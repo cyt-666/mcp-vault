@@ -1,0 +1,38 @@
+[package]
+name = "mcp-vault-providers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+mcp-vault-auth = { path = "../auth" }
+mcp-vault-domain = { path = "../domain" }
+mcp-vault-state = { path = "../state" }
+reqwest = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[features]
+default = []
+fastembed = ["dep:fastembed"]
+
+[dependencies.fastembed]
+workspace = true
+optional = true
+
+[dev-dependencies]
+axum = { workspace = true }
+http-body-util = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

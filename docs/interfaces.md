@@ -82,6 +82,12 @@ A WebDAV credential is:
 
 Do not reuse the Admin password or MCP token.
 
+The data-plane adapter mounts this contract at
+`/dav/v1/vaults/{vault_slug}/`. The slug selects the Vault context; the
+credential is looked up inside that same Vault, so neither a DAV request nor a
+credential can switch Vaults by supplying an arbitrary `vault_id`. Admin
+credential CRUD and generated connection cards remain control-plane work.
+
 ### 3.3 ETags and revisions
 
 For files, generate a strong ETag from the current content hash and revision.
@@ -165,7 +171,12 @@ persistent change. Preserve revisions and do not retry a conflict by
 overwriting newer content.
 ```
 
-Discovery, tool lists, and resources are authorization-dependent and therefore use private cache scope.
+Discovery, tool lists, and resources are authorization-dependent and therefore use private cache scope. Tool/resource list and read results include `ttlMs` and `cacheScope`; the current implementation uses `ttlMs: 1000` and `cacheScope: "private"` for rebuildable projections.
+
+MCP Vault advertises only the capabilities it implements: tools and
+resources. Unsupported optional surfaces such as `prompts/list` and
+`completion/complete` return JSON-RPC method-not-found and are not silently
+reported as empty capabilities.
 
 ### 4.4 Tool list
 
@@ -176,21 +187,29 @@ Return tools in this deterministic order, omitting tools the caller’s scopes d
 3. `recent_changes`
 4. `search_notes`
 5. `read_note`
-6. `note_context`
-7. `recall`
-8. `get_memory`
-9. `list_memories`
-10. `create_note`
-11. `edit_note`
-12. `move_note`
-13. `delete_note`
-14. `note_history`
-15. `restore_note_revision`
-16. `remember`
-17. `update_memory`
-18. `forget_memory`
+6. `recall`
+7. `get_memory`
+8. `list_memories`
+9. `create_note`
+10. `edit_note`
+11. `move_note`
+12. `delete_note`
+13. `note_history`
+14. `restore_note_revision`
+15. `remember`
+16. `update_memory`
+17. `forget_memory`
 
 Names may receive a stable namespace if required by SDK conventions, but once released they must remain backward compatible.
+
+The MCP foundation advertises deterministic discovery, browse, lexical
+`search_notes`, read, mutation, and history tools. WP-11 adds `recall`,
+`get_memory`, `list_memories`, `remember`, `update_memory`, and `forget_memory`
+when the credential grants the corresponding memory scopes. Memory resources
+are authorization-dependent and include `vault://memory/context` plus the
+`vault://memory/{memory_id}` template. `search_notes` remains lexical-safe
+when semantic providers are unavailable; `recall` reports semantic
+degradation while preserving projection-based lexical/context results.
 
 ## 5. MCP scopes
 
@@ -249,6 +268,22 @@ All tools define JSON Schema 2020-12 input and output schemas.
 All outputs return structured content. When a result refers to a note or memory, also return MCP resource links where supported.
 
 Every result includes a stable `request_id` for audit correlation.
+
+Tool structured content uses this envelope:
+
+```json
+{
+  "request_id": "...",
+  "ok": true,
+  "data": {},
+  "error": null
+}
+```
+
+`data` is an object for all current MCP Vault tools so the output schema is
+valid for both the 2026-07-28 and negotiated dated MCP schemas. Error results
+set `ok` to `false` and provide a bounded structured `error` object instead of
+leaking SQL, filesystem, provider, or secret details.
 
 ### 6.1 `vault_overview`
 
@@ -324,6 +359,7 @@ Output includes:
 - representative/pinned notes;
 - next cursor;
 - index revision;
+- bounded note candidates with tags, outgoing links, and backlink counts;
 - resource links.
 
 A missing `node_id` means root.
@@ -386,7 +422,7 @@ Output result fields:
 - heading/source anchor;
 - bounded snippet;
 - lexical/semantic/fused score when requested;
-- tags/topic IDs;
+- tags/topic IDs, outgoing links, and backlink count;
 - resource link.
 
 ### 6.5 `read_note`
@@ -726,6 +762,14 @@ The React UI is served from the same listener.
 - `GET /api/v1/session` — current admin;
 - state-changing requests require CSRF token and strict Origin validation.
 
+Source-network admission is a deployment concern controlled by listener
+publication, firewall/VPN rules, or an operator-selected reverse proxy. The
+application rejects invalid sessions, disallowed Origin/Referer values, and
+missing or mismatched `X-CSRF-Token` before invoking application services.
+Successful login sets an opaque Secure/HttpOnly/SameSite=Strict cookie and
+returns the session-bound CSRF value once; the cookie is never returned in
+JSON.
+
 Use secure, HttpOnly, SameSite=Strict cookies. Do not store session bearer tokens in browser local storage.
 
 ### 10.3 API groups
@@ -734,6 +778,7 @@ Use secure, HttpOnly, SameSite=Strict cookies. Do not store session bearer token
 GET    /api/v1/dashboard
 GET    /api/v1/system
 GET    /api/v1/health/details
+GET    /api/v1/diagnostics
 
 GET    /api/v1/vault
 PATCH  /api/v1/vault
@@ -749,8 +794,13 @@ POST   /api/v1/mcp/tokens
 DELETE /api/v1/mcp/tokens/{id}
 GET    /api/v1/mcp/oauth
 PUT    /api/v1/mcp/oauth
+GET    /api/v1/mcp/oauth/grants
+POST   /api/v1/mcp/oauth/grants
+DELETE /api/v1/mcp/oauth/grants/{id}
 GET    /api/v1/mcp/connection-info
 
+GET    /api/v1/providers/mode
+PUT    /api/v1/providers/mode
 GET    /api/v1/providers
 POST   /api/v1/providers
 GET    /api/v1/providers/{id}
@@ -787,6 +837,7 @@ POST   /api/v1/backups
 POST   /api/v1/backups/{id}/verify
 POST   /api/v1/restore/validate
 POST   /api/v1/restore
+POST   /api/v1/maintenance/recover
 ```
 
 Deletion endpoints use explicit confirmation payloads and return operation/job IDs when asynchronous.
@@ -809,6 +860,27 @@ Deletion endpoints use explicit confirmation payloads and return operation/job I
 ### 10.5 Secret responses
 
 Admin APIs never return stored secret plaintext.
+
+Secret issuance responses return a generated password/token only once. List and
+detail responses expose configured state, public prefixes, and masked hints;
+the old secret is never returned after replacement. Backup creation, verify,
+restore validation, and restore apply return bounded operation/job envelopes;
+restore apply additionally requires `confirmation: "RESTORE"` and recent Admin
+password reauthentication. Manifest summaries expose checksums/versions and
+key version identifiers but never note bodies, provider secrets, or master-key
+material.
+
+Successful Admin mutations append a redacted audit fact with the request ID,
+actor, plane, action, target identity, result, and bounded non-secret metadata.
+The embedded console keeps an issued WebDAV password or MCP PAT only in
+volatile component state until the operator hides it; it never persists the
+secret in browser storage.
+
+Provider mode is Vault-scoped and uses `disabled`, `local_only`, or
+`remote_allowed`; responses include the optimistic setting revision. OAuth
+grant list/create/revoke operations always derive the current `VaultContext`
+from Admin state and never accept a caller-selected `vault_id`. Issuer responses
+report cache presence/timestamp but never return the stored JWKS body.
 
 Example:
 
@@ -841,6 +913,15 @@ GET /api/v1/health/details
 ```
 
 Detailed health includes storage, database, migration, outbox, worker, index coverage, provider configuration, and backup age.
+
+When `MCP_VAULT_METRICS_ENABLED=true`, the data listener also exposes
+`GET /metrics` as bounded Prometheus text with fixed plane/status counters.
+It never uses request paths, Vault slugs, credential IDs, note content, or
+secret values as labels. During `read_only`, WebDAV/MCP mutation methods and
+Admin state-changing routes return a temporary maintenance error while reads
+and authenticated restore validation remain available. During `offline`, the
+data plane is unavailable; the authenticated Admin restore/diagnostic surface
+remains available for recovery.
 
 ## 12. Interface compatibility policy
 

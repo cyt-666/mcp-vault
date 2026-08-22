@@ -1,0 +1,40 @@
+[package]
+name = "mcp-vault-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+axum = { workspace = true }
+mcp-vault-auth = { path = "../auth" }
+mcp-vault-core = { path = "../vault-core" }
+mcp-vault-domain = { path = "../domain" }
+mcp-vault-indexer = { path = "../indexer" }
+mcp-vault-memory = { path = "../memory" }
+mcp-vault-state = { path = "../state" }
+mcp-vault-storage-fs = { path = "../storage-fs" }
+percent-encoding = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+# The official transport is opt-in in rmcp; keep the selected protocol
+# implementation pinned in the workspace lockfile.
+rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
+
+[dev-dependencies]
+base64 = { workspace = true }
+http-body-util = { workspace = true }
+rand = { workspace = true }
+rsa = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+tower = { workspace = true }
+
+[lints]
+workspace = true

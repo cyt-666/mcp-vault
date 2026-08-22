@@ -1,0 +1,28 @@
+services:
+  mcp-vault:
+    build: .
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 45s
+    ports:
+      - "8080:8080"
+      - "${MCP_VAULT_ADMIN_PUBLISH:-127.0.0.1:8081}:8081"
+    volumes:
+      - ./data:/data
+    environment:
+      MCP_VAULT_DATA_DIR: /data
+      MCP_VAULT_SECRETS_DIR: /data/secrets
+      MCP_VAULT_DATA_BIND: 0.0.0.0:8080
+      MCP_VAULT_ADMIN_BIND: 0.0.0.0:8081
+      MCP_VAULT_BACKUP_DIR: /data/backups
+      MCP_VAULT_METRICS_ENABLED: "false"
+      MCP_VAULT_LOG_FORMAT: json
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: 2g

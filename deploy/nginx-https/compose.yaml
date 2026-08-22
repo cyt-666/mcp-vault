@@ -1,0 +1,83 @@
+services:
+  mcp-vault:
+    image: "${MCP_VAULT_IMAGE:-mcp-vault:0.1.0}"
+    platform: linux/amd64
+    pull_policy: never
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 45s
+    expose:
+      - "8080"
+      - "8081"
+    volumes:
+      - ./data:/data
+    environment:
+      MCP_VAULT_DATA_DIR: /data
+      MCP_VAULT_SECRETS_DIR: /data/secrets
+      MCP_VAULT_DATA_BIND: 0.0.0.0:8080
+      MCP_VAULT_ADMIN_BIND: 0.0.0.0:8081
+      MCP_VAULT_DATA_HOSTS: "${MCP_VAULT_PUBLIC_HOST:?set MCP_VAULT_PUBLIC_HOST in .env}"
+      MCP_VAULT_DATA_ORIGINS: "https://${MCP_VAULT_PUBLIC_HOST:?set MCP_VAULT_PUBLIC_HOST in .env}"
+      MCP_VAULT_ADMIN_ORIGINS: "https://${MCP_VAULT_ADMIN_HOST:?set MCP_VAULT_ADMIN_HOST in .env}:${MCP_VAULT_ADMIN_HTTPS_PORT:-8444}"
+      MCP_VAULT_TRUSTED_PROXY_IPS: "${MCP_VAULT_PROXY_IP:-172.30.30.10}"
+      MCP_VAULT_BACKUP_DIR: /data/backups
+      MCP_VAULT_METRICS_ENABLED: "false"
+      MCP_VAULT_LOG_FORMAT: json
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: 2g
+    networks:
+      edge:
+        ipv4_address: "${MCP_VAULT_APP_IP:-172.30.30.20}"
+
+  nginx:
+    image: nginx:1.30.4-alpine3.24@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46
+    platform: linux/amd64
+    user: "101:101"
+    restart: unless-stopped
+    depends_on:
+      - mcp-vault
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - >-
+        envsubst '$${MCP_VAULT_ADMIN_SOURCE_CIDR}'
+        < /etc/nginx/templates/nginx.conf.template
+        > /tmp/nginx.conf
+        && exec nginx -c /tmp/nginx.conf -g 'daemon off;'
+    environment:
+      MCP_VAULT_ADMIN_SOURCE_CIDR: "${MCP_VAULT_ADMIN_SOURCE_CIDR:?set MCP_VAULT_ADMIN_SOURCE_CIDR in .env}"
+    ports:
+      - "${MCP_VAULT_HTTP_PORT:-80}:8080"
+      - "${MCP_VAULT_HTTPS_PORT:-443}:8443"
+      - "${MCP_VAULT_ADMIN_BIND_IP:?set MCP_VAULT_ADMIN_BIND_IP in .env}:${MCP_VAULT_ADMIN_HTTPS_PORT:-8444}:8444"
+    volumes:
+      - ./nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
+      - ./certs/fullchain.pem:/etc/nginx/tls/fullchain.pem:ro
+      - ./certs/privkey.pem:/etc/nginx/tls/privkey.pem:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,uid=101,gid=101,mode=1700
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 256m
+    networks:
+      edge:
+        ipv4_address: "${MCP_VAULT_PROXY_IP:-172.30.30.10}"
+
+networks:
+  edge:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "${MCP_VAULT_PROXY_SUBNET:-172.30.30.0/24}"

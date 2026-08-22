@@ -71,3 +71,21 @@ The data plane must be protected by TLS when it leaves the host. The admin liste
 - Docker-first deployment
 
 Exact dependency versions belong in lockfiles and may be updated after compatibility and conformance testing.
+
+## Development foundation
+
+The repository uses Rust 1.94.0 and a Make-based task runner. The initial
+server binds the data plane on `0.0.0.0:8080` and the control plane on
+`127.0.0.1:8081`; protocol handlers are explicit boundaries until their work
+packages are implemented.
+
+Run the foundation checks with:
+
+```bash
+make check
+```
+
+The Admin frontend is under `frontend/admin/` and owns its `pnpm-lock.yaml`.
+Cargo embeds the built `frontend/admin/dist/` bundle while keeping it outside
+the canonical Vault content root. Dependency license and source policy is in
+`deny.toml`.

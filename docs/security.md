@@ -70,17 +70,24 @@ Host compromise guidance still requires encrypted disks, least-privilege contain
 
 Primary protection is network publication:
 
-- map to `127.0.0.1` by default;
+- bind/map to `127.0.0.1` by default;
 - optionally map to a specific LAN/VPN address;
 - never route through the public virtual host;
 - firewall explicit CIDRs.
 
-Application CIDR checks are defense in depth. They must understand trusted-proxy configuration and otherwise use the socket peer address.
+MCP Vault does not enforce source CIDRs or trust forwarded client-address
+headers for Admin admission. The operator owns this network boundary through
+listener publication, firewall/VPN policy, or any chosen reverse proxy. This
+keeps application behavior independent from Nginx, Caddy, Traefik, and direct
+listener deployments. Admin username/password, session, CSRF, Origin, expiry,
+revocation, and login-rate controls remain mandatory after a connection
+reaches the listener.
 
 ### 4.2 Data listener
 
 - expose only through HTTPS when leaving the host;
-- validate `Host` and `Origin` according to configured public origins;
+- validate `Host` against the exact `MCP_VAULT_DATA_HOSTS` allow-list and
+  validate supplied `Origin` values against the separate data Origin policy;
 - set request/body/time limits;
 - do not co-host Admin routes;
 - reverse proxy must preserve MCP headers and streaming responses.
@@ -120,6 +127,10 @@ Use dedicated app credentials.
 - Permissions are explicit.
 - Expiry and revocation are supported.
 - Basic Auth is accepted only over secure transport outside localhost.
+- The application accepts a forwarded HTTPS assertion only from an exact
+  configured socket-peer allow list (`MCP_VAULT_TRUSTED_PROXY_IPS`).
+- A forwarded header from any other peer is ignored and public plaintext Basic
+  Authentication is rejected.
 - Authentication headers are never logged.
 - DAV responses must not reveal whether another Vault/user exists beyond necessary status behavior.
 
@@ -151,7 +162,17 @@ When enabled, follow the current MCP authorization specification:
 - bind subject to explicit Vault grant and scopes;
 - reject token passthrough;
 - keep upstream provider credentials separate;
-- use short cache lifetime for JWKS and fail safely on validation errors.
+- accept only normalized RSA public JWKS for `RS256`; symmetric/private key
+  material is rejected and never persisted;
+- fail safely on validation errors and require an Admin cache update when the
+  issuer rotates keys.
+
+The current release uses an explicitly Admin-supplied public JWKS cache. It
+does not impose a 24-hour expiry without an automatic refresh worker, because
+that would deterministically disable OAuth. The cache remains active until an
+audited Admin update. A future discovery/refresh worker must use a bounded
+short cache lifetime, SSRF-safe HTTPS fetching, and retain the last validated
+public set only according to an explicit stale-key policy.
 
 The server acts as a resource server. A configured external OAuth/OIDC server may provide authorization. Do not invent an incomplete OAuth implementation.
 
@@ -177,15 +198,23 @@ Tools declare read-only/destructive behavior where MCP supports annotations.
 
 Provider secrets and other reversible secrets use authenticated encryption with an installation master key.
 
-Recommended:
+Required cryptographic behavior:
 
-- 256-bit key from a mounted root-readable secret file;
+- 256-bit installation key;
 - XChaCha20-Poly1305 or AES-256-GCM;
 - versioned key IDs;
 - random nonce per encryption;
 - associated data containing secret purpose/owner ID.
 
-The master key is not stored in SQLite.
+The master key is not stored in SQLite. By default MCP Vault atomically creates
+and reuses `<data-dir>/secrets/master-key`; an explicit
+`MCP_VAULT_MASTER_KEY_FILE` remains an operator-managed override. SQLite stores
+only a one-way keyed verification digest and key version so startup rejects a
+different valid-size key before serving requests. Once a verifier or
+key-dependent state exists, a missing key is a hard failure and is never
+silently regenerated. MCP Vault does not inspect or modify file permission
+bits; filesystem ownership, modes, ACLs, volume protection, and separate key
+backup are deployment responsibilities.
 
 ### 8.2 Rust handling
 
@@ -211,6 +240,28 @@ Admin API returns only configured state and masked hints. The browser never rece
 ### 9.1 Normalization
 
 All external paths are decoded once and converted to a validated `VaultPath`.
+
+The domain canonical form is explicit:
+
+- URL-path input uses one decode boundary. The logical parser rejects encoded
+  separators, dot segments, NUL, and nested percent escapes that could become
+  traversal after a second decode.
+- Vault-relative paths use `/` separators and NFC Unicode normalization. The
+  Vault root is represented internally by an empty logical path; a transport
+  leading `/` is accepted only by the URL-path adapter.
+- Hard limits are 4,096 normalized UTF-8 bytes, 64 segments, and 255 bytes per
+  segment. Duplicate separators and empty segments are rejected.
+- The portable filename policy rejects backslashes, controls, NUL, Windows
+  reserved device names, trailing spaces/periods, and Windows-invalid
+  punctuation even when the host filesystem would accept them.
+- Case comparison is an explicit policy rather than a host-OS guess. The
+  default safety policy is case-insensitive and setup/reconciliation must run
+  collision detection before accepting a path set; a case-sensitive policy is
+  an explicit deployment choice.
+
+The service-managed `_mcp-vault` namespace is reserved. Ordinary user and
+protocol file operations reject that path and its descendants; only explicit
+managed-memory/index operations may use it.
 
 Reject:
 
@@ -242,6 +293,15 @@ If symlinks are supported later, they require an explicit safe policy and tests.
 Never extract backup paths directly.
 
 Validate archive entries, sizes, hashes, duplicates, symlinks, and destination before applying in maintenance mode.
+
+WP-13 uses a service-owned uncompressed tar artifact with a bounded JSON
+manifest. Only `manifest.json`, `state/`, `vaults/<vault-id>/content/`, and
+`history/<vault-id>/` are allowed. Absolute paths, dot segments, backslashes,
+duplicate files, links, devices, and oversized entries are rejected before
+staging. Restore target roots come from the current Vault registry; an archive
+cannot redirect the service to a new absolute root. The manifest also carries
+retained encryption-key version identifiers for compatibility checks, never the
+installation master-key material.
 
 ## 10. Write integrity
 
@@ -309,6 +369,13 @@ Defaults:
 - use system/root CA validation by default;
 - make custom CA configuration explicit.
 
+The implementation resolves and validates every provider hostname before a
+request, rejects mixed public/private DNS answers, pins the selected socket
+for that request, disables redirects by default, and never permits provider
+configuration from MCP input. Local-only mode accepts only loopback/private
+addresses; remote mode requires HTTPS and rejects metadata/link-local targets
+unless an explicit private-network policy is configured.
+
 ## 14. Privacy policy
 
 Per Vault:
@@ -329,6 +396,14 @@ Do not send:
 - attachments without explicit future multimodal policy;
 - secrets from configuration;
 - revision-history blobs unrelated to the request.
+
+Promoted memory Markdown is written only through the explicit Vault Core
+managed-path boundary. Ordinary WebDAV/MCP file operations cannot address the
+reserved namespace, reconciliation does not infer managed-file deletion, and
+memory extraction skips managed files to prevent self-triggering loops.
+Recall returns only Vault-scoped projection rows after lifecycle, temporal,
+permission, and budget filtering; it never scans the filesystem or sends a
+query to an LLM.
 
 Provider audit records include byte/token estimates and model, not note body.
 
@@ -432,12 +507,26 @@ A backup may contain the entire private knowledge base.
 - validate restore in an isolated staging path;
 - audit restore.
 
+Ordinary backups contain encrypted provider ciphertext but not the installation
+master key. Restore enters process offline mode, creates a pre-restore safety
+artifact, swaps only validated roots, restores SQLite through the StateStore
+boundary, runs migrations/integrity/Core recovery, and leaves readiness false
+if any post-restore check fails.
+
+Backup first switches to read-only admission and waits for every counted
+in-flight mutation to finish before copying SQLite/Vault state. Restore then
+switches to offline admission and waits for active protocol operations before
+swapping roots. New protocol and worker work cannot enter between the mode
+change and the drain check.
+
 ## 20. Security verification
 
 Required tests:
 
 - public listener has no Admin routes/assets;
-- Admin source allow list and trusted proxy behavior;
+- loopback Admin default, obsolete application-CIDR rejection, and documented
+  deployment-owned source policy;
+- data-plane trusted-proxy behavior;
 - CSRF/Origin/session controls;
 - password/token/secret redaction;
 - OAuth issuer/audience/resource/scope validation;
@@ -451,6 +540,23 @@ Required tests:
 - body/PROPFIND/search limits;
 - crash recovery without unauthorized path access;
 - backup permissions and restore validation.
+
+### WP-14 threat-model verification record
+
+The release review must attach evidence for each high-risk boundary:
+
+| Threat | Verification |
+|---|---|
+| Cross-Vault credential or query confusion | two-Vault state/MCP/WebDAV tests and endpoint-bound fixture requests |
+| DNS rebinding or forged browser Origin | official MCP DNS/header scenarios and Origin rejection smoke |
+| Public proxy exposes Admin | data-listener `/api` negative test plus reference proxy review |
+| Lost update or unsafe overwrite | DAV stale `If-Match`, MCP expected-revision tests, journal/recovery tests |
+| Archive traversal or restore corruption | backup archive validation, checksum, staged-restore and rollback tests |
+| Secret leakage through logs/artifacts | redaction tests, sanitized conformance output, release artifact review |
+| Provider SSRF/outage/prompt injection | local provider contract tests, redirect policy tests, degraded FTS path |
+
+The table is a review checklist, not a waiver. Any missing evidence remains a
+release blocker and is tracked in `docs/requirements-traceability.md`.
 
 ## 21. Security incident response
 

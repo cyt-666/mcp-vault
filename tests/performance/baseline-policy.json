@@ -1,0 +1,8 @@
+{
+  "fixture": "disposable-seeded-vault",
+  "operation": "GET /health/ready",
+  "iterations": 20,
+  "p95_seconds": 0.5,
+  "scope": "regression-smoke-only",
+  "note": "This policy is not the full-scale 10k-note performance target; release reports must include host metadata and the complete fixture measurements described in docs/development-and-testing.md."
+}

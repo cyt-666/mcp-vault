@@ -1,0 +1,36 @@
+[package]
+name = "mcp-vault-admin-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+axum = { workspace = true }
+mcp-vault-backup = { path = "../backup" }
+mcp-vault-auth = { path = "../auth" }
+mcp-vault-core = { path = "../vault-core" }
+mcp-vault-domain = { path = "../domain" }
+mcp-vault-indexer = { path = "../indexer" }
+mcp-vault-memory = { path = "../memory" }
+mcp-vault-providers = { path = "../providers" }
+mcp-vault-state = { path = "../state" }
+mcp-vault-storage-fs = { path = "../storage-fs" }
+http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+base64 = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+http-body-util = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

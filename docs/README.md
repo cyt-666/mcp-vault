@@ -22,6 +22,9 @@ Then consult:
 - [`admin-and-configuration.md`](admin-and-configuration.md) for the management plane and provider settings;
 - [`deployment-and-operations.md`](deployment-and-operations.md) for Docker, backup, monitoring, and upgrades;
 - [`development-and-testing.md`](development-and-testing.md) for workspace, coding, CI, and conformance practices;
+- [`compatibility-matrix.md`](compatibility-matrix.md) for automated WebDAV/MCP evidence and manual Obsidian client records;
+- [`requirements-traceability.md`](requirements-traceability.md) for requirement-to-test/release evidence mapping;
+- [`release-readiness.md`](release-readiness.md) for first-release gates and operator handoff;
 - [`standards-and-references.md`](standards-and-references.md) for the protocol versions and primary references used when this specification was written;
 - [`adr/`](adr/) for accepted architectural decisions.
 
@@ -38,6 +41,9 @@ Then consult:
 | `security.md` | Threat model, control/data/agent planes, secrets, path and provider safety |
 | `deployment-and-operations.md` | Docker, networking, TLS, health, backup, recovery, upgrade |
 | `development-and-testing.md` | Rust implementation rules, test strategy, CI and tooling |
+| `compatibility-matrix.md` | MCP/WebDAV interoperability evidence and Obsidian client checklist |
+| `requirements-traceability.md` | Release requirement-to-evidence mapping |
+| `release-readiness.md` | First-release gates, artifact procedure, operator handoff |
 | `implementation-plan.md` | Complete-service work packages and dependencies |
 | `standards-and-references.md` | Versioned external standards and verified libraries |
 | `adr/*.md` | Why durable architectural choices were made |

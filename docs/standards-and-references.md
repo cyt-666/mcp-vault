@@ -2,7 +2,7 @@
 
 ## 1. Verification date
 
-This document was verified on **2026-08-19**.
+This document was verified on **2026-08-21**.
 
 External protocols and libraries evolve. Before implementing a protocol-sensitive change, confirm the current official specification and the selected dependency’s supported revision.
 
@@ -49,6 +49,16 @@ Use the official Rust SDK:
   `rmcp`
 
 At verification time, the official SDK documents stable 2026-07-28 support and compatibility with older revisions. Pin a tested 3.x release in the lockfile and run its matching conformance suites.
+
+The official conformance framework is maintained at:
+
+- repository: https://github.com/modelcontextprotocol/conformance
+- WP-14 CI pin: `74edef34d674f563537be8c6587cebaa58e830ca`
+
+The pin is used by `scripts/conformance/mcp.sh`; update it only after a
+reviewed compatibility run. The conformance runner's expected-failure file is
+strict: a new failure fails the job and a formerly failing check becoming
+passing makes the baseline stale.
 
 Do not use older blog examples that assume a persistent `Mcp-Session-Id` for the current revision.
 
@@ -110,6 +120,9 @@ Conformance:
 - WebDAV Litmus test suite
   http://www.webdav.org/neon/litmus/
 
+The repository wrapper is `scripts/interop/webdav-litmus.sh`. A missing Litmus
+binary is an explicit blocked gate; it is not treated as a passing test.
+
 ## 7. OAuth and protected resources
 
 Relevant standards referenced by the MCP authorization specification:
@@ -147,6 +160,10 @@ Candidate optional Rust adapter:
 - fastembed-rs
   https://github.com/Anush008/fastembed-rs
 
+WP-10 pins the FastEmbed Rust crate to 5.17.4 and runs its synchronous ONNX
+inference on a bounded blocking task. Provider HTTP uses reqwest 0.12.28 with
+project-owned redirect, DNS, timeout, and response-size policy.
+
 Run synchronous inference on a dedicated bounded blocking pool. Model choice and license must be visible to the administrator.
 
 ## 10. Markdown parsing
@@ -165,3 +182,26 @@ Comrak covers CommonMark and GFM. Obsidian wikilinks, embeds, block references, 
 - Record a compatibility decision in an ADR when behavior differs from a standard or tested client.
 - Never advertise protocol compatibility that is not exercised by CI/release tests.
 - Update this document’s verification date when the protocol baseline changes.
+
+## 12. Backup and observability libraries
+
+WP-13 pins and uses the following primary library references:
+
+- Rust `tar` 0.4.45 for the portable container format:
+  https://docs.rs/tar/0.4.45/tar/
+- OpenTelemetry Rust 0.31 and OTLP HTTP exporter 0.31:
+  https://docs.rs/opentelemetry/0.31.0/opentelemetry/
+  https://docs.rs/opentelemetry-otlp/0.31.0/opentelemetry_otlp/
+- Prometheus text exposition format:
+  https://prometheus.io/docs/instrumenting/exposition_formats/
+- Syft SBOM generator:
+  https://github.com/anchore/syft
+- Trivy image scanner:
+  https://github.com/aquasecurity/trivy
+
+The tar container is only packaging. The project-owned backup service validates
+every entry, manifest path, size, type, and checksum before extraction or
+publication; it does not rely on archive extraction defaults for safety. OTLP
+export remains disabled unless `MCP_VAULT_OTEL_ENDPOINT` is explicitly set,
+and metrics labels are fixed rather than derived from request paths, Vault
+identities, or credentials.

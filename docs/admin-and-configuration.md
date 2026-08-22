@@ -14,7 +14,11 @@ It is separate from the WebDAV and MCP data/agent plane in all of the following 
 - separate CSRF and browser security policy;
 - distinct audit actor type.
 
-The control plane is intended for localhost, LAN, or VPN access only. This restriction is enforced primarily at the host/container/reverse-proxy layer and secondarily through an application CIDR allow list.
+The control plane is intended for localhost, LAN, or VPN access only. Listener
+publication and source-network restrictions are deployment responsibilities
+implemented by host/container bindings, firewall/VPN policy, or an
+operator-selected reverse proxy. MCP Vault does not enforce Admin source
+CIDRs.
 
 Network restriction does not replace an admin password.
 
@@ -28,13 +32,6 @@ bind = "0.0.0.0:8080"
 
 [admin_plane]
 bind = "0.0.0.0:8081"
-allowed_cidrs = [
-  "127.0.0.0/8",
-  "::1/128",
-  "10.0.0.0/8",
-  "172.16.0.0/12",
-  "192.168.0.0/16"
-]
 ```
 
 Recommended default Docker publication:
@@ -54,23 +51,39 @@ ports:
 
 VPN ranges such as Tailscale’s CGNAT space are configured explicitly.
 
-The application must not blindly trust `X-Forwarded-For`. Forwarded addresses are honored only from configured trusted proxies.
+MCP Vault does not use `X-Forwarded-For` to decide who may access Admin. If an
+operator wants source-IP policy, the deployment layer enforces it before
+proxying to the Admin listener.
 
 ## 3. First-run bootstrap
 
 ### 3.1 Preconditions
 
-Setup mode is active only when no admin account exists.
+Setup mode is active only when no Admin account exists.
 
-The setup route is available only on the Admin listener and only from an allowed network.
+The setup route is available only on the Admin listener. Whether a source can
+reach that listener is controlled by the deployment.
 
 ### 3.2 Bootstrap secret
 
-The deployment provides a one-time bootstrap secret through one of:
+When no explicit bootstrap input is configured, MCP Vault atomically creates a
+high-entropy one-time token at
+`<MCP_VAULT_SECRETS_DIR>/bootstrap-token`. The owner retrieves it locally with:
+
+```bash
+mcp-vault bootstrap-token
+```
+
+Inside Compose this is normally:
+
+```bash
+docker compose exec mcp-vault mcp-vault bootstrap-token
+```
+
+The existing operator-managed overrides remain available:
 
 - `MCP_VAULT_BOOTSTRAP_TOKEN`;
-- a root-readable mounted secret file;
-- an interactive local CLI command that generates a short-lived token.
+- `MCP_VAULT_BOOTSTRAP_TOKEN_FILE`.
 
 Do not derive setup authorization from a predictable default password.
 
@@ -80,9 +93,12 @@ Do not derive setup authorization from a predictable default password.
 2. The UI requests the one-time bootstrap token.
 3. The owner creates the initial admin username/password.
 4. The service initializes the default Vault registry entry or validates the configured content root.
-5. The service creates an encrypted-secret key version.
+5. The startup-provisioned installation-key version remains the active key for
+   encrypted secrets and keyed credentials.
 6. Setup mode is permanently disabled unless the database is deliberately reset through a local recovery command.
-7. The bootstrap token is invalidated and must not be written to audit/log plaintext.
+7. The bootstrap token is invalidated. An application-managed token file is
+   removed; an explicit operator file is left untouched. Token plaintext is
+   never written to ordinary audit/log output.
 
 ## 4. Admin authentication
 
@@ -138,7 +154,10 @@ Configuration sources, from lowest to highest precedence:
 4. Vault-scoped settings stored in SQLite;
 5. explicit request/task overrides permitted by schema.
 
-Environment variables are for bootstrap and secrets that must exist before runtime configuration loads. They are not the primary long-term UI configuration store.
+Environment variables are for bootstrap values needed before runtime
+configuration loads and optional external secret overrides. They are not the
+primary long-term UI configuration store; default installation/bootstrap
+secret files are provisioned by MCP Vault itself.
 
 ### 5.1 Bootstrap-only settings
 
@@ -146,13 +165,77 @@ Examples:
 
 ```text
 MCP_VAULT_DATA_DIR
+MCP_VAULT_SECRETS_DIR
 MCP_VAULT_DATABASE_URL
 MCP_VAULT_MASTER_KEY_FILE
 MCP_VAULT_BOOTSTRAP_TOKEN_FILE
+MCP_VAULT_BOOTSTRAP_TOKEN
 MCP_VAULT_DATA_BIND
 MCP_VAULT_ADMIN_BIND
+MCP_VAULT_DATA_HOSTS
+MCP_VAULT_DATA_ORIGINS
+MCP_VAULT_ADMIN_ORIGINS
+MCP_VAULT_TRUSTED_PROXY_IPS
+MCP_VAULT_RECONCILIATION_INTERVAL_SECONDS
+MCP_VAULT_BACKUP_DIR
+MCP_VAULT_BACKUP_MAX_ENTRY_BYTES
+MCP_VAULT_BACKUP_MAX_TOTAL_BYTES
+MCP_VAULT_BACKUP_MAX_ARCHIVE_BYTES
+MCP_VAULT_BACKUP_MAX_ENTRIES
+MCP_VAULT_BACKUP_KEEP_COUNT
+MCP_VAULT_METRICS_ENABLED
+MCP_VAULT_OTEL_ENDPOINT
 RUST_LOG
 ```
+
+`MCP_VAULT_DATA_HOSTS` is a comma-separated allow-list of exact HTTP Host
+authorities accepted by the MCP transport. Values are host names or IP
+authorities, optionally including a port; they must not contain a scheme,
+path, query, fragment, whitespace, or userinfo. It defaults to local
+development authorities and must be set to the public hostname when a
+reverse proxy or LAN hostname is used. This Host policy is independent from
+the `MCP_VAULT_DATA_ORIGINS` browser-Origin policy.
+
+`MCP_VAULT_TRUSTED_PROXY_IPS` is a comma-separated list of exact socket-peer
+IP addresses. It is empty by default. WebDAV accepts
+`X-Forwarded-Proto: https` only when the direct peer is in this list; the
+header alone never makes plaintext Basic Authentication secure. Loopback
+clients may use Basic Authentication over local HTTP. This setting does not
+trust forwarded client addresses or grant any Vault permission.
+
+`MCP_VAULT_SECRETS_DIR` defaults to `<MCP_VAULT_DATA_DIR>/secrets` and owns the
+automatically generated `master-key` and pre-setup `bootstrap-token` files.
+Ordinary MCP Vault backups exclude this directory. An operator may mount it as
+a separate persistent volume or override either file with the explicit
+settings above. MCP Vault does not inspect or change filesystem permission
+bits on these files.
+
+`MCP_VAULT_ADMIN_ALLOWED_CIDRS` is obsolete and rejected at configuration
+load so an old setting cannot create a false belief that the application still
+enforces a network allow list. Move that policy to listener publication,
+firewall/VPN, or reverse-proxy configuration, then remove the variable.
+
+`MCP_VAULT_RECONCILIATION_INTERVAL_SECONDS` controls the authoritative
+polling pass used to recover from missed filesystem events. It defaults to
+300 seconds and accepts values from 1 through 86400 seconds.
+
+`MCP_VAULT_BACKUP_DIR` is a service-owned absolute directory for verified tar
+artifacts. The backup size/count settings are numeric byte/entry limits and
+are enforced before staging or extraction; `MCP_VAULT_BACKUP_KEEP_COUNT`
+protects the last verified artifacts from automatic retention cleanup.
+`MCP_VAULT_METRICS_ENABLED` opt-in exposes only bounded, non-sensitive
+Prometheus text at the data listener's `/metrics`. `MCP_VAULT_OTEL_ENDPOINT`
+opt-in exports redacted tracing spans through OTLP HTTP; it is unset by
+default. Backup manifests expose only retained encryption-key version
+identifiers; the master-key material remains outside ordinary backups.
+The OTLP endpoint must be an absolute HTTP(S) URL without embedded userinfo.
+
+When `MCP_VAULT_MASTER_KEY_FILE` is unset, MCP Vault atomically creates and
+reuses `<MCP_VAULT_SECRETS_DIR>/master-key`. An explicit file must contain a
+regular 32-byte raw or 64-character hex key and remains operator-managed. Once
+provider ciphertext, an MCP PAT, or an installation-key check exists, startup
+fails when the effective file is missing or its one-way verifier does not
+match; the service never replaces a lost established key.
 
 Changing a database-stored setting through an environment variable after setup must not create ambiguous precedence. The UI shows the effective source and marks non-editable bootstrap values.
 
@@ -282,6 +365,11 @@ Allow configuring:
 
 Protected-resource metadata preview must be available.
 
+The implemented control-plane surface lists, creates/updates, and revokes
+subject grants for the current Vault. It accepts normalized `RS256` RSA public
+JWKS only. Manually supplied keys stay valid until an audited update; automatic
+discovery refresh is not claimed by this release.
+
 ## 11. AI Providers page
 
 ### 11.1 Provider record
@@ -315,6 +403,12 @@ Provider types:
 
 Provider adapters must remain project-owned abstractions even when several types share HTTP shapes.
 
+The page also sets the current Vault's explicit `disabled`, `local_only`, or
+`remote_allowed` privacy mode with optimistic revision handling. All Admin,
+MCP, memory, and worker calls share one process `ProviderService`, so a
+provider's maximum concurrency is enforced across planes rather than per HTTP
+request.
+
 ### 11.2 URL policy
 
 - Public providers require HTTPS.
@@ -336,6 +430,11 @@ The UI supports:
 - test a minimal non-sensitive request.
 
 Do not assume a provider’s model-list endpoint is universally available or accurate.
+
+Provider tests persist only redacted health state and model metadata. A test
+failure never exposes response bodies or secrets and does not make the Vault
+unready. Configuration updates use optimistic revisions; model bindings first
+check the Vault-specific override and then the global default.
 
 ### 11.4 Model roles
 
@@ -405,6 +504,41 @@ The UI includes:
 - prompt/provider/pipeline metadata;
 - embedding coverage and failures.
 
+### 13.1 Memory service and runtime boundary
+
+Memory commands are application-service operations. The MCP and future Admin
+HTTP adapters authenticate the caller, resolve the endpoint-bound
+`VaultContext`, validate DTOs, and call `MemoryService`; they do not read the
+Vault filesystem, execute memory SQL, invoke providers, or update projections
+directly. The service writes canonical records below the Vault reserved root
+through Vault Core, so managed memory Markdown receives the same atomic-write,
+revision, history, audit, and outbox guarantees as other Core-managed data.
+
+The reserved memory namespace is not an ordinary WebDAV or MCP file path and
+is excluded from note indexing and normal filesystem reconciliation. It remains
+portable Markdown, while SQLite memory rows, FTS, entities, relations,
+candidates, and embeddings are rebuildable operational projections.
+
+Automatic extraction is admitted as a Vault-scoped durable job containing only
+file identity, path, revision, and pipeline references. The worker rechecks
+the source revision before promotion and treats provider output as an
+untrusted candidate. `memory.revalidate`, `memory.rebuild`, and
+`embedding.rebuild` are separate jobs; provider outages degrade recall to
+lexical/context retrieval and do not make canonical memory writes fail.
+
+The runtime stores the following Vault-scoped settings through the typed
+configuration API rather than an unvalidated key/value editor:
+
+- extraction policy, candidate thresholds, and schema/prompt version;
+- recall weights, result/token budgets, and optional embedding role binding;
+- memory retention, source invalidation, and diagnostic policies.
+
+Changing thresholds, bindings, or worker concurrency is hot-reloadable when
+the setting schema permits it. Changing an analyzer, embedding model, or
+taxonomy schedules a derived projection rebuild and never rewrites canonical
+memory Markdown implicitly. The WP-12 Admin API/UI exposes these operations;
+the WP-11 service boundary is already present for MCP and worker callers.
+
 ## 14. Jobs page
 
 Display:
@@ -459,6 +593,12 @@ Functions:
 
 A restore requires reauthentication and explicit confirmation.
 
+The UI shows catalog/job state rather than blocking on archive creation. Restore
+validation runs against private staging and reports manifest/target/checksum
+results without changing configured roots. Applying restore requires typing
+`RESTORE` and entering the current Admin password; the data plane remains
+offline until post-restore integrity and Core recovery checks pass.
+
 ## 17. System page
 
 Display:
@@ -468,7 +608,8 @@ Display:
 - schema migration version;
 - enabled Cargo/runtime features;
 - data paths;
-- listener addresses and effective allowed CIDRs;
+- listener addresses and a reminder that publication/source-network policy is
+  deployment-owned;
 - trusted proxies;
 - storage/database health;
 - log level;

@@ -1,0 +1,31 @@
+[package]
+name = "mcp-vault-webdav"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+axum = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+dav-server = { workspace = true }
+futures-util = { workspace = true }
+mcp-vault-auth = { path = "../auth" }
+mcp-vault-core = { path = "../vault-core" }
+mcp-vault-domain = { path = "../domain" }
+mcp-vault-state = { path = "../state" }
+mcp-vault-storage-fs = { path = "../storage-fs" }
+http = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+http-body-util = { workspace = true }
+tempfile = { workspace = true }
+tower = { workspace = true }
+
+[lints]
+workspace = true

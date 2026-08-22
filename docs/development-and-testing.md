@@ -135,7 +135,13 @@ Never return raw SQL, I/O, provider, or crypto errors to clients.
 - Application services own transaction boundaries.
 - Repositories do not secretly open nested independent transactions.
 - Outbox insertion occurs in the same transaction as operational metadata.
-- SQLite busy handling is bounded and observable.
+- SQLite busy handling and connection-pool admission are separately bounded
+  and observable.
+- Bursty request paths queue their short SQLite write phases through the shared
+  state write gate. Do not serialize file streaming or canonical filesystem
+  work merely because SQLite permits one writer.
+- Read-before-write metadata commits use an immediate transaction so they do
+  not attempt to upgrade a stale WAL snapshot.
 
 ### Traits
 
@@ -198,6 +204,8 @@ Maintain fixtures containing:
 - Use repository query helpers that require `VaultId`.
 - Avoid dynamic SQL assembled from untrusted sort/filter names.
 - FTS and vector tables need reconciliation tests because extensions may not enforce ordinary foreign keys.
+- Backup catalog migration, SQLite snapshot/restore, manifest checksums, and
+  clean-host restore fixtures must run against real temporary roots.
 
 ## 8. Test pyramid
 
@@ -227,6 +235,7 @@ Use property/fuzz testing for:
 - Markdown/frontmatter parser;
 - memory JSON schema handling;
 - backup archive validation;
+- duplicate/link/device/oversized archive entries and traversal rejection;
 - header/body matching;
 - ranking determinism.
 
@@ -245,7 +254,15 @@ Test application services with real temporary filesystem + SQLite:
 - outbox/job idempotency;
 - external edit reconciliation;
 - index rebuild;
+- FTS path/tag/topic/time filters and bounded cursors;
+- taxonomy overlay validation and managed-namespace read isolation;
+- resolved links, unresolved links, backlinks, and related-note scoring;
+- deletion of derived rows followed by a Vault-scoped rebuild;
+- public MCP lexical search with two-Vault authorization isolation;
 - provider failure;
+- provider adapter contracts use local fake HTTP servers only;
+- SSRF/redirect/privacy/retry/concurrency and response-schema failures;
+- embedding dimension/model/Vault partition and re-embedding job references;
 - memory materialization.
 
 ### 8.5 Protocol tests
@@ -259,6 +276,9 @@ Test application services with real temporary filesystem + SQLite:
 - streaming;
 - auth/revocation;
 - path attacks;
+- two-Vault endpoint/credential isolation;
+- overwrite COPY/MOVE and recursive directory moves;
+- interrupted staged PUT journal cleanup;
 - Litmus.
 
 #### MCP
@@ -276,7 +296,13 @@ Test application services with real temporary filesystem + SQLite:
 
 - setup;
 - session/CSRF/Origin;
+- automatic first-run key/token creation, restart reuse, managed-token cleanup,
+  and missing-established-key rejection;
+- Admin requests remain authenticated without application-owned source-CIDR
+  admission;
 - secret masking;
+- one-time WebDAV/PAT response display without plaintext in list endpoints;
+- successful mutation audit entries without password/bootstrap-token content;
 - LAN/public listener separation;
 - provider/config validation.
 
@@ -286,7 +312,8 @@ Use Docker Compose and actual HTTP.
 
 Scenarios:
 
-- setup to Obsidian credential creation;
+- generated bootstrap-token retrieval through first-Admin setup to Obsidian
+  credential creation;
 - DAV sync fixture;
 - MCP Agent-like discovery/search/read/edit;
 - remember/recall;
@@ -308,6 +335,36 @@ Because Obsidian plugins run in a GUI environment, combine:
 
 Do not encode one plugin’s bugs as general behavior without tests and documentation.
 
+The current automated adapter slice can be run with:
+
+```bash
+cargo test -p mcp-vault-storage-fs --all-features
+cargo test -p mcp-vault-core --all-features
+cargo test -p mcp-vault-webdav --all-features
+cargo test -p mcp-vault-server --all-features
+```
+
+The WebDAV integration fixture exercises the public adapter boundary with
+Basic challenge, ETags and ranges, streamed binary PUT, PROPFIND, MKCOL,
+COPY/MOVE/DELETE, LOCK/UNLOCK, overwrite behavior, directory trees, path
+attacks, expiry/revocation, trusted-proxy transport, and two-Vault isolation.
+Run Litmus and the sanitized Sync Engine/Remotely Save fixtures against a
+real HTTP server before release; the in-process fixture is not a substitute
+for those client checks.
+
+The disposable real-process fixture and public smoke can be run with:
+
+```bash
+bash scripts/interop/http-smoke.sh
+```
+
+It creates a temporary SQLite/Vault root, starts the actual data and control
+listeners, performs 50 concurrent nested WebDAV PUTs and reads every result
+back, and deletes only that fixture after the check. Its outer MCP PAT injection
+is test-only and does not alter production authentication. The in-process
+WebDAV regression additionally asserts that the same burst leaves no
+`prepared` or `file_committed` operation journal rows.
+
 ## 10. MCP conformance
 
 Use the official conformance tooling compatible with the selected `rmcp` version.
@@ -325,6 +382,21 @@ At minimum verify:
 - backward compatibility negotiated by SDK.
 
 Never advertise a revision not exercised in CI/release validation.
+
+The repeatable WP-14 entry point is:
+
+```bash
+bash scripts/conformance/mcp.sh
+```
+
+The default run uses the fixed official conformance commit and target
+`2026-07-28` scenarios for stateless discovery, tools/resources listing,
+header validation, DNS rebinding, and caching. The committed baseline contains
+only narrow checks for conformance-private diagnostic capabilities that MCP
+Vault intentionally does not advertise. Set
+`MCP_VAULT_CONFORMANCE_REQUIREMENTS=2026-07-28` for the full official
+requirements set when its product-specific expected-failure review is ready;
+do not replace that review with a broad scenario allow-list.
 
 ## 11. Provider contract tests
 
@@ -361,6 +433,13 @@ Evaluate:
 
 Ranking changes require benchmark comparison and recorded rationale.
 
+WP-11 also keeps deterministic integration fixtures for remember idempotency,
+managed Markdown materialization/round-trip, invalid frontmatter quarantine,
+candidate validation, source invalidation, lifecycle filtering, contradiction
+supersession, FTS-only recall, optional vector degradation, recall budgets,
+MCP memory scopes/resources, and two-Vault memory isolation. Tests use local
+provider fakes only; recall tests prove that no query-time LLM is required.
+
 ## 13. Crash and recovery tests
 
 Inject failures after each write phase:
@@ -384,6 +463,13 @@ Restart and assert:
 - no cross-path corruption;
 - audit outcome is accurate.
 
+WP-06 additionally exercises SQLite lease reclaim and Vault-scoped job
+deduplication, outbox admission into a durable job before acknowledgement,
+bounded no-follow enumeration, scan-generation fencing, direct external
+create/edit/delete import, unsafe-entry protection, and supervisor shutdown.
+The polling reconciliation pass is the authority when a filesystem watcher
+event is missed; native watcher acceleration must not replace this test path.
+
 ## 14. Security tests
 
 Follow `security.md`, including:
@@ -396,6 +482,8 @@ Follow `security.md`, including:
 - provider SSRF;
 - prompt injection;
 - archive restore;
+- clean-host restore, pre-restore rollback, low-disk rejection, and backup
+  retention last-verified protection;
 - resource limits;
 - public Admin route absence.
 
@@ -424,6 +512,17 @@ Measure:
 
 Do not optimize before measurement, but do not accept designs that require loading the entire Vault into memory per request.
 
+WP-14 also provides a bounded public-listener regression smoke:
+
+```bash
+bash scripts/perf/baseline.sh
+```
+
+It emits a JSON report with fixture size, iteration count, p50/p95/max,
+threshold, timestamp, and platform. The report is a regression tripwire, not
+the full-scale 10,000-note/50,000-attachment/100,000-record acceptance
+measurement; a release must attach the larger fixture report separately.
+
 ## 16. CI pipeline
 
 Suggested jobs:
@@ -440,6 +539,10 @@ Suggested jobs:
 10. coverage;
 11. Docker build and end-to-end smoke;
 12. SBOM/image scan.
+
+The repository additionally runs the real HTTP smoke, the pinned official MCP
+core scenarios, migration fixture test, threat/traceability review, and the
+release artifact checks documented in `docs/release-readiness.md`.
 
 Use caching without allowing stale generated schemas/migrations to pass.
 

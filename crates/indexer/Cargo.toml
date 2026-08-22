@@ -1,0 +1,26 @@
+[package]
+name = "mcp-vault-indexer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+comrak = { workspace = true }
+mcp-vault-core = { path = "../vault-core" }
+mcp-vault-domain = { path = "../domain" }
+mcp-vault-state = { path = "../state" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+yaml-rust = "=0.4.5"
+
+[dev-dependencies]
+mcp-vault-storage-fs = { path = "../storage-fs" }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

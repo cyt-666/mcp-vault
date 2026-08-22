@@ -170,6 +170,14 @@ Vault Core owns canonical file behavior:
 
 Every mutation from WebDAV, MCP, Admin, reconciliation, and memory materialization uses Vault Core.
 
+Every Core factory receives the same process-owned `VaultCoreRuntime`. Its
+path-lock registry serializes conflicting paths across independently built
+WebDAV, MCP, Admin, reconciliation, and worker Core instances; lock entries are
+weakly retained so inactive paths do not accumulate. The runtime also carries
+the counted maintenance gate. Protocol requests and worker mutations hold RAII
+admissions for their full operation, while staged writes retain their write
+admission until commit/drop.
+
 ### 4.4 Filesystem storage
 
 The filesystem implementation owns low-level I/O:
@@ -238,6 +246,17 @@ The adapter:
 
 The Admin API is a conventional versioned JSON API served on the control-plane listener.
 
+WP-13 adds a dedicated backup application boundary. It coordinates Vault Core/
+storage reads, the StateStore SQLite snapshot/restore boundary, a service-owned
+manifest/tar artifact, and durable global jobs. Archive validation and root
+swaps remain below the Admin adapter; protocol handlers never receive archive
+paths or execute backup SQL. A process `MaintenanceGate` coordinates normal,
+read-only, and offline modes across data adapters and workers without replacing
+the per-operation `VaultContext` isolation boundary. Read-only transition
+rejects new writes and drains admitted mutations; offline transition
+additionally rejects/drains active protocol operations before restore swaps
+SQLite or Vault roots.
+
 It performs:
 
 - admin session authentication;
@@ -247,6 +266,15 @@ It performs:
 - sanitized response mapping.
 
 The React application is built separately and embedded into the server image or binary for a single deployable artifact.
+
+WP-12 implements this adapter as a stateful `AdminApiState` injected only into
+the control listener. Authenticated routes use the existing AuthService
+session/CSRF boundary and translate typed DTOs to provider, index, memory, job,
+and state application services. Network publication and source filtering are
+owned by the host, firewall, or operator-selected reverse proxy; the
+application defaults the control listener to loopback and does not interpret
+client CIDRs. The data listener continues to use the unconfigured Admin
+boundary and has no Admin assets or routes.
 
 ## 6. Application services
 
@@ -314,10 +342,30 @@ Concurrency controls are layered:
 - file/path locks prevent conflicting in-process operations;
 - expected revision protects Agent edits;
 - HTTP ETags and modification preconditions protect WebDAV operations;
+- a process-local admission gate serializes only SQLite write phases across
+  bursty protocol requests, matching SQLite's single-writer model while file
+  streaming, fsync, history creation, and atomic replacement remain concurrent;
 - SQLite constraints protect unique revisions and idempotency keys;
 - jobs use leases and idempotent deduplication keys.
 
+Worker leases are renewed while handlers run, and a persisted Admin
+cancellation bit is polled into each cooperative handler token. Full index
+jobs created by a file-event burst are generation-coalesced per Vault: older
+active jobs terminate without rebuilding and only the newest generation runs.
+If a newer dirty event arrives during that rebuild, its durable job remains for
+one follow-up pass.
+
+Metadata commits reserve the SQLite writer before reading precondition state.
+This avoids upgrading a stale WAL snapshot after another commit and leaving a
+canonical file stranded ahead of its revision, audit, and outbox transaction.
+
 Move/copy operations lock source and destination in canonical order to avoid deadlock.
+
+Directory moves extend that lock set to every tracked descendant and prepare
+one journaled path revision per entry before the physical directory rename.
+If a DAV overwrite has already tombstoned the destination, the old tombstone
+is moved into the reserved operational namespace in the same metadata
+transaction; the source identity and descendant histories remain intact.
 
 ## 8. Revisions and history
 
@@ -372,7 +420,10 @@ Long-running or retryable work is represented in SQLite:
 - index rebuild;
 - backup and restore validation.
 
-Workers use leases, bounded concurrency, exponential backoff, dead-letter state, and deterministic deduplication keys.
+Workers use renewable leases, bounded concurrency, exponential backoff,
+dead-letter state, deterministic deduplication keys, and cooperative persistent
+cancellation. Generic `outbox.event` fan-out jobs have a terminal compatibility
+handler; the retained source outbox row remains the durable event record.
 
 ## 10. Index architecture
 
@@ -441,6 +492,14 @@ recall request
 
 Normal recall is an index query and does not call an LLM. See `memory-system.md`.
 
+WP-11 implements this boundary in `mcp-vault-memory`: explicit commands and
+candidate validation precede promotion, while recall consumes Vault-scoped
+memory FTS/entity/tag/recent projections and optional ProviderService vectors.
+Promoted records are rendered as deterministic Markdown under the managed
+namespace through Vault Core, so a projection rebuild never becomes a hidden
+database-only memory store. Managed file rows are excluded from ordinary
+reconciliation and note indexing loops.
+
 ## 12. Provider architecture
 
 Provider adapters implement internal traits for:
@@ -462,6 +521,13 @@ Provider requests use:
 - schema validation.
 
 Provider adapters cannot write files or SQL projections directly.
+
+The WP-10 provider boundary also owns endpoint policy, bounded transport,
+structured-response validation, embedding dimension checks, and the
+VectorIndex implementation. Provider definitions are global operational
+configuration; model bindings resolve a Vault override before a global
+default. Embeddings and vectors remain derived, Vault-partitioned state with
+an exact SQLite fallback.
 
 ## 13. Multi-Vault evolution
 

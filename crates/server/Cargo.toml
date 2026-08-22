@@ -1,0 +1,50 @@
+[package]
+name = "mcp-vault-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+mcp-vault-admin-api = { path = "../admin-api" }
+mcp-vault-backup = { path = "../backup" }
+mcp-vault-domain = { path = "../domain" }
+axum = { workspace = true }
+mime_guess = { workspace = true }
+mcp-vault-auth = { path = "../auth" }
+mcp-vault-core = { path = "../vault-core" }
+mcp-vault-indexer = { path = "../indexer" }
+mcp-vault-mcp = { path = "../mcp" }
+mcp-vault-memory = { path = "../memory" }
+mcp-vault-providers = { path = "../providers" }
+mcp-vault-state = { path = "../state" }
+mcp-vault-storage-fs = { path = "../storage-fs" }
+mcp-vault-webdav = { path = "../webdav" }
+rust-embed = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+http-body-util = { workspace = true }
+tower = { workspace = true }
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "mcp-vault"
+path = "src/main.rs"

@@ -1,0 +1,14 @@
+/target/
+/dist/
+/data/
+/frontend/admin/node_modules/
+/frontend/admin/dist/*
+!/frontend/admin/dist/.gitkeep
+/frontend/admin/coverage/
+.pnpm-store/
+.env
+*.pem
+*.key
+*.tar
+*.tar.gz
+.DS_Store

@@ -128,12 +128,17 @@ CREATE TABLE encrypted_secrets (
     key_version INTEGER NOT NULL,
     nonce BLOB NOT NULL,
     ciphertext BLOB NOT NULL,
+    hint TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
 ```
 
 Encryption uses an installation master key and authenticated encryption. Provider secrets are never returned after save; the UI receives only presence and a masked hint stored separately.
+
+Migration `0003_auth_security.sql` adds the non-secret `hint`, records the
+digest key version used by Admin sessions and MCP PATs, and adds the protected
+OAuth resource identifier. Existing migrations remain immutable.
 
 ## 5. Admin identity and sessions
 
@@ -153,6 +158,7 @@ CREATE TABLE admin_sessions (
     user_id TEXT NOT NULL,
     token_digest BLOB NOT NULL UNIQUE,
     csrf_secret_digest BLOB NOT NULL,
+    digest_key_version INTEGER NOT NULL DEFAULT 1,
     created_at INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
@@ -163,7 +169,8 @@ CREATE TABLE admin_sessions (
 );
 ```
 
-Session tokens are high entropy and only their digest is stored.
+Session tokens are high entropy and only their keyed digest and digest-key
+version are stored. The CSRF secret follows the same rule.
 
 ## 6. WebDAV credentials
 
@@ -199,6 +206,7 @@ CREATE TABLE mcp_tokens (
     name TEXT NOT NULL,
     token_prefix TEXT NOT NULL,
     token_digest BLOB NOT NULL UNIQUE,
+    digest_key_version INTEGER NOT NULL DEFAULT 1,
     scopes_json TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     last_used_at INTEGER,
@@ -208,7 +216,9 @@ CREATE TABLE mcp_tokens (
 );
 ```
 
-The token is shown once. Store a keyed HMAC digest or equivalent lookup-safe keyed digest, not plaintext.
+The token is shown once. Store a keyed HMAC digest or equivalent lookup-safe
+keyed digest, not plaintext. A master-key version allows retained old keys to
+validate existing tokens during rotation.
 
 ### 7.2 OAuth issuers and subject grants
 
@@ -219,6 +229,7 @@ CREATE TABLE oauth_issuers (
     issuer_url TEXT NOT NULL UNIQUE,
     discovery_url TEXT,
     audience TEXT NOT NULL,
+    resource TEXT,
     jwks_cache_json TEXT,
     jwks_cached_at INTEGER,
     enabled INTEGER NOT NULL DEFAULT 1,
@@ -241,7 +252,27 @@ CREATE TABLE oauth_subject_grants (
 );
 ```
 
-Access-token validation checks issuer, signature, time, audience/resource, subject grant, and scopes.
+Access-token validation checks issuer, signature, time, audience/resource,
+subject grant, and scopes. `jwks_cache_json` contains only normalized RSA public
+key fields and is never returned in an Admin response or default log. Migration
+0009 disables and clears every prerelease cached JWKS because older rows may
+contain plaintext symmetric key material; the operator must re-save a public
+RSA set through Admin.
+
+### 7.3 Installation-key identity
+
+```sql
+CREATE TABLE installation_key_checks (
+    key_version INTEGER PRIMARY KEY,
+    verification_digest BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+```
+
+`verification_digest` is a fixed-purpose keyed digest, not key material. It is
+used only to reject a missing or different installation key at startup and is
+safe to include in the operational-state backup.
 
 ## 8. Stable file identity
 
@@ -274,6 +305,12 @@ directory
 ```
 
 Path comparison policy must be documented per platform. The canonical server representation uses normalized `/` separators and NFC Unicode. The service should reject collisions caused by case-insensitive filesystems during setup or scan.
+
+The domain path value uses an empty logical string for the Vault root and
+accepts a leading `/` only at the explicit URL-path decoding boundary. The
+portable safety limits are 4,096 normalized UTF-8 bytes per path, 64 segments,
+and 255 bytes per segment. The reserved `_mcp-vault` namespace is not an
+ordinary user path and requires managed service access.
 
 ### 8.2 Revisions
 
@@ -317,6 +354,13 @@ external_change
 
 A move preserves `file_id` and increments revision.
 
+When WebDAV overwrites an existing destination, the DAV library first
+materializes the old destination as a tombstone. Vault Core archives that
+tombstone under the reserved operational namespace in the same metadata
+transaction, then moves the source row into the destination while preserving
+the source `file_id`. The archive is not exposed as ordinary Vault content;
+the old delete revision and history remain available to recovery/audit code.
+
 ## 9. Operation journal and outbox
 
 ### 9.1 Operation journal
@@ -334,12 +378,17 @@ CREATE TABLE operation_journal (
     prior_hash TEXT,
     proposed_hash TEXT,
     temp_path TEXT,
+    idempotency_key TEXT,
     payload_json TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     error TEXT,
     FOREIGN KEY(vault_id) REFERENCES vaults(id)
 );
+
+The optional `idempotency_key` is unique within a Vault when present. It
+allows a retry after a process interruption to locate the original journal
+intent without treating an opaque payload as an identity.
 ```
 
 States:
@@ -368,11 +417,21 @@ CREATE TABLE outbox_events (
     claimed_until INTEGER,
     delivered_at INTEGER,
     attempts INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT
+    last_error TEXT,
+    dead_lettered INTEGER NOT NULL DEFAULT 0,
+    dead_letter_reason TEXT
 );
+
+CREATE INDEX outbox_claim_idx
+    ON outbox_events(dead_lettered, delivered_at, available_at, claimed_until);
 ```
 
-Consumers must be idempotent.
+Consumers must be idempotent. A worker claims an undelivered row with a
+conditional lease, acknowledges it only after durable derived-work admission,
+and clears the lease on success. Lease expiry makes the row reclaimable after
+a process crash. Retryable failures use bounded exponential backoff;
+non-retryable failures or exhausted attempts set `dead_lettered` and retain a
+redacted reason for operator inspection.
 
 ## 10. Durable background jobs
 
@@ -395,8 +454,15 @@ CREATE TABLE jobs (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     completed_at INTEGER,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
     UNIQUE(vault_id, dedup_key)
 );
+
+CREATE UNIQUE INDEX jobs_global_dedup_idx
+    ON jobs(dedup_key)
+    WHERE vault_id IS NULL;
+CREATE INDEX jobs_claim_idx
+    ON jobs(status, cancel_requested, available_at, lease_until);
 ```
 
 Statuses:
@@ -409,6 +475,46 @@ completed
 failed
 cancelled
 ```
+
+`vault_id` is mandatory for Vault work and may be `NULL` only for explicitly
+global jobs. Vault jobs are deduplicated by `(vault_id, dedup_key)`; global
+jobs use the partial unique index above. Claims increment `attempts` and set a
+conditional lease. Progress is bounded JSON, cancellation is durable, and
+expired leases are reclaimable by another worker.
+
+## 10.1 Scan checkpoints
+
+Filesystem scans keep their durable lifecycle separate from jobs so startup
+and periodic reconciliation remain observable and restart-safe:
+
+```sql
+CREATE TABLE scan_checkpoints (
+    id TEXT PRIMARY KEY,
+    vault_id TEXT NOT NULL,
+    scan_type TEXT NOT NULL,
+    generation TEXT NOT NULL,
+    cursor_path TEXT,
+    status TEXT NOT NULL,
+    entries_seen INTEGER NOT NULL DEFAULT 0,
+    files_seen INTEGER NOT NULL DEFAULT 0,
+    directories_seen INTEGER NOT NULL DEFAULT 0,
+    changes_imported INTEGER NOT NULL DEFAULT 0,
+    unsafe_entries_skipped INTEGER NOT NULL DEFAULT 0,
+    missing_deletes_skipped INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    started_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    UNIQUE(vault_id, scan_type),
+    FOREIGN KEY(vault_id) REFERENCES vaults(id)
+);
+```
+
+`scan_type` is currently `initial` or `reconciliation`. A generation owns
+its progress updates; stale generations cannot overwrite a newer run. The
+cursor is only a validated relative-path hint. Core still completes a full
+safe comparison before marking a pass `completed`, so a missed watcher event
+cannot become lost knowledge.
 
 ## 11. Note metadata projection
 
@@ -431,8 +537,8 @@ CREATE TABLE notes (
     analyzer_version INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    FOREIGN KEY(file_id) REFERENCES file_entries(id),
-    FOREIGN KEY(vault_id) REFERENCES vaults(id)
+    FOREIGN KEY (vault_id, file_id)
+        REFERENCES file_entries(vault_id, id)
 );
 ```
 
@@ -449,7 +555,9 @@ CREATE TABLE note_headings (
     title TEXT NOT NULL,
     start_byte INTEGER NOT NULL,
     end_byte INTEGER,
-    UNIQUE(file_id, ordinal)
+    UNIQUE(file_id, ordinal),
+    FOREIGN KEY (vault_id, file_id)
+        REFERENCES file_entries(vault_id, id)
 );
 
 CREATE TABLE note_tags (
@@ -458,7 +566,9 @@ CREATE TABLE note_tags (
     tag TEXT NOT NULL,
     normalized_tag TEXT NOT NULL,
     source TEXT NOT NULL,
-    PRIMARY KEY(file_id, normalized_tag, source)
+    PRIMARY KEY(file_id, normalized_tag, source),
+    FOREIGN KEY (vault_id, file_id)
+        REFERENCES file_entries(vault_id, id)
 );
 
 CREATE TABLE note_links (
@@ -470,7 +580,11 @@ CREATE TABLE note_links (
     target_heading TEXT,
     link_type TEXT NOT NULL,
     ordinal INTEGER NOT NULL,
-    UNIQUE(source_file_id, ordinal)
+    UNIQUE(source_file_id, ordinal),
+    FOREIGN KEY (vault_id, source_file_id)
+        REFERENCES file_entries(vault_id, id),
+    FOREIGN KEY (vault_id, target_file_id)
+        REFERENCES file_entries(vault_id, id)
 );
 ```
 
@@ -512,7 +626,8 @@ CREATE TABLE index_nodes (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     UNIQUE(vault_id, stable_key),
-    FOREIGN KEY(parent_id) REFERENCES index_nodes(id)
+    FOREIGN KEY (vault_id, parent_id)
+        REFERENCES index_nodes(vault_id, id)
 );
 
 CREATE TABLE index_memberships (
@@ -521,7 +636,11 @@ CREATE TABLE index_memberships (
     file_id TEXT NOT NULL,
     relevance REAL NOT NULL,
     source_type TEXT NOT NULL,
-    PRIMARY KEY(node_id, file_id, source_type)
+    PRIMARY KEY(node_id, file_id, source_type),
+    FOREIGN KEY (vault_id, node_id)
+        REFERENCES index_nodes(vault_id, id),
+    FOREIGN KEY (vault_id, file_id)
+        REFERENCES file_entries(vault_id, id)
 );
 ```
 
@@ -538,6 +657,12 @@ entity
 
 LLM-generated summaries are projections and carry provider/model/prompt metadata in a companion table or `source_ref`.
 
+The deterministic rebuild also stores one Vault-scoped `index_status` row with
+the projection revision, analyzed entry/note/byte counts, analyzer version,
+coverage JSON, last successful rebuild time, and a redacted failure code.
+The `note_fts` FTS5 companion table keeps `vault_id` and `file_id` as
+unindexed filter columns; it is always replaceable from the canonical notes.
+
 ## 13. Memory schema
 
 The complete memory schema is defined in `memory-system.md`. At minimum it includes:
@@ -552,6 +677,16 @@ The complete memory schema is defined in `memory-system.md`. At minimum it inclu
 - recall statistics.
 
 Memory queries always include `vault_id`.
+
+Migration `0007_memory_state.sql` owns `memories`, `memory_sources`,
+`memory_entities`, `memory_tags`, `memory_relations`, `memory_candidates`,
+`memory_idempotency`, `memory_diagnostics`, and the rebuildable `memory_fts`
+projection. Composite foreign keys include `(vault_id, memory_id)` or
+`(vault_id, file_id)` wherever a row references another Vault-owned object.
+Active and archived memory Markdown is materialized under the reserved
+managed namespace through explicit Vault Core methods; its `file_entries` and
+`file_revisions` rows are hidden from ordinary protocol paths and excluded
+from reconciliation delete inference.
 
 ## 14. Provider and model configuration
 
@@ -609,6 +744,11 @@ rerank
 
 A `NULL vault_id` is the global default. Future Vault-specific bindings override it.
 
+Migration 0006 adds optimistic configuration revisions to providers, models,
+and bindings. It also adds provider_health for redacted test/availability
+state. Existing provider/model rows from the operational foundation remain
+compatible and are upgraded forward-only.
+
 ## 15. Embeddings
 
 Wrap vector storage behind an internal `VectorIndex`.
@@ -635,6 +775,11 @@ CREATE TABLE embedding_records (
 A pinned `sqlite-vec` backend may be used, but it remains behind the project interface because the extension is pre-1.0. Provide a deterministic exact-cosine fallback for development, recovery, and small installations.
 
 Never mix dimensions or models in one similarity query.
+
+The exact fallback stores normalized f32 values in a Vault-scoped
+embedding_vectors BLOB row referenced by embedding_records. Both metadata and
+vector bytes are derived and may be deleted and rebuilt independently of
+canonical notes and memory Markdown.
 
 ## 16. Audit
 
@@ -665,17 +810,28 @@ Audit retention is configurable and independent from application logs.
 ```sql
 CREATE TABLE backups (
     id TEXT PRIMARY KEY,
-    status TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN
+        ('queued', 'running', 'completed', 'failed', 'validating', 'restoring')),
     location TEXT NOT NULL,
     manifest_json TEXT,
     started_at INTEGER NOT NULL,
     completed_at INTEGER,
     verified_at INTEGER,
-    error TEXT
+    error TEXT,
+    created_by TEXT
 );
 ```
 
-The manifest identifies Vault content snapshot, state database snapshot, history snapshot, schema version, service version, and checksums.
+Migration `0008_backup_catalog.sql` owns this table. Artifact bytes remain in
+the service-owned backup directory; `manifest_json` is bounded redacted
+metadata and never contains passwords, tokens, provider plaintext, or note
+bodies. Backup jobs are global operational jobs, while every manifest content
+and history path remains explicitly prefixed by its Vault ID.
+
+The manifest identifies Vault content snapshot, state database snapshot,
+history snapshot, schema version, service version, retained encryption-key
+version identifiers, and checksums. Key material is never stored in the
+artifact.
 
 ## 18. Rebuildability matrix
 
@@ -699,4 +855,12 @@ The manifest identifies Vault content snapshot, state database snapshot, history
 - Keep migrations forward-only.
 - A migration that changes canonical managed Markdown requires an idempotent filesystem migrator with journal and dry-run support.
 - Provider/model changes schedule new derived work; they do not rewrite source notes.
+- Migration 0006 upgrades provider/model configuration and adds rebuildable
+  provider health and Vault-scoped embedding/vector state.
+- Migration 0007 adds the Vault-scoped memory projection, candidates,
+  provenance, lifecycle/recall state, idempotency, diagnostics, and FTS.
+- Migration 0008 adds the backup catalog and keeps artifact data outside
+  SQLite so catalog cleanup cannot become an implicit knowledge deletion.
+- Migration 0009 adds the installation-key verifier and removes legacy cached
+  OAuth key JSON that cannot be proven public-only.
 - Every migration must preserve Vault IDs and credential bindings.

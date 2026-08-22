@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+      - run: cargo doc --workspace --no-deps
+
+  frontend:
+    name: Admin frontend checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend/admin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+          cache-dependency-path: frontend/admin/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm build
+
+  repository:
+    name: Repository boundaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+      - run: bash scripts/check-docs.sh
+
+  interop:
+    name: Public protocol conformance and performance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+      - name: Run real HTTP public-plane smoke
+        run: bash scripts/interop/http-smoke.sh
+      - name: Run pinned official MCP conformance scenarios
+        env:
+          MCP_VAULT_CONFORMANCE_OUTPUT_DIR: ${{ runner.temp }}/mcp-vault-conformance
+        run: bash scripts/conformance/mcp.sh
+      - name: Verify prior prerelease migration fixture
+        run: bash scripts/release/check-migrations.sh
+      - name: Run bounded performance regression smoke
+        env:
+          MCP_VAULT_PERF_REPORT: ${{ runner.temp }}/mcp-vault-perf-report.json
+        run: bash scripts/perf/baseline.sh
+      - name: Upload interoperability evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-vault-interop-evidence
+          path: |
+            ${{ runner.temp }}/mcp-vault-conformance
+            ${{ runner.temp }}/mcp-vault-perf-report.json
+          if-no-files-found: warn
+
+  webdav-litmus:
+    name: WebDAV Litmus (opt-in release environment)
+    if: ${{ vars.MCP_VAULT_LITMUS_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require an externally managed Litmus target
+        env:
+          MCP_VAULT_WEBDAV_URL: ${{ vars.MCP_VAULT_WEBDAV_URL }}
+          MCP_VAULT_WEBDAV_USERNAME: ${{ secrets.MCP_VAULT_WEBDAV_USERNAME }}
+          MCP_VAULT_WEBDAV_PASSWORD: ${{ secrets.MCP_VAULT_WEBDAV_PASSWORD }}
+        run: bash scripts/interop/webdav-litmus.sh basic
+
+  container:
+    name: Container hardening and supply-chain checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build release image
+        run: docker build --tag mcp-vault:ci .
+      - name: Assert runtime is non-root
+        shell: bash
+        run: test "$(docker run --rm --entrypoint id mcp-vault:ci -u)" != "0"
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: mcp-vault:ci
+          format: spdx-json
+          output-file: sbom-mcp-vault.json
+      - name: Scan image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: mcp-vault:ci
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-vault-sbom
+          path: sbom-mcp-vault.json
+      - name: Record immutable image metadata and checksum
+        shell: bash
+        run: |
+          docker image inspect mcp-vault:ci > image-inspect.json
+          sha256sum image-inspect.json sbom-mcp-vault.json > release-artifact-SHA256SUMS
+      - name: Upload image metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-vault-image-metadata
+          path: |
+            image-inspect.json
+            release-artifact-SHA256SUMS

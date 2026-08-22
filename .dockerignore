@@ -1,0 +1,9 @@
+.git
+.github
+.pnpm-store
+target
+frontend/admin/node_modules
+frontend/admin/dist
+data
+docs/exec-plans/active
+*.DS_Store

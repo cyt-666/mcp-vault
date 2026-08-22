@@ -1,0 +1,28 @@
+[package]
+name = "mcp-vault-backup"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+fs2 = { workspace = true }
+mcp-vault-core = { path = "../vault-core" }
+mcp-vault-domain = { path = "../domain" }
+mcp-vault-state = { path = "../state" }
+mcp-vault-storage-fs = { path = "../storage-fs" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tar = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

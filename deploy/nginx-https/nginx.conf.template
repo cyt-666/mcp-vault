@@ -1,0 +1,156 @@
+worker_processes auto;
+pid /tmp/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    client_body_temp_path /tmp/client_temp;
+    proxy_temp_path /tmp/proxy_temp;
+    fastcgi_temp_path /tmp/fastcgi_temp;
+    uwsgi_temp_path /tmp/uwsgi_temp;
+    scgi_temp_path /tmp/scgi_temp;
+
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" request_time=$request_time';
+    access_log /dev/stdout main;
+    error_log /dev/stderr warn;
+
+    server_tokens off;
+    sendfile on;
+    tcp_nopush on;
+    keepalive_timeout 65s;
+
+    upstream mcp_vault_data {
+        server mcp-vault:8080;
+        keepalive 32;
+    }
+
+    upstream mcp_vault_admin {
+        server mcp-vault:8081;
+        keepalive 16;
+    }
+
+    server {
+        listen 8080 default_server;
+        server_name _;
+        return 308 https://$host$request_uri;
+    }
+
+    # Public HTTPS data plane. There is deliberately no Admin fallback here.
+    server {
+        listen 8443 ssl default_server;
+        http2 on;
+        server_name _;
+
+        ssl_certificate /etc/nginx/tls/fullchain.pem;
+        ssl_certificate_key /etc/nginx/tls/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_session_cache shared:MCPVaultTLS:10m;
+        ssl_session_timeout 10m;
+        ssl_session_tickets off;
+
+        client_max_body_size 1g;
+        client_body_timeout 300s;
+        send_timeout 3600s;
+
+        location = /health/live {
+            proxy_pass http://mcp_vault_data;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Forwarded-Port 443;
+        }
+
+        location = /health/ready {
+            proxy_pass http://mcp_vault_data;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Forwarded-Port 443;
+        }
+
+        location ^~ /mcp/ {
+            proxy_pass http://mcp_vault_data;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Forwarded-Port 443;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header Connection "";
+            proxy_request_buffering off;
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+            proxy_max_temp_file_size 0;
+        }
+
+        location ^~ /dav/ {
+            proxy_pass http://mcp_vault_data;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Forwarded-Port 443;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header Connection "";
+            proxy_request_buffering off;
+            proxy_buffering off;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+            proxy_max_temp_file_size 0;
+        }
+
+        location / {
+            return 404;
+        }
+    }
+
+    # Separate control-plane HTTPS listener. Compose publishes this port only
+    # on the configured LAN address, and Nginx additionally enforces the LAN
+    # source CIDR before forwarding any Admin UI/API request.
+    server {
+        listen 8444 ssl;
+        http2 on;
+        server_name _;
+
+        ssl_certificate /etc/nginx/tls/fullchain.pem;
+        ssl_certificate_key /etc/nginx/tls/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_session_cache shared:MCPVaultAdminTLS:5m;
+        ssl_session_timeout 10m;
+        ssl_session_tickets off;
+
+        allow ${MCP_VAULT_ADMIN_SOURCE_CIDR};
+        deny all;
+
+        client_max_body_size 1g;
+        client_body_timeout 300s;
+
+        location / {
+            proxy_pass http://mcp_vault_admin;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Forwarded-Port 8444;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header Connection "";
+            proxy_buffering off;
+            proxy_read_timeout 300s;
+            proxy_send_timeout 300s;
+        }
+    }
+}

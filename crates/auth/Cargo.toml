@@ -1,0 +1,33 @@
+[package]
+name = "mcp-vault-auth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+argon2 = { workspace = true }
+base64 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+http = { workspace = true }
+hmac = { workspace = true }
+mcp-vault-domain = { path = "../domain" }
+mcp-vault-state = { path = "../state" }
+rand = { workspace = true }
+rsa = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

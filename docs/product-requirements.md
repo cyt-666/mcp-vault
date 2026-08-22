@@ -219,7 +219,8 @@ Targets are engineering objectives and must be measured with Chinese and English
 
 ### 4.5 Operability
 
-- One Docker Compose command starts the service after required secrets are provided.
+- One Docker Compose command starts a fresh service and MCP Vault generates the
+  installation key and one-time Admin bootstrap token automatically.
 - Health and readiness endpoints reflect database, storage, migrations, and worker state.
 - Migrations are forward-only, tested, and backed up before upgrade.
 - Logs are structured and redact secrets.

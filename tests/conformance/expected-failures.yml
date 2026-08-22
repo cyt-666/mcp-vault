@@ -1,0 +1,15 @@
+# WP-14 keeps a narrow baseline. Any new exception must be a narrow
+# scenario:check-id entry reviewed with a reason and a removal condition.
+# The official runner treats a failure not listed here as a regression and a
+# listed check that starts passing as a stale baseline.
+server:
+  # The product deliberately does not expose the conformance suite's private
+  # diagnostic tools for sampling/elicitation/logging probes. These checks are
+  # therefore untestable, not protocol failures in advertised capabilities.
+  - "server-stateless:sep-2575-server-rejects-undeclared-capability"
+  - "server-stateless:sep-2575-missing-capability-http-400"
+  - "server-stateless:sep-2575-http-server-no-independent-requests-on-stream"
+  - "server-stateless:sep-2575-server-no-log-without-loglevel"
+  # prompts/list is intentionally not advertised or implemented by MCP Vault;
+  # the caching scenario cannot exercise a cache hint for an absent capability.
+  - "caching:sep-2549-prompts-list-caching-hints"
