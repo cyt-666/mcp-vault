@@ -32,9 +32,8 @@ mkdir -p data certs
 sudo chown -R 999:999 data
 ```
 
-MCP Vault creates `data/secrets/master-key` and the temporary
-`data/secrets/bootstrap-token` automatically. It does not inspect or modify
-their filesystem permission bits.
+MCP Vault creates `data/secrets/master-key` automatically. It does not inspect
+or modify the file's filesystem permission bits.
 
 Edit `.env` and set:
 
@@ -107,22 +106,18 @@ From a client inside `MCP_VAULT_ADMIN_SOURCE_CIDR`, open:
 https://<MCP_VAULT_ADMIN_HOST>:<MCP_VAULT_ADMIN_HTTPS_PORT>/
 ```
 
-Retrieve the one-time setup value locally:
-
-```bash
-docker compose --env-file .env exec mcp-vault mcp-vault bootstrap-token
-```
-
-Enter that value and finish setup. MCP Vault removes its managed bootstrap
-token file after the first Admin is committed.
+Enter the desired Admin username and password to finish setup; no container
+command or setup-token copy is required. Because first setup is a first-claim
+operation, every client admitted by the Admin Nginx source policy can attempt
+to become the owner until one account commits. Keep that policy narrow and
+complete initialization before broadening LAN/VPN access.
 Admin is not reachable through the public port 443 virtual host. Do not bind
 the Admin HTTPS port to `0.0.0.0`; keep the host firewall restricted to the
 same LAN/VPN CIDR configured in Nginx.
 
 After setup, separately back up `data/secrets/master-key`. Losing it
 does not destroy Markdown content, but encrypted provider secrets cannot be
-recovered and existing PAT digests cannot be reproduced. The bootstrap token
-is no longer accepted after setup.
+recovered and existing PAT digests cannot be reproduced.
 
 ## 5. Endpoints and shutdown
 

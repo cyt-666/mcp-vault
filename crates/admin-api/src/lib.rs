@@ -65,6 +65,7 @@ pub struct AdminApiState {
     origin_policy: OriginPolicy,
     data_hosts: BTreeSet<String>,
     data_origins: Vec<String>,
+    data_public_origin: Option<String>,
     data_bind: SocketAddr,
     admin_bind: SocketAddr,
     data_dir: PathBuf,
@@ -87,6 +88,8 @@ pub struct AdminApiConfig {
     pub data_hosts: BTreeSet<String>,
     /// Configured data-plane browser origins.
     pub data_origins: Vec<String>,
+    /// Canonical external data-plane origin shown in connection cards.
+    pub data_public_origin: Option<String>,
     /// Data listener address shown in diagnostics.
     pub data_bind: SocketAddr,
     /// Admin listener address shown in diagnostics.
@@ -138,6 +141,7 @@ impl AdminApiState {
             origin_policy: config.origin_policy,
             data_hosts: config.data_hosts,
             data_origins: config.data_origins,
+            data_public_origin: config.data_public_origin,
             data_bind: config.data_bind,
             admin_bind: config.admin_bind,
             data_dir: config.data_dir,
@@ -423,7 +427,7 @@ pub fn router() -> Router {
 /// Build the authenticated, stateful Admin API.
 pub fn stateful_router(state: AdminApiState) -> Router {
     let public = Router::new()
-        .route("/setup", post(setup))
+        .route("/setup", get(setup_status).post(setup))
         .route("/session", post(login));
     let protected = Router::new()
         .route("/session", get(current_session).delete(logout))
@@ -815,8 +819,8 @@ fn parse_vault_status(value: &str) -> Result<VaultStatus, Response> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SetupRequest {
-    bootstrap_token: String,
     username: String,
     password: String,
 }
@@ -852,9 +856,22 @@ struct VaultSummary {
     settings_revision: i64,
 }
 
+async fn setup_status(State(state): State<AdminApiState>, headers: HeaderMap) -> Response {
+    let request_id = request_id(&headers);
+    match state.auth.admin_setup_available().await {
+        Ok(setup_available) => api_ok(
+            StatusCode::OK,
+            json!({"setup_available": setup_available}),
+            request_id,
+        ),
+        Err(error) => auth_error(error, request_id),
+    }
+}
+
 async fn setup(
     State(state): State<AdminApiState>,
     headers: HeaderMap,
+    Extension(peer): Extension<AdminPeerIp>,
     Json(input): Json<SetupRequest>,
 ) -> Response {
     let request_id = request_id(&headers);
@@ -863,10 +880,10 @@ async fn setup(
     }
     let username = input.username;
     let password = SecretString::new(input.password);
-    let bootstrap = SecretString::new(input.bootstrap_token);
+    let source_ip = peer.0.map(|address| address.to_string());
     let prepared = match state
         .auth
-        .prepare_admin_setup(&bootstrap, &username, &password)
+        .prepare_admin_setup(&username, &password, source_ip.as_deref())
         .await
     {
         Ok(prepared) => prepared,
@@ -1383,6 +1400,7 @@ async fn system(
             },
             "data_hosts": state.data_hosts,
             "data_origins": state.data_origins,
+            "data_public_origin": state.data_public_origin,
             "data_dir": state.data_dir.display().to_string(),
             "history_root": state.history_root.display().to_string(),
             "ready": state.readiness.load(Ordering::Acquire),
@@ -2315,31 +2333,80 @@ async fn connection_info(
         Ok(vault) => vault,
         Err(response) => return response,
     };
-    let host = state
-        .data_hosts
-        .iter()
-        .next()
-        .cloned()
-        .unwrap_or_else(|| "localhost".to_owned());
-    let scheme = state
-        .data_origins
-        .first()
-        .and_then(|origin| Url::parse(origin).ok())
-        .map(|url| url.scheme().to_owned())
-        .unwrap_or_else(|| "http".to_owned());
+    let origin = advertised_data_origin(&state);
     api_ok(
         StatusCode::OK,
         json!({
             "vault_id": vault.id.to_string(),
             "vault_slug": vault.slug.to_string(),
-            "mcp_endpoint": format!("{scheme}://{host}/mcp/v1/vaults/{}", vault.slug),
-            "webdav_endpoint": format!("{scheme}://{host}/dav/v1/vaults/{}/", vault.slug),
+            "mcp_endpoint": format!("{origin}/mcp/v1/vaults/{}", vault.slug),
+            "webdav_endpoint": format!("{origin}/dav/v1/vaults/{}/", vault.slug),
             "supported_mcp_revisions": ["2026-07-28"],
             "authorization_modes": ["pat", "oauth_resource_server"],
             "instructions": "Use recall proactively for durable context; verify exact source material with search_notes/read_note.",
         }),
         request_id.0,
     )
+}
+
+fn advertised_data_origin(state: &AdminApiState) -> String {
+    select_advertised_data_origin(
+        state.data_public_origin.as_deref(),
+        &state.data_origins,
+        &state.data_hosts,
+        state.data_bind,
+    )
+}
+
+fn select_advertised_data_origin(
+    public_origin: Option<&str>,
+    data_origins: &[String],
+    data_hosts: &BTreeSet<String>,
+    data_bind: SocketAddr,
+) -> String {
+    public_origin
+        .and_then(canonical_endpoint_origin)
+        .or_else(|| {
+            data_origins
+                .first()
+                .and_then(|origin| canonical_endpoint_origin(origin))
+        })
+        .unwrap_or_else(|| {
+            let host = data_hosts
+                .iter()
+                .next()
+                .map(String::as_str)
+                .unwrap_or("127.0.0.1");
+            format!("http://{}", authority_with_port(host, data_bind.port()))
+        })
+}
+
+fn canonical_endpoint_origin(value: &str) -> Option<String> {
+    let url = Url::parse(value).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let origin = url.origin().ascii_serialization();
+    (origin != "null").then_some(origin)
+}
+
+fn authority_with_port(authority: &str, port: u16) -> String {
+    if let Ok(address) = authority.parse::<IpAddr>() {
+        return match address {
+            IpAddr::V4(_) => format!("{address}:{port}"),
+            IpAddr::V6(_) => format!("[{address}]:{port}"),
+        };
+    }
+    if authority
+        .parse::<axum::http::uri::Authority>()
+        .ok()
+        .and_then(|value| value.port_u16())
+        .is_some()
+    {
+        authority.to_owned()
+    } else {
+        format!("{authority}:{port}")
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -4393,11 +4460,14 @@ fn memory_error(error: mcp_vault_memory::MemoryError, request_id: String) -> Res
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::{
+        collections::BTreeSet,
+        sync::{Arc, atomic::AtomicBool},
+    };
 
     use super::{
         AdminApiConfig, AdminApiState, BackupLimits, MaintenanceGate, MaintenanceMode,
-        VaultCoreRuntime, router, stateful_router,
+        VaultCoreRuntime, router, select_advertised_data_origin, stateful_router,
     };
     use axum::{
         body::Body,
@@ -4406,7 +4476,7 @@ mod tests {
     };
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use http_body_util::BodyExt;
-    use mcp_vault_auth::{AuthService, MasterKeyRing, OriginPolicy, SecretString};
+    use mcp_vault_auth::{AuthService, MasterKeyRing, OriginPolicy};
     use mcp_vault_state::StateStore;
     use mcp_vault_storage_fs::StorageOptions;
     use serde_json::{Value, json};
@@ -4421,8 +4491,7 @@ mod tests {
         let auth = AuthService::new(
             state.auth(),
             MasterKeyRing::from_bytes(1, &[4_u8; 32]).unwrap(),
-        )
-        .with_bootstrap_token(&SecretString::new("bootstrap-token-1234"));
+        );
         let key_version_ids = auth.key_version_ids();
         let maintenance = MaintenanceGate::new();
         let core_runtime = VaultCoreRuntime::new(maintenance.clone());
@@ -4432,7 +4501,8 @@ mod tests {
             AdminApiConfig {
                 origin_policy: OriginPolicy::new(["http://localhost:8081"]).unwrap(),
                 data_hosts: ["localhost".to_owned()].into_iter().collect(),
-                data_origins: vec!["http://localhost:8080".to_owned()],
+                data_origins: Vec::new(),
+                data_public_origin: None,
                 data_bind: "127.0.0.1:8080".parse().unwrap(),
                 admin_bind: "127.0.0.1:8081".parse().unwrap(),
                 data_dir: root.path().to_owned(),
@@ -4448,6 +4518,42 @@ mod tests {
             },
         );
         (stateful_router(admin), root, maintenance)
+    }
+
+    #[test]
+    fn advertised_data_origin_preserves_ports_and_public_https() {
+        let local_hosts = BTreeSet::from(["127.0.0.1".to_owned()]);
+        assert_eq!(
+            select_advertised_data_origin(None, &[], &local_hosts, "0.0.0.0:8080".parse().unwrap(),),
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            select_advertised_data_origin(
+                Some("https://vault.example.test"),
+                &["https://browser.example.test".to_owned()],
+                &local_hosts,
+                "0.0.0.0:8080".parse().unwrap(),
+            ),
+            "https://vault.example.test"
+        );
+        assert_eq!(
+            select_advertised_data_origin(
+                None,
+                &["https://vault.example.test:8443".to_owned()],
+                &local_hosts,
+                "0.0.0.0:8080".parse().unwrap(),
+            ),
+            "https://vault.example.test:8443"
+        );
+        assert_eq!(
+            select_advertised_data_origin(
+                None,
+                &[],
+                &BTreeSet::from(["::1".to_owned()]),
+                "[::]:8080".parse().unwrap(),
+            ),
+            "http://[::1]:8080"
+        );
     }
 
     fn request(
@@ -4494,7 +4600,6 @@ mod tests {
                 "POST",
                 "/setup",
                 json!({
-                    "bootstrap_token": "bootstrap-token-1234",
                     "username": "owner",
                     "password": "correct horse battery staple"
                 }),
@@ -4555,6 +4660,23 @@ mod tests {
     #[tokio::test]
     async fn setup_login_csrf_and_vault_update_round_trip() {
         let (router, _root, maintenance) = fixture().await;
+        let rejected = router
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/setup",
+                json!({
+                    "bootstrap_token": "obsolete",
+                    "username": "owner",
+                    "password": "correct horse battery staple"
+                }),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
         let (status, body) = json_response(
             router
                 .clone()
@@ -4562,7 +4684,6 @@ mod tests {
                     "POST",
                     "/setup",
                     json!({
-                        "bootstrap_token": "bootstrap-token-1234",
                         "username": "owner",
                         "password": "correct horse battery staple"
                     }),
@@ -4602,6 +4723,30 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
+
+        let (status, connection) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    "/mcp/connection-info",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            connection["data"]["webdav_endpoint"],
+            "http://localhost:8080/dav/v1/vaults/default/"
+        );
+        assert_eq!(
+            connection["data"]["mcp_endpoint"],
+            "http://localhost:8080/mcp/v1/vaults/default"
+        );
 
         let (status, webdav_body) = json_response(
             router
@@ -4803,7 +4948,6 @@ mod tests {
         }));
         let serialized = audit_body.to_string();
         assert!(!serialized.contains("correct horse battery staple"));
-        assert!(!serialized.contains("bootstrap-token-1234"));
     }
 
     #[tokio::test]
@@ -5001,11 +5145,21 @@ mod tests {
     #[tokio::test]
     async fn concurrent_setup_requests_create_one_admin_and_one_default_vault() {
         let (router, _root, _maintenance) = fixture().await;
+        let (status, body) = json_response(
+            router
+                .clone()
+                .oneshot(request("GET", "/setup", Value::Null, None, None))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["setup_available"], true);
+
         let first = router.clone().oneshot(request(
             "POST",
             "/setup",
             json!({
-                "bootstrap_token": "bootstrap-token-1234",
                 "username": "first-owner",
                 "password": "correct horse battery staple"
             }),
@@ -5016,7 +5170,6 @@ mod tests {
             "POST",
             "/setup",
             json!({
-                "bootstrap_token": "bootstrap-token-1234",
                 "username": "second-owner",
                 "password": "correct horse battery staple"
             }),
@@ -5047,6 +5200,16 @@ mod tests {
             &second.1
         };
         assert_eq!(winner["data"]["vault"]["slug"], "default");
+
+        let (status, body) = json_response(
+            router
+                .oneshot(request("GET", "/setup", Value::Null, None, None))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["setup_available"], false);
     }
 
     #[tokio::test]
@@ -5056,7 +5219,6 @@ mod tests {
             "POST",
             "/setup",
             json!({
-                "bootstrap_token": "bootstrap-token-1234",
                 "username": "owner",
                 "password": "correct horse battery staple"
             }),

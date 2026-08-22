@@ -52,7 +52,7 @@ export class AdminApiClient {
       throw new AdminApiError(
         response.status,
         error?.code ?? 'request_failed',
-        error?.message ?? 'The Admin request failed.',
+        error?.message ?? '管理端请求失败。',
         error?.fields,
       );
     }
@@ -70,10 +70,14 @@ export class AdminApiClient {
     return response;
   }
 
-  async setup(bootstrapToken: string, username: string, password: string) {
+  async setupStatus() {
+    return this.request<{ setup_available: boolean }>('/setup');
+  }
+
+  async setup(username: string, password: string) {
     return this.request('/setup', {
       method: 'POST',
-      body: { bootstrap_token: bootstrapToken, username, password },
+      body: { username, password },
     });
   }
 

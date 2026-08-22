@@ -296,13 +296,14 @@ Test application services with real temporary filesystem + SQLite:
 
 - setup;
 - session/CSRF/Origin;
-- automatic first-run key/token creation, restart reuse, managed-token cleanup,
-  and missing-established-key rejection;
+- automatic installation-key creation, restart reuse, password-only first-Admin
+  setup, concurrent single-winner behavior, and missing-established-key
+  rejection;
 - Admin requests remain authenticated without application-owned source-CIDR
   admission;
 - secret masking;
 - one-time WebDAV/PAT response display without plaintext in list endpoints;
-- successful mutation audit entries without password/bootstrap-token content;
+- successful mutation audit entries without password content;
 - LAN/public listener separation;
 - provider/config validation.
 
@@ -312,8 +313,7 @@ Use Docker Compose and actual HTTP.
 
 Scenarios:
 
-- generated bootstrap-token retrieval through first-Admin setup to Obsidian
-  credential creation;
+- password-only first-Admin setup through Obsidian credential creation;
 - DAV sync fixture;
 - MCP Agent-like discovery/search/read/edit;
 - remember/recall;

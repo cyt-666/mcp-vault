@@ -148,22 +148,10 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
     let maintenance = MaintenanceGate::new();
     let core_runtime = mcp_vault_core::VaultCoreRuntime::new(maintenance.clone());
     let auth_keys = load_master_key_ring(&config, &state).await?;
-    let bootstrap_token = load_bootstrap_token(&config, &state).await?;
-    let history_root = if config.data_dir.is_absolute() {
-        config.data_dir.join("history")
-    } else {
-        std::env::current_dir()
-            .map_err(|error| ServerError::BootstrapFilesystem(error.to_string()))?
-            .join(&config.data_dir)
-            .join("history")
-    };
-    let backup_root = if config.backup_root.is_absolute() {
-        config.backup_root.clone()
-    } else {
-        std::env::current_dir()
-            .map_err(|error| ServerError::BootstrapFilesystem(error.to_string()))?
-            .join(&config.backup_root)
-    };
+    remove_obsolete_managed_bootstrap_token(&config).await;
+    let data_root = resolve_runtime_path(&config.data_dir)?;
+    let history_root = data_root.join("history");
+    let backup_root = resolve_runtime_path(&config.backup_root)?;
     for vault in state.vaults().list().await? {
         let context = vault.context()?;
         let recovery_core = core_for_vault(&state, &history_root, &vault, &core_runtime)
@@ -186,15 +174,7 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
 
     run_initial_scans(&state, &history_root, &core_runtime).await?;
 
-    let mut auth_service = mcp_vault_auth::AuthService::new(state.auth(), auth_keys);
-    if let Some(bootstrap_token) = bootstrap_token.as_ref() {
-        auth_service = match bootstrap_token.managed_file.as_ref() {
-            Some(path) => {
-                auth_service.with_managed_bootstrap_token(&bootstrap_token.token, path.clone())
-            }
-            None => auth_service.with_bootstrap_token(&bootstrap_token.token),
-        };
-    }
+    let auth_service = mcp_vault_auth::AuthService::new(state.auth(), auth_keys);
     let provider_service =
         mcp_vault_providers::ProviderService::new(state.clone(), auth_service.clone());
     let memory_service = mcp_vault_memory::MemoryService::with_provider_service(
@@ -239,9 +219,10 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
                 .allowed_origins()
                 .map(str::to_owned)
                 .collect(),
+            data_public_origin: config.data_public_origin.clone(),
             data_bind: config.data_bind,
             admin_bind: config.admin_bind,
-            data_dir: config.data_dir.clone(),
+            data_dir: data_root,
             history_root: history_root.clone(),
             storage_options: mcp_vault_storage_fs::StorageOptions::default(),
             core_runtime: core_runtime.clone(),
@@ -713,70 +694,26 @@ async fn load_master_key_ring(
     Ok(keys)
 }
 
-#[cfg(test)]
-async fn validate_bootstrap_token(
-    config: &AppConfig,
-    state: &mcp_vault_state::StateStore,
-) -> Result<(), ServerError> {
-    let _bootstrap_token = load_bootstrap_token(config, state).await?;
-    Ok(())
+fn resolve_runtime_path(path: &Path) -> Result<PathBuf, ServerError> {
+    if path.is_absolute() {
+        return Ok(path.to_owned());
+    }
+    std::env::current_dir()
+        .map(|directory| directory.join(path))
+        .map_err(|error| ServerError::BootstrapFilesystem(error.to_string()))
 }
 
-struct LoadedBootstrapToken {
-    token: mcp_vault_auth::SecretString,
-    managed_file: Option<PathBuf>,
-}
-
-async fn load_bootstrap_token(
-    config: &AppConfig,
-    state: &mcp_vault_state::StateStore,
-) -> Result<Option<LoadedBootstrapToken>, ServerError> {
-    if state.auth().has_admin_users().await? {
-        if config.bootstrap_token.is_none() && config.bootstrap_token_file.is_none() {
-            let path = config.managed_bootstrap_token_file();
-            if let Err(error) = tokio::fs::remove_file(&path).await
-                && error.kind() != io::ErrorKind::NotFound
-            {
-                warn!(
-                    path = %path.display(),
-                    %error,
-                    "setup is complete but the stale managed bootstrap token file could not be removed"
-                );
-            }
-        }
-        return Ok(None);
+async fn remove_obsolete_managed_bootstrap_token(config: &AppConfig) {
+    let path = config.secrets_dir.join("bootstrap-token");
+    if let Err(error) = tokio::fs::remove_file(&path).await
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        warn!(
+            path = %path.display(),
+            %error,
+            "obsolete managed bootstrap-token file could not be removed"
+        );
     }
-    if let Some(token) = config.bootstrap_token.as_ref() {
-        return Ok(Some(LoadedBootstrapToken {
-            token: token.clone(),
-            managed_file: None,
-        }));
-    }
-    if let Some(path) = config.bootstrap_token_file.as_deref() {
-        return Ok(Some(LoadedBootstrapToken {
-            token: mcp_vault_auth::load_bootstrap_token(path).await?,
-            managed_file: None,
-        }));
-    }
-    let path = config.managed_bootstrap_token_file();
-    Ok(Some(LoadedBootstrapToken {
-        token: mcp_vault_auth::load_or_create_bootstrap_token(&path).await?,
-        managed_file: Some(path),
-    }))
-}
-
-/// Return the first-run token only for an explicit local CLI invocation. The
-/// normal server startup path never prints this value.
-pub async fn bootstrap_token_for_display(
-    config: &AppConfig,
-) -> Result<mcp_vault_auth::SecretString, ServerError> {
-    let state = mcp_vault_state::StateStore::connect_and_migrate(&config.database_url).await?;
-    load_bootstrap_token(config, &state)
-        .await?
-        .map(|material| material.token)
-        .ok_or(ServerError::Authentication(
-            mcp_vault_auth::AuthError::SetupUnavailable,
-        ))
 }
 
 #[cfg(test)]
@@ -785,7 +722,7 @@ async fn validate_bootstrap_material(
     state: &mcp_vault_state::StateStore,
 ) -> Result<(), ServerError> {
     let _keys = load_master_key_ring(config, state).await?;
-    validate_bootstrap_token(config, state).await
+    Ok(())
 }
 
 async fn wait_for_notification(notify: Arc<Notify>) {
@@ -805,7 +742,7 @@ pub fn routers_for_test(readiness: health::Readiness) -> (Router, Router) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use crate::workers;
     use axum::{body::Body, http::Request};
@@ -814,8 +751,9 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        bootstrap_token_for_display, config::AppConfig, load_bootstrap_token, load_master_key_ring,
-        reconcile_vault_once, routers_for_test, run_initial_scans, validate_bootstrap_material,
+        config::AppConfig, load_master_key_ring, reconcile_vault_once,
+        remove_obsolete_managed_bootstrap_token, resolve_runtime_path, routers_for_test,
+        run_initial_scans, validate_bootstrap_material,
     };
 
     #[tokio::test]
@@ -848,6 +786,38 @@ mod tests {
     #[test]
     fn default_configuration_validates_without_filesystem_access() {
         assert!(AppConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn relative_default_data_root_becomes_an_absolute_vault_context() {
+        let root = resolve_runtime_path(Path::new("./data")).unwrap();
+        assert!(root.is_absolute());
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("default").unwrap(),
+            root.join("vaults/default"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        assert!(context.content_root().is_absolute());
+    }
+
+    #[tokio::test]
+    async fn startup_removes_only_the_obsolete_managed_token_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let obsolete = directory.path().join("bootstrap-token");
+        let unrelated = directory.path().join("master-key");
+        tokio::fs::write(&obsolete, b"obsolete").await.unwrap();
+        tokio::fs::write(&unrelated, b"keep").await.unwrap();
+        let config = AppConfig {
+            secrets_dir: directory.path().to_owned(),
+            ..AppConfig::default()
+        };
+
+        remove_obsolete_managed_bootstrap_token(&config).await;
+
+        assert!(!tokio::fs::try_exists(obsolete).await.unwrap());
+        assert!(tokio::fs::try_exists(unrelated).await.unwrap());
     }
 
     #[tokio::test]
@@ -973,7 +943,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fresh_install_provisions_both_managed_files_but_not_missing_explicit_files() {
+    async fn fresh_install_provisions_only_the_managed_master_key() {
         let directory = tempfile::tempdir().unwrap();
         let state = mcp_vault_state::StateStore::connect_and_migrate("sqlite::memory:")
             .await
@@ -989,11 +959,12 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert!(
-            tokio::fs::try_exists(config.managed_bootstrap_token_file())
-                .await
-                .unwrap()
-        );
+        let mut entries = tokio::fs::read_dir(&config.secrets_dir).await.unwrap();
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            names.push(entry.file_name());
+        }
+        assert_eq!(names, [std::ffi::OsString::from("master-key")]);
 
         let explicit_directory = tempfile::tempdir().unwrap();
         let explicit_state = mcp_vault_state::StateStore::connect_and_migrate("sqlite::memory:")
@@ -1016,80 +987,6 @@ mod tests {
             !tokio::fs::try_exists(explicit.managed_master_key_file())
                 .await
                 .unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn managed_bootstrap_token_is_reused_then_removed_after_first_admin() {
-        let directory = tempfile::tempdir().unwrap();
-        let state = mcp_vault_state::StateStore::connect_and_migrate("sqlite::memory:")
-            .await
-            .unwrap();
-        let config = AppConfig {
-            data_dir: directory.path().to_owned(),
-            secrets_dir: directory.path().join("secrets"),
-            ..AppConfig::default()
-        };
-        let keys = load_master_key_ring(&config, &state).await.unwrap();
-        let first = load_bootstrap_token(&config, &state)
-            .await
-            .unwrap()
-            .unwrap();
-        let second = load_bootstrap_token(&config, &state)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(first.token, second.token);
-        let path = first.managed_file.clone().unwrap();
-
-        mcp_vault_auth::AuthService::new(state.auth(), keys)
-            .with_managed_bootstrap_token(&first.token, path.clone())
-            .setup_admin(
-                &first.token,
-                "owner",
-                &mcp_vault_auth::SecretString::new("correct horse battery staple"),
-            )
-            .await
-            .unwrap();
-        assert!(!tokio::fs::try_exists(&path).await.unwrap());
-        assert!(
-            load_bootstrap_token(&config, &state)
-                .await
-                .unwrap()
-                .is_none()
-        );
-
-        let explicit_missing = AppConfig {
-            bootstrap_token_file: Some(directory.path().join("removed-operator-token")),
-            ..config
-        };
-        assert!(
-            load_bootstrap_token(&explicit_missing, &state)
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn local_display_boundary_returns_the_generated_token() {
-        let directory = tempfile::tempdir().unwrap();
-        let database_path = directory.path().join("state.sqlite3");
-        let config = AppConfig::from_lookup(|key| match key {
-            "MCP_VAULT_DATA_DIR" => Some(directory.path().display().to_string()),
-            "MCP_VAULT_DATABASE_URL" => Some(format!("sqlite://{}", database_path.display())),
-            _ => None,
-        })
-        .unwrap();
-
-        let first = bootstrap_token_for_display(&config).await.unwrap();
-        let second = bootstrap_token_for_display(&config).await.unwrap();
-        assert_eq!(first, second);
-        assert_eq!(
-            tokio::fs::read_to_string(config.managed_bootstrap_token_file())
-                .await
-                .unwrap(),
-            first.expose_secret()
         );
     }
 

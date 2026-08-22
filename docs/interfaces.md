@@ -756,7 +756,10 @@ The React UI is served from the same listener.
 
 ### 10.2 Session behavior
 
-- `POST /api/v1/setup` — one-time bootstrap from allowed networks;
+- `GET /api/v1/setup` — unauthenticated, non-secret first-Admin setup
+  availability (`setup_available`);
+- `POST /api/v1/setup` — one-time first-Admin claim on the Admin listener with
+  `username`, `password`, and strict Origin validation;
 - `POST /api/v1/session` — login;
 - `DELETE /api/v1/session` — logout;
 - `GET /api/v1/session` — current admin;
@@ -771,6 +774,13 @@ returns the session-bound CSRF value once; the cookie is never returned in
 JSON.
 
 Use secure, HttpOnly, SameSite=Strict cookies. Do not store session bearer tokens in browser local storage.
+
+The setup-availability response is only a UI projection. The Auth service
+atomically enforces that exactly one first Admin can be committed, so a stale
+`true` response never authorizes a second account. No setup token is accepted
+or returned. Before the first commit, any client that can reach the Admin
+listener and satisfy its Origin policy can attempt the first claim; listener
+publication is therefore the setup trust boundary.
 
 ### 10.3 API groups
 
@@ -839,6 +849,12 @@ POST   /api/v1/restore/validate
 POST   /api/v1/restore
 POST   /api/v1/maintenance/recover
 ```
+
+Connection info uses the configured canonical data public origin. Without an
+external origin, direct-listener URLs include the actual data bind port; the
+default WebDAV endpoint is
+`http://127.0.0.1:8080/dav/v1/vaults/default/`. Host and Origin allow-lists are
+validation policy and do not silently remove or replace the advertised port.
 
 Deletion endpoints use explicit confirmation payloads and return operation/job IDs when asynchronous.
 

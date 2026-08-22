@@ -142,6 +142,23 @@ The service MUST provide a browser-based administration console for:
 - backup, restore, and retention configuration;
 - system version, migrations, and diagnostics.
 
+The first-release console MUST use Simplified Chinese for operator-facing
+copy, group navigation by common tasks, show page-specific summaries instead
+of raw JSON by default, and progressively disclose advanced OAuth,
+restore/recovery, and diagnostic controls.
+
+Password-creation forms MUST state the effective minimum and rejected-default
+policy beside the input. Validation errors MUST repeat actionable requirements
+and MUST NOT require operators to infer hidden uppercase, number, or symbol
+rules that the service does not enforce.
+
+Before authentication, the console MUST show first-Admin creation only while
+the service reports that no Admin exists. Once initialization is complete it
+MUST show login without a registration control. This UI state does not replace
+the server-side atomic one-time setup guard. First-run setup accepts only the
+desired Admin username and password; it MUST NOT require an operator-generated
+or manually copied bootstrap token.
+
 The Admin UI and Admin API MUST run on a separate listener that is not publicly exposed by default. Network restriction does not replace authentication.
 
 ### 3.8 Authentication and authorization
@@ -219,8 +236,9 @@ Targets are engineering objectives and must be measured with Chinese and English
 
 ### 4.5 Operability
 
-- One Docker Compose command starts a fresh service and MCP Vault generates the
-  installation key and one-time Admin bootstrap token automatically.
+- One Docker Compose command starts a fresh service, MCP Vault generates its
+  installation key automatically, and the browser completes initialization
+  with only the desired Admin username and password.
 - Health and readiness endpoints reflect database, storage, migrations, and worker state.
 - Migrations are forward-only, tested, and backed up before upgrade.
 - Logs are structured and redact secrets.

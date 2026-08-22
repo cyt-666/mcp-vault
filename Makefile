@@ -2,6 +2,7 @@
 
 CARGO ?= cargo
 PNPM ?= pnpm
+PNPM_ENV ?= CI=true PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false
 
 fmt:
 	$(CARGO) fmt --all
@@ -16,16 +17,16 @@ test:
 	$(CARGO) test --workspace --all-features
 
 frontend-install:
-	CI=true $(PNPM) --dir frontend/admin install --frozen-lockfile
+	$(PNPM_ENV) $(PNPM) --dir frontend/admin install --frozen-lockfile
 
 frontend-lint: frontend-install
-	CI=true $(PNPM) --dir frontend/admin lint
+	$(PNPM_ENV) $(PNPM) --dir frontend/admin lint
 
 frontend-test: frontend-install
-	CI=true $(PNPM) --dir frontend/admin test
+	$(PNPM_ENV) $(PNPM) --dir frontend/admin test
 
 frontend-build: frontend-install
-	CI=true $(PNPM) --dir frontend/admin build
+	$(PNPM_ENV) $(PNPM) --dir frontend/admin build
 
 docs-check:
 	bash scripts/check-docs.sh
@@ -48,7 +49,7 @@ image-scan:
 	trivy image --severity HIGH,CRITICAL --exit-code 1 mcp-vault:dev
 
 run: frontend-build
-	$(CARGO) run -p mcp-vault-server
+	$(CARGO) run -p mcp-vault-server --bin mcp-vault
 
 conformance:
 	bash scripts/conformance/mcp.sh

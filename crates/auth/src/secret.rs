@@ -25,7 +25,6 @@ use crate::error::AuthError;
 const MASTER_KEY_BYTES: usize = 32;
 const SECRET_NONCE_BYTES: usize = 24;
 const SECRET_TEMP_NAME_BYTES: usize = 12;
-const BOOTSTRAP_TOKEN_LABEL: &str = "mcpv_bootstrap_";
 const INSTALLATION_CHECK_PURPOSE: &str = "mcp-vault-installation-key-check-v1";
 const INSTALLATION_CHECK_VALUE: &[u8] = b"installation-key-verifier";
 
@@ -64,25 +63,6 @@ impl fmt::Debug for SecretString {
     }
 }
 
-/// Load a bootstrap token file without retaining a filesystem path or
-/// logging its contents. One conventional trailing newline is ignored.
-pub async fn load_bootstrap_token(path: &Path) -> Result<SecretString, AuthError> {
-    let mut bytes = tokio::fs::read(path)
-        .await
-        .map_err(|_| AuthError::BootstrapTokenUnavailable)?;
-    if bytes.last() == Some(&b'\n') {
-        bytes.pop();
-        if bytes.last() == Some(&b'\r') {
-            bytes.pop();
-        }
-    }
-    let value = String::from_utf8(bytes).map_err(|_| AuthError::BootstrapTokenUnavailable)?;
-    if value.len() < 16 || value.chars().any(char::is_control) {
-        return Err(AuthError::BootstrapTokenUnavailable);
-    }
-    Ok(SecretString::new(value))
-}
-
 /// Load an existing installation key or atomically create one at an
 /// application-managed path. Callers must decide whether creating a new key is
 /// safe for the current operational-state identity before invoking this
@@ -99,22 +79,6 @@ pub async fn load_or_create_master_key(path: &Path) -> Result<MasterKeyRing, Aut
             .map_err(|_| AuthError::MasterKeyUnavailable)?;
     }
     MasterKeyRing::load_file(path).await
-}
-
-/// Load an existing first-run token or atomically create a high-entropy token
-/// at an application-managed path. The token is returned only to the auth
-/// composition boundary and an explicit local display command.
-pub async fn load_or_create_bootstrap_token(path: &Path) -> Result<SecretString, AuthError> {
-    if !tokio::fs::try_exists(path)
-        .await
-        .map_err(|_| AuthError::BootstrapTokenUnavailable)?
-    {
-        let token = generate_bearer_token(BOOTSTRAP_TOKEN_LABEL);
-        install_secret_file_if_absent(path, token.expose_secret().as_bytes())
-            .await
-            .map_err(|_| AuthError::BootstrapTokenUnavailable)?;
-    }
-    load_bootstrap_token(path).await
 }
 
 /// A high-entropy token with the same redaction behavior as a password.
@@ -530,8 +494,8 @@ async fn sync_directory(_path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BearerToken, MasterKeyRing, SecretString, generate_bearer_token,
-        load_or_create_bootstrap_token, load_or_create_master_key, mask_hint,
+        BearerToken, MasterKeyRing, SecretString, generate_bearer_token, load_or_create_master_key,
+        mask_hint,
     };
 
     #[test]
@@ -587,12 +551,6 @@ mod tests {
             second.installation_key_check()
         );
         assert!(first.is_persistent());
-
-        let token_path = directory.path().join("nested/bootstrap-token");
-        let first = load_or_create_bootstrap_token(&token_path).await.unwrap();
-        let second = load_or_create_bootstrap_token(&token_path).await.unwrap();
-        assert_eq!(first, second);
-        assert!(first.expose_secret().starts_with("mcpv_bootstrap_"));
     }
 
     #[test]

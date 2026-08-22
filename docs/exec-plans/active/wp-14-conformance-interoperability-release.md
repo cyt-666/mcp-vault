@@ -135,8 +135,8 @@ throttling:
 
 ### Self-contained first-run provisioning
 
-The deployment follow-up on 2026-08-22 removes manual secret generation and
-reverse-proxy coupling from the application bootstrap path:
+The final deployment follow-up on 2026-08-22 removes manual secret generation
+and reverse-proxy coupling from the application bootstrap path:
 
 1. When no explicit master-key file is configured, MCP Vault owns
    `<data-dir>/secrets/master-key`. It atomically creates a random persistent
@@ -144,18 +144,14 @@ reverse-proxy coupling from the application bootstrap path:
    that file on restart. A persisted verifier or key-dependent record with a
    missing/different key still fails closed; startup never replaces a lost
    installation key.
-2. When neither bootstrap-token environment input nor an explicit token file
-   is configured, MCP Vault owns `<data-dir>/secrets/bootstrap-token`. It
-   atomically creates a high-entropy token only while no Admin exists, exposes
-   it through an explicit local CLI command, and removes the managed file after
-   the first Admin is committed. The token is never emitted to ordinary logs or
-   an unauthenticated HTTP response.
-3. Explicit `MCP_VAULT_MASTER_KEY_FILE`,
-   `MCP_VAULT_BOOTSTRAP_TOKEN_FILE`, and `MCP_VAULT_BOOTSTRAP_TOKEN` inputs
-   remain operator-managed compatibility overrides. MCP Vault does not create
-   or delete explicit files.
+2. While no Admin exists, the browser presents password-only first-Admin setup
+   and the Auth repository atomically accepts one claim. No setup token or
+   default account exists.
+3. `MCP_VAULT_MASTER_KEY_FILE` remains an operator-managed compatibility
+   override. Obsolete bootstrap-token settings are rejected with migration
+   guidance rather than ignored.
 4. MCP Vault does not inspect, reject, or mutate filesystem permission bits on
-   key/token files. Ownership, mode, ACL, volume protection, TLS, reverse
+   key files. Ownership, mode, ACL, volume protection, TLS, reverse
    proxying, firewall rules, and Admin source-network publication belong to the
    deployment environment.
 5. The application keeps the separate control listener plus Admin username/
@@ -163,6 +159,63 @@ reverse-proxy coupling from the application bootstrap path:
    removes application CIDR filtering; the safe default listener remains
    loopback and operators explicitly choose any LAN/VPN/public bind or proxy
    policy.
+
+### Admin usability and Chinese localization
+
+The operator review on 2026-08-22 found that the first Admin shell exposes too
+many peer-level destinations, expands advanced OAuth/recovery controls by
+default, and uses English plus raw JSON as its primary presentation. The
+release UI is revised without changing Admin API/Vault boundaries:
+
+1. All operator-facing labels, help text, status messages, errors, and empty
+   states use Simplified Chinese while protocol names, scopes, IDs, and URLs
+   remain exact technical values.
+2. Navigation is grouped into overview, connection, intelligence, and
+   operations sections. Dashboard and each page show a concise status summary
+   before management controls.
+3. Common actions remain immediately discoverable. Advanced OAuth issuer/
+   grant management, restore/recovery controls, and raw JSON diagnostics are
+   collapsed until explicitly opened.
+4. WebDAV permissions and common MCP PAT scopes use labeled choices instead of
+   comma-delimited free text. Existing server validation and one-time secret
+   semantics remain authoritative.
+5. Page-specific lists replace the always-visible JSON dump for credentials,
+   providers, memories, jobs, audit, backups, index, and system state. Raw
+   sanitized responses remain available in an explicit diagnostic disclosure.
+6. Responsive and keyboard-visible behavior is preserved and visually checked
+   at desktop and narrow viewport sizes.
+7. The unauthenticated Admin shell reads a non-secret setup-availability flag.
+   A fresh installation shows only first-Admin creation; after the atomic first
+   Admin commit it shows only login. The status is advisory UI state: the Auth
+   service's create-only transaction remains the authoritative race-safe guard.
+8. Every password-creation form explains the actual default policy beside the
+   input, including minimum length, absence of composition requirements, and
+   rejected placeholder examples. A policy error repeats actionable guidance
+   instead of asking the operator to guess.
+
+### Password-only first-Admin initialization
+
+The operator decision on 2026-08-22 supersedes the bootstrap-token portions of
+the earlier self-contained provisioning design. MCP Vault now uses a
+first-claim setup model:
+
+1. While `admin_users` is empty, `GET /api/v1/setup` reports setup available and
+   `POST /api/v1/setup` accepts only the desired username and password.
+2. The Auth service performs password validation/hashing and the existing
+   atomic `INSERT ... WHERE NOT EXISTS` remains the sole first-Admin commit
+   boundary. Concurrent claims still produce exactly one winner.
+3. No bootstrap token is generated, persisted, accepted by HTTP, exposed by a
+   CLI command, or requested by the frontend. The installation master key
+   remains automatically generated and independently required for encrypted
+   operational secrets and durable keyed credentials.
+4. Setup authorization is therefore reachability plus the empty-Admin state.
+   The Admin listener remains loopback by default. An operator who publishes an
+   uninitialized listener to LAN/VPN delegates first-claim trust to that
+   network/deployment boundary; ordinary authenticated Admin sessions remain
+   mandatory after setup.
+5. Removed bootstrap-token environment variables are rejected with migration
+   guidance rather than silently ignored, so an old deployment cannot retain a
+   false belief that the token still protects setup.
 
 ## Work breakdown
 
@@ -197,13 +250,48 @@ reverse-proxy coupling from the application bootstrap path:
     operations docs and checksums; run all Rust/frontend/public-protocol/
     migration/recovery checks. Do not rebuild deployment images until these
     gates pass.
-14. **Self-contained first-run provisioning.** Add managed secret paths and
-    atomic create/reuse behavior in `auth`/`server`, a local bootstrap-token
-    display command, managed-token cleanup after first-Admin commit, and remove
-    application Admin CIDR enforcement. Update Compose/operator docs without
-    requiring a particular reverse proxy. Validate fresh install, restart,
-    concurrent creation, setup cleanup, explicit-file preservation, lost-key
-    fail-closed behavior, and authenticated Admin route protection.
+14. **Initial self-contained first-run provisioning.** Add managed secret paths
+    and atomic create/reuse behavior in `auth`/`server`, and remove application
+    Admin CIDR enforcement. Item 17 supersedes this item's temporary setup-token
+    mechanism. Validate fresh install, restart, concurrent creation,
+    explicit-master-key preservation, lost-key fail-closed behavior, and
+    authenticated Admin route protection.
+15. **Chinese Admin usability redesign.** Refactor `frontend/admin/src/App.tsx`
+    and `app.css` into grouped navigation, Chinese authentication/dashboard/
+    management copy, page-specific summaries and lists, progressive disclosure
+    for advanced/destructive controls, and choice-based permission/scope
+    inputs. Extend frontend tests and update Admin documentation. Validate
+    lint/test/build plus browser visual/interaction checks without changing
+    backend routes or secret exposure.
+16. **First-Admin setup visibility.** Expose a read-only setup-availability
+    projection from the Auth service through the public Admin API, drive the
+    unauthenticated shell from that state, and fail closed to login if status
+    cannot be confirmed. Validate the fresh-to-initialized transition, a
+    second setup rejection, concurrent setup safety, and frontend conditional
+    rendering.
+17. **Password-only first-Admin claim.** Remove bootstrap-token configuration,
+    storage, CLI, Auth digest checks, Admin DTO fields, and frontend guidance;
+    keep setup availability and atomic first-user insertion. Update ADR-0004,
+    security/interface/deployment documentation and compatibility guidance.
+    Validate fresh setup with username/password only, concurrent single-winner
+    behavior, obsolete-variable rejection, no token artifacts, and restart
+    login-only behavior.
+18. **Password-policy guidance.** Add persistent, accessible Chinese guidance
+    to first-Admin and WebDAV password inputs, make the translated policy error
+    concrete, and document the exact default UTF-8-byte/placeholder behavior.
+    Validate both forms and error translation through frontend assertions.
+19. **Relative default-data setup regression.** Resolve the configured data
+    directory against the process working directory before constructing the
+    default Vault context, and remove the obsolete service-owned bootstrap-token
+    path left by prerelease builds. Validate that the default `./data` path
+    produces an absolute Vault root without clearing partially initialized
+    operational state.
+20. **Advertised data endpoint correctness.** Separate the canonical endpoint
+    origin shown in Admin connection cards from Host/Origin allow-list policy.
+    Add an optional typed public-origin setting, preserve configured reverse
+    proxy HTTPS origins, and otherwise derive a direct-listener URL that
+    includes the actual data bind port. Validate local `:8080`, explicit HTTPS,
+    IPv6, MCP, and WebDAV URL shapes.
 
 ## Progress
 
@@ -221,7 +309,14 @@ reverse-proxy coupling from the application bootstrap path:
 - [x] 2026-08-21 — Fix real Sync Engine first-upload concurrency failures with a shared short-lived SQLite write gate and immediate metadata transactions; 32 concurrent in-process PUTs and 50 concurrent public HTTP PUTs now commit and read back without incomplete journals or client-side throttling.
 - [x] 2026-08-22 — Resolve the deployment-observed durable-job backlog: `outbox.event` has a terminal compatibility handler; full-Vault index jobs are Vault-scoped generation-coalesced, renewable, cancellable, and periodic reconciliation admits one durable rebuild instead of racing a worker rebuild.
 - [x] 2026-08-22 — Remediate all actionable review findings across filesystem/Core concurrency, maintenance/restore, installation keys/Auth, Jobs/indexing, Provider limits, and OAuth/Admin wiring; negative, concurrent, restart, Vault-isolation, public HTTP, and frontend tests pass without replacing the deployment image.
-- [x] 2026-08-22 — Implement self-contained first-run master-key/bootstrap-token provisioning, remove permission-bit and Admin CIDR enforcement, retain application Admin authentication, and update deployment-independent tests/docs.
+- [x] 2026-08-22 — Initially implement self-contained first-run master-key/bootstrap-token provisioning; the later password-only decision supersedes the token portion while retaining automatic master-key provisioning.
+- [x] 2026-08-22 — Simplify and fully localize the Admin console in Chinese, retain all control-plane capabilities, and complete responsive visual QA.
+- [x] 2026-08-22 — Show first-Admin creation only while setup is available, while retaining the backend atomic one-time guard.
+- [x] 2026-08-22 — Make the production `mcp-vault` binary the Cargo default and the explicit `make run` target after the fixture binary made local startup ambiguous.
+- [x] 2026-08-22 — Replace manual bootstrap-token handling with password-only atomic first-Admin initialization and update the security/deployment contract.
+- [x] 2026-08-22 — Explain the actual password policy inline and in validation errors instead of requiring trial and error.
+- [x] 2026-08-22 — Fix first-Admin setup with the default relative `./data` directory and clean the obsolete managed token artifact.
+- [x] 2026-08-22 — Correct Admin-generated WebDAV/MCP addresses so local direct-listener URLs include `:8080` and proxy URLs use their configured public origin.
 - [ ] Complete release-environment Litmus, named Obsidian plugin/client matrix, full-scale performance, clean-host restore, and signed-artifact verification; then review whether the full frozen MCP requirements report is applicable to the advertised capability set.
 
 ## Decisions
@@ -257,6 +352,11 @@ reverse-proxy coupling from the application bootstrap path:
 - File permission/ACL policy and Admin source-network admission are deployment
   responsibilities. MCP Vault keeps application-layer Admin authentication and
   a loopback default bind but no longer interprets source CIDRs.
+- Simplified Chinese is the first-release Admin UI language. Information
+  architecture uses grouped navigation and progressive disclosure; advanced
+  controls and raw API payloads remain available without dominating the
+  ordinary operator path. This is a presentation-layer change and does not
+  merge protocol/authentication domains or move business logic into React.
 
 ## Surprises and discoveries
 
@@ -316,10 +416,14 @@ reverse-proxy coupling from the application bootstrap path:
   a false belief that a security policy remains active. Configuration now
   rejects the obsolete variable with migration guidance, while listener bind,
   firewall/VPN, and optional proxy policy stay deployment-owned.
-- Existing explicit master-key/bootstrap-token environment and file inputs
-  must remain operator-owned for upgrades. Only absent overrides select the
-  application-managed paths, and a missing explicit file is never created or
-  replaced by the automatic provisioning path.
+- Existing explicit master-key inputs remain operator-owned for upgrades. Only
+  an absent override selects the application-managed path, and a missing
+  explicit key file is never created or replaced. Bootstrap-token variables
+  are rejected because setup no longer consumes them.
+- The existing `rust-embed` macro did not cause an incremental Cargo rebuild
+  after `frontend/admin/dist` changed, so a locally rebuilt binary could serve
+  stale UI assets even though a clean CI image was correct. A small Server
+  build script now declares the dist directory as a Cargo rerun input.
 
 ## Validation
 
@@ -363,25 +467,128 @@ Validation recorded on 2026-08-22 for review remediation:
 - Per operator instruction, no Docker image/archive was rebuilt. External
   Litmus/client GUI, signing, and clean-host release gates remain the same
   explicit WP-14 blockers recorded below.
+- `GET /api/v1/setup` exposes only a non-secret `setup_available` projection
+  on the Admin listener. The UI uses it to choose exactly one unauthenticated
+  flow and fails closed to login on status errors; the Auth repository's
+  atomic first-user insert remains the authorization and race boundary.
+- Password-only setup deliberately uses Admin-listener reachability as its
+  first-claim trust boundary. Source-keyed setup limiting plus the bounded
+  Argon2 pool constrain abuse, exact Origin remains mandatory, and obsolete
+  token environment variables/HTTP fields are rejected rather than ignored.
+- Connection cards use one canonical advertised data origin; Host and Origin
+  allow-lists remain validation policy. Without an external origin, direct
+  URLs are derived from the configured host plus actual listener port rather
+  than assuming HTTP 80.
 
 Validation recorded on 2026-08-22 for self-contained first-run provisioning:
 
 - `cargo fmt --all --check`, workspace all-target/all-feature Clippy with
   `-D warnings`, `cargo test --workspace --all-features`, and
   `cargo doc --workspace --no-deps` pass. Auth/Server tests cover concurrent
-  atomic creation, restart reuse, broad Unix permission acceptance, managed
-  first-Admin token cleanup, explicit-file preservation, missing established
-  key failure without regeneration, and the local display boundary.
+  atomic creation, restart reuse, broad Unix permission acceptance,
+  explicit-master-key preservation, missing established key failure without
+  regeneration, and absence of a setup-token artifact.
 - Admin API tests prove missing socket-peer metadata is no longer an
   application network denial while strict Origin, password/session, and CSRF
   protections remain. Frontend lint/test/build pass with corrected setup copy.
 - Base and optional Nginx Compose configurations pass `docker compose config
-  --quiet`; neither requires pre-created MCP Vault key/token files. The Nginx
+  --quiet`; neither requires pre-created MCP Vault key files. The Nginx
   example remains optional and keeps its own operator-selected source policy.
 - `scripts/check-docs.sh`, documentation checksums, and `git diff --check`
   pass. The real HTTP `make e2e` smoke passes outside the restricted listener
   sandbox, including Admin/data-plane separation and 50 concurrent WebDAV
   writes. No Docker image/archive was built.
+
+Validation recorded on 2026-08-22 for Chinese Admin usability:
+
+- Frontend lint, four Vitest assertions, TypeScript, and Vite production build
+  pass. Tests cover Chinese login/password-only setup copy,
+  Chinese job summaries, and collapsed raw diagnostics.
+- Workspace formatting, all-target/all-feature Clippy with `-D warnings`, and
+  `cargo test --workspace --all-features` pass after updating the embedded
+  index-title assertion. The Server build script recompiles embedded assets
+  when the frontend dist directory changes.
+- Real browser checks against both Vite and an isolated, authenticated MCP
+  Vault process cover login, first-run instructions, grouped navigation,
+  dashboard, WebDAV credentials, endpoint copy fields, PAT presets, collapsed
+  OAuth/raw diagnostics, and a 390-by-844 responsive viewport. The narrow view
+  starts at scroll position zero and retains a visible logout action.
+- Documentation checksums, `scripts/check-docs.sh`, and `git diff --check`
+  pass. No backend route/schema/auth behavior or Docker image was changed.
+
+Validation recorded on 2026-08-22 for conditional first-Admin setup:
+
+- Auth and Admin API tests prove setup availability starts true, exactly one of
+  concurrent first-Admin requests succeeds, and availability then becomes
+  false. The atomic insertion check remains authoritative.
+- Frontend tests cover initialized-login-only and fresh-setup-only rendering;
+  the API client reads status with `GET` and no CSRF mutation token. Frontend
+  lint, test, TypeScript, and production build pass without warnings.
+- Workspace formatting, all-target/all-feature Clippy with `-D warnings`, and
+  `cargo test --workspace --all-features` pass. Documentation and checksum
+  validation are rerun after recording this behavior. No Docker image/archive
+  was built.
+
+Validation recorded on 2026-08-22 for password-only first-Admin setup:
+
+- Auth/Admin tests prove a username/password-only request creates the first
+  Admin, concurrent claims retain one winner, setup password work is
+  source-rate-limited, and an obsolete `bootstrap_token` HTTP field is
+  rejected. Server tests prove a fresh secrets directory contains only the
+  managed `master-key`; both obsolete token environment variables are rejected.
+- Frontend lint, six Vitest assertions, TypeScript, and production build pass.
+  The setup form and API client contain no token input or payload field.
+- A real isolated process on loopback ports returned setup available, accepted
+  only the test username/password, then returned setup unavailable; a second
+  claim returned HTTP 409. The temporary secrets directory contained only
+  `master-key`, and the fixture process/data were removed afterward.
+- Workspace formatting, all-target/all-feature Clippy with `-D warnings`, and
+  `cargo test --workspace --all-features` pass. Documentation checksums and
+  consistency checks are recorded after this plan update. No Docker image was
+  built.
+
+Validation recorded on 2026-08-22 for password-policy guidance:
+
+- The first-Admin and WebDAV forms now show the default policy beside the
+  password input with `aria-describedby`: pure English needs at least 12
+  characters, Chinese recommends a longer phrase, composition classes are not
+  mandatory, and rejected placeholders are named.
+- The `password_policy` translation repeats those requirements instead of the
+  former generic “longer and uncommon” message. Frontend lint, eight Vitest
+  assertions, TypeScript, and production build pass.
+- Admin/security/product documentation states the exact 12-UTF-8-byte default,
+  placeholder list, and visible-guidance requirement. Documentation checksum
+  and consistency checks are rerun after this update.
+
+Validation recorded on 2026-08-22 for relative default-data setup:
+
+- The Server composition resolves `AppConfig.data_dir` against the process
+  working directory before passing it to Admin. Unit coverage proves
+  `./data/vaults/default` becomes an absolute, valid `VaultContext` root.
+- A real process launched with
+  `MCP_VAULT_DATA_DIR=./data/codex-relative-setup-smoke` reported setup
+  available and completed password-only initialization. Its response exposed
+  the expected absolute project-local Vault root; the old
+  `vault_setup_failed` path did not recur.
+- Startup removes only the former service-owned
+  `<secrets-dir>/bootstrap-token` path and preserves `master-key`; a focused
+  test covers both outcomes. The isolated relative-path process and its exact
+  test directory were stopped and removed after validation.
+
+Validation recorded on 2026-08-22 for advertised data endpoints:
+
+- Admin connection info now prefers the typed
+  `MCP_VAULT_DATA_PUBLIC_ORIGIN`, falls back to a configured data Origin for
+  compatibility, and otherwise combines the first allowed direct host with the
+  actual `MCP_VAULT_DATA_BIND` port.
+- Admin API tests assert default direct WebDAV/MCP URLs include `:8080`, an
+  explicit HTTPS public origin wins over policy origins, `:8443` is retained,
+  and a direct IPv6 URL is bracketed with its port. The authenticated
+  connection-info round trip verifies both complete Vault-scoped paths.
+- The optional Nginx Compose example derives the public-origin setting from
+  its existing public hostname, so port 443 remains implicit under HTTPS.
+  Targeted Admin/Server tests, formatting, Clippy, Compose parsing, docs, and
+  checksums are rerun after this update.
 
 Validation recorded on 2026-08-21:
 
@@ -455,7 +662,18 @@ full-scale/clean-host operational evidence, SBOM/scan/signature tooling, and
 final capability-set review have not been performed. Move it to
 `docs/exec-plans/completed/` only after those gates have concrete evidence.
 
-The 2026-08-22 deployment follow-up additionally shipped application-owned
-first-run key/token provisioning, local token retrieval, managed-token cleanup,
-deployment-owned Admin source admission, and permission-bit-neutral secret-file
-loading without weakening Admin authentication or installation-key identity.
+The 2026-08-22 deployment follow-up ships application-owned installation-key
+provisioning, password-only atomic first-Admin claim, deployment-owned Admin
+source admission, and permission-bit-neutral key loading without weakening
+post-setup Admin authentication or installation-key identity.
+
+The Admin follow-up ships a Simplified Chinese, task-grouped console with
+page-specific summaries, guided WebDAV/PAT choices, one-time-secret copy UX,
+and progressive disclosure for OAuth, restore, and raw diagnostics. All prior
+application services remain behind the same authenticated Admin API boundary.
+The unauthenticated shell additionally chooses first-Admin creation or login
+from server state, never presents registration after initialization, and still
+relies on the atomic Auth transaction rather than browser state for safety. It
+does not request or transmit a bootstrap token.
+Password-creation forms also expose the real default policy before submission
+and return the same concrete guidance on rejection.

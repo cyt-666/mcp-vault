@@ -22,4 +22,43 @@ describe('Admin API client', () => {
     expect(mutation.credentials).toBe('include');
     expect(JSON.stringify(mutation.body)).toContain('new');
   });
+
+  it('reads first-Admin setup availability without a mutation token', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ data: { setup_available: false }, request_id: 'setup-status' }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new AdminApiClient();
+
+    await expect(client.setupStatus()).resolves.toEqual({ setup_available: false });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/setup',
+      expect.objectContaining({ method: 'GET', credentials: 'include' }),
+    );
+    const options = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(options.headers).has('X-CSRF-Token')).toBe(false);
+  });
+
+  it('submits first-Admin setup with only username and password', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ data: { created: true }, request_id: 'setup' }), {
+        status: 201,
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new AdminApiClient();
+
+    await client.setup('owner', 'correct horse battery staple');
+
+    const options = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(options.body))).toEqual({
+      username: 'owner',
+      password: 'correct horse battery staple',
+    });
+    expect(String(options.body)).not.toContain('bootstrap');
+  });
 });

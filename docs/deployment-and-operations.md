@@ -55,6 +55,8 @@ services:
       MCP_VAULT_DATA_HOSTS: vault.example.com
       # Set these to the exact browser origins used by the deployment.
       MCP_VAULT_DATA_ORIGINS: https://vault.example.com
+      # Canonical external base URL shown in WebDAV/MCP connection cards.
+      MCP_VAULT_DATA_PUBLIC_ORIGIN: https://vault.example.com
       MCP_VAULT_ADMIN_ORIGINS: https://admin.example.com
       MCP_VAULT_BACKUP_DIR: /data/backups
       MCP_VAULT_METRICS_ENABLED: "false"
@@ -171,7 +173,6 @@ MCP Vault creates its installation files by default under:
 
 ```text
 /data/secrets/master-key
-/data/secrets/bootstrap-token   # exists only before first Admin setup
 ```
 
 `/data/secrets` is persistent service state but is deliberately excluded from
@@ -204,28 +205,22 @@ encrypted secrets/PATs exist is a hard startup failure and is never replaced.
 2. Open SQLite and apply forward migrations.
 3. Load or atomically create the managed installation key, then validate its
    persisted identity.
-4. While no Admin exists, load or atomically create the managed bootstrap
-   token.
-5. Recover incomplete operation-journal entries.
-6. Run the safe initial scan for each active Vault and persist its checkpoint.
-7. Build routers and bind both listeners.
-8. Start the outbox/job supervisor and the periodic reconciliation loop.
-9. Mark liveness healthy.
-10. Mark readiness healthy only when operational database, Vault storage,
+4. Recover incomplete operation-journal entries.
+5. Run the safe initial scan for each active Vault and persist its checkpoint.
+6. Build routers and bind both listeners.
+7. Start the outbox/job supervisor and the periodic reconciliation loop.
+8. Mark liveness healthy.
+9. Mark readiness healthy only when operational database, Vault storage,
     initial scan, migrations, and critical workers are ready.
 
 Provider health is not required for core readiness because providers are optional/degradable.
 
-For a fresh installation, retrieve the generated setup token with an explicit
-local command; normal startup logs never contain it:
-
-```bash
-docker compose exec mcp-vault mcp-vault bootstrap-token
-```
-
-After the first Admin account is committed, this command reports that setup is
-unavailable and the managed token file is removed. Explicit operator-provided
-token files are never deleted by MCP Vault.
+For a fresh installation, open the Admin listener and enter the desired Admin
+username and password. No secret generation, container command, or token copy
+step is required. Until that first account commits, any client admitted by the
+Admin listener's deployment boundary can attempt to claim the installation;
+keep the default loopback publication or an equivalently restricted LAN/VPN
+policy until setup is complete.
 
 ## 7. Shutdown sequence
 
@@ -491,8 +486,13 @@ Admin login and this recovery call while data-plane requests remain blocked.
 For the self-provisioning transition, remove the obsolete
 `MCP_VAULT_ADMIN_ALLOWED_CIDRS` variable after moving its policy to the
 deployment layer; MCP Vault rejects that obsolete setting rather than silently
-ignoring it. Existing explicit master-key/bootstrap-token mounts remain
-supported. If moving an established master key to
+ignoring it. Also remove `MCP_VAULT_BOOTSTRAP_TOKEN` and
+`MCP_VAULT_BOOTSTRAP_TOKEN_FILE`; password-only first-Admin setup no longer
+accepts either setting and startup rejects them with migration guidance.
+Startup removes the former service-owned
+`<MCP_VAULT_SECRETS_DIR>/bootstrap-token` path; explicitly managed token files
+outside that path are left untouched and are no longer read.
+Existing explicit master-key mounts remain supported. If moving an established master key to
 `MCP_VAULT_SECRETS_DIR`, copy the exact existing bytes while the service is
 stopped—never ask the service to generate a replacement for a database that
 already has a key verifier or key-dependent records.

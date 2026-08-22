@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use mcp_vault_auth::{OriginPolicy, SecretString};
+use mcp_vault_auth::OriginPolicy;
 use mcp_vault_backup::BackupLimits;
 use thiserror::Error;
 
@@ -41,22 +41,20 @@ pub struct AppConfig {
     pub admin_bind: SocketAddr,
     /// Root directory reserved for application state and future Vault roots.
     pub data_dir: PathBuf,
-    /// Directory for application-managed first-run secret files. Ordinary
+    /// Directory for the application-managed installation key. Ordinary
     /// service backups exclude this directory.
     pub secrets_dir: PathBuf,
     /// Bootstrap SQLite URL. Long-term settings remain in SQLite.
     pub database_url: String,
     /// Optional operator-managed installation master-key file override.
     pub master_key_file: Option<PathBuf>,
-    /// Optional operator-managed first-run bootstrap token file override.
-    pub bootstrap_token_file: Option<PathBuf>,
-    /// Optional first-run bootstrap token supplied directly by the process
-    /// environment. Its `Debug` representation is redacted.
-    pub bootstrap_token: Option<SecretString>,
     /// Exact browser origins accepted by the Admin listener.
     pub admin_origins: OriginPolicy,
     /// Exact browser origins accepted by data-plane protocol adapters.
     pub data_origins: OriginPolicy,
+    /// Canonical external data-plane origin advertised in Admin connection
+    /// cards. When absent, the server derives a direct-listener origin.
+    pub data_public_origin: Option<String>,
     /// Exact Host authorities accepted by the MCP transport.
     pub data_hosts: BTreeSet<String>,
     /// Structured log output mode.
@@ -88,12 +86,11 @@ impl Default for AppConfig {
             secrets_dir: PathBuf::from(DEFAULT_DATA_DIR).join("secrets"),
             database_url: DEFAULT_DATABASE_URL.to_owned(),
             master_key_file: None,
-            bootstrap_token_file: None,
-            bootstrap_token: None,
             admin_origins: OriginPolicy::new(DEFAULT_ADMIN_ORIGINS.split(','))
                 .expect("default Admin origins are valid"),
             data_origins: OriginPolicy::new(std::iter::empty::<&str>())
                 .expect("empty data origin policy is valid"),
+            data_public_origin: None,
             data_hosts: default_data_hosts(DEFAULT_DATA_BIND.parse().expect("valid data bind")),
             log_format: LogFormat::Json,
             shutdown_timeout: Duration::from_secs(DEFAULT_SHUTDOWN_TIMEOUT_SECONDS),
@@ -128,6 +125,17 @@ impl AppConfig {
                 message: "is no longer enforced by MCP Vault; remove it and configure listener publication, firewall/VPN, or reverse-proxy policy instead".to_owned(),
             });
         }
+        for key in [
+            "MCP_VAULT_BOOTSTRAP_TOKEN",
+            "MCP_VAULT_BOOTSTRAP_TOKEN_FILE",
+        ] {
+            if lookup(key).is_some() {
+                return Err(ConfigError::InvalidValue {
+                    key,
+                    message: "is obsolete because first-Admin setup now accepts only username and password; remove this setting".to_owned(),
+                });
+            }
+        }
         let data_bind = parse_socket_addr(&lookup, "MCP_VAULT_DATA_BIND", defaults.data_bind)?;
         let admin_bind = parse_socket_addr(&lookup, "MCP_VAULT_ADMIN_BIND", defaults.admin_bind)?;
         let data_dir = parse_path(&lookup, "MCP_VAULT_DATA_DIR", defaults.data_dir)?;
@@ -135,17 +143,10 @@ impl AppConfig {
         let database_url =
             lookup("MCP_VAULT_DATABASE_URL").unwrap_or_else(|| default_database_url(&data_dir));
         let master_key_file = optional_path(&lookup, "MCP_VAULT_MASTER_KEY_FILE")?;
-        let bootstrap_token_file = optional_path(&lookup, "MCP_VAULT_BOOTSTRAP_TOKEN_FILE")?;
-        let bootstrap_token = optional_secret(&lookup, "MCP_VAULT_BOOTSTRAP_TOKEN")?;
-        if bootstrap_token.is_some() && bootstrap_token_file.is_some() {
-            return Err(ConfigError::InvalidValue {
-                key: "MCP_VAULT_BOOTSTRAP_TOKEN",
-                message: "cannot be combined with MCP_VAULT_BOOTSTRAP_TOKEN_FILE".to_owned(),
-            });
-        }
         let admin_origins =
             parse_origins(&lookup, "MCP_VAULT_ADMIN_ORIGINS", DEFAULT_ADMIN_ORIGINS)?;
         let data_origins = parse_origins(&lookup, "MCP_VAULT_DATA_ORIGINS", DEFAULT_DATA_ORIGINS)?;
+        let data_public_origin = parse_optional_origin(&lookup, "MCP_VAULT_DATA_PUBLIC_ORIGIN")?;
         let data_hosts = parse_data_hosts(&lookup, default_data_hosts(data_bind))?;
         let log_format = parse_log_format(&lookup)?;
         let shutdown_timeout = parse_shutdown_timeout(&lookup)?;
@@ -163,10 +164,9 @@ impl AppConfig {
             secrets_dir,
             database_url,
             master_key_file,
-            bootstrap_token_file,
-            bootstrap_token,
             admin_origins,
             data_origins,
+            data_public_origin,
             data_hosts,
             log_format,
             shutdown_timeout,
@@ -249,12 +249,6 @@ impl AppConfig {
     pub fn managed_master_key_file(&self) -> PathBuf {
         self.secrets_dir.join("master-key")
     }
-
-    /// Default service-owned first-Admin token path used when no explicit
-    /// environment/file override is configured.
-    pub fn managed_bootstrap_token_file(&self) -> PathBuf {
-        self.secrets_dir.join("bootstrap-token")
-    }
 }
 
 fn default_database_url(data_dir: &Path) -> String {
@@ -320,22 +314,6 @@ where
     match lookup(key) {
         Some(value) if value.is_empty() => Err(ConfigError::EmptyValue(key)),
         Some(value) => Ok(Some(PathBuf::from(value))),
-        None => Ok(None),
-    }
-}
-
-fn optional_secret<F>(lookup: &F, key: &'static str) -> Result<Option<SecretString>, ConfigError>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    match lookup(key) {
-        Some(value) if value.len() < 16 || value.chars().any(char::is_control) => {
-            Err(ConfigError::InvalidValue {
-                key,
-                message: "must be at least 16 non-control characters".to_owned(),
-            })
-        }
-        Some(value) => Ok(Some(SecretString::new(value))),
         None => Ok(None),
     }
 }
@@ -461,6 +439,24 @@ where
         key,
         message: "must contain exact http(s) origins separated by commas".to_owned(),
     })
+}
+
+fn parse_optional_origin<F>(lookup: &F, key: &'static str) -> Result<Option<String>, ConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(value) = lookup(key) else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Err(ConfigError::EmptyValue(key));
+    }
+    let policy = OriginPolicy::new([value.as_str()]).map_err(|_| ConfigError::InvalidValue {
+        key,
+        message: "must be one exact http(s) origin without a path, query, fragment, or userinfo"
+            .to_owned(),
+    })?;
+    Ok(policy.allowed_origins().next().map(str::to_owned))
 }
 
 fn parse_log_format<F>(lookup: &F) -> Result<LogFormat, ConfigError>
@@ -620,6 +616,7 @@ mod tests {
             vec!["http://127.0.0.1:8081", "http://localhost:8081"]
         );
         assert_eq!(result.data_origins.allowed_origins().count(), 0);
+        assert!(result.data_public_origin.is_none());
     }
 
     #[test]
@@ -634,12 +631,15 @@ mod tests {
                 "sqlite:///var/lib/mcp-vault/state.db",
             ),
             ("MCP_VAULT_MASTER_KEY_FILE", "/run/secrets/master-key"),
-            ("MCP_VAULT_BOOTSTRAP_TOKEN_FILE", "/run/secrets/bootstrap"),
             (
                 "MCP_VAULT_ADMIN_ORIGINS",
                 "https://admin.example.test,https://admin.example.test:443",
             ),
             ("MCP_VAULT_DATA_ORIGINS", "https://agent.example.test"),
+            (
+                "MCP_VAULT_DATA_PUBLIC_ORIGIN",
+                "https://vault.example.test:8443",
+            ),
             ("MCP_VAULT_LOG_FORMAT", "pretty"),
             ("MCP_VAULT_SHUTDOWN_TIMEOUT_SECONDS", "12"),
             ("MCP_VAULT_RECONCILIATION_INTERVAL_SECONDS", "42"),
@@ -671,11 +671,6 @@ mod tests {
             result.master_key_file,
             Some(PathBuf::from("/run/secrets/master-key"))
         );
-        assert_eq!(
-            result.bootstrap_token_file,
-            Some(PathBuf::from("/run/secrets/bootstrap"))
-        );
-        assert!(result.bootstrap_token.is_none());
         assert_eq!(result.log_format, LogFormat::Pretty);
         assert_eq!(result.shutdown_timeout, Duration::from_secs(12));
         assert_eq!(result.reconciliation_interval, Duration::from_secs(42));
@@ -703,6 +698,10 @@ mod tests {
         assert_eq!(
             result.data_origins.allowed_origins().collect::<Vec<_>>(),
             vec!["https://agent.example.test"]
+        );
+        assert_eq!(
+            result.data_public_origin.as_deref(),
+            Some("https://vault.example.test:8443")
         );
     }
 
@@ -776,14 +775,32 @@ mod tests {
             }
         ));
 
-        let error = config(&[("MCP_VAULT_BOOTSTRAP_TOKEN", "too-short")]).unwrap_err();
+        let error = config(&[(
+            "MCP_VAULT_DATA_PUBLIC_ORIGIN",
+            "https://vault.example.test/path",
+        )])
+        .unwrap_err();
         assert!(matches!(
             error,
             ConfigError::InvalidValue {
-                key: "MCP_VAULT_BOOTSTRAP_TOKEN",
+                key: "MCP_VAULT_DATA_PUBLIC_ORIGIN",
                 ..
             }
         ));
+
+        for key in [
+            "MCP_VAULT_BOOTSTRAP_TOKEN",
+            "MCP_VAULT_BOOTSTRAP_TOKEN_FILE",
+        ] {
+            let error = config(&[(key, "obsolete")]).unwrap_err();
+            assert!(matches!(
+                error,
+                ConfigError::InvalidValue {
+                    key: rejected,
+                    ..
+                } if rejected == key
+            ));
+        }
 
         let error = config(&[("MCP_VAULT_BACKUP_KEEP_COUNT", "0")]).unwrap_err();
         assert!(matches!(

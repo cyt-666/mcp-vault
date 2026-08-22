@@ -178,6 +178,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             origin_policy: OriginPolicy::new([format!("http://{admin_bind}")])?,
             data_hosts,
             data_origins: data_origins.allowed_origins().map(str::to_owned).collect(),
+            data_public_origin: None,
             data_bind,
             admin_bind,
             data_dir: directory.path().to_owned(),

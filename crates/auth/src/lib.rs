@@ -20,8 +20,7 @@ pub use origin::OriginPolicy;
 pub use password::{PasswordPolicy, PasswordVerification};
 pub use secret::{
     BearerToken, EncryptedSecretPayload, MasterKeyRing, SecretString, digest_bearer_token,
-    generate_bearer_token, load_bootstrap_token, load_or_create_bootstrap_token,
-    load_or_create_master_key, mask_hint, token_prefix,
+    generate_bearer_token, load_or_create_master_key, mask_hint, token_prefix,
 };
 pub use service::{
     AdminLogin, AdminPrincipal, AuthPrincipal, AuthService, OAuthIssuerInput, PatIssue,

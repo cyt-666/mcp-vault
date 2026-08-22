@@ -88,6 +88,8 @@ reaches the listener.
 - expose only through HTTPS when leaving the host;
 - validate `Host` against the exact `MCP_VAULT_DATA_HOSTS` allow-list and
   validate supplied `Origin` values against the separate data Origin policy;
+- treat `MCP_VAULT_DATA_PUBLIC_ORIGIN` only as advertised connection metadata,
+  never as an authorization or trusted-proxy grant;
 - set request/body/time limits;
 - do not co-host Admin routes;
 - reverse proxy must preserve MCP headers and streaming responses.
@@ -105,7 +107,22 @@ When proxy-terminated:
 
 ## 5. Admin authentication
 
+Before the first Admin exists, setup uses a first-claim model. The public
+Admin setup status discloses only whether the `admin_users` table is empty, and
+the setup mutation accepts only the desired username and password. Exactly one
+concurrent claim commits through the atomic state-repository insert. There is
+no bootstrap token or default password. Setup attempts are source-rate-limited,
+and password hashing remains behind the shared bounded Argon2 worker pool.
+
+Consequently, Admin-listener reachability is also the pre-setup authorization
+boundary. The default loopback bind supports host-local initialization. An
+operator that publishes an uninitialized listener to LAN/VPN must treat every
+client on the admitted network as capable of claiming the installation and
+should complete setup before broadening publication.
+
 - Argon2id password hashing;
+- default minimum of 12 UTF-8 bytes, with exact placeholder/default rejection
+  and visible UI guidance rather than hidden composition rules;
 - login rate limiting and progressive delay;
 - opaque session cookies;
 - Secure, HttpOnly, SameSite=Strict;

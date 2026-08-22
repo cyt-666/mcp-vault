@@ -61,44 +61,39 @@ proxying to the Admin listener.
 
 Setup mode is active only when no Admin account exists.
 
+The unauthenticated Admin shell reads `GET /api/v1/setup` before choosing an
+authentication flow. A fresh installation displays only the first-Admin form;
+an initialized installation displays only Admin login. If the status cannot be
+confirmed, the shell fails closed to login. The status is presentation state,
+not authorization: `POST /api/v1/setup` still atomically rejects every request
+after the first Admin commit, including races from another browser.
+
 The setup route is available only on the Admin listener. Whether a source can
 reach that listener is controlled by the deployment.
 
-### 3.2 Bootstrap secret
+### 3.2 First-claim boundary
 
-When no explicit bootstrap input is configured, MCP Vault atomically creates a
-high-entropy one-time token at
-`<MCP_VAULT_SECRETS_DIR>/bootstrap-token`. The owner retrieves it locally with:
+Setup requires only the desired Admin username and password. MCP Vault does
+not generate, store, display, or accept a bootstrap token, and it has no
+predictable default account.
 
-```bash
-mcp-vault bootstrap-token
-```
-
-Inside Compose this is normally:
-
-```bash
-docker compose exec mcp-vault mcp-vault bootstrap-token
-```
-
-The existing operator-managed overrides remain available:
-
-- `MCP_VAULT_BOOTSTRAP_TOKEN`;
-- `MCP_VAULT_BOOTSTRAP_TOKEN_FILE`.
-
-Do not derive setup authorization from a predictable default password.
+Before the first Admin commit, every client that can reach the Admin listener
+and satisfy its exact Origin policy can attempt setup. The default listener is
+loopback so a fresh direct installation is claimed locally. If an operator
+publishes Admin to LAN/VPN before setup, that deployment boundary must admit
+only clients trusted to become the owner. The state repository's atomic first
+insert guarantees one winner but cannot identify which reachable person should
+win.
 
 ### 3.3 Setup flow
 
-1. The owner opens `/setup`.
-2. The UI requests the one-time bootstrap token.
-3. The owner creates the initial admin username/password.
+1. The owner opens the Admin listener.
+2. The UI confirms that setup is available.
+3. The owner enters the initial Admin username and password.
 4. The service initializes the default Vault registry entry or validates the configured content root.
 5. The startup-provisioned installation-key version remains the active key for
    encrypted secrets and keyed credentials.
 6. Setup mode is permanently disabled unless the database is deliberately reset through a local recovery command.
-7. The bootstrap token is invalidated. An application-managed token file is
-   removed; an explicit operator file is left untouched. Token plaintext is
-   never written to ordinary audit/log output.
 
 ## 4. Admin authentication
 
@@ -107,8 +102,15 @@ Do not derive setup authorization from a predictable default password.
 - Hash with Argon2id using current recommended parameters.
 - Store algorithm parameters with the hash.
 - Support transparent rehash after login when parameters change.
-- Enforce minimum length and reject known placeholder/default values.
+- The default minimum is 12 UTF-8 bytes: pure ASCII/English therefore needs at
+  least 12 characters. The Chinese UI recommends at least eight Han characters
+  rather than encouraging a short password that merely satisfies byte length.
+- Reject control characters and the case-insensitive placeholders `password`,
+  `password123`, `changeme`, `admin`, `admin123`, and `letmein`.
 - Do not impose arbitrary composition rules that encourage weak patterns.
+- Show these rules beside every Admin/WebDAV password-creation input and repeat
+  the actionable rule when validation fails; never expose only a generic
+  “password is unsafe” message.
 - Rate-limit login attempts per source and account.
 
 ### 4.2 Session
@@ -154,10 +156,10 @@ Configuration sources, from lowest to highest precedence:
 4. Vault-scoped settings stored in SQLite;
 5. explicit request/task overrides permitted by schema.
 
-Environment variables are for bootstrap values needed before runtime
-configuration loads and optional external secret overrides. They are not the
-primary long-term UI configuration store; default installation/bootstrap
-secret files are provisioned by MCP Vault itself.
+Environment variables are for process-bootstrap values needed before runtime
+configuration loads and optional installation-key overrides. They are not the
+primary long-term UI configuration store; the default installation key is
+provisioned by MCP Vault itself.
 
 ### 5.1 Bootstrap-only settings
 
@@ -168,12 +170,11 @@ MCP_VAULT_DATA_DIR
 MCP_VAULT_SECRETS_DIR
 MCP_VAULT_DATABASE_URL
 MCP_VAULT_MASTER_KEY_FILE
-MCP_VAULT_BOOTSTRAP_TOKEN_FILE
-MCP_VAULT_BOOTSTRAP_TOKEN
 MCP_VAULT_DATA_BIND
 MCP_VAULT_ADMIN_BIND
 MCP_VAULT_DATA_HOSTS
 MCP_VAULT_DATA_ORIGINS
+MCP_VAULT_DATA_PUBLIC_ORIGIN
 MCP_VAULT_ADMIN_ORIGINS
 MCP_VAULT_TRUSTED_PROXY_IPS
 MCP_VAULT_RECONCILIATION_INTERVAL_SECONDS
@@ -196,6 +197,16 @@ development authorities and must be set to the public hostname when a
 reverse proxy or LAN hostname is used. This Host policy is independent from
 the `MCP_VAULT_DATA_ORIGINS` browser-Origin policy.
 
+`MCP_VAULT_DATA_PUBLIC_ORIGIN` is the single canonical `http(s)` origin shown
+in generated WebDAV/MCP connection cards. Set it to the external reverse-proxy
+origin, for example `https://vault.example.com` or
+`https://vault.example.com:8443`. If absent, MCP Vault first reuses a configured
+data Origin; when no data Origin exists, it generates a direct-listener URL
+from `MCP_VAULT_DATA_HOSTS` and the actual `MCP_VAULT_DATA_BIND` port. Thus the
+default local card is `http://127.0.0.1:8080`, not port 80. This advertised
+origin does not grant Host/Origin access and remains separate from both
+allow-lists.
+
 `MCP_VAULT_TRUSTED_PROXY_IPS` is a comma-separated list of exact socket-peer
 IP addresses. It is empty by default. WebDAV accepts
 `X-Forwarded-Proto: https` only when the direct peer is in this list; the
@@ -204,11 +215,16 @@ clients may use Basic Authentication over local HTTP. This setting does not
 trust forwarded client addresses or grant any Vault permission.
 
 `MCP_VAULT_SECRETS_DIR` defaults to `<MCP_VAULT_DATA_DIR>/secrets` and owns the
-automatically generated `master-key` and pre-setup `bootstrap-token` files.
-Ordinary MCP Vault backups exclude this directory. An operator may mount it as
-a separate persistent volume or override either file with the explicit
-settings above. MCP Vault does not inspect or change filesystem permission
-bits on these files.
+automatically generated `master-key` file. Ordinary MCP Vault backups exclude
+this directory. An operator may mount it as a separate persistent volume or
+override the key with `MCP_VAULT_MASTER_KEY_FILE`. MCP Vault does not inspect
+or change filesystem permission bits on this file.
+
+`MCP_VAULT_BOOTSTRAP_TOKEN` and `MCP_VAULT_BOOTSTRAP_TOKEN_FILE` are obsolete
+and rejected at configuration load. Remove them when upgrading; setup no
+longer accepts a token. Startup removes only the former service-owned
+`<MCP_VAULT_SECRETS_DIR>/bootstrap-token` path. An old explicit token file at
+another path is never read or deleted and may be removed by its operator.
 
 `MCP_VAULT_ADMIN_ALLOWED_CIDRS` is obsolete and rejected at configuration
 load so an old setting cannot create a false belief that the application still
@@ -255,22 +271,40 @@ Each change:
 
 ## 6. Admin information architecture
 
-Recommended navigation:
+The first-release console uses Simplified Chinese and groups destinations by
+the operator's task rather than presenting every subsystem as one flat list:
 
 ```text
-Setup
-Dashboard
-Vault
-WebDAV
-MCP Access
-AI Providers
-Knowledge Index
-Memory
-Jobs
-Audit
-Backup & Restore
-System
+首次访问
+  ├── 未初始化：首次初始化
+  └── 已初始化：管理员登录
+
+常用
+  ├── 总览
+  └── Vault 设置
+连接
+  ├── Obsidian 同步（WebDAV）
+  └── Agent 接入（MCP）
+智能
+  ├── AI 服务
+  ├── 知识索引
+  └── 长期记忆
+运维
+  ├── 后台任务
+  ├── 备份与恢复
+  ├── 审计日志
+  └── 系统信息
 ```
+
+Each page presents a concise status summary and common action first. OAuth
+issuer/grant configuration, restore/recovery controls, and raw API responses
+are progressive disclosures and remain collapsed until explicitly opened.
+Credentials, jobs, memories, providers, backups, audit entries, index state,
+and system state use page-specific lists or cards instead of a raw JSON dump.
+Raw disclosures may contain the private paths or memory content already
+authorized for that page, but stored secret plaintext is never returned.
+Technical protocol names, scopes, IDs, paths, and URLs remain exact values even
+when surrounding labels and guidance are Chinese.
 
 ## 7. Dashboard
 
@@ -663,6 +697,19 @@ Recommended stack:
 
 The backend remains authoritative for validation.
 
+First-release usability requirements:
+
+- all operator-facing copy and known error states are Simplified Chinese;
+- navigation is grouped into common, connection, intelligence, and operations
+  tasks;
+- WebDAV permissions and common PAT scopes use labeled choices, while the API
+  still validates the submitted stable wire values;
+- advanced and destructive controls use progressive disclosure and explicit
+  confirmations;
+- one-time secrets remain visually prominent and offer a copy action without
+  storing the value in browser persistence;
+- desktop and narrow/mobile layouts preserve the same capabilities.
+
 Accessibility requirements:
 
 - keyboard navigation;
@@ -674,7 +721,10 @@ Accessibility requirements:
 ## 20. Configuration acceptance tests
 
 - setup route is unavailable on the data listener;
-- setup requires valid bootstrap token and allowed source;
+- setup status changes from available to unavailable after the first Admin is
+  committed, and the unauthenticated UI removes the registration form;
+- setup is available only on the Admin listener, accepts only username/password,
+  and requires exact Origin policy;
 - setup cannot run after first admin creation;
 - session cookie and CSRF behavior pass browser tests;
 - secret create/update never returns stored plaintext;

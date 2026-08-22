@@ -16,9 +16,6 @@ pub enum AuthError {
     /// A required master-key file could not be created, read, or parsed.
     #[error("installation key is unavailable")]
     MasterKeyUnavailable,
-    /// A first-run bootstrap token could not be created, read, or parsed.
-    #[error("bootstrap token is unavailable")]
-    BootstrapTokenUnavailable,
     /// An encrypted record cannot be authenticated or its key version is not
     /// available.
     #[error("encrypted secret is unavailable")]

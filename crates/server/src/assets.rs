@@ -97,9 +97,10 @@ mod tests {
 
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
+        let expected_title = "MCP Vault 管理端".as_bytes();
         assert!(
-            body.windows("MCP Vault Admin".len())
-                .any(|window| window == b"MCP Vault Admin")
+            body.windows(expected_title.len())
+                .any(|window| window == expected_title)
         );
     }
 

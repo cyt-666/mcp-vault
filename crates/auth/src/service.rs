@@ -2,7 +2,6 @@
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -37,7 +36,6 @@ const CSRF_LABEL: &str = "mcpv_csrf_";
 const PAT_DIGEST_PURPOSE: &str = "mcp-pat-digest";
 const SESSION_DIGEST_PURPOSE: &str = "admin-session-digest";
 const CSRF_DIGEST_PURPOSE: &str = "admin-csrf-digest";
-const BOOTSTRAP_DIGEST_PURPOSE: &str = "bootstrap-token-digest";
 const MAX_PASSWORD_WORKERS: usize = 4;
 
 /// Session lifetime and cookie settings.
@@ -92,6 +90,7 @@ pub struct AdminPrincipal {
 pub struct PreparedAdminSetup {
     username: String,
     password_hash: String,
+    limiter_key: String,
 }
 
 impl std::fmt::Debug for PreparedAdminSetup {
@@ -207,8 +206,6 @@ pub struct AuthService {
     keys: MasterKeyRing,
     password_policy: PasswordPolicy,
     session_policy: SessionPolicy,
-    bootstrap_digest: Option<[u8; 32]>,
-    managed_bootstrap_token_file: Option<PathBuf>,
     limiter: Arc<LoginRateLimiter>,
     password_workers: Arc<Semaphore>,
 }
@@ -221,8 +218,6 @@ impl AuthService {
             keys,
             password_policy: PasswordPolicy::default(),
             session_policy: SessionPolicy::default(),
-            bootstrap_digest: None,
-            managed_bootstrap_token_file: None,
             limiter: Arc::new(LoginRateLimiter::default()),
             password_workers: Arc::new(Semaphore::new(MAX_PASSWORD_WORKERS)),
         }
@@ -236,27 +231,6 @@ impl AuthService {
     ) -> Self {
         self.password_policy = password_policy;
         self.session_policy = session_policy;
-        self
-    }
-
-    /// Bind a one-time bootstrap token without retaining its plaintext.
-    pub fn with_bootstrap_token(mut self, token: &SecretString) -> Self {
-        self.bootstrap_digest = Some(
-            self.keys
-                .keyed_digest(BOOTSTRAP_DIGEST_PURPOSE, token.as_bytes()),
-        );
-        self.managed_bootstrap_token_file = None;
-        self
-    }
-
-    /// Bind an application-generated first-run token and remember only the
-    /// managed file path needed for best-effort cleanup after setup commits.
-    pub fn with_managed_bootstrap_token(mut self, token: &SecretString, path: PathBuf) -> Self {
-        self.bootstrap_digest = Some(
-            self.keys
-                .keyed_digest(BOOTSTRAP_DIGEST_PURPOSE, token.as_bytes()),
-        );
-        self.managed_bootstrap_token_file = Some(path);
         self
     }
 
@@ -498,42 +472,46 @@ impl AuthService {
         Ok(rotated)
     }
 
-    /// Create the first Admin identity using the configured one-time token.
+    /// Create the first Admin identity while the installation has no Admin.
     pub async fn setup_admin(
         &self,
-        bootstrap_token: &SecretString,
         username: &str,
         password: &SecretString,
     ) -> Result<AdminUserRecord, AuthError> {
-        let prepared = self
-            .prepare_admin_setup(bootstrap_token, username, password)
-            .await?;
+        let prepared = self.prepare_admin_setup(username, password, None).await?;
         self.commit_admin_setup(prepared).await
     }
 
-    /// Validate bootstrap material and perform bounded password work before
-    /// the Admin adapter initializes the default Vault.
+    /// Report whether this installation can still create its first Admin.
+    ///
+    /// This projection is suitable for deciding whether the unauthenticated
+    /// Admin shell should show setup or login. The atomic first-user insert in
+    /// [`Self::commit_admin_setup`] remains authoritative if callers race.
+    pub async fn admin_setup_available(&self) -> Result<bool, AuthError> {
+        Ok(!self.repository.has_admin_users().await?)
+    }
+
+    /// Validate first-Admin input and perform bounded password work before the
+    /// Admin adapter initializes the default Vault.
     pub async fn prepare_admin_setup(
         &self,
-        bootstrap_token: &SecretString,
         username: &str,
         password: &SecretString,
+        source_ip: Option<&str>,
     ) -> Result<PreparedAdminSetup, AuthError> {
-        let expected = self.bootstrap_digest.ok_or(AuthError::SetupUnavailable)?;
-        let actual = self
-            .keys
-            .keyed_digest(BOOTSTRAP_DIGEST_PURPOSE, bootstrap_token.as_bytes());
-        if !bool::from(actual.ct_eq(&expected)) {
-            return Err(AuthError::SetupUnavailable);
-        }
         if self.repository.has_admin_users().await? {
             return Err(AuthError::SetupUnavailable);
         }
         let username = normalize_username(username)?;
+        let limiter_key = format!("setup\0{}", source_ip.unwrap_or("unknown"));
+        let now = now_millis()?;
+        self.limiter.check(&limiter_key, now)?;
+        self.limiter.failure(&limiter_key, now);
         let password_hash = self.hash_password(password).await?;
         Ok(PreparedAdminSetup {
             username,
             password_hash,
+            limiter_key,
         })
     }
 
@@ -551,16 +529,7 @@ impl AuthService {
             )
             .await?
             .ok_or(AuthError::SetupUnavailable)?;
-        if let Some(path) = self.managed_bootstrap_token_file.as_deref()
-            && let Err(error) = tokio::fs::remove_file(path).await
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(
-                path = %path.display(),
-                %error,
-                "first Admin was created but the managed bootstrap token file could not be removed"
-            );
-        }
+        self.limiter.success(&prepared.limiter_key);
         Ok(user)
     }
 
@@ -1396,21 +1365,15 @@ mod tests {
             .await
             .unwrap();
         let keys = MasterKeyRing::from_bytes(1, &[9_u8; 32]).unwrap();
-        let service = AuthService::new(store.auth(), keys)
-            .with_policies(
-                crate::password::PasswordPolicy::default(),
-                SessionPolicy {
-                    idle_timeout: Duration::from_secs(3600),
-                    absolute_timeout: Duration::from_secs(3600),
-                },
-            )
-            .with_bootstrap_token(&SecretString::new("bootstrap-token-value"));
+        let service = AuthService::new(store.auth(), keys).with_policies(
+            crate::password::PasswordPolicy::default(),
+            SessionPolicy {
+                idle_timeout: Duration::from_secs(3600),
+                absolute_timeout: Duration::from_secs(3600),
+            },
+        );
         service
-            .setup_admin(
-                &SecretString::new("bootstrap-token-value"),
-                "Admin",
-                &SecretString::new("correct horse battery staple"),
-            )
+            .setup_admin("Admin", &SecretString::new("correct horse battery staple"))
             .await
             .unwrap();
         (service, context, store)
@@ -1424,15 +1387,14 @@ mod tests {
         let service = AuthService::new(
             store.auth(),
             MasterKeyRing::from_bytes(1, &[3_u8; 32]).unwrap(),
-        )
-        .with_bootstrap_token(&SecretString::new("bootstrap-token-value"));
+        );
+        assert!(service.admin_setup_available().await.unwrap());
         let first = service.clone();
         let second = service.clone();
         let (first, second) = tokio::join!(
             async move {
                 first
                     .setup_admin(
-                        &SecretString::new("bootstrap-token-value"),
                         "first-admin",
                         &SecretString::new("correct horse battery staple"),
                     )
@@ -1441,7 +1403,6 @@ mod tests {
             async move {
                 second
                     .setup_admin(
-                        &SecretString::new("bootstrap-token-value"),
                         "second-admin",
                         &SecretString::new("correct horse battery staple"),
                     )
@@ -1455,57 +1416,35 @@ mod tests {
             second.err()
         };
         assert!(matches!(failure, Some(AuthError::SetupUnavailable)));
+        assert!(!service.admin_setup_available().await.unwrap());
     }
 
     #[tokio::test]
-    async fn first_admin_consumes_only_an_application_managed_bootstrap_file() {
-        let directory = tempfile::tempdir().unwrap();
-        let managed_path = directory.path().join("managed-bootstrap-token");
-        tokio::fs::write(&managed_path, b"bootstrap-token-value")
+    async fn first_admin_password_work_is_source_rate_limited() {
+        let store = StateStore::connect_and_migrate("sqlite::memory:")
             .await
             .unwrap();
-        let managed_store = StateStore::connect_and_migrate("sqlite::memory:")
-            .await
-            .unwrap();
-        let managed = AuthService::new(
-            managed_store.auth(),
-            MasterKeyRing::from_bytes(1, &[5_u8; 32]).unwrap(),
-        )
-        .with_managed_bootstrap_token(
-            &SecretString::new("bootstrap-token-value"),
-            managed_path.clone(),
+        let service = AuthService::new(
+            store.auth(),
+            MasterKeyRing::from_bytes(1, &[8_u8; 32]).unwrap(),
         );
-        managed
-            .setup_admin(
-                &SecretString::new("bootstrap-token-value"),
-                "managed-owner",
-                &SecretString::new("correct horse battery staple"),
-            )
-            .await
-            .unwrap();
-        assert!(!tokio::fs::try_exists(&managed_path).await.unwrap());
 
-        let explicit_path = directory.path().join("operator-bootstrap-token");
-        tokio::fs::write(&explicit_path, b"bootstrap-token-value")
-            .await
-            .unwrap();
-        let explicit_store = StateStore::connect_and_migrate("sqlite::memory:")
-            .await
-            .unwrap();
-        let explicit = AuthService::new(
-            explicit_store.auth(),
-            MasterKeyRing::from_bytes(1, &[6_u8; 32]).unwrap(),
-        )
-        .with_bootstrap_token(&SecretString::new("bootstrap-token-value"));
-        explicit
-            .setup_admin(
-                &SecretString::new("bootstrap-token-value"),
-                "explicit-owner",
+        for _ in 0..5 {
+            let error = service
+                .prepare_admin_setup("owner", &SecretString::new("short"), Some("127.0.0.1"))
+                .await
+                .unwrap_err();
+            assert!(matches!(error, AuthError::PasswordPolicy));
+        }
+        let error = service
+            .prepare_admin_setup(
+                "owner",
                 &SecretString::new("correct horse battery staple"),
+                Some("127.0.0.1"),
             )
             .await
-            .unwrap();
-        assert!(tokio::fs::try_exists(&explicit_path).await.unwrap());
+            .unwrap_err();
+        assert!(matches!(error, AuthError::RateLimited));
     }
 
     #[tokio::test]

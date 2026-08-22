@@ -13,7 +13,8 @@ compatibility result.
 | WebDAV safe writes and RFC method behavior | WebDAV crate tests; `scripts/interop/http-smoke.sh`; Litmus wrapper | HTTP smoke automated; Litmus must run before first release |
 | Obsidian interoperability | `docs/compatibility-matrix.md`; sanitized DAV request fixture | Manual client/version evidence required |
 | Admin/data listener separation | Router tests; HTTP smoke `/api/v1/system` on data listener; deployment proxy checklist | Automated direct boundary; reference proxy check required |
-| Self-contained first-run provisioning | Auth/Server concurrent create, restart reuse, lost-key, explicit-file, managed-token cleanup, and local-display tests; Compose config checks | Automated code/config evidence; clean-host release-image setup remains a release gate |
+| Simplified Chinese Admin usability | Frontend lint/test/build; authenticated desktop and 390px browser checks; conditional first-Admin setup and progressive-disclosure assertions | Automated UI evidence; setup and destructive operations still require backend auth/confirmation |
+| Self-contained first-run provisioning | Auth/Admin concurrent password-only first claim, Server installation-key restart/lost-key tests, obsolete-token-variable rejection, and Compose config checks | Automated code/config evidence; clean-host release-image setup remains a release gate |
 | Admin network publication versus authentication | Loopback default/config tests; Admin Origin/session/CSRF tests; ADR-0004 and deployment runbook | Source admission is deployment-owned; application Admin authentication remains mandatory |
 | Auth separation and secret redaction | Auth/MCP/WebDAV/Admin tests; redacted diagnostics tests | Automated; no secret-log finding allowed |
 | Durable writes, revisions, recovery, and outbox | Vault Core, state, worker, backup/restore tests; WP-13 recovery checks | Automated; crash/recovery failure blocks release |

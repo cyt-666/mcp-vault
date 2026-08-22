@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 
-use mcp_vault_server::{bootstrap_token_for_display, config::AppConfig, init_tracing, run};
+use mcp_vault_server::{config::AppConfig, init_tracing, run};
 
 #[tokio::main]
 async fn main() -> Result<ExitCode, mcp_vault_server::ServerError> {
@@ -13,11 +13,16 @@ async fn main() -> Result<ExitCode, mcp_vault_server::ServerError> {
             return Ok(ExitCode::SUCCESS);
         }
         Some("bootstrap-token" | "show-bootstrap-token") => {
-            let token = bootstrap_token_for_display(&config).await?;
-            println!("{}", token.expose_secret());
-            return Ok(ExitCode::SUCCESS);
+            eprintln!(
+                "the bootstrap-token command has been removed; open the Admin listener and create the first Admin with a username and password"
+            );
+            return Ok(ExitCode::FAILURE);
         }
-        _ => {}
+        Some(command) => {
+            eprintln!("unknown mcp-vault command: {command}");
+            return Ok(ExitCode::FAILURE);
+        }
+        None => {}
     }
 
     init_tracing(&config)?;
