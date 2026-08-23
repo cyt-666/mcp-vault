@@ -25,6 +25,6 @@ pub use secret::{
 pub use service::{
     AdminLogin, AdminPrincipal, AuthPrincipal, AuthService, OAuthIssuerInput, PatIssue,
     PreparedAdminSetup, SecretMetadata, SessionPolicy, WebDavCredentialIssue,
-    clear_session_cookie_header, parse_session_cookie, require_secure_basic_auth,
-    session_cookie_header,
+    clear_csrf_cookie_header, clear_session_cookie_header, csrf_cookie_header,
+    parse_session_cookie, require_secure_basic_auth, session_cookie_header,
 };

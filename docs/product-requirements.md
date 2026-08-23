@@ -159,6 +159,11 @@ the server-side atomic one-time setup guard. First-run setup accepts only the
 desired Admin username and password; it MUST NOT require an operator-generated
 or manually copied bootstrap token.
 
+A valid Admin login MUST survive an ordinary page reload without copying or
+persisting the session bearer in JavaScript-accessible browser storage. The UI
+MUST confirm the server-side session before rendering authenticated content and
+MUST retain the session-bound CSRF protection required for later mutations.
+
 The Admin UI and Admin API MUST run on a separate listener that is not publicly exposed by default. Network restriction does not replace authentication.
 
 ### 3.8 Authentication and authorization

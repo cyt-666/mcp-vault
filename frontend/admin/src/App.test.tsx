@@ -13,7 +13,29 @@ import { formatRequestError } from './view-model';
 describe('Admin 管理界面', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.spyOn(adminApi, 'restoreSession').mockResolvedValue(null);
     vi.spyOn(adminApi, 'setupStatus').mockResolvedValue({ setup_available: false });
+  });
+
+  it('刷新后恢复有效管理会话而不显示登录页', async () => {
+    vi.mocked(adminApi.restoreSession).mockResolvedValue({
+      user_id: 'admin-1',
+      username: 'owner',
+      expires_at: null,
+      csrf_token: null,
+    });
+    vi.spyOn(adminApi, 'request').mockResolvedValue({ ready: true });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+
+    await act(async () => root.render(<App />));
+
+    expect(container.textContent).toContain('管理控制台');
+    expect(container.textContent).toContain('总览');
+    expect(container.textContent).not.toContain('欢迎回来');
+    expect(adminApi.setupStatus).not.toHaveBeenCalled();
+
+    await act(async () => root.unmount());
   });
 
   it('已初始化时只显示中文管理员登录', async () => {

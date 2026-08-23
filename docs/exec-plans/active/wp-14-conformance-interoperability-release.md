@@ -3,7 +3,7 @@
 Status: In progress
 Owner: Codex
 Created: 2026-08-21
-Last updated: 2026-08-22
+Last updated: 2026-08-23
 
 ## Purpose and user-visible result
 
@@ -192,6 +192,10 @@ release UI is revised without changing Admin API/Vault boundaries:
    input, including minimum length, absence of composition requirements, and
    rejected placeholder examples. A policy error repeats actionable guidance
    instead of asking the operator to guess.
+9. A valid Admin session survives page reload. The session bearer remains only
+   in the Secure/HttpOnly cookie; a separate Secure/SameSite CSRF cookie is
+   readable by the Admin frontend solely to reconstruct the required
+   mutation header before `GET /session` confirms the server-side session.
 
 ### Password-only first-Admin initialization
 
@@ -292,6 +296,12 @@ first-claim setup model:
     proxy HTTPS origins, and otherwise derive a direct-listener URL that
     includes the actual data bind port. Validate local `:8080`, explicit HTTPS,
     IPv6, MCP, and WebDAV URL shapes.
+21. **Refresh-safe Admin session restoration.** Issue and clear a dedicated
+    non-HttpOnly CSRF cookie alongside the HttpOnly session cookie, recover it
+    into the in-memory API client on page load, verify the current session
+    before rendering authenticated pages, and preserve mutation CSRF checks.
+    Validate reload restoration, expired/missing-cookie fallback, logout
+    cleanup, and a post-restore state-changing request.
 
 ## Progress
 
@@ -317,6 +327,7 @@ first-claim setup model:
 - [x] 2026-08-22 — Explain the actual password policy inline and in validation errors instead of requiring trial and error.
 - [x] 2026-08-22 — Fix first-Admin setup with the default relative `./data` directory and clean the obsolete managed token artifact.
 - [x] 2026-08-22 — Correct Admin-generated WebDAV/MCP addresses so local direct-listener URLs include `:8080` and proxy URLs use their configured public origin.
+- [x] 2026-08-23 — Restore valid Admin sessions and CSRF capability after a browser page refresh without exposing the session bearer token.
 - [ ] Complete release-environment Litmus, named Obsidian plugin/client matrix, full-scale performance, clean-host restore, and signed-artifact verification; then review whether the full frozen MCP requirements report is applicable to the advertised capability set.
 
 ## Decisions
@@ -479,6 +490,32 @@ Validation recorded on 2026-08-22 for review remediation:
   allow-lists remain validation policy. Without an external origin, direct
   URLs are derived from the configured host plus actual listener port rather
   than assuming HTTP 80.
+- Admin reload restoration keeps authentication and CSRF capabilities
+  separate. The opaque session bearer remains only in its Secure/HttpOnly/
+  SameSite=Strict cookie. Login also issues the session-bound CSRF value in a
+  Secure/SameSite=Strict non-HttpOnly cookie so the Admin frontend can
+  reconstruct `X-CSRF-Token`; the UI still calls `GET /api/v1/session` before
+  treating the browser as authenticated, and the CSRF value alone grants no
+  access. This avoids persisting the session bearer or rotating one shared
+  CSRF digest on every tab reload.
+
+Validation recorded on 2026-08-23 for reload-safe Admin sessions:
+
+- Auth/Admin API tests prove login emits distinct session and CSRF cookies,
+  the session bearer remains HttpOnly, and logout expires both cookies. The
+  frontend tests recover the CSRF value after reload, confirm the server-side
+  session, attach the restored value only to mutations, clear stale state on
+  HTTP 401, and bypass the login/setup UI only after validation.
+- A disposable real process and browser on `http://127.0.0.1` completed first
+  setup, hard-loaded the Admin URL again into the authenticated dashboard,
+  created a WebDAV credential through a protected mutation after reload, then
+  logged out and remained on the login page after another hard load. The
+  temporary process, credential, and data root were removed afterward.
+- `cargo fmt --all --check`, workspace all-target/all-feature Clippy with
+  `-D warnings`, and all 185 Rust tests pass. Frontend lint, 11 Vitest
+  assertions, TypeScript, and the Vite production build pass. Documentation
+  consistency and checksum checks are rerun after this record. No Docker image
+  or archive was built.
 
 Validation recorded on 2026-08-22 for self-contained first-run provisioning:
 

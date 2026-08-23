@@ -126,6 +126,11 @@ Path=/
 
 Store only a digest in SQLite.
 
+The browser must never copy the session bearer into JavaScript-accessible
+storage. On page reload, it first recovers the separately issued CSRF value and
+then calls `GET /api/v1/session`; authenticated UI is rendered only when the
+HttpOnly cookie is still accepted by the server.
+
 Session policy:
 
 - idle timeout;
@@ -143,6 +148,13 @@ Every state-changing Admin request requires:
 - valid Origin/Referer policy;
 - CSRF token bound to the session;
 - content type validation.
+
+Issue the session-bound CSRF value in a separate `Secure`,
+`SameSite=Strict`, non-`HttpOnly` cookie so the Admin frontend can reconstruct
+`X-CSRF-Token` after reload. This cookie is not an authentication
+credential, and possession of it without the opaque HttpOnly session cookie
+must grant no access. Store only its digest in SQLite and expire it together
+with the session cookie on logout.
 
 Do not use CORS to make Admin reachable from arbitrary origins.
 
@@ -726,7 +738,8 @@ Accessibility requirements:
 - setup is available only on the Admin listener, accepts only username/password,
   and requires exact Origin policy;
 - setup cannot run after first admin creation;
-- session cookie and CSRF behavior pass browser tests;
+- session and CSRF cookies pass browser tests, including authenticated page
+  reload, mutation after reload, expired-session fallback, and logout cleanup;
 - secret create/update never returns stored plaintext;
 - changing embedding model schedules re-embedding rather than mixing vectors;
 - provider outage is visible without breaking core readiness;

@@ -13,10 +13,10 @@ compatibility result.
 | WebDAV safe writes and RFC method behavior | WebDAV crate tests; `scripts/interop/http-smoke.sh`; Litmus wrapper | HTTP smoke automated; Litmus must run before first release |
 | Obsidian interoperability | `docs/compatibility-matrix.md`; sanitized DAV request fixture | Manual client/version evidence required |
 | Admin/data listener separation | Router tests; HTTP smoke `/api/v1/system` on data listener; deployment proxy checklist | Automated direct boundary; reference proxy check required |
-| Simplified Chinese Admin usability | Frontend lint/test/build; authenticated desktop and 390px browser checks; conditional first-Admin setup and progressive-disclosure assertions | Automated UI evidence; setup and destructive operations still require backend auth/confirmation |
+| Simplified Chinese Admin usability | Frontend lint/test/build; authenticated desktop and 390px browser checks; conditional first-Admin setup, reload-safe session restoration, and progressive-disclosure assertions | Automated UI evidence; setup and destructive operations still require backend auth/confirmation |
 | Self-contained first-run provisioning | Auth/Admin concurrent password-only first claim, Server installation-key restart/lost-key tests, obsolete-token-variable rejection, and Compose config checks | Automated code/config evidence; clean-host release-image setup remains a release gate |
 | Admin network publication versus authentication | Loopback default/config tests; Admin Origin/session/CSRF tests; ADR-0004 and deployment runbook | Source admission is deployment-owned; application Admin authentication remains mandatory |
-| Auth separation and secret redaction | Auth/MCP/WebDAV/Admin tests; redacted diagnostics tests | Automated; no secret-log finding allowed |
+| Auth separation and secret redaction | Auth/MCP/WebDAV/Admin tests; Admin dual-cookie/CSRF reload and logout tests; redacted diagnostics tests | Automated; the session bearer remains HttpOnly and no secret-log finding is allowed |
 | Durable writes, revisions, recovery, and outbox | Vault Core, state, worker, backup/restore tests; WP-13 recovery checks | Automated; crash/recovery failure blocks release |
 | Provider outage/degradation | Provider local-fake contract tests; lexical/FTS fallback and readiness tests | Automated; no paid endpoint in CI |
 | Migration from prior prerelease state | `pre_wp02.sql` upgrade test through migration 0009; migration check command | Automated; preserve fixture and checksum |

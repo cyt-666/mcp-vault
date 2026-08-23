@@ -769,11 +769,18 @@ Source-network admission is a deployment concern controlled by listener
 publication, firewall/VPN rules, or an operator-selected reverse proxy. The
 application rejects invalid sessions, disallowed Origin/Referer values, and
 missing or mismatched `X-CSRF-Token` before invoking application services.
-Successful login sets an opaque Secure/HttpOnly/SameSite=Strict cookie and
-returns the session-bound CSRF value once; the cookie is never returned in
-JSON.
+Successful login sets an opaque Secure/HttpOnly/SameSite=Strict session cookie,
+sets a separate Secure/SameSite=Strict CSRF cookie that the Admin frontend may
+read, and returns the same session-bound CSRF value in the login
+response. The CSRF value is not an authentication bearer: every mutation must
+still send it in `X-CSRF-Token`, where it is checked against the digest bound to
+the authenticated session. `GET /api/v1/session` validates the HttpOnly session
+after a page reload but does not return either stored bearer value. Logout
+expires both cookies.
 
-Use secure, HttpOnly, SameSite=Strict cookies. Do not store session bearer tokens in browser local storage.
+Do not store the session bearer in JavaScript memory, local storage, or session
+storage. The readable CSRF cookie exists only to reconstruct the mutation
+header after reload and cannot authenticate a request by itself.
 
 The setup-availability response is only a UI projection. The Auth service
 atomically enforces that exactly one first Admin can be committed, so a stale

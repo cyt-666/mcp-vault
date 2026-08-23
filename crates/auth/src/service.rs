@@ -33,6 +33,8 @@ use crate::{
 const PAT_LABEL: &str = "mcpv_pat_";
 const SESSION_LABEL: &str = "mcpv_session_";
 const CSRF_LABEL: &str = "mcpv_csrf_";
+const SESSION_COOKIE_NAME: &str = "mcp_vault_session";
+const CSRF_COOKIE_NAME: &str = "mcp_vault_csrf";
 const PAT_DIGEST_PURPOSE: &str = "mcp-pat-digest";
 const SESSION_DIGEST_PURPOSE: &str = "admin-session-digest";
 const CSRF_DIGEST_PURPOSE: &str = "admin-csrf-digest";
@@ -1125,7 +1127,17 @@ impl AuthService {
 /// Construct a secure Admin session cookie header value.
 pub fn session_cookie_header(token: &BearerToken, max_age: Duration) -> String {
     format!(
-        "mcp_vault_session={}; Path=/; Max-Age={}; Secure; HttpOnly; SameSite=Strict",
+        "{SESSION_COOKIE_NAME}={}; Path=/; Max-Age={}; Secure; HttpOnly; SameSite=Strict",
+        token.expose_secret(),
+        max_age.as_secs()
+    )
+}
+
+/// Construct the same-origin-readable CSRF cookie used to reconstruct the
+/// mutation header after a page reload. It is not an authentication bearer.
+pub fn csrf_cookie_header(token: &BearerToken, max_age: Duration) -> String {
+    format!(
+        "{CSRF_COOKIE_NAME}={}; Path=/; Max-Age={}; Secure; SameSite=Strict",
         token.expose_secret(),
         max_age.as_secs()
     )
@@ -1138,7 +1150,7 @@ pub fn parse_session_cookie(header: &str) -> Result<&str, AuthError> {
         let mut pair = part.trim().splitn(2, '=');
         let name = pair.next().unwrap_or_default();
         let value = pair.next().unwrap_or_default();
-        if name == "mcp_vault_session" {
+        if name == SESSION_COOKIE_NAME {
             if found.is_some() || value.is_empty() || value.chars().any(char::is_control) {
                 return Err(AuthError::InvalidCredential);
             }
@@ -1151,6 +1163,11 @@ pub fn parse_session_cookie(header: &str) -> Result<&str, AuthError> {
 /// Construct a deletion cookie for logout.
 pub fn clear_session_cookie_header() -> &'static str {
     "mcp_vault_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"
+}
+
+/// Expire the frontend-readable CSRF cookie during logout.
+pub fn clear_csrf_cookie_header() -> &'static str {
+    "mcp_vault_csrf=; Path=/; Max-Age=0; Secure; SameSite=Strict"
 }
 
 /// Basic authentication is acceptable only over TLS or a loopback transport.
@@ -1341,7 +1358,7 @@ mod tests {
     };
     use mcp_vault_state::{StateStore, VaultStatus};
 
-    use super::{AuthService, SessionPolicy, session_cookie_header};
+    use super::{AuthService, SessionPolicy, csrf_cookie_header, session_cookie_header};
     use crate::{
         AuthError,
         origin::OriginPolicy,
@@ -1493,6 +1510,10 @@ mod tests {
             session_cookie_header(&login.session_token, Duration::from_secs(60))
                 .contains("Secure; HttpOnly; SameSite=Strict")
         );
+        let csrf_cookie = csrf_cookie_header(&login.csrf_token, Duration::from_secs(60));
+        assert!(csrf_cookie.contains("mcp_vault_csrf="));
+        assert!(csrf_cookie.contains("Secure; SameSite=Strict"));
+        assert!(!csrf_cookie.contains("HttpOnly"));
         let origin = OriginPolicy::new(["http://localhost:8081"]).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert("origin", HeaderValue::from_static("http://localhost:8081"));

@@ -55,6 +55,7 @@ async function loadPage(page: Page): Promise<JsonObject> {
 
 export function App() {
   const [authenticated, setAuthenticated] = useState(false);
+  const [sessionChecked, setSessionChecked] = useState(false);
   const [setupAvailable, setSetupAvailable] = useState<boolean | null>(null);
   const [setupStatusRevision, setSetupStatusRevision] = useState(0);
   const [page, setPage] = useState<Page>('dashboard');
@@ -69,7 +70,25 @@ export function App() {
   }, [authenticated, page]);
 
   useEffect(() => {
-    if (authenticated) return;
+    let cancelled = false;
+    adminApi
+      .restoreSession()
+      .then((session) => {
+        if (!cancelled) setAuthenticated(session !== null);
+      })
+      .catch((requestError: unknown) => {
+        if (!cancelled) setError(formatRequestError(requestError));
+      })
+      .finally(() => {
+        if (!cancelled) setSessionChecked(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!sessionChecked || authenticated) return;
     let cancelled = false;
     setSetupAvailable(null);
 
@@ -87,7 +106,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [authenticated, setupStatusRevision]);
+  }, [authenticated, sessionChecked, setupStatusRevision]);
 
   useEffect(() => {
     if (!authenticated) return;
@@ -142,7 +161,7 @@ export function App() {
         </section>
         <AuthCard
           mode={setupAvailable === true ? 'setup' : 'login'}
-          checking={setupAvailable === null}
+          checking={!sessionChecked || setupAvailable === null}
           onAuthenticated={() => {
             setAuthenticated(true);
             setPage('dashboard');

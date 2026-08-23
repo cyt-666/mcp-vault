@@ -5,6 +5,7 @@ import { AdminApiClient } from './api';
 describe('Admin API client', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    document.cookie = 'mcp_vault_csrf=; Path=/; Max-Age=0';
   });
 
   it('keeps the CSRF token in memory and sends it only on mutations', async () => {
@@ -60,5 +61,59 @@ describe('Admin API client', () => {
       password: 'correct horse battery staple',
     });
     expect(String(options.body)).not.toContain('bootstrap');
+  });
+
+  it('restores a cookie-backed session and reuses its CSRF token for mutations', async () => {
+    document.cookie = 'mcp_vault_csrf=csrf-restored; Path=/';
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: {
+              user_id: 'admin-1',
+              username: 'owner',
+              expires_at: null,
+              csrf_token: null,
+            },
+            request_id: 'restore',
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: { changed: true }, request_id: 'mutation' }), {
+          status: 200,
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new AdminApiClient();
+
+    await expect(client.restoreSession()).resolves.toMatchObject({ username: 'owner' });
+    await client.request('/vault', { method: 'PATCH', body: { name: 'Renamed' } });
+
+    const restore = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(restore.method).toBe('GET');
+    const mutation = fetchMock.mock.calls[1]?.[1] as RequestInit;
+    expect(new Headers(mutation.headers).get('X-CSRF-Token')).toBe('csrf-restored');
+  });
+
+  it('clears a stale CSRF cookie when the server rejects session restoration', async () => {
+    document.cookie = 'mcp_vault_csrf=csrf-stale; Path=/';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            error: { code: 'admin_session_expired', message: 'expired' },
+            request_id: 'expired',
+          }),
+          { status: 401 },
+        ),
+      ),
+    );
+    const client = new AdminApiClient();
+
+    await expect(client.restoreSession()).resolves.toBeNull();
+    expect(document.cookie).not.toContain('mcp_vault_csrf=');
   });
 });

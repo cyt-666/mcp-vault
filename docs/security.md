@@ -124,9 +124,12 @@ should complete setup before broadening publication.
 - default minimum of 12 UTF-8 bytes, with exact placeholder/default rejection
   and visible UI guidance rather than hidden composition rules;
 - login rate limiting and progressive delay;
-- opaque session cookies;
-- Secure, HttpOnly, SameSite=Strict;
-- CSRF token for state changes;
+- opaque session cookies that remain Secure, HttpOnly, and SameSite=Strict;
+- a separate Secure/SameSite=Strict CSRF cookie readable by the Admin frontend
+  solely to rebuild the mutation header after page reload;
+- a session-bound CSRF token for state changes, checked as an
+  `X-CSRF-Token` header against its stored digest and useless without the
+  HttpOnly session bearer;
 - strict Origin validation;
 - session rotation after login;
 - absolute and idle expiry;
@@ -544,7 +547,8 @@ Required tests:
 - loopback Admin default, obsolete application-CIDR rejection, and documented
   deployment-owned source policy;
 - data-plane trusted-proxy behavior;
-- CSRF/Origin/session controls;
+- CSRF/Origin/session controls, including reload restoration, mutation after
+  reload, expired-session fallback, and dual-cookie logout cleanup;
 - password/token/secret redaction;
 - OAuth issuer/audience/resource/scope validation;
 - cross-Vault repository/API/MCP/WebDAV isolation;

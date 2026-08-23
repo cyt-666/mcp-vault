@@ -29,7 +29,8 @@ use axum::{
 };
 use mcp_vault_auth::{
     AdminPrincipal, AuthError, AuthService, OAuthIssuerInput, OriginPolicy, SecretString,
-    clear_session_cookie_header, parse_session_cookie, session_cookie_header,
+    clear_csrf_cookie_header, clear_session_cookie_header, csrf_cookie_header,
+    parse_session_cookie, session_cookie_header,
 };
 use mcp_vault_backup::{BackupError, BackupLimits, BackupService};
 use mcp_vault_core::{VaultCore, VaultCoreRuntime};
@@ -1049,6 +1050,11 @@ async fn login(
     )) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
+    if let Ok(value) =
+        HeaderValue::from_str(&csrf_cookie_header(&login.csrf_token, SESSION_MAX_AGE))
+    {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
     response
 }
 
@@ -1100,6 +1106,10 @@ async fn logout(
     response.headers_mut().append(
         header::SET_COOKIE,
         HeaderValue::from_static(clear_session_cookie_header()),
+    );
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_static(clear_csrf_cookie_header()),
     );
     response
 }
@@ -4620,6 +4630,23 @@ mod tests {
             ))
             .await
             .unwrap();
+        let set_cookies = login
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|value| value.to_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(set_cookies.len(), 2);
+        assert!(
+            set_cookies
+                .iter()
+                .any(|value| value.starts_with("mcp_vault_session="))
+        );
+        assert!(
+            set_cookies.iter().any(|value| {
+                value.starts_with("mcp_vault_csrf=") && !value.contains("HttpOnly")
+            })
+        );
         let cookie = login
             .headers()
             .get("set-cookie")
@@ -4634,6 +4661,36 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let csrf = body["data"]["csrf_token"].as_str().unwrap().to_owned();
         (router, root, maintenance, cookie, csrf)
+    }
+
+    #[tokio::test]
+    async fn logout_clears_session_and_csrf_cookies() {
+        let (router, _root, _maintenance, cookie, csrf) = authenticated_fixture().await;
+        let response = router
+            .oneshot(request(
+                "DELETE",
+                "/session",
+                json!({}),
+                Some(&cookie),
+                Some(&csrf),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let set_cookies = response
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(set_cookies.iter().any(|value| {
+            value.starts_with("mcp_vault_session=") && value.contains("Max-Age=0")
+        }));
+        assert!(
+            set_cookies.iter().any(|value| {
+                value.starts_with("mcp_vault_csrf=") && value.contains("Max-Age=0")
+            })
+        );
     }
 
     #[tokio::test]

@@ -26,8 +26,33 @@ export type RequestOptions = Omit<RequestInit, 'body'> & {
   body?: unknown;
 };
 
+export type AdminSession = {
+  user_id: string;
+  username: string;
+  expires_at: number | null;
+  csrf_token: string | null;
+};
+
+const CSRF_COOKIE_NAME = 'mcp_vault_csrf';
+
+function readCsrfCookie(): string | null {
+  if (typeof document === 'undefined') return null;
+  for (const part of document.cookie.split(';')) {
+    const [name, ...value] = part.trim().split('=');
+    if (name === CSRF_COOKIE_NAME && value.length > 0) {
+      return decodeURIComponent(value.join('='));
+    }
+  }
+  return null;
+}
+
+function clearCsrfCookie() {
+  if (typeof document === 'undefined') return;
+  document.cookie = `${CSRF_COOKIE_NAME}=; Path=/; Max-Age=0; SameSite=Strict`;
+}
+
 export class AdminApiClient {
-  private csrfToken: string | null = null;
+  private csrfToken: string | null = readCsrfCookie();
 
   async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
     const method = (options.method ?? 'GET').toUpperCase();
@@ -60,14 +85,30 @@ export class AdminApiClient {
   }
 
   async login(username: string, password: string) {
-    const response = await this.request<{
-      user_id: string;
-      username: string;
-      expires_at: number;
-      csrf_token: string;
-    }>('/session', { method: 'POST', body: { username, password } });
+    const response = await this.request<AdminSession>('/session', {
+      method: 'POST',
+      body: { username, password },
+    });
     this.csrfToken = response.csrf_token;
     return response;
+  }
+
+  async restoreSession(): Promise<AdminSession | null> {
+    const csrfToken = readCsrfCookie();
+    if (!csrfToken) {
+      this.csrfToken = null;
+      return null;
+    }
+    this.csrfToken = csrfToken;
+    try {
+      return await this.request<AdminSession>('/session');
+    } catch (error: unknown) {
+      if (error instanceof AdminApiError && error.status === 401) {
+        this.clearSession();
+        return null;
+      }
+      throw error;
+    }
   }
 
   async setupStatus() {
@@ -91,6 +132,7 @@ export class AdminApiClient {
 
   clearSession() {
     this.csrfToken = null;
+    clearCsrfCookie();
   }
 }
 
