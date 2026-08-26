@@ -120,7 +120,7 @@ impl StateStore {
 
     /// Return provider/model/binding/embedding repository operations.
     pub fn providers(&self) -> ProviderRepository {
-        ProviderRepository::new(self.pool.clone())
+        ProviderRepository::new(self.pool.clone(), self.write_gate.clone())
     }
 
     /// Return authentication, authorization, and secret metadata repositories.
@@ -474,7 +474,7 @@ fn sqlite_file_path(database_url: &str) -> Option<PathBuf> {
 mod tests {
     use std::path::Path;
 
-    use mcp_vault_domain::{FileId, RevisionId, VaultId};
+    use mcp_vault_domain::{FileId, MemoryId, MemoryRawId, RevisionId, VaultId};
     use sqlx::Executor;
     use tempfile::TempDir;
 
@@ -530,6 +530,9 @@ mod tests {
             "memory_candidates",
             "memory_idempotency",
             "memory_diagnostics",
+            "memory_stage1_outputs",
+            "memory_consolidation_proposals",
+            "memory_consolidation_state",
             "memory_fts",
             "audit_log",
             "backups",
@@ -547,7 +550,7 @@ mod tests {
         let report = store.integrity_check().await.unwrap();
         assert!(report.integrity_ok);
         assert_eq!(report.foreign_key_violations, 0);
-        assert_eq!(report.migration_version, 9);
+        assert_eq!(report.migration_version, 11);
         assert!(store.foreign_keys_enabled().await.unwrap());
     }
 
@@ -669,7 +672,7 @@ mod tests {
         }
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 9);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 11);
     }
 
     #[tokio::test]
@@ -711,7 +714,214 @@ mod tests {
         assert!(jwks.is_none());
         assert_eq!(enabled, 0);
         assert!(store.has_table("installation_key_checks").await.unwrap());
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 9);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 11);
+    }
+
+    #[tokio::test]
+    async fn migration_0010_adds_codex_style_two_phase_memory_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = StateStore::connect(&database_url(directory.path()))
+            .await
+            .unwrap();
+        let mut pre_two_phase = sqlx::migrate::Migrator::DEFAULT;
+        pre_two_phase.migrations = std::borrow::Cow::Owned(
+            crate::migrations::MIGRATOR
+                .iter()
+                .filter(|migration| migration.version <= 9)
+                .cloned()
+                .collect(),
+        );
+        pre_two_phase.run(&store.pool).await.unwrap();
+        for table in [
+            "memory_stage1_outputs",
+            "memory_consolidation_proposals",
+            "memory_consolidation_state",
+        ] {
+            assert!(!store.has_table(table).await.unwrap(), "{table}");
+        }
+
+        let mut two_phase = sqlx::migrate::Migrator::DEFAULT;
+        two_phase.migrations = std::borrow::Cow::Owned(
+            crate::migrations::MIGRATOR
+                .iter()
+                .filter(|migration| migration.version <= 10)
+                .cloned()
+                .collect(),
+        );
+        two_phase.run(&store.pool).await.unwrap();
+        for table in [
+            "memory_stage1_outputs",
+            "memory_consolidation_proposals",
+            "memory_consolidation_state",
+        ] {
+            assert!(store.has_table(table).await.unwrap(), "{table}");
+        }
+        assert!(
+            !store
+                .has_table("memory_extraction_evaluations")
+                .await
+                .unwrap()
+        );
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 10);
+
+        store.migrate().await.unwrap();
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 11);
+    }
+
+    #[tokio::test]
+    async fn migration_0011_discards_only_prerelease_memory_state_and_jobs() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = StateStore::connect(&database_url(directory.path()))
+            .await
+            .unwrap();
+        let mut pre_cutover = sqlx::migrate::Migrator::DEFAULT;
+        pre_cutover.migrations = std::borrow::Cow::Owned(
+            crate::migrations::MIGRATOR
+                .iter()
+                .filter(|migration| migration.version <= 10)
+                .cloned()
+                .collect(),
+        );
+        pre_cutover.run(&store.pool).await.unwrap();
+        let vault = VaultId::new();
+        let file = FileId::new();
+        let memory = MemoryId::new();
+        let raw = MemoryRawId::new();
+        insert_vault(&store, vault, "memory-cutover").await;
+        sqlx::query(
+            "INSERT INTO file_entries
+             (id, vault_id, path, entry_type, current_revision, size,
+              modified_at, created_at, updated_at)
+             VALUES (?, ?, 'notes/keep.md', 'file', 1, 4, 1, 1, 1)",
+        )
+        .bind(file.to_string())
+        .bind(vault.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO providers
+             (id, name, provider_type, base_url, settings_json, enabled,
+              created_at, updated_at)
+             VALUES ('provider-cutover', 'Keep provider', 'openai_compatible',
+                     'https://example.test/v1/', '{}', 1, 1, 1)",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO models
+             (id, provider_id, external_model_id, capability_json,
+              settings_json, enabled, created_at, updated_at)
+             VALUES ('model-cutover', 'provider-cutover', 'model', '{}', '{}', 1, 1, 1)",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO memories
+             (id, vault_id, memory_type, status, content, normalized_content,
+              content_hash, importance, confidence, origin, revision,
+              extraction_json, created_at, updated_at)
+             VALUES (?, ?, 'fact', 'active', 'old memory', 'old memory',
+                     'old-memory-hash', 1.0, 1.0, 'extracted', 1, '{}', 1, 1)",
+        )
+        .bind(memory.to_string())
+        .bind(vault.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO memory_stage1_outputs
+             (id, vault_id, source_type, source_key, profile_hash,
+              pipeline_version, prompt_version, raw_memory, source_summary,
+              output_hash, status, generated_at, updated_at)
+             VALUES (?, ?, 'note', 'old-source', 'old-profile', 7,
+                     'old-prompt', 'old raw', 'old summary', 'old-output',
+                     'ready', 1, 1)",
+        )
+        .bind(raw.to_string())
+        .bind(vault.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO embedding_records
+             (id, vault_id, object_type, object_id, chunk_key, provider_id,
+              model_id, dimension, content_hash, vector_backend_key,
+              created_at, updated_at)
+             VALUES ('memory-vector', ?, 'memory', ?, 'content',
+                     'provider-cutover', 'model-cutover', 2, 'hash', 'key', 1, 1)",
+        )
+        .bind(vault.to_string())
+        .bind(memory.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        for (job_type, dedup) in [
+            ("memory.extract", "old-memory-job"),
+            ("index.rebuild", "keep-index-job"),
+        ] {
+            sqlx::query(
+                "INSERT INTO jobs
+                 (id, vault_id, job_type, dedup_key, payload_json, status,
+                  max_attempts, available_at, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, '{}', 'queued', 3, 1, 1, 1)",
+            )
+            .bind(VaultId::new().to_string())
+            .bind(vault.to_string())
+            .bind(job_type)
+            .bind(dedup)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+
+        store.migrate().await.unwrap();
+
+        for table in [
+            "memories",
+            "memory_stage1_outputs",
+            "memory_consolidation_proposals",
+            "embedding_records",
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 0, "{table} retained prerelease memory state");
+        }
+        let memory_jobs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE job_type LIKE 'memory.%'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(memory_jobs, 0);
+        let retained_jobs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE job_type = 'index.rebuild'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(retained_jobs, 1);
+        let retained_files: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM file_entries")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(retained_files, 1);
+        let retained_providers: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM providers")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(retained_providers, 1);
+        let pipeline_column: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('memory_consolidation_state')
+             WHERE name = 'pipeline_generation'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(pipeline_column, 1);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 11);
     }
 
     #[tokio::test]

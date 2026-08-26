@@ -1,8 +1,9 @@
 use std::{
+    convert::Infallible,
     net::SocketAddr,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -11,27 +12,35 @@ use std::{
 use async_trait::async_trait;
 use axum::{
     Json, Router,
+    body::{Body, Bytes},
     extract::State,
     http::{StatusCode, header},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use mcp_vault_auth::{AuthService, MasterKeyRing, SecretString};
-use mcp_vault_domain::{Revision, VaultContext, VaultId, VaultSlug};
+use mcp_vault_domain::{DomainError, Revision, VaultContext, VaultId, VaultSlug};
 use mcp_vault_providers::{
     AuthStyle, EmbeddingInput, EmbeddingRequest, EmbeddingSourceRef, EmbeddingSourceResolver,
-    ModelCapabilities, ModelInput, ProviderError, ProviderInput, ProviderKind, ProviderMode,
-    ProviderService, ProviderSettings, ProviderTransport, StructuredGenerationRequest,
-    endpoint_url, validate_endpoint,
+    ModelCapabilities, ModelInput, ModelSettings, OpenAiStructuredOutputMode, ProviderError,
+    ProviderInput, ProviderKind, ProviderMode, ProviderService, ProviderSettings,
+    ProviderTransport, RequestOptions, StructuredGenerationRequest, endpoint_url,
+    validate_endpoint,
 };
-use mcp_vault_state::{StateStore, VaultStatus};
+use mcp_vault_state::{StateError, StateStore, VaultStatus};
 use reqwest::Method;
 use serde_json::{Value, json};
 use tempfile::tempdir;
 use tokio::net::TcpListener;
 use url::Url;
 
-async fn fake_chat() -> Json<serde_json::Value> {
+async fn fake_chat(Json(request): Json<Value>) -> Response {
+    if request["response_format"]["type"] != "json_schema"
+        || request.get("max_tokens").is_none()
+        || request.get("max_completion_tokens").is_some()
+    {
+        return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+    }
     Json(json!({
         "id": "fake-response",
         "model": "fake-chat",
@@ -42,6 +51,22 @@ async fn fake_chat() -> Json<serde_json::Value> {
             }
         }],
         "usage": {"total_tokens": 3}
+    }))
+    .into_response()
+}
+
+async fn capture_vendor_chat(
+    State(captured): State<Arc<Mutex<Vec<Value>>>>,
+    Json(request): Json<Value>,
+) -> Json<Value> {
+    captured.lock().unwrap().push(request);
+    Json(json!({
+        "id": "fake-mimo-response",
+        "model": "mimo-v2.5",
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": "{\"answer\":\"ok\"}"}
+        }]
     }))
 }
 
@@ -128,6 +153,14 @@ async fn invalid_content_response() -> impl IntoResponse {
     )
 }
 
+async fn invalid_json_response() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        "not-json",
+    )
+}
+
 async fn redirect_response() -> impl IntoResponse {
     (StatusCode::FOUND, [(header::LOCATION, "/retry")], "")
 }
@@ -135,6 +168,44 @@ async fn redirect_response() -> impl IntoResponse {
 async fn slow_response() -> impl IntoResponse {
     tokio::time::sleep(Duration::from_millis(100)).await;
     Json(json!({"ok": true}))
+}
+
+async fn delayed_body_response(State(attempts): State<Arc<AtomicUsize>>) -> Response {
+    attempts.fetch_add(1, Ordering::SeqCst);
+    let stream = futures_util::stream::once(async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        Ok::<Bytes, Infallible>(Bytes::from_static(b"{\"ok\":true}"))
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from_stream(stream))
+        .unwrap()
+}
+
+async fn interrupted_body_response(State(attempts): State<Arc<AtomicUsize>>) -> Response {
+    attempts.fetch_add(1, Ordering::SeqCst);
+    let stream = futures_util::stream::unfold(0_u8, |state| async move {
+        match state {
+            0 => Some((Ok(Bytes::from_static(b"{\"ok\":")), 1)),
+            1 => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                Some((
+                    Err::<Bytes, std::io::Error>(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "fixture response interrupted",
+                    )),
+                    2,
+                ))
+            }
+            _ => None,
+        }
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from_stream(stream))
+        .unwrap()
 }
 
 #[derive(Default)]
@@ -231,8 +302,10 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
                     "required": ["answer"],
                     "additionalProperties": false
                 }),
+                missing_required_string_fallbacks: Vec::new(),
                 max_output_tokens: 32,
                 temperature: Some(0.0),
+                timeout: None,
             },
         )
         .await
@@ -253,13 +326,21 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
                     "required": ["answer"],
                     "additionalProperties": false
                 }),
+                missing_required_string_fallbacks: Vec::new(),
                 max_output_tokens: 32,
                 temperature: None,
+                timeout: None,
             },
         )
         .await
         .unwrap_err();
-    assert!(matches!(invalid_schema, ProviderError::SchemaValidation));
+    assert!(matches!(
+        invalid_schema,
+        ProviderError::SchemaValidation {
+            issue: "type_mismatch",
+            ref path,
+        } if path == "$.answer"
+    ));
 
     let embeddings = service.embeddings();
     let records = embeddings
@@ -316,7 +397,7 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
                 dimension: Some(3),
                 ..ModelCapabilities::default()
             },
-            settings: json!({}),
+            settings: ModelSettings::default(),
             enabled: true,
         })
         .await
@@ -354,7 +435,7 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
                 dimension: Some(2),
                 ..ModelCapabilities::default()
             },
-            settings: json!({}),
+            settings: ModelSettings::default(),
             enabled: true,
         })
         .await
@@ -387,6 +468,357 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
     assert_eq!(job.job_type, "embedding.rebuild");
     assert!(job.payload.to_string().contains("note-a"));
     assert!(!job.payload.to_string().contains("first"));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn provider_deletion_is_revision_checked_and_cleans_only_dependent_state() {
+    let (address, server) = fake_server().await;
+    let directory = tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let work = context(&state, "delete-work", directory.path().join("delete-work")).await;
+    let other = context(
+        &state,
+        "delete-other",
+        directory.path().join("delete-other"),
+    )
+    .await;
+    let auth = AuthService::new(
+        state.auth(),
+        MasterKeyRing::from_bytes(1, &[13_u8; 32]).unwrap(),
+    );
+    let service = ProviderService::new(state.clone(), auth);
+    for context in [&work, &other] {
+        service
+            .set_provider_mode(context, ProviderMode::LocalOnly, None)
+            .await
+            .unwrap();
+    }
+    let provider = service
+        .create_provider(ProviderInput {
+            name: "provider to delete".to_owned(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: Url::parse(&format!("http://{address}/v1/")).unwrap(),
+            settings: ProviderSettings::default(),
+            enabled: true,
+            secret: Some(SecretString::new("delete-secret")),
+        })
+        .await
+        .unwrap();
+    let unrelated = service
+        .create_provider(ProviderInput {
+            name: "provider to retain".to_owned(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: Url::parse(&format!("http://{address}/v1/")).unwrap(),
+            settings: ProviderSettings::default(),
+            enabled: true,
+            secret: None,
+        })
+        .await
+        .unwrap();
+    let original_secret_id = provider.secret_id.unwrap();
+    let provider = service
+        .update_provider(
+            provider,
+            ProviderInput {
+                name: "provider to delete after edit".to_owned(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url: Url::parse(&format!("http://{address}/v1/")).unwrap(),
+                settings: ProviderSettings::default(),
+                enabled: true,
+                secret: Some(SecretString::new("replacement-secret")),
+            },
+        )
+        .await
+        .unwrap();
+    let secret_id = provider.secret_id.unwrap();
+    assert_ne!(secret_id, original_secret_id);
+    assert!(
+        state
+            .auth()
+            .get_secret(original_secret_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(state.auth().count_encrypted_secrets().await.unwrap(), 1);
+    let models = service.test_provider(&work, provider.id).await.unwrap();
+    let chat = models
+        .iter()
+        .find(|model| model.external_model_id == "fake-chat")
+        .unwrap();
+    let embedding = models
+        .iter()
+        .find(|model| model.external_model_id == "fake-embed")
+        .unwrap();
+    service
+        .bind_model(None, "note_summary", chat.id, json!({}), None)
+        .await
+        .unwrap();
+    service
+        .bind_model(
+            Some(&other),
+            "embedding_memory",
+            embedding.id,
+            json!({}),
+            None,
+        )
+        .await
+        .unwrap();
+    let work_embedding = service
+        .embeddings()
+        .embed_and_store(
+            &work,
+            embedding.id,
+            &[EmbeddingInput {
+                source: EmbeddingSourceRef {
+                    object_type: "note".to_owned(),
+                    object_id: "work-note".to_owned(),
+                    chunk_key: "root".to_owned(),
+                    content_hash: "sha256:work".to_owned(),
+                },
+                text: "work text".to_owned(),
+            }],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    let other_embedding = service
+        .embeddings()
+        .embed_and_store(
+            &other,
+            embedding.id,
+            &[EmbeddingInput {
+                source: EmbeddingSourceRef {
+                    object_type: "memory".to_owned(),
+                    object_id: "other-memory".to_owned(),
+                    chunk_key: "root".to_owned(),
+                    content_hash: "sha256:other".to_owned(),
+                },
+                text: "other text".to_owned(),
+            }],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+
+    let stale = service
+        .delete_provider(provider.id, Some(Revision::new(99)))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        stale,
+        ProviderError::State(StateError::InvalidDomain(
+            DomainError::RevisionConflict { .. }
+        ))
+    ));
+    assert!(service.get_provider(provider.id).await.is_ok());
+
+    let summary = service
+        .delete_provider(provider.id, Some(provider.revision))
+        .await
+        .unwrap();
+    assert_eq!(summary.models_deleted, 2);
+    assert_eq!(summary.bindings_deleted, 2);
+    assert_eq!(summary.embeddings_deleted, 2);
+    assert_eq!(summary.secrets_deleted, 1);
+    assert!(matches!(
+        service.get_provider(provider.id).await,
+        Err(ProviderError::NotFound)
+    ));
+    assert_eq!(
+        service.get_provider(unrelated.id).await.unwrap().id,
+        unrelated.id
+    );
+    assert!(
+        state
+            .providers()
+            .list_models(Some(provider.id), 100)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        state
+            .providers()
+            .get_binding(None, "note_summary")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        state
+            .providers()
+            .get_binding(Some(&other), "embedding_memory")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        state
+            .providers()
+            .get_embedding(&work, work_embedding.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        state
+            .providers()
+            .get_embedding(&other, other_embedding.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(state.auth().get_secret(secret_id).await.unwrap().is_none());
+    let stale_update = service
+        .update_provider(
+            provider.clone(),
+            ProviderInput {
+                name: "must remain deleted".to_owned(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url: Url::parse(&format!("http://{address}/v1/")).unwrap(),
+                settings: ProviderSettings::default(),
+                enabled: true,
+                secret: Some(SecretString::new("must-not-be-orphaned")),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(stale_update, ProviderError::NotFound));
+    assert_eq!(state.auth().count_encrypted_secrets().await.unwrap(), 0);
+    assert!(
+        state
+            .providers()
+            .get_health(provider.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        state
+            .integrity_check()
+            .await
+            .unwrap()
+            .foreign_key_violations,
+        0
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn provider_service_sends_first_class_vendor_structured_generation_contracts() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new()
+        .route("/v1/chat/completions", post(capture_vendor_chat))
+        .with_state(captured.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let directory = tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let work = context(
+        &state,
+        "vendor-contracts",
+        directory.path().join("vendor-contracts"),
+    )
+    .await;
+    let auth = AuthService::new(
+        state.auth(),
+        MasterKeyRing::from_bytes(1, &[9_u8; 32]).unwrap(),
+    );
+    let service = ProviderService::new(state, auth);
+    service
+        .set_provider_mode(&work, ProviderMode::LocalOnly, None)
+        .await
+        .unwrap();
+    let cases = [
+        (ProviderKind::DeepSeek, "deepseek-v4-pro"),
+        (ProviderKind::XiaomiMimo, "mimo-v2.5"),
+        (ProviderKind::ZhipuGlm, "glm-5.2"),
+        (ProviderKind::MoonshotKimi, "kimi-k2.6"),
+        (ProviderKind::GoogleGemini, "gemini-3.7-flash"),
+        (ProviderKind::AlibabaQwen, "qwen3.8-max"),
+    ];
+    for (kind, external_model_id) in cases {
+        let provider = service
+            .create_provider(ProviderInput {
+                name: format!("{} fixture", kind.as_str()),
+                kind,
+                base_url: Url::parse(&format!("http://{address}/v1/")).unwrap(),
+                settings: ProviderSettings::default(),
+                enabled: true,
+                secret: None,
+            })
+            .await
+            .unwrap();
+        let model = service
+            .register_model(ModelInput {
+                provider_id: provider.id,
+                external_model_id: external_model_id.to_owned(),
+                capabilities: ModelCapabilities {
+                    structured_output: true,
+                    ..ModelCapabilities::default()
+                },
+                settings: ModelSettings::default(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        let result = service
+            .generate_structured(
+                &work,
+                model.id,
+                &StructuredGenerationRequest {
+                    model: external_model_id.to_owned(),
+                    system: "Return an answer.".to_owned(),
+                    user: "untrusted input".to_owned(),
+                    schema_name: "answer".to_owned(),
+                    schema: json!({
+                        "type": "object",
+                        "properties": {"answer": {"type": "string"}},
+                        "required": ["answer"],
+                        "additionalProperties": false
+                    }),
+                    missing_required_string_fallbacks: Vec::new(),
+                    max_output_tokens: 8_192,
+                    temperature: Some(0.0),
+                    timeout: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.value["answer"], "ok");
+    }
+
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 6);
+    assert_eq!(requests[0]["response_format"]["type"], "json_object");
+    assert_eq!(requests[0]["max_tokens"], 32_768);
+    assert_eq!(requests[0]["thinking"]["type"], "enabled");
+    assert_eq!(requests[1]["max_completion_tokens"], 32_768);
+    assert_eq!(requests[1]["thinking"]["type"], "enabled");
+    assert_eq!(requests[2]["max_tokens"], 8_192);
+    assert_eq!(requests[3]["response_format"]["type"], "json_schema");
+    assert_eq!(requests[3]["max_completion_tokens"], 32_768);
+    assert_eq!(requests[4]["response_format"]["type"], "json_schema");
+    assert_eq!(requests[4]["max_tokens"], 32_768);
+    assert_eq!(requests[5]["response_format"]["type"], "json_object");
+    assert_eq!(requests[5]["max_completion_tokens"], 32_768);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.get("temperature").is_none())
+    );
 
     server.abort();
 }
@@ -452,8 +884,11 @@ async fn transport_enforces_retry_auth_timeout_and_redirect_contracts() {
         .route("/retry", post(transient_response))
         .route("/unauthorized", post(unauthorized_response))
         .route("/invalid-content", post(invalid_content_response))
+        .route("/invalid-json", post(invalid_json_response))
         .route("/redirect", post(redirect_response))
         .route("/slow", post(slow_response))
+        .route("/delayed-body", post(delayed_body_response))
+        .route("/interrupted-body", post(interrupted_body_response))
         .with_state(attempts.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -475,9 +910,8 @@ async fn transport_enforces_retry_auth_timeout_and_redirect_contracts() {
             Method::POST,
             &endpoint("/retry"),
             ProviderMode::LocalOnly,
-            Some(&secret),
-            AuthStyle::Bearer,
             &json!({}),
+            RequestOptions::new(AuthStyle::Bearer, Some(&secret)),
         )
         .await
         .unwrap();
@@ -489,9 +923,8 @@ async fn transport_enforces_retry_auth_timeout_and_redirect_contracts() {
             Method::POST,
             &endpoint("/unauthorized"),
             ProviderMode::LocalOnly,
-            Some(&secret),
-            AuthStyle::Bearer,
             &json!({}),
+            RequestOptions::new(AuthStyle::Bearer, Some(&secret)),
         )
         .await
         .unwrap_err();
@@ -508,25 +941,40 @@ async fn transport_enforces_retry_auth_timeout_and_redirect_contracts() {
             Method::POST,
             &endpoint("/invalid-content"),
             ProviderMode::LocalOnly,
-            None,
-            AuthStyle::None,
             &json!({}),
+            RequestOptions::new(AuthStyle::None, None)
+                .with_timeout(Some(Duration::from_millis(250))),
         )
         .await
         .unwrap_err();
+    assert_eq!(
+        invalid_content.code(),
+        "provider_response_content_type_invalid"
+    );
     assert!(matches!(
         invalid_content,
         ProviderError::InvalidResponse("provider content type is not JSON")
     ));
+
+    let invalid_json = transport
+        .request_json(
+            Method::POST,
+            &endpoint("/invalid-json"),
+            ProviderMode::LocalOnly,
+            &json!({}),
+            RequestOptions::new(AuthStyle::None, None),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(invalid_json.code(), "provider_response_json_invalid");
 
     let redirect = transport
         .request_json(
             Method::POST,
             &endpoint("/redirect"),
             ProviderMode::LocalOnly,
-            None,
-            AuthStyle::None,
             &json!({}),
+            RequestOptions::new(AuthStyle::None, None),
         )
         .await
         .unwrap_err();
@@ -544,9 +992,8 @@ async fn transport_enforces_retry_auth_timeout_and_redirect_contracts() {
             Method::POST,
             &endpoint("/slow"),
             ProviderMode::LocalOnly,
-            None,
-            AuthStyle::None,
             &json!({}),
+            RequestOptions::new(AuthStyle::None, None),
         )
         .await
         .unwrap_err();
@@ -557,6 +1004,78 @@ async fn transport_enforces_retry_auth_timeout_and_redirect_contracts() {
             retryable: true
         }
     ));
+
+    let ambiguous_transport = ProviderTransport::new(ProviderSettings {
+        max_retries: 2,
+        timeout_ms: 20,
+        connect_timeout_ms: 10,
+        ..ProviderSettings::default()
+    })
+    .unwrap();
+    let attempts_before_body_timeout = attempts.load(Ordering::SeqCst);
+    let body_timeout = ambiguous_transport
+        .request_json(
+            Method::POST,
+            &endpoint("/delayed-body"),
+            ProviderMode::LocalOnly,
+            &json!({}),
+            RequestOptions::new(AuthStyle::None, None),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        body_timeout,
+        ProviderError::Transport {
+            code: "provider_response_timeout",
+            retryable: false
+        }
+    ));
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        attempts_before_body_timeout + 1,
+        "a response-body failure after HTTP success must not replay paid work"
+    );
+
+    let overridden = ambiguous_transport
+        .request_json(
+            Method::POST,
+            &endpoint("/delayed-body"),
+            ProviderMode::LocalOnly,
+            &json!({}),
+            RequestOptions::new(AuthStyle::None, None)
+                .with_timeout(Some(Duration::from_millis(250))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(overridden.body["ok"], true);
+
+    let attempts_before_interrupted_body = attempts.load(Ordering::SeqCst);
+    let interrupted_body = ambiguous_transport
+        .request_json(
+            Method::POST,
+            &endpoint("/interrupted-body"),
+            ProviderMode::LocalOnly,
+            &json!({}),
+            RequestOptions::new(AuthStyle::None, None)
+                .with_timeout(Some(Duration::from_millis(250))),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            &interrupted_body,
+            ProviderError::Transport {
+                code: "provider_response_incomplete",
+                retryable: false
+            }
+        ),
+        "unexpected interrupted-body classification: {interrupted_body:?}"
+    );
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        attempts_before_interrupted_body + 1,
+        "an interrupted response body must not replay paid work"
+    );
 
     server.abort();
 }
@@ -581,6 +1100,24 @@ async fn provider_policy_rejects_remote_http_and_unsafe_endpoints() {
             .unwrap()
             .path(),
         "/v1/embeddings"
+    );
+    assert_eq!(
+        endpoint_url(
+            &Url::parse("https://open.bigmodel.cn/api/paas/v4/").unwrap(),
+            "chat/completions"
+        )
+        .unwrap()
+        .path(),
+        "/api/paas/v4/chat/completions"
+    );
+    assert_eq!(
+        endpoint_url(
+            &Url::parse("https://generativelanguage.googleapis.com/v1beta/openai/").unwrap(),
+            "models"
+        )
+        .unwrap()
+        .path(),
+        "/v1beta/openai/models"
     );
     assert!(endpoint_url(&public_http, "../secret").is_err());
 }
@@ -613,7 +1150,7 @@ async fn provider_disabled_mode_fails_before_remote_request() {
             provider_id: provider.id,
             external_model_id: "model".to_owned(),
             capabilities: ModelCapabilities::default(),
-            settings: json!({}),
+            settings: ModelSettings::default(),
             enabled: true,
         })
         .await
@@ -630,4 +1167,46 @@ async fn provider_disabled_mode_fails_before_remote_request() {
         .await
         .unwrap_err();
     assert!(matches!(error, ProviderError::PrivacyDenied));
+}
+
+#[tokio::test]
+async fn non_openai_adapter_rejects_an_openai_compatibility_override() {
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let auth = AuthService::new(
+        state.auth(),
+        MasterKeyRing::from_bytes(1, &[8_u8; 32]).unwrap(),
+    );
+    let service = ProviderService::new(state, auth);
+    let provider = service
+        .create_provider(ProviderInput {
+            name: "Anthropic fixture".to_owned(),
+            kind: ProviderKind::AnthropicMessages,
+            base_url: Url::parse("https://api.example.test/v1/").unwrap(),
+            settings: ProviderSettings::default(),
+            enabled: true,
+            secret: None,
+        })
+        .await
+        .unwrap();
+
+    let error = service
+        .register_model(ModelInput {
+            provider_id: provider.id,
+            external_model_id: "anthropic-model".to_owned(),
+            capabilities: ModelCapabilities {
+                structured_output: true,
+                ..ModelCapabilities::default()
+            },
+            settings: ModelSettings {
+                openai_structured_output_mode: OpenAiStructuredOutputMode::PromptOnly,
+                ..ModelSettings::default()
+            },
+            enabled: true,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ProviderError::InvalidConfiguration(_)));
 }

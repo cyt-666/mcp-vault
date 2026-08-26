@@ -2,873 +2,347 @@
 
 ## 1. Purpose
 
-The memory subsystem turns the Vault into durable, transparent context that an AI Agent can recall naturally.
+MCP Vault memory is durable, sourced context for future Agent work. It is not
+an excerpt collection, an opaque model store, or a synonym for note search.
 
-It is designed to answer:
+The subsystem has two complementary outputs:
 
-> Which prior preferences, decisions, constraints, facts, relationships, events, and project state are useful for the current task?
+- consolidated long-term memory for preferences, decisions, constraints,
+  project state, procedures, relationships, and significant events;
+- `related_notes` retrieval cues for ordinary article knowledge that should
+  remain in canonical notes instead of becoming global memory.
 
-It is not merely:
+Normal recall is an indexed local operation. It never scans the Vault or calls
+an LLM at query time.
 
-- a chat transcript;
-- a search result list;
-- a vector database;
-- an opaque vendor memory store;
-- an LLM call that scans the Vault at query time.
+## 2. Architecture
 
-## 2. Natural recall and MCP limitations
-
-An MCP server does not receive every user message unless the MCP Host chooses to call it. Therefore the server cannot guarantee recall on every turn.
-
-MCP Vault increases the probability of appropriate recall through:
-
-1. clear `server/discover` instructions;
-2. a tool named and described as long-term `recall`, not generic search;
-3. low-latency structured results;
-4. `vault://memory/context` as a compact bootstrap resource;
-5. separate discovery tools when the Agent does not know exact terms;
-6. provenance and confidence so recalled information can be used safely.
-
-The external Agent remains responsible for deciding when to call recall and how to reason over results.
-
-## 3. Memory principles
-
-### 3.1 Atomic
-
-One memory expresses one independently useful proposition.
-
-Good:
+MCP Vault follows the Codex two-phase memory architecture. The admission unit
+is a Vault note revision or explicit `remember` input rather than a Codex
+conversation rollout.
 
 ```text
-MCP Vault uses Rust for its server implementation.
+note revision / explicit remember
+    │
+    ▼
+Phase 1: memory.extract
+    memory_extraction model
+    semantic raw_memory + source_summary + evidence anchors
+    │
+    ▼
+memory_stage1_outputs
+    ready / no_output / withdrawn
+    │
+    ▼
+Phase 2: memory.consolidate
+    memory_consolidation model
+    deduplicate / merge / update / conflict resolution / forgetting
+    │
+    ▼
+validated canonical artifacts through Vault Core
+    MEMORY.md + memory_summary.md + per-record Markdown
+    │
+    ▼
+Vault-scoped memory projections and LLM-free recall
 ```
 
-Bad:
+Phase 1 never writes final `memories` or final memory FTS rows. Phase 2 never
+accepts arbitrary Provider output as state: local code validates every action,
+source reference, evidence index, memory ID, lifecycle transition, bound, and
+optimistic revision before applying it.
 
-```text
-MCP Vault uses Rust, WebDAV, a LAN-only UI, several providers,
-and might support multiple Vaults later.
-```
+## 3. Phase 1: source distillation
 
-### 3.2 Durable
+### 3.1 Note input
 
-A memory is worth retaining beyond the immediate exchange.
+When automatic memory is enabled, an ordinary non-managed Markdown revision is
+eligible without tags, frontmatter, marker files, path conventions, or special
+folders. Managed memory artifacts are always excluded to prevent feedback
+loops.
 
-Do not store every prompt, response, or transient question.
-
-### 3.3 Transparent
-
-An active durable memory has canonical Markdown representation inside the Vault. The owner can inspect and edit it through Obsidian or the Admin Console.
-
-### 3.4 Sourced
-
-Every memory has one or more provenance sources or is explicitly marked as an unsourced user/Agent assertion.
-
-### 3.5 Temporal
-
-Memories may have:
-
-- `valid_from`;
-- `valid_to`;
-- creation and update time;
-- a current, stale, superseded, or archived lifecycle.
-
-### 3.6 Conservative
-
-LLM output is a candidate. Questions, examples, hypotheticals, and weak inferences must not become high-confidence memories.
-
-### 3.7 Vault-isolated
-
-Memory extraction, storage, embedding, retrieval, and audit are scoped to one authenticated Vault.
-
-## 4. Memory types
-
-Initial types are text values to permit future extension:
-
-```text
-identity
-preference
-decision
-constraint
-fact
-project
-progress
-event
-relationship
-procedure
-```
-
-### Identity
-
-Stable user or project identity.
-
-```text
-The owner is a software engineer.
-```
-
-Identity extraction requires high confidence because a wrong identity fact has broad impact.
-
-### Preference
-
-A durable choice or working style.
-
-```text
-The owner prefers hands-on deep learning exercises over theory-only study.
-```
-
-### Decision
-
-A choice that governs future work.
-
-```text
-The service will use existing WebDAV-compatible Obsidian plugins.
-```
-
-### Constraint
-
-A requirement that limits solutions.
-
-```text
-The Admin Console must not be exposed on the public listener.
-```
-
-### Fact
-
-A durable factual statement.
-
-```text
-The development machine has an NVIDIA RTX 4070 Ti.
-```
-
-### Project
-
-A durable project definition, objective, or ownership fact.
-
-### Progress
-
-The latest known state of a project, learning plan, or task.
-
-Progress often changes quickly and receives a shorter temporal half-life.
-
-### Event
-
-An important dated occurrence.
-
-### Relationship
-
-A meaningful relation between people, projects, technologies, or decisions.
-
-### Procedure
-
-A reusable way to perform an operation.
-
-## 5. Lifecycle
-
-```text
-candidate ──promote──▶ active
-    │                    │
-    ├──reject──▶ rejected│
-    │                    ├──newer truth──▶ superseded
-    │                    ├──source lost──▶ stale
-    │                    └──intentional──▶ archived
-    └──expire───────────▶ rejected/stale
-```
-
-### Candidate
-
-Proposed by automatic extraction, import, or low-confidence rule.
-
-Candidates are derived and may be rebuilt.
-
-### Active
-
-Eligible for normal recall and materialized as canonical Markdown.
-
-### Superseded
-
-Replaced by a newer memory. Retained for history but excluded from normal recall.
-
-### Stale
-
-No longer reliably supported by a current source. Excluded by default.
-
-### Archived
-
-Intentionally inactive but retained.
-
-### Rejected
-
-Reviewed and not accepted. A deterministic extraction fingerprint prevents immediate recreation from the same source revision and pipeline version.
-
-## 6. Canonical Markdown
-
-Default layout:
-
-```text
-_mcp-vault/
-└── memory/
-    └── records/
-        └── 2026/
-            └── 08/
-                └── <memory-id>.md
-```
-
-Example:
-
-```markdown
----
-id: 0191f5d4-7f2d-7c37-9d9e-c875df159b09
-type: decision
-status: active
-importance: 0.95
-confidence: 0.99
-origin: extracted
-created_at: 2026-08-19T08:30:00Z
-updated_at: 2026-08-19T08:30:00Z
-valid_from: 2026-08-19T00:00:00Z
-valid_to:
-entities:
-  - MCP Vault
-  - Obsidian
-  - WebDAV
-tags:
-  - architecture
-  - synchronization
-supersedes: []
-sources:
-  - path: Projects/mcp-vault/design.md
-    revision: 18
-    heading:
-      - Obsidian Integration
-    start_line: 142
-    end_line: 148
-    excerpt_hash: sha256:...
-extraction:
-  provider_id: primary-llm
-  model_id: memory-extractor
-  prompt_version: memory-extraction-v1
-  pipeline_version: 1
----
-
-MCP Vault uses standard WebDAV and existing Obsidian synchronization
-plugins instead of maintaining a custom Obsidian plugin.
-```
-
-The body is the canonical proposition. Frontmatter is canonical metadata.
-
-Rules:
-
-- one active memory per file;
-- ID is stable;
-- edits go through Vault Core or are reconciled as out-of-band edits;
-- memory files are excluded from automatic extraction to prevent loops;
-- memory files remain searchable and recallable;
-- invalid manually edited memory files are quarantined from normal recall and shown in Admin diagnostics rather than silently rewritten.
-
-## 7. Database projection
-
-The operational database projects canonical memories and stores candidates.
-
-### 7.1 Memories
-
-```sql
-CREATE TABLE memories (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    memory_type TEXT NOT NULL,
-    status TEXT NOT NULL,
-    content TEXT NOT NULL,
-    normalized_content TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    importance REAL NOT NULL,
-    confidence REAL NOT NULL,
-    origin TEXT NOT NULL,
-    canonical_file_id TEXT,
-    canonical_path TEXT,
-    canonical_revision INTEGER,
-    valid_from INTEGER,
-    valid_to INTEGER,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    last_recalled_at INTEGER,
-    recall_count INTEGER NOT NULL DEFAULT 0,
-    UNIQUE(vault_id, content_hash, status),
-    FOREIGN KEY(vault_id) REFERENCES vaults(id)
-);
-```
-
-### 7.2 Provenance
-
-```sql
-CREATE TABLE memory_sources (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    memory_id TEXT NOT NULL,
-    source_type TEXT NOT NULL,
-    note_file_id TEXT,
-    note_path TEXT,
-    note_revision INTEGER,
-    heading_path_json TEXT,
-    start_line INTEGER,
-    end_line INTEGER,
-    excerpt_hash TEXT,
-    actor_id TEXT,
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY(memory_id) REFERENCES memories(id)
-);
-```
-
-Source types:
-
-```text
-note
-explicit_agent
-explicit_admin
-direct_markdown
-import
-```
-
-### 7.3 Entities, tags, and relations
-
-```sql
-CREATE TABLE memory_entities (
-    vault_id TEXT NOT NULL,
-    memory_id TEXT NOT NULL,
-    entity TEXT NOT NULL,
-    normalized_entity TEXT NOT NULL,
-    PRIMARY KEY(memory_id, normalized_entity)
-);
-
-CREATE TABLE memory_tags (
-    vault_id TEXT NOT NULL,
-    memory_id TEXT NOT NULL,
-    tag TEXT NOT NULL,
-    PRIMARY KEY(memory_id, tag)
-);
-
-CREATE TABLE memory_relations (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    source_memory_id TEXT NOT NULL,
-    target_memory_id TEXT NOT NULL,
-    relation_type TEXT NOT NULL,
-    confidence REAL NOT NULL,
-    created_at INTEGER NOT NULL
-);
-```
-
-Relation types:
-
-```text
-supersedes
-supports
-contradicts
-refines
-related_to
-derived_from
-```
-
-### 7.4 Candidates
-
-```sql
-CREATE TABLE memory_candidates (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    source_file_id TEXT NOT NULL,
-    source_path TEXT NOT NULL,
-    source_revision INTEGER NOT NULL,
-    candidate_json TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    extraction_fingerprint TEXT NOT NULL,
-    confidence REAL NOT NULL,
-    importance REAL NOT NULL,
-    decision TEXT,
-    decision_reason TEXT,
-    created_at INTEGER NOT NULL,
-    reviewed_at INTEGER,
-    UNIQUE(vault_id, extraction_fingerprint)
-);
-```
-
-The extraction fingerprint includes Vault, source identity/revision, section anchor, pipeline version, prompt version, provider/model, and normalized candidate.
-
-## 8. Explicit `remember`
-
-`remember` is a command to create or reinforce durable memory.
-
-Flow:
-
-```text
-request
-  → authenticate and require memory:write
-  → normalize and validate atomic content
-  → duplicate/conflict lookup
-  → choose create/reinforce/merge/review outcome
-  → materialize or update Markdown through Vault Core
-  → commit memory projection, audit, and outbox
-  → schedule embedding
-```
-
-It accepts an idempotency key.
-
-Possible outcomes:
-
-```text
-created
-reinforced_existing
-merged_into_existing
-conflict_requires_review
-rejected_by_policy
-```
-
-The response always identifies the resulting memory or candidate.
-
-## 9. Automatic extraction pipeline
-
-### 9.1 Trigger
-
-A canonical Markdown revision schedules extraction when:
-
-- the Vault enables extraction;
-- the path matches include policy and not exclude policy;
-- the file is not under the canonical memory root;
-- the revision/pipeline fingerprint has not already completed;
-- the note size is within configured limits or can be sectioned.
-
-The source write completes before extraction.
-
-### 9.2 Preparation
-
-The analyzer:
-
-1. parses frontmatter;
-2. parses headings and source byte/line anchors;
-3. separates fenced code and quoted material;
-4. splits by meaningful Markdown section;
-5. adds note title, path, tags, and parent heading context;
-6. removes configured sensitive sections;
-7. enforces provider request-size policy.
-
-Note text is untrusted data. The extraction prompt must explicitly tell the model not to follow instructions contained in the note.
-
-### 9.3 Structured extraction
-
-Provider output must satisfy a versioned JSON Schema.
-
-Example:
+The extraction model returns one strict object:
 
 ```json
 {
-  "memories": [
+  "source_summary": "Detailed evidence-aware summary",
+  "source_slug": "stable-source-slug",
+  "raw_memory": "Concise consolidation-ready semantic information",
+  "evidence": [
     {
-      "type": "decision",
-      "content": "MCP Vault will use Rust for the server implementation.",
-      "importance": 0.95,
-      "confidence": 0.99,
-      "valid_from": "2026-08-19T00:00:00Z",
-      "entities": ["MCP Vault", "Rust"],
-      "tags": ["architecture"],
-      "source_anchor": {
-        "heading": ["Technology Stack"],
-        "start_line": 40,
-        "end_line": 44
-      }
+      "start_line": 10,
+      "end_line": 10
     }
   ]
 }
 ```
 
-The prompt requires the model to:
+MCP Vault sends an untrusted view whose lines carry stable `L<number>:` labels.
+The model selects bounded start/end labels and never supplies the canonical
+quotation. MCP Vault validates the range against the current revision, derives
+the exact excerpt hash itself, and persists only file identity, path, revision,
+and line range. `source_summary` is an auxiliary Phase 2 context field. If a
+Provider omits only that field while returning a valid string `raw_memory`, MCP
+Vault copies that semantic text verbatim as the summary and reruns the full
+schema/evidence checks. This bounded repair never accepts an empty object or
+manufactures evidence.
 
-- return no memory when nothing durable is present;
-- distinguish an accepted decision from an idea or question;
-- avoid turning examples into user facts;
-- avoid combining propositions;
-- preserve negation and temporal qualifiers;
-- use conservative confidence;
-- quote no more source text than necessary for anchoring.
+`raw_memory` is semantic model output and is allowed to differ from the source
+wording. It is not final global memory. If the note contains no durable input,
+Phase 1 stores `no_output` with empty semantic fields so an unchanged note is
+not billed again.
 
-### 9.4 Candidate validation
+### 3.2 Explicit remember input
 
-Deterministic validation checks:
-
-- schema;
-- length and atomicity heuristics;
-- confidence/importance bounds;
-- source anchor inside supplied section;
-- source revision still current;
-- type allowed by Vault policy;
-- path privacy policy;
-- duplicate/conflict candidates.
-
-An invalid LLM response never writes canonical Markdown.
-
-### 9.5 Promotion policy
-
-Recommended defaults:
-
-```yaml
-memory:
-  extraction:
-    auto_promote: true
-    minimum_confidence: 0.92
-    minimum_importance: 0.75
-    auto_promote_types:
-      - decision
-      - constraint
-      - project
-      - progress
-```
-
-Identity, sensitive relationships, and low-confidence preferences should default to human review.
-
-Promotion rechecks that the source revision is current.
-
-## 10. Duplicate detection
-
-Use multiple signals:
-
-- exact normalized hash;
-- lexical similarity;
-- embedding similarity;
-- entity overlap;
-- type compatibility;
-- source overlap;
-- temporal validity.
-
-Outcomes:
-
-```text
-new
-duplicate
-reinforcement
-refinement
-potential_contradiction
-```
-
-Reinforcement adds another provenance source and may increase confidence within a cap. It does not create a duplicate canonical file.
-
-## 11. Contradiction and supersession
-
-Example:
-
-```text
-Existing: The backend will use Go.
-New:      The backend will use Rust.
-```
-
-The service must not silently overwrite.
-
-When the newer statement is explicit, current, and authoritative:
-
-1. create/promote the Rust memory;
-2. mark the Go memory `superseded`;
-3. add a `supersedes` relation;
-4. preserve both canonical files/status history;
-5. return only the current memory in normal recall.
-
-When authority is uncertain, create a reviewable conflict. Recall may return both with a conflict warning only when the caller requests unresolved conflicts.
-
-## 12. Source invalidation
-
-When a source note changes or is deleted:
-
-- re-evaluate memories sourced from the old revision;
-- retain a memory if another current source supports it;
-- update provenance when the proposition remains;
-- create a replacement and supersede when it changes;
-- mark stale when no source supports it;
-- never delete an explicit memory solely because a related note changed.
-
-## 13. Recall pipeline
-
-```text
-query + optional current context
-    → normalization and entity extraction
-    → candidate generation
-        ├── memory FTS
-        ├── memory vectors
-        ├── entity/tag match
-        ├── topic/index relation
-        └── recent active project/progress
-    → Vault, status, permission, and temporal filtering
-    → reciprocal-rank fusion
-    → importance/confidence/continuity/recency boosts
-    → contradiction and duplicate handling
-    → diversity selection
-    → token-budgeted structured output
-```
-
-### 13.1 Candidate pools
-
-Recommended defaults:
-
-```text
-FTS: 50
-Vector: 50
-Entity/tag: 30
-Topic/graph: 30
-Recent active: 20
-```
-
-All pools are Vault-scoped.
-
-### 13.2 Fusion
-
-Use weighted Reciprocal Rank Fusion because lexical and vector scores are not directly comparable.
-
-Conceptual base:
-
-```text
-base =
-    lexical_weight / (k + lexical_rank)
-  + semantic_weight / (k + semantic_rank)
-  + entity_weight / (k + entity_rank)
-  + topic_weight / (k + topic_rank)
-```
-
-Recommended `k = 60`.
-
-Then apply bounded boosts:
-
-```text
-final =
-    base
-    × importance_boost
-    × confidence_boost
-    × temporal_boost
-    × continuity_boost
-    × relationship_boost
-```
-
-Weights are configurable and versioned. Debug mode may return a score breakdown.
-
-### 13.3 Temporal behavior
-
-Recency must not erase durable constraints or identity.
-
-Default half-life suggestions:
-
-| Type | Half-life |
-|---|---:|
-| identity | 730 days |
-| preference | 365 days |
-| decision | 365 days |
-| constraint | 365 days |
-| fact | 180 days |
-| project | 120 days |
-| progress | 30 days |
-| event | 90 days |
-| relationship | 180 days |
-| procedure | 365 days |
-
-Explicit `valid_to` has priority. An expired memory cannot be returned as current.
-
-### 13.4 Continuity context
-
-The MCP client may provide:
+MCP/Admin explicit remember is also a Phase 1 admission. The service validates
+and normalizes any note provenance, stages the caller's semantic statement and
+metadata, enqueues `memory.consolidate`, and returns:
 
 ```json
 {
-  "active_project": "mcp-vault",
-  "entities": ["Rust", "WebDAV", "MCP"],
-  "recent_topics": ["memory architecture", "Vault isolation"]
+  "outcome": "staged",
+  "memory": null,
+  "raw_memory_id": "...",
+  "consolidation_job_id": "..."
 }
 ```
 
-The server does not invent conversation state it did not receive.
+The call does not claim that recall has changed. The final memory becomes
+visible only after Phase 2 commits. Idempotency keys map to the same current
+raw input and reject conflicting reuse.
 
-### 13.5 Diversity
+### 3.3 Coverage and re-extraction
 
-Avoid returning many paraphrases.
+One current Stage 1 row is keyed by Vault, source type, and stable source key.
+For notes it records the exact file revision and an effective profile hash over
+the extraction policy, prompt/pipeline, model binding, model settings, and
+Provider settings.
 
-Use semantic deduplication and optionally Maximal Marginal Relevance. Prefer a useful mix of constraints, decisions, preferences, facts, and current progress.
+Incremental extraction skips an unchanged successful `ready` or `no_output`
+row before any Provider call. Explicit full re-extraction includes unchanged
+rows. A failed forced extraction invalidates the profile for retry but does not
+turn previously selected raw content into a false new Phase 2 input.
 
-### 13.6 Token budget
+One malformed model output is a note-local failure. The durable full-Vault job
+checkpoints it and continues later notes. A bounded consecutive-output circuit
+prevents unlimited invalid paid calls while preserving the completed cursor.
 
-The caller specifies result and token limits. The server returns complete atomic memories, compact sources, and a `truncated` indicator. Never cut a memory in the middle.
+## 4. Phase 2: global consolidation
 
-## 14. `recall` contract
+Phase 2 receives a bounded set of dirty Stage 1 inputs, recent current raw
+inputs, the last compact memory summary, and current active global memories.
+The model proposes:
 
-Input:
+- `create`, `update`, `keep`, or `archive` actions;
+- semantic content and memory type for writes;
+- Stage 1/evidence references for every written memory;
+- supersession targets;
+- one `used`, `discarded`, or `withdrawn` disposition for every dirty input;
+- a complete compact `memory_summary`.
 
-```json
-{
-  "query": "Continue implementing the MCP Vault service",
-  "context": {
-    "active_project": "mcp-vault",
-    "entities": ["Rust"],
-    "recent_topics": ["WebDAV", "memory"]
-  },
-  "types": [],
-  "time_range": null,
-  "min_importance": 0.0,
-  "include_historical": false,
-  "include_sources": true,
-  "include_score_breakdown": false,
-  "max_results": 12,
-  "max_tokens": 1800
-}
-```
+Local validation enforces:
 
-Output:
+- every dirty input is dispositioned exactly once;
+- a `used` input is referenced by a write action;
+- discarded/withdrawn inputs are not used as support;
+- note-derived writes reference locally validated evidence anchors;
+- IDs and sources exist in the same Vault;
+- one generation does not target and supersede the same memory;
+- create/update content is bounded, non-empty, and secret-redacted;
+- prepared update/keep/archive actions retain the exact base revision observed
+  before the Provider call.
 
-```json
-{
-  "memories": [
-    {
-      "id": "...",
-      "type": "decision",
-      "content": "MCP Vault uses Rust for its server implementation.",
-      "status": "active",
-      "importance": 0.95,
-      "confidence": 0.99,
-      "valid_from": "2026-08-19T00:00:00Z",
-      "valid_to": null,
-      "sources": [
-        {
-          "path": "Projects/mcp-vault/design.md",
-          "revision": 18,
-          "heading": ["Technology Stack"]
-        }
-      ],
-      "relations": [],
-      "score": 0.93
-    }
-  ],
-  "available_result_count": 7,
-  "truncated": false,
-  "degraded": [],
-  "request_id": "..."
-}
-```
+Only one non-terminal `memory.consolidate` job may exist per Vault. Provider
+I/O happens before the Vault apply lock. Before canonical writes, the service
+rechecks the generation, every raw output hash/status, and every current memory
+revision/content hash. Before a proposal is persisted, a changed snapshot
+causes a short retry with a new input hash. Once a proposal is prepared,
+memory mutations briefly return a retryable conflict until that exact proposal
+is applied or recovered, so its source/base revisions cannot drift underneath
+partial writes.
 
-After a successful response, update `last_recalled_at` and `recall_count` asynchronously. Recall statistics must not mutate canonical memory Markdown.
+Prepared proposals are persisted before application. Retrying the same input
+reuses the validated proposal without another model call. Per-memory proposal
+markers, Vault Core revision preconditions, idempotent proposal commit, and
+selected-input hashes make partial application recoverable after restart. If a
+managed record was written but its memory projection was not, recovery adopts
+the byte-identical current file and completes the projection instead of
+creating another Vault revision. One worker invocation drains successive
+bounded 256-input generations until no dirty Stage 1 input remains; startup
+and periodic reconciliation re-admit any durable input left by the narrow job-
+completion race.
 
-## 15. Provider use
+## 5. Canonical artifacts
 
-### 15.1 LLM roles
-
-- extraction;
-- candidate consolidation;
-- optional note/topic summary;
-- optional reranking.
-
-Normal recall does not require an LLM.
-
-### 15.2 Embedding roles
-
-Use separate model bindings for:
-
-- note/section embedding;
-- memory embedding.
-
-Store model ID, provider ID, dimension, content hash, and generation time. A model change schedules re-embedding and leaves lexical retrieval operational.
-
-### 15.3 Optional local models
-
-A local embedding adapter may use `fastembed` behind a Cargo feature. It must run blocking inference on a bounded dedicated pool, not Tokio’s async core threads.
-
-## 16. Background jobs
-
-Memory job types:
+All final mutations go through Vault Core managed operations:
 
 ```text
-extract_memory
-validate_candidate
-consolidate_candidate
-materialize_memory
-project_memory
-embed_memory
-revalidate_sources
-rebuild_memory_index
+_mcp-vault/memory/
+├── MEMORY.md
+├── memory_summary.md
+├── raw_memories.md
+├── source_summaries/
+│   └── <stage1-id>.md
+└── records/
+    └── YYYY/MM/<memory-id>.md
 ```
 
-Jobs are idempotent, leased, retryable, and visible in Admin.
+- `MEMORY.md` is the retrieval-oriented consolidated semantic state.
+- `memory_summary.md` is the compact cross-memory summary from the committed
+  generation.
+- `raw_memories.md` and `source_summaries/` make the current staged semantic
+  inputs inspectable without copying source quotations.
+- `records/` retains one deterministic Markdown record per final memory for
+  lifecycle/detail/resource compatibility.
 
-Provider errors:
+Obsolete source-summary files are deleted through Vault Core when their Stage
+1 row is withdrawn or regenerated. Revision history and backup retention remain
+independent. Artifact generation paginates the complete active-memory and ready
+Stage 1 sets; the bounded model context is never reused as an artifact cutoff.
+SQLite projections are rebuildable from canonical final Markdown; the original
+note/history remains canonical supporting evidence.
 
-- do not fail the source note write;
-- retry transient errors;
-- fail permanently on invalid credentials or unsupported model until configuration changes;
-- preserve candidate and diagnostic information without logging note bodies.
+## 6. Final memory and provenance
 
-## 17. Admin capabilities
+The final body is a concise normalized semantic statement:
 
-The Memory UI provides:
+```text
+Project services should use Rust for future implementation.
+```
 
-- counts by lifecycle/type;
-- search and filters;
-- canonical Markdown and provenance view;
-- candidate diff to source;
-- promote/reject;
-- edit;
-- merge;
-- mark supersession;
-- archive/restore;
-- hard delete with confirmation;
-- re-extract source;
-- provider/prompt/pipeline metadata;
-- embedding coverage;
-- job failures;
-- recall-debug simulator with score breakdown.
+It is not required to equal this supporting evidence:
 
-The owner must be able to answer: “What does the system remember, why, and from where?”
+```text
+I decided that future services use Rust.
+```
 
-## 18. Privacy and prompt-injection safety
+`memory_sources` separately stores source type, file ID, path, note revision,
+line range, excerpt hash, and Vault ID. Detail operations return source
+metadata; normal recall omits sources by default to conserve context. Exact
+evidence can be verified against the retained note revision through Vault
+history permissions.
 
-- Remote extraction is opt-in per Vault.
-- Exclude policies are evaluated before request creation.
-- Attachments are not sent unless a future explicit multimodal policy permits it.
-- The extraction model gets no tools and no network authority.
-- Prompts treat note content as quoted untrusted data.
-- Output is schema-validated and cannot directly issue actions.
-- Provider redirects are restricted according to security policy.
-- Audit records provider/model usage without note or memory bodies.
-- Sensitive memory types may require manual promotion.
+Memory types remain extensible text values:
 
-## 19. Rebuild behavior
+```text
+identity preference decision constraint fact project progress
+event relationship procedure
+```
 
-Safe to rebuild:
+Final lifecycle states are:
 
-- memory FTS;
-- memory embeddings;
-- entity/tag projections;
-- derived relations;
-- automatic candidates;
-- extraction coverage.
+```text
+active ──newer truth──▶ superseded
+   │
+   ├──source consolidation──▶ archived
+   ├──manual archive────────▶ archived
+   └──invalid managed file──▶ quarantined
+```
 
-Never delete during ordinary rebuild:
+There is no human-review candidate lifecycle in the normal architecture.
+Legacy `memory_candidates` rows are removed by the pipeline cutover and are not
+exposed by Admin or MCP.
 
-- active/archived canonical memory Markdown;
-- manual edits;
-- explicit memories;
-- audit history;
-- source revision history.
+## 7. Recall
 
-A full re-extraction uses deterministic fingerprints and avoids duplicate active memory creation.
+```text
+recall request
+    → Vault/status/temporal filters
+    → memory FTS/entity/tag/recent candidates
+    → optional stored memory vectors
+    → ordinary-note lexical/vector cues when vault:read is allowed
+    → rank fusion and diversity
+    → token-budgeted memories + related_notes
+```
 
-## 20. Memory acceptance tests
+Normal recall reads only the latest committed projection/artifacts. It never
+waits for pending Stage 1 work and never performs a live consolidation call.
+`include_sources` defaults to `false`; `get_memory` and memory resources provide
+provenance detail.
 
-Required tests include:
+An MCP Host still decides when to call recall. Discovery instructions,
+`vault://memory/context`, deterministic low-latency output, and the distinct
+`related_notes` channel make proactive use more likely without pretending MCP
+Vault receives every user message.
 
-- `remember` materializes one valid Markdown record;
-- repeated idempotent remember does not duplicate;
-- direct Markdown edit updates projection;
-- invalid memory Markdown is excluded and diagnosed;
-- memory files do not recursively trigger extraction;
-- extraction question/example is not promoted as fact;
-- duplicate sources reinforce one memory;
-- explicit newer decision supersedes an older one;
-- deleted source marks unsupported extracted memory stale;
-- active recall excludes stale/superseded/archived by default;
-- historical recall includes them when requested;
-- FTS-only recall works with embedding/LLM disabled;
-- hybrid recall falls back predictably during provider outage;
-- current project context boosts relevant memory;
-- expired memory is not presented as current;
-- cross-Vault recall is impossible;
-- excluded source path is never sent to provider;
-- LLM invalid JSON does not write canonical data;
-- provider failure does not fail WebDAV or note mutation;
-- score fixtures remain stable or are deliberately versioned.
+## 8. Source changes and deletion
+
+A note update does not immediately mark all existing memories stale. The new
+revision is distilled, then Phase 2 updates, merges, or forgets affected global
+memory as one sourced decision. Until that commit, the last complete global
+generation remains recallable.
+
+A deleted note marks its current Stage 1 row `withdrawn` and queues Phase 2.
+The consolidation proposal must disposition that withdrawal and archive or
+update unsupported final memory. Other current supporting sources can keep a
+memory active.
+
+## 9. Prerelease pipeline cutover
+
+ADR-0017 makes memory architecture changes destructive while MCP Vault remains
+prerelease. Migration 0011 deletes every old `memory.*` job and all old memory
+database state. `memory.reset_pipeline` is then admitted as a Vault-scoped,
+persistent, idempotent filesystem cutover job.
+
+It:
+
+1. deletes every current file below `_mcp-vault/memory/` through Vault Core,
+   retaining ordinary Core revision history and existing backups;
+2. transactionally purges any residual final memory, Stage 1, proposal,
+   candidate, diagnostic, idempotency, FTS, and memory-vector rows;
+3. writes empty current-generation `MEMORY.md`, `memory_summary.md`, and
+   `raw_memories.md` artifacts;
+4. records `pipeline_generation` plus durable `regeneration_pending` state;
+5. admits a brand-new full-Vault Phase 1 job with `fresh_start = true`, no
+   progress cursor, and the current pipeline generation; and
+6. clears the pending marker only after that exact durable job exists.
+
+No old explicit or extracted memory is converted. Ordinary notes and
+attachments are untouched and are the only regeneration input. If Phase 1 is
+not configured, periodic reconciliation retains the pending marker and admits
+the fresh job after configuration becomes ready.
+
+## 10. Jobs and observability
+
+Persistent job types are:
+
+```text
+memory.extract
+memory.consolidate
+memory.reset_pipeline
+memory.revalidate
+memory.rebuild
+embedding.rebuild
+```
+
+Phase 1 progress reports note cursor/path, processed count, raw inputs staged,
+no-output count, unchanged skips, bounded per-note failures, elapsed time, and
+trusted schema diagnostics. Phase 2 reports raw inputs, created/updated/
+retired/discarded counts, proposal reuse, and committed generation. Logs expose
+the same redacted counts and error codes but never note bodies, raw/final memory
+text, prompts, Provider response text, credentials, or authorization headers.
+
+Running consolidation and pipeline reset cannot be cancelled through Admin after
+their apply phase starts. Shutdown/interruption recovery uses the persisted
+proposal and Vault Core revisions.
+
+## 11. Security and isolation
+
+- Every row, job, source, proposal, artifact, query, and embedding is scoped by
+  `VaultContext`/`vault_id`.
+- Note text, explicit inputs, Provider output, and stored proposal JSON are
+  untrusted.
+- Generated raw memory, summaries, reasons, metadata strings, and final content
+  pass best-effort secret redaction before persistence.
+- Evidence quotations are validated in memory and replaced with line/hash
+  pointers before persistence.
+- Protocol/Admin handlers do not call Providers, SQL, indexes, or the
+  filesystem directly; they call Memory/Vault Core application services.
+- Recall remains usable when Providers are offline.
+
+## 12. Model roles
+
+`memory_extraction` and `memory_consolidation` are separate first-class model
+bindings. Admin considers the complete pipeline ready only when automatic
+memory is enabled, Provider policy allows calls, and both effective models and
+Providers are enabled. Their failures, costs, timeouts, progress, and retry
+domains remain separate.

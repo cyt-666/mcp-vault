@@ -2401,9 +2401,13 @@ dependencies = [
 name = "mcp-vault-indexer"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "axum",
  "comrak",
+ "mcp-vault-auth",
  "mcp-vault-core",
  "mcp-vault-domain",
+ "mcp-vault-providers",
  "mcp-vault-state",
  "mcp-vault-storage-fs",
  "serde",
@@ -2412,6 +2416,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "url",
  "yaml-rust",
 ]
 
@@ -2457,6 +2462,7 @@ dependencies = [
  "mcp-vault-providers",
  "mcp-vault-state",
  "mcp-vault-storage-fs",
+ "regex",
  "serde",
  "serde_json",
  "sha2 0.10.9",

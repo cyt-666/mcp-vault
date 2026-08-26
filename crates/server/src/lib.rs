@@ -16,6 +16,7 @@ use std::{io, net::SocketAddr, path::Path, path::PathBuf, sync::Arc};
 use axum::Router;
 use config::AppConfig;
 use mcp_vault_domain::MaintenanceGate;
+use mcp_vault_memory::MEMORY_PIPELINE_GENERATION;
 use thiserror::Error;
 use tokio::{net::TcpListener, sync::Notify, time::timeout};
 use tracing::{info, warn};
@@ -181,6 +182,24 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         state.clone(),
         provider_service.clone(),
     );
+    let index_service = mcp_vault_indexer::IndexService::with_provider_service(
+        state.clone(),
+        provider_service.clone(),
+    );
+    for vault in state.vaults().list().await? {
+        let context = vault.context()?;
+        if index_service
+            .schedule_note_embeddings(&context)
+            .await
+            .is_err()
+        {
+            warn!(
+                vault_id = %context.id(),
+                error_code = "note_embedding_schedule_failed",
+                "optional startup note embedding scheduling failed"
+            );
+        }
+    }
     let webdav_service = mcp_vault_webdav::WebDavService::new(
         state.clone(),
         auth_service.clone(),
@@ -198,7 +217,7 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         config.data_hosts.iter().cloned().collect(),
         config.data_origins.clone(),
     )
-    .with_memory_service(memory_service.clone());
+    .with_application_services(index_service.clone(), memory_service.clone());
     let readiness = health::Readiness::new();
     let metrics = metrics::Metrics::new(config.metrics_enabled);
     let key_version_ids = auth_service.key_version_ids();
@@ -257,7 +276,7 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
 
     let supervisor = workers::WorkerSupervisor::new(
         state.clone(),
-        workers::outbox_to_job_handler(state.clone()),
+        workers::outbox_to_job_handler(state.clone(), memory_service.clone()),
         workers::WorkerConfig::default(),
     )
     .map_err(|failure| ServerError::Workers(failure.code))?
@@ -300,6 +319,7 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
                 state.clone(),
                 history_root.clone(),
                 core_runtime.clone(),
+                index_service.clone(),
             ),
         )
         .map_err(|failure| ServerError::Workers(failure.code))?;
@@ -316,13 +336,30 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         .map_err(|failure| ServerError::Workers(failure.code))?;
     supervisor
         .register_job_handler(
-            "memory.revalidate",
-            workers::memory_revalidate_job_handler(
+            "memory.consolidate",
+            workers::memory_consolidate_job_handler(
                 state.clone(),
                 history_root.clone(),
                 core_runtime.clone(),
                 memory_service.clone(),
             ),
+        )
+        .map_err(|failure| ServerError::Workers(failure.code))?;
+    supervisor
+        .register_job_handler(
+            "memory.reset_pipeline",
+            workers::memory_reset_pipeline_job_handler(
+                state.clone(),
+                history_root.clone(),
+                core_runtime.clone(),
+                memory_service.clone(),
+            ),
+        )
+        .map_err(|failure| ServerError::Workers(failure.code))?;
+    supervisor
+        .register_job_handler(
+            "memory.revalidate",
+            workers::memory_revalidate_job_handler(state.clone(), memory_service.clone()),
         )
         .map_err(|failure| ServerError::Workers(failure.code))?;
     supervisor
@@ -339,9 +376,35 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
     supervisor
         .register_job_handler(
             "embedding.rebuild",
-            workers::memory_embedding_job_handler(state.clone(), memory_service),
+            workers::embedding_job_handler(state.clone(), index_service, memory_service.clone()),
         )
         .map_err(|failure| ServerError::Workers(failure.code))?;
+    for vault in state.vaults().list().await? {
+        let context = vault
+            .context()
+            .map_err(|_| ServerError::Workers("memory_pipeline_reset_context_invalid"))?;
+        let reset_complete = state
+            .memory()
+            .get_consolidation_state(&context)
+            .await?
+            .is_some_and(|memory_state| {
+                memory_state.pipeline_generation >= MEMORY_PIPELINE_GENERATION
+            });
+        if !reset_complete {
+            workers::ensure_memory_pipeline_reset_job(&state, &context).await?;
+        } else {
+            workers::ensure_memory_pipeline_regeneration_job(
+                &state,
+                &memory_service,
+                &context,
+                None,
+            )
+            .await
+            .map_err(|_| ServerError::Workers("memory_regeneration_admission_failed"))?;
+            workers::ensure_memory_consolidation_job(&state, &context, "startup_recovery", None)
+                .await?;
+        }
+    }
     let worker_shutdown = workers::Cancellation::default();
     let worker_task = tokio::spawn({
         let supervisor = supervisor.clone();
@@ -357,6 +420,7 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         config.reconciliation_interval,
         maintenance.clone(),
         core_runtime.clone(),
+        memory_service.clone(),
         reconciliation_shutdown.clone(),
     ));
 
@@ -599,6 +663,7 @@ async fn run_reconciliation_loop(
     interval: std::time::Duration,
     maintenance: MaintenanceGate,
     core_runtime: mcp_vault_core::VaultCoreRuntime,
+    memory_service: mcp_vault_memory::MemoryService,
     shutdown: workers::Cancellation,
 ) {
     let mut ticker = tokio::time::interval(interval);
@@ -635,6 +700,42 @@ async fn run_reconciliation_loop(
                             "periodic Vault reconciliation completed"
                         ),
                         Err(_) => warn!(vault_id = %vault_id, "periodic Vault reconciliation failed"),
+                    }
+                    let context = match vault.context() {
+                        Ok(context) => context,
+                        Err(_) => {
+                            warn!(vault_id = %vault_id, "periodic memory admission could not resolve Vault context");
+                            continue;
+                        }
+                    };
+                    if workers::ensure_memory_pipeline_reset_job(&state, &context)
+                        .await
+                        .is_err()
+                    {
+                        warn!(vault_id = %vault_id, "periodic memory pipeline reset admission failed");
+                        continue;
+                    }
+                    if workers::ensure_memory_pipeline_regeneration_job(
+                        &state,
+                        &memory_service,
+                        &context,
+                        None,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        warn!(vault_id = %vault_id, "periodic memory regeneration admission failed");
+                    }
+                    if workers::ensure_memory_consolidation_job(
+                        &state,
+                        &context,
+                        "periodic_recovery",
+                        None,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        warn!(vault_id = %vault_id, "periodic memory consolidation admission failed");
                     }
                 }
             }
@@ -1065,7 +1166,7 @@ mod tests {
         .unwrap();
         let index_job = state
             .jobs()
-            .list(&context, None, 20, 0)
+            .list(&context, None, None, 20, 0)
             .await
             .unwrap()
             .into_iter()
@@ -1075,6 +1176,7 @@ mod tests {
             state.clone(),
             directory.path().join("history"),
             core_runtime,
+            mcp_vault_indexer::IndexService::new(state.clone()),
         ))(index_job, workers::Cancellation::default())
         .await;
         assert_eq!(outcome, workers::JobOutcome::Complete);

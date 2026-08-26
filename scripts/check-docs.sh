@@ -13,6 +13,7 @@ required_docs=(
   docs/security.md
   docs/development-and-testing.md
   docs/deployment-and-operations.md
+  docs/provider-compatibility.md
   docs/compatibility-matrix.md
   docs/requirements-traceability.md
   docs/release-readiness.md
@@ -59,6 +60,8 @@ test -f migrations/0006_provider_vector_state.sql
 test -f migrations/0007_memory_state.sql
 test -f migrations/0008_backup_catalog.sql
 test -f migrations/0009_auth_runtime_hardening.sql
+test -f migrations/0010_codex_two_phase_memory.sql
+test -f migrations/0011_prerelease_memory_pipeline_cutover.sql
 test -f crates/state/tests/fixtures/pre_wp02.sql
 
 grep -q '"build"' frontend/admin/package.json

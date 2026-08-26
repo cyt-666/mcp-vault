@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use mcp_vault_domain::{FileId, MemoryId, Revision, VaultPath};
+use mcp_vault_domain::{FileId, JobId, MemoryId, MemoryRawId, Revision, VaultPath};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -74,7 +74,7 @@ impl TryFrom<&str> for MemoryType {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryStatus {
-    /// Derived proposal awaiting review.
+    /// Legacy prerelease candidate projection retained for migration parsing.
     Candidate,
     /// Eligible for normal recall and canonical Markdown.
     Active,
@@ -84,7 +84,7 @@ pub enum MemoryStatus {
     Stale,
     /// Intentionally inactive but retained.
     Archived,
-    /// Rejected by review/policy.
+    /// Legacy/manual rejected lifecycle value retained for compatibility.
     Rejected,
     /// Invalid managed Markdown excluded from recall.
     Quarantined,
@@ -126,7 +126,7 @@ impl TryFrom<&str> for MemoryStatus {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryOrigin {
-    /// Validated provider candidate.
+    /// Consolidated from model-distilled note sources.
     Extracted,
     /// Explicit Agent assertion.
     ExplicitAgent,
@@ -149,6 +149,139 @@ impl MemoryOrigin {
             Self::Import => "import",
         }
     }
+}
+
+/// Which ordinary Markdown revisions may be evaluated for automatic memory.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtractionSourceMode {
+    /// Evaluate ordinary notes after the Vault-level feature is enabled.
+    #[serde(alias = "explicit_only", alias = "all_notes")]
+    #[default]
+    Automatic,
+}
+
+/// Vault-scoped automatic Phase 1 extraction policy.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ExtractionPolicy {
+    /// Admit future Markdown changes and explicit backfill runs for extraction.
+    pub enabled: bool,
+    /// Serialized source-admission mode; legacy marker modes migrate to automatic.
+    pub source_mode: ExtractionSourceMode,
+    /// Hard upper bound on exact evidence anchors retained from one note.
+    #[serde(alias = "max_candidates_per_note")]
+    pub max_evidence_per_note: u32,
+    /// Total deadline for one structured note-extraction request.
+    pub request_timeout_seconds: u64,
+}
+
+impl Default for ExtractionPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            source_mode: ExtractionSourceMode::Automatic,
+            max_evidence_per_note: 3,
+            request_timeout_seconds: 300,
+        }
+    }
+}
+
+/// Extraction policy together with its optimistic settings revision.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ExtractionPolicyState {
+    /// Effective typed policy; absent storage resolves to the safe default.
+    pub policy: ExtractionPolicy,
+    /// Persisted settings revision, absent for the implicit default.
+    pub revision: Option<Revision>,
+}
+
+/// Redacted readiness projection for Admin and durable job admission.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ExtractionReadiness {
+    /// True only when policy, provider mode, binding, model, and provider permit extraction.
+    pub ready: bool,
+    /// Stable non-secret blocker codes.
+    pub blockers: Vec<String>,
+    /// Selected provider identity when resolvable.
+    pub provider_id: Option<String>,
+    /// Selected internal model identity when resolvable.
+    pub model_id: Option<String>,
+    /// Provider-specific model identifier for display.
+    pub external_model_id: Option<String>,
+}
+
+/// Bounded outcome of processing one current Markdown note.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NoteExtractionResult {
+    /// Whether the current note passed local bounds and reached the provider.
+    pub source_admitted: bool,
+    /// Whether Phase 1 stored a non-empty consolidation-ready raw memory.
+    pub raw_memory_staged: bool,
+    /// Whether Phase 1 successfully decided that the source has no memory input.
+    pub no_output: bool,
+    /// True when an unchanged note/profile was skipped before a Provider call.
+    pub already_evaluated: bool,
+}
+
+/// Per-call behavior for automatic note extraction.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NoteExtractionOptions {
+    /// Re-evaluate a current successful note/profile at explicit operator cost.
+    pub include_evaluated: bool,
+}
+
+/// Outcome of reconciling one required fresh pipeline regeneration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PipelineRegenerationAdmission {
+    /// The Vault does not require a fresh regeneration.
+    NotPending,
+    /// One or both memory model phases are not ready yet.
+    AwaitingConfiguration,
+    /// Another extraction currently owns the singleton slot.
+    AwaitingOtherExtraction,
+    /// A current-generation fresh extraction exists and pending state cleared.
+    Admitted,
+}
+
+/// Outcome of one committed Phase 2 global-memory consolidation.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct MemoryConsolidationReport {
+    /// Dirty Phase 1 inputs consumed by this generation.
+    pub raw_inputs: u32,
+    /// New semantic final memories created.
+    pub created: u32,
+    /// Existing semantic memories updated.
+    pub updated: u32,
+    /// Existing memories archived or superseded.
+    pub retired: u32,
+    /// Raw inputs intentionally discarded as low-signal/temporary.
+    pub discarded: u32,
+    /// Monotonic committed global-memory generation.
+    pub generation: u64,
+    /// Whether a crash-safe prepared proposal was reused without another model call.
+    pub reused_proposal: bool,
+}
+
+/// Result of one destructive prerelease memory-pipeline cutover.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MemoryPipelineResetReport {
+    /// Whether the current pipeline generation already completed cleanup.
+    pub already_completed: bool,
+    /// Managed memory Markdown files removed through Vault Core.
+    pub removed_managed_files: u64,
+    /// Final memory projections removed.
+    pub cleared_memories: u64,
+    /// Phase 1 source outputs removed.
+    pub cleared_stage1_outputs: u64,
+    /// Candidate projections removed.
+    pub cleared_candidates: u64,
+    /// Consolidation proposals removed.
+    pub cleared_proposals: u64,
+    /// Managed-file diagnostics removed.
+    pub cleared_diagnostics: u64,
+    /// Derived memory embedding records removed.
+    pub cleared_embeddings: u64,
 }
 
 /// Provenance input supplied by an explicit command or extraction validator.
@@ -255,8 +388,12 @@ pub struct RecallRequest {
     pub include_sources: bool,
     /// Return score breakdown.
     pub include_score_breakdown: bool,
+    /// Include ordinary-note cues only when the caller can also read Vault notes.
+    pub include_related_notes: bool,
     /// Maximum memories.
     pub max_results: u32,
+    /// Maximum ordinary-note cues.
+    pub max_related_notes: u32,
     /// Approximate output token budget.
     pub max_tokens: u32,
 }
@@ -270,9 +407,11 @@ impl Default for RecallRequest {
             valid_at: None,
             min_importance: 0.0,
             include_historical: false,
-            include_sources: true,
+            include_sources: false,
             include_score_breakdown: false,
+            include_related_notes: true,
             max_results: 12,
+            max_related_notes: 8,
             max_tokens: 1800,
         }
     }
@@ -281,10 +420,14 @@ impl Default for RecallRequest {
 /// Result of explicit remember.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RememberResult {
-    /// created, reinforced_existing, merged_into_existing, or conflict_requires_review.
+    /// staged for consolidation or an idempotent prior staging result.
     pub outcome: String,
-    /// Resulting memory bundle.
-    pub memory: MemoryView,
+    /// Final memory when returned by a legacy read path; staging returns none.
+    pub memory: Option<MemoryView>,
+    /// Phase 1 raw-memory input identity.
+    pub raw_memory_id: Option<MemoryRawId>,
+    /// Admitted Phase 2 job identity.
+    pub consolidation_job_id: Option<JobId>,
 }
 
 /// Revision-aware durable memory update.
@@ -382,35 +525,41 @@ pub struct MemoryRelationView {
 pub struct RecallResult {
     /// Selected memories.
     pub memories: Vec<MemoryView>,
-    /// Number of eligible candidates before result truncation.
+    /// Selected rebuildable ordinary-note cues.
+    pub related_notes: Vec<RelatedNoteView>,
+    /// Total eligible memory and note candidates before truncation.
     pub available_result_count: u32,
+    /// Eligible durable memories before truncation.
+    pub available_memory_count: u32,
+    /// Eligible ordinary-note cues before truncation.
+    pub available_related_note_count: u32,
     /// Whether the token/result budget truncated output.
     pub truncated: bool,
     /// Stable degradation codes.
     pub degraded: Vec<String>,
 }
 
-/// Candidate extraction proposal accepted by deterministic validation.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ExtractedCandidate {
-    /// Memory type.
-    pub memory_type: MemoryType,
-    /// Atomic proposition.
-    pub content: String,
-    /// Importance.
-    pub importance: f64,
-    /// Confidence.
-    pub confidence: f64,
-    /// Optional validity start.
-    pub valid_from: Option<i64>,
-    /// Entity values.
-    pub entities: Vec<String>,
-    /// Tag values.
+/// A rebuildable cue that points an Agent back to canonical note source.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct RelatedNoteView {
+    /// Stable canonical file identity.
+    pub file_id: FileId,
+    /// Current Vault-relative path.
+    pub path: VaultPath,
+    /// Canonical revision represented by the cue.
+    pub revision: Revision,
+    /// Optional note title.
+    pub title: Option<String>,
+    /// Bounded matching snippet from the derived projection.
+    pub snippet: String,
+    /// Search tags.
     pub tags: Vec<String>,
-    /// Source anchor heading.
-    pub heading_path: Vec<String>,
-    /// Source line range.
-    pub start_line: Option<u32>,
-    /// Source line range end.
-    pub end_line: Option<u32>,
+    /// Stable knowledge-map topic keys.
+    pub topic_ids: Vec<String>,
+    /// Ordered note headings for source selection.
+    pub headings: Vec<String>,
+    /// Fused relevance score.
+    pub score: f64,
+    /// Optional stable score diagnostics.
+    pub score_breakdown: Option<BTreeMap<String, f64>>,
 }

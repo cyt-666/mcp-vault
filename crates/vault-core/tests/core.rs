@@ -482,7 +482,7 @@ async fn out_of_band_content_change_is_diagnosed_before_core_read() {
 }
 
 #[tokio::test]
-async fn reconciliation_imports_direct_create_edit_and_delete_as_external_revisions() {
+async fn reconciliation_imports_direct_create_edit_delete_and_restore_as_external_revisions() {
     let (directory, state, context, core) = setup().await;
     let note = path("external.md");
     std::fs::create_dir_all(directory.path().join("content")).unwrap();
@@ -502,6 +502,14 @@ async fn reconciliation_imports_direct_create_edit_and_delete_as_external_revisi
         .unwrap()
         .unwrap();
     assert_eq!(file.current_revision, Revision::new(1));
+    let events = state
+        .outbox()
+        .find_by_aggregate(&context, &file.id.to_string())
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, "FileCreated");
+    assert_eq!(events[0].payload["operation"], "external_change");
     assert_eq!(
         state
             .files()
@@ -526,6 +534,14 @@ async fn reconciliation_imports_direct_create_edit_and_delete_as_external_revisi
         .unwrap()
         .unwrap();
     assert_eq!(file.current_revision, Revision::new(2));
+    let events = state
+        .outbox()
+        .find_by_aggregate(&context, &file.id.to_string())
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].event_type, "FileUpdated");
+    assert_eq!(events[1].payload["operation"], "external_change");
 
     std::fs::remove_file(directory.path().join("content/external.md")).unwrap();
     let third = core.reconcile(&context, reconciler_actor()).await.unwrap();
@@ -548,6 +564,38 @@ async fn reconciliation_imports_direct_create_edit_and_delete_as_external_revisi
             .deleted_at
             .is_some()
     );
+    let events = state
+        .outbox()
+        .find_by_aggregate(&context, &file.id.to_string())
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[2].event_type, "FileDeleted");
+    assert_eq!(events[2].payload["operation"], "external_change");
+
+    std::fs::write(
+        directory.path().join("content/external.md"),
+        b"restored outside",
+    )
+    .unwrap();
+    let fourth = core.reconcile(&context, reconciler_actor()).await.unwrap();
+    assert_eq!(fourth.imported, 1);
+    let restored = state
+        .files()
+        .get_active(&context, &note)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.id, file.id);
+    assert_eq!(restored.current_revision, Revision::new(4));
+    let events = state
+        .outbox()
+        .find_by_aggregate(&context, &file.id.to_string())
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 4);
+    assert_eq!(events[3].event_type, "FileRestored");
+    assert_eq!(events[3].payload["operation"], "external_change");
 }
 
 #[cfg(unix)]

@@ -7,8 +7,8 @@ use serde_json::Value;
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 
 use mcp_vault_domain::{
-    FileId, MemoryCandidateId, MemoryId, MemoryRelationId, MemorySourceId, Revision, VaultContext,
-    VaultId, VaultPath,
+    FileId, MemoryCandidateId, MemoryConsolidationId, MemoryId, MemoryRawId, MemoryRelationId,
+    MemorySourceId, ModelId, ProviderId, Revision, VaultContext, VaultId, VaultPath,
 };
 
 use crate::{StateError, now_millis};
@@ -206,6 +206,139 @@ pub struct MemoryIdempotencyRecord {
     pub created_at: i64,
 }
 
+/// Current Codex-style Phase 1 output for one Vault-scoped source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryStage1OutputRecord {
+    /// Stable raw-memory identity.
+    pub id: MemoryRawId,
+    /// Vault isolation boundary.
+    pub vault_id: VaultId,
+    /// Note, explicit_agent, explicit_admin, direct_markdown, or import.
+    pub source_type: String,
+    /// Stable source identity within the source type.
+    pub source_key: String,
+    /// Source note identity when applicable.
+    pub source_file_id: Option<FileId>,
+    /// Source path at extraction time.
+    pub source_path: Option<VaultPath>,
+    /// Source revision at extraction time.
+    pub source_revision: Option<Revision>,
+    /// Effective Phase 1 extraction profile.
+    pub profile_hash: String,
+    /// Phase 1 pipeline version.
+    pub pipeline_version: u32,
+    /// Phase 1 prompt version.
+    pub prompt_version: String,
+    /// Consolidation-ready semantic raw memory.
+    pub raw_memory: String,
+    /// Detailed source/evidence summary.
+    pub source_summary: String,
+    /// Optional stable routing slug.
+    pub source_slug: Option<String>,
+    /// Bounded structured evidence references.
+    pub evidence: Value,
+    /// Bounded source/admission hints carried into consolidation.
+    pub metadata: Value,
+    /// Hash of output fields and evidence.
+    pub output_hash: String,
+    /// Ready, no_output, or withdrawn.
+    pub status: String,
+    /// Provider generation timestamp.
+    pub generated_at: i64,
+    /// Last row update timestamp.
+    pub updated_at: i64,
+    /// Number of consolidation selections/usages.
+    pub usage_count: u64,
+    /// Last successful consolidation usage.
+    pub last_usage: Option<i64>,
+    /// Whether this exact output has completed Phase 2.
+    pub selected_for_phase2: bool,
+    /// Output hash selected by the last successful Phase 2.
+    pub selected_for_phase2_hash: Option<String>,
+    /// Last successful selection timestamp.
+    pub selected_for_phase2_at: Option<i64>,
+}
+
+/// Persisted untrusted Phase 2 proposal for crash-safe application.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryConsolidationProposalRecord {
+    /// Stable proposal identity.
+    pub id: MemoryConsolidationId,
+    /// Vault isolation boundary.
+    pub vault_id: VaultId,
+    /// Deterministic hash of current raw and global inputs.
+    pub input_hash: String,
+    /// Structured consolidation proposal, never logged by default.
+    pub proposal: Value,
+    /// Internal model identity.
+    pub model_id: ModelId,
+    /// Internal Provider identity.
+    pub provider_id: ProviderId,
+    /// Consolidation prompt version.
+    pub prompt_version: String,
+    /// Prepared, applied, or rejected.
+    pub status: String,
+    /// Preparation timestamp.
+    pub created_at: i64,
+    /// Successful application timestamp.
+    pub applied_at: Option<i64>,
+}
+
+/// Last committed global memory generation for one Vault.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryConsolidationStateRecord {
+    /// Vault isolation boundary.
+    pub vault_id: VaultId,
+    /// Monotonic committed generation.
+    pub generation: u64,
+    /// Compact semantic memory summary.
+    pub memory_summary: String,
+    /// Input hash used by the last successful generation.
+    pub last_input_hash: Option<String>,
+    /// Applied proposal identity.
+    pub last_proposal_id: Option<MemoryConsolidationId>,
+    /// Last successful consolidation timestamp.
+    pub last_success_at: Option<i64>,
+    /// Current prerelease memory architecture generation.
+    pub pipeline_generation: u32,
+    /// Whether current notes still need one complete Phase 1 regeneration.
+    pub regeneration_pending: bool,
+    /// Last state update timestamp.
+    pub updated_at: i64,
+}
+
+/// Rows removed by one Vault-scoped prerelease memory-pipeline cutover.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MemoryPipelinePurgeReport {
+    /// Final memory projections removed.
+    pub memories: u64,
+    /// Phase 1 source outputs removed.
+    pub stage1_outputs: u64,
+    /// Obsolete candidate projections removed.
+    pub candidates: u64,
+    /// Prepared/applied consolidation proposals removed.
+    pub proposals: u64,
+    /// Managed-file diagnostics removed.
+    pub diagnostics: u64,
+    /// Derived memory embedding records removed.
+    pub embeddings: u64,
+}
+
+/// Phase 1 coverage and pending-selection counts for one Vault.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MemoryStage1Counts {
+    /// All current source outputs.
+    pub total: u64,
+    /// Sources with non-empty raw memory.
+    pub ready: u64,
+    /// Sources successfully evaluated with no durable output.
+    pub no_output: u64,
+    /// Deleted/withdrawn sources awaiting consolidation.
+    pub withdrawn: u64,
+    /// Outputs not represented by the latest committed generation.
+    pub pending: u64,
+}
+
 /// Redacted diagnosis for one invalid managed memory file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MemoryDiagnosticRecord {
@@ -309,6 +442,61 @@ struct CandidateRow {
     decision_reason: Option<String>,
     created_at: i64,
     reviewed_at: Option<i64>,
+}
+
+#[derive(Debug, FromRow)]
+struct Stage1OutputRow {
+    id: String,
+    vault_id: String,
+    source_type: String,
+    source_key: String,
+    source_file_id: Option<String>,
+    source_path: Option<String>,
+    source_revision: Option<i64>,
+    profile_hash: String,
+    pipeline_version: i64,
+    prompt_version: String,
+    raw_memory: String,
+    source_summary: String,
+    source_slug: Option<String>,
+    evidence_json: String,
+    metadata_json: String,
+    output_hash: String,
+    status: String,
+    generated_at: i64,
+    updated_at: i64,
+    usage_count: i64,
+    last_usage: Option<i64>,
+    selected_for_phase2: i64,
+    selected_for_phase2_hash: Option<String>,
+    selected_for_phase2_at: Option<i64>,
+}
+
+#[derive(Debug, FromRow)]
+struct ConsolidationProposalRow {
+    id: String,
+    vault_id: String,
+    input_hash: String,
+    proposal_json: String,
+    model_id: String,
+    provider_id: String,
+    prompt_version: String,
+    status: String,
+    created_at: i64,
+    applied_at: Option<i64>,
+}
+
+#[derive(Debug, FromRow)]
+struct ConsolidationStateRow {
+    vault_id: String,
+    generation: i64,
+    memory_summary: String,
+    last_input_hash: Option<String>,
+    last_proposal_id: Option<String>,
+    last_success_at: Option<i64>,
+    pipeline_generation: i64,
+    regeneration_pending: i64,
+    updated_at: i64,
 }
 
 /// SQL boundary for memory projection and candidate state.
@@ -783,6 +971,477 @@ impl MemoryRepository {
         self.list_memories(context, filter, limit, 0).await
     }
 
+    /// Return the current Phase 1 output for one exact source identity.
+    pub async fn get_stage1_output(
+        &self,
+        context: &VaultContext,
+        source_type: &str,
+        source_key: &str,
+    ) -> Result<Option<MemoryStage1OutputRecord>, StateError> {
+        self.ensure_vault_context(context).await?;
+        let row = sqlx::query_as::<_, Stage1OutputRow>(
+            "SELECT id, vault_id, source_type, source_key, source_file_id,
+                    source_path, source_revision, profile_hash, pipeline_version,
+                    prompt_version, raw_memory, source_summary, source_slug,
+                    evidence_json, metadata_json, output_hash, status, generated_at, updated_at,
+                    usage_count, last_usage, selected_for_phase2,
+                    selected_for_phase2_hash, selected_for_phase2_at
+             FROM memory_stage1_outputs
+             WHERE vault_id = ? AND source_type = ? AND source_key = ?",
+        )
+        .bind(context.id().to_string())
+        .bind(source_type)
+        .bind(source_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(stage1_output_from_row).transpose()
+    }
+
+    /// Insert or replace the current Phase 1 output for one source.
+    pub async fn upsert_stage1_output(
+        &self,
+        context: &VaultContext,
+        output: &MemoryStage1OutputRecord,
+    ) -> Result<MemoryStage1OutputRecord, StateError> {
+        self.ensure_vault_context(context).await?;
+        validate_stage1_output(context, output)?;
+        sqlx::query(
+            "INSERT INTO memory_stage1_outputs
+             (id, vault_id, source_type, source_key, source_file_id, source_path,
+              source_revision, profile_hash, pipeline_version, prompt_version,
+              raw_memory, source_summary, source_slug, evidence_json, metadata_json, output_hash,
+              status, generated_at, updated_at, usage_count, last_usage,
+              selected_for_phase2, selected_for_phase2_hash,
+              selected_for_phase2_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(vault_id, source_type, source_key) DO UPDATE SET
+              source_file_id = excluded.source_file_id,
+              source_path = excluded.source_path,
+              source_revision = excluded.source_revision,
+              profile_hash = excluded.profile_hash,
+              pipeline_version = excluded.pipeline_version,
+              prompt_version = excluded.prompt_version,
+              raw_memory = excluded.raw_memory,
+              source_summary = excluded.source_summary,
+              source_slug = excluded.source_slug,
+              evidence_json = excluded.evidence_json,
+              metadata_json = excluded.metadata_json,
+              status = excluded.status,
+              generated_at = excluded.generated_at,
+              updated_at = excluded.updated_at,
+              selected_for_phase2 = CASE
+                WHEN memory_stage1_outputs.output_hash = excluded.output_hash
+                 AND memory_stage1_outputs.status = excluded.status
+                THEN memory_stage1_outputs.selected_for_phase2 ELSE 0 END,
+              selected_for_phase2_hash = CASE
+                WHEN memory_stage1_outputs.output_hash = excluded.output_hash
+                 AND memory_stage1_outputs.status = excluded.status
+                THEN memory_stage1_outputs.selected_for_phase2_hash ELSE NULL END,
+              selected_for_phase2_at = CASE
+                WHEN memory_stage1_outputs.output_hash = excluded.output_hash
+                 AND memory_stage1_outputs.status = excluded.status
+                THEN memory_stage1_outputs.selected_for_phase2_at ELSE NULL END,
+              output_hash = excluded.output_hash",
+        )
+        .bind(output.id.to_string())
+        .bind(context.id().to_string())
+        .bind(&output.source_type)
+        .bind(&output.source_key)
+        .bind(output.source_file_id.map(|id| id.to_string()))
+        .bind(output.source_path.as_ref().map(VaultPath::as_str))
+        .bind(output.source_revision.map(Revision::as_i64).transpose()?)
+        .bind(&output.profile_hash)
+        .bind(i64::from(output.pipeline_version))
+        .bind(&output.prompt_version)
+        .bind(&output.raw_memory)
+        .bind(&output.source_summary)
+        .bind(output.source_slug.as_deref())
+        .bind(serde_json::to_string(&output.evidence)?)
+        .bind(serde_json::to_string(&output.metadata)?)
+        .bind(&output.output_hash)
+        .bind(&output.status)
+        .bind(output.generated_at)
+        .bind(output.updated_at)
+        .bind(
+            i64::try_from(output.usage_count).map_err(|_| {
+                StateError::InvalidInput("raw memory usage count exceeds SQLite range")
+            })?,
+        )
+        .bind(output.last_usage)
+        .bind(i64::from(output.selected_for_phase2))
+        .bind(output.selected_for_phase2_hash.as_deref())
+        .bind(output.selected_for_phase2_at)
+        .execute(&self.pool)
+        .await?;
+        self.get_stage1_output(context, &output.source_type, &output.source_key)
+            .await?
+            .ok_or(StateError::InvalidInput("raw memory output was not saved"))
+    }
+
+    /// List current Phase 1 inputs in deterministic update/id order.
+    pub async fn list_stage1_outputs(
+        &self,
+        context: &VaultContext,
+        dirty_only: bool,
+        limit: u32,
+    ) -> Result<Vec<MemoryStage1OutputRecord>, StateError> {
+        self.list_stage1_outputs_page(context, dirty_only, limit, 0)
+            .await
+    }
+
+    /// List one deterministic page of current Phase 1 inputs.
+    pub async fn list_stage1_outputs_page(
+        &self,
+        context: &VaultContext,
+        dirty_only: bool,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<MemoryStage1OutputRecord>, StateError> {
+        self.ensure_vault_context(context).await?;
+        if limit == 0 || limit > 4096 || offset > 1_000_000 {
+            return Err(StateError::InvalidInput("raw memory query page is invalid"));
+        }
+        let rows = if dirty_only {
+            sqlx::query_as::<_, Stage1OutputRow>(
+                "SELECT id, vault_id, source_type, source_key, source_file_id,
+                        source_path, source_revision, profile_hash, pipeline_version,
+                        prompt_version, raw_memory, source_summary, source_slug,
+                        evidence_json, metadata_json, output_hash, status, generated_at, updated_at,
+                        usage_count, last_usage, selected_for_phase2,
+                        selected_for_phase2_hash, selected_for_phase2_at
+                 FROM memory_stage1_outputs
+                 WHERE vault_id = ? AND selected_for_phase2 = 0
+                 ORDER BY updated_at ASC, id ASC LIMIT ? OFFSET ?",
+            )
+            .bind(context.id().to_string())
+            .bind(i64::from(limit))
+            .bind(i64::from(offset))
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, Stage1OutputRow>(
+                "SELECT id, vault_id, source_type, source_key, source_file_id,
+                        source_path, source_revision, profile_hash, pipeline_version,
+                        prompt_version, raw_memory, source_summary, source_slug,
+                        evidence_json, metadata_json, output_hash, status, generated_at, updated_at,
+                        usage_count, last_usage, selected_for_phase2,
+                        selected_for_phase2_hash, selected_for_phase2_at
+                 FROM memory_stage1_outputs
+                 WHERE vault_id = ?
+                 ORDER BY updated_at ASC, id ASC LIMIT ? OFFSET ?",
+            )
+            .bind(context.id().to_string())
+            .bind(i64::from(limit))
+            .bind(i64::from(offset))
+            .fetch_all(&self.pool)
+            .await?
+        };
+        rows.into_iter().map(stage1_output_from_row).collect()
+    }
+
+    /// List the most recently updated ready Phase 1 inputs for bounded Phase 2
+    /// context. The result is returned oldest-to-newest for deterministic
+    /// prompting.
+    pub async fn list_recent_ready_stage1_outputs(
+        &self,
+        context: &VaultContext,
+        limit: u32,
+    ) -> Result<Vec<MemoryStage1OutputRecord>, StateError> {
+        self.ensure_vault_context(context).await?;
+        if limit == 0 || limit > 4096 {
+            return Err(StateError::InvalidInput("raw memory limit is invalid"));
+        }
+        let rows = sqlx::query_as::<_, Stage1OutputRow>(
+            "SELECT id, vault_id, source_type, source_key, source_file_id,
+                    source_path, source_revision, profile_hash, pipeline_version,
+                    prompt_version, raw_memory, source_summary, source_slug,
+                    evidence_json, metadata_json, output_hash, status, generated_at, updated_at,
+                    usage_count, last_usage, selected_for_phase2,
+                    selected_for_phase2_hash, selected_for_phase2_at
+             FROM memory_stage1_outputs
+             WHERE vault_id = ? AND status = 'ready'
+             ORDER BY updated_at DESC, id DESC LIMIT ?",
+        )
+        .bind(context.id().to_string())
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut outputs = rows
+            .into_iter()
+            .map(stage1_output_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        outputs.reverse();
+        Ok(outputs)
+    }
+
+    /// Count raw inputs not yet represented by a committed Phase 2 generation.
+    pub async fn pending_stage1_count(&self, context: &VaultContext) -> Result<u64, StateError> {
+        self.ensure_vault_context(context).await?;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM memory_stage1_outputs
+             WHERE vault_id = ? AND selected_for_phase2 = 0",
+        )
+        .bind(context.id().to_string())
+        .fetch_one(&self.pool)
+        .await?;
+        u64::try_from(count).map_err(|_| StateError::InvalidInput("raw memory count is invalid"))
+    }
+
+    /// Return aggregate Phase 1 coverage without loading generated text.
+    pub async fn stage1_counts(
+        &self,
+        context: &VaultContext,
+    ) -> Result<MemoryStage1Counts, StateError> {
+        self.ensure_vault_context(context).await?;
+        let (total, ready, no_output, withdrawn, pending): (i64, i64, i64, i64, i64) =
+            sqlx::query_as(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(status = 'ready'), 0),
+                        COALESCE(SUM(status = 'no_output'), 0),
+                        COALESCE(SUM(status = 'withdrawn'), 0),
+                        COALESCE(SUM(selected_for_phase2 = 0), 0)
+                 FROM memory_stage1_outputs WHERE vault_id = ?",
+            )
+            .bind(context.id().to_string())
+            .fetch_one(&self.pool)
+            .await?;
+        let parse = |value| {
+            u64::try_from(value)
+                .map_err(|_| StateError::InvalidInput("raw memory count is invalid"))
+        };
+        Ok(MemoryStage1Counts {
+            total: parse(total)?,
+            ready: parse(ready)?,
+            no_output: parse(no_output)?,
+            withdrawn: parse(withdrawn)?,
+            pending: parse(pending)?,
+        })
+    }
+
+    /// Make prior successful Phase 1 coverage stale before explicit regeneration.
+    pub async fn invalidate_stage1_output(
+        &self,
+        context: &VaultContext,
+        source_type: &str,
+        source_key: &str,
+    ) -> Result<bool, StateError> {
+        self.ensure_vault_context(context).await?;
+        let result = sqlx::query(
+            "UPDATE memory_stage1_outputs
+             SET profile_hash = 'invalidated', updated_at = ?
+             WHERE vault_id = ? AND source_type = ? AND source_key = ?",
+        )
+        .bind(now_millis()?)
+        .bind(context.id().to_string())
+        .bind(source_type)
+        .bind(source_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Mark one existing source withdrawn so Phase 2 can forget unsupported memory.
+    pub async fn withdraw_stage1_output(
+        &self,
+        context: &VaultContext,
+        source_type: &str,
+        source_key: &str,
+    ) -> Result<bool, StateError> {
+        self.ensure_vault_context(context).await?;
+        let result = sqlx::query(
+            "UPDATE memory_stage1_outputs
+             SET status = 'withdrawn', selected_for_phase2 = 0,
+                 selected_for_phase2_hash = NULL, selected_for_phase2_at = NULL,
+                 updated_at = ?
+             WHERE vault_id = ? AND source_type = ? AND source_key = ?
+               AND status != 'withdrawn'",
+        )
+        .bind(now_millis()?)
+        .bind(context.id().to_string())
+        .bind(source_type)
+        .bind(source_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Return a prepared/applied Phase 2 proposal for one exact input set.
+    pub async fn get_consolidation_proposal_by_input(
+        &self,
+        context: &VaultContext,
+        input_hash: &str,
+    ) -> Result<Option<MemoryConsolidationProposalRecord>, StateError> {
+        self.ensure_vault_context(context).await?;
+        let row = sqlx::query_as::<_, ConsolidationProposalRow>(
+            "SELECT id, vault_id, input_hash, proposal_json, model_id, provider_id,
+                    prompt_version, status, created_at, applied_at
+             FROM memory_consolidation_proposals
+             WHERE vault_id = ? AND input_hash = ?",
+        )
+        .bind(context.id().to_string())
+        .bind(input_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(consolidation_proposal_from_row).transpose()
+    }
+
+    /// Return the newest unapplied proposal for crash-safe Phase 2 recovery.
+    pub async fn latest_prepared_consolidation_proposal(
+        &self,
+        context: &VaultContext,
+    ) -> Result<Option<MemoryConsolidationProposalRecord>, StateError> {
+        self.ensure_vault_context(context).await?;
+        let row = sqlx::query_as::<_, ConsolidationProposalRow>(
+            "SELECT id, vault_id, input_hash, proposal_json, model_id, provider_id,
+                    prompt_version, status, created_at, applied_at
+             FROM memory_consolidation_proposals
+             WHERE vault_id = ? AND status = 'prepared'
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1",
+        )
+        .bind(context.id().to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(consolidation_proposal_from_row).transpose()
+    }
+
+    /// Persist one validated but still untrusted Phase 2 proposal before applying it.
+    pub async fn insert_consolidation_proposal(
+        &self,
+        context: &VaultContext,
+        proposal: &MemoryConsolidationProposalRecord,
+    ) -> Result<MemoryConsolidationProposalRecord, StateError> {
+        self.ensure_vault_context(context).await?;
+        if proposal.vault_id != context.id() || proposal.status != "prepared" {
+            return Err(StateError::InvalidInput(
+                "memory consolidation proposal is invalid",
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO memory_consolidation_proposals
+             (id, vault_id, input_hash, proposal_json, model_id, provider_id,
+              prompt_version, status, created_at, applied_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'prepared', ?, NULL)
+             ON CONFLICT(vault_id, input_hash) DO NOTHING",
+        )
+        .bind(proposal.id.to_string())
+        .bind(context.id().to_string())
+        .bind(&proposal.input_hash)
+        .bind(serde_json::to_string(&proposal.proposal)?)
+        .bind(proposal.model_id.to_string())
+        .bind(proposal.provider_id.to_string())
+        .bind(&proposal.prompt_version)
+        .bind(proposal.created_at)
+        .execute(&self.pool)
+        .await?;
+        self.get_consolidation_proposal_by_input(context, &proposal.input_hash)
+            .await?
+            .ok_or(StateError::InvalidInput(
+                "memory consolidation proposal was not saved",
+            ))
+    }
+
+    /// Return the last committed global-memory generation.
+    pub async fn get_consolidation_state(
+        &self,
+        context: &VaultContext,
+    ) -> Result<Option<MemoryConsolidationStateRecord>, StateError> {
+        self.ensure_vault_context(context).await?;
+        let row = sqlx::query_as::<_, ConsolidationStateRow>(
+            "SELECT vault_id, generation, memory_summary, last_input_hash,
+                    last_proposal_id, last_success_at, pipeline_generation,
+                    regeneration_pending, updated_at
+             FROM memory_consolidation_state WHERE vault_id = ?",
+        )
+        .bind(context.id().to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(consolidation_state_from_row).transpose()
+    }
+
+    /// Atomically advance Phase 2 state after canonical files/projections commit.
+    pub async fn commit_consolidation(
+        &self,
+        context: &VaultContext,
+        proposal_id: MemoryConsolidationId,
+        input_hash: &str,
+        memory_summary: &str,
+        selected: &[(MemoryRawId, String)],
+    ) -> Result<MemoryConsolidationStateRecord, StateError> {
+        self.ensure_vault_context(context).await?;
+        if let Some(state) = self.get_consolidation_state(context).await?
+            && state.last_proposal_id == Some(proposal_id)
+            && state.last_input_hash.as_deref() == Some(input_hash)
+        {
+            return Ok(state);
+        }
+        let now = now_millis()?;
+        let mut transaction = self.pool.begin().await?;
+        let proposal_updated = sqlx::query(
+            "UPDATE memory_consolidation_proposals
+             SET status = 'applied', applied_at = ?
+             WHERE vault_id = ? AND id = ? AND input_hash = ?
+               AND status = 'prepared'",
+        )
+        .bind(now)
+        .bind(context.id().to_string())
+        .bind(proposal_id.to_string())
+        .bind(input_hash)
+        .execute(&mut *transaction)
+        .await?;
+        if proposal_updated.rows_affected() != 1 {
+            return Err(StateError::Conflict);
+        }
+        for (id, output_hash) in selected {
+            let result = sqlx::query(
+                "UPDATE memory_stage1_outputs
+                 SET selected_for_phase2 = 1,
+                     selected_for_phase2_hash = output_hash,
+                     selected_for_phase2_at = ?, usage_count = usage_count + 1,
+                     last_usage = ?
+                 WHERE vault_id = ? AND id = ? AND output_hash = ?",
+            )
+            .bind(now)
+            .bind(now)
+            .bind(context.id().to_string())
+            .bind(id.to_string())
+            .bind(output_hash)
+            .execute(&mut *transaction)
+            .await?;
+            if result.rows_affected() != 1 {
+                return Err(StateError::Conflict);
+            }
+        }
+        sqlx::query(
+            "INSERT INTO memory_consolidation_state
+             (vault_id, generation, memory_summary, last_input_hash,
+              last_proposal_id, last_success_at, pipeline_generation,
+              regeneration_pending, updated_at)
+             VALUES (?, 1, ?, ?, ?, ?, 0, 0, ?)
+             ON CONFLICT(vault_id) DO UPDATE SET
+              generation = memory_consolidation_state.generation + 1,
+              memory_summary = excluded.memory_summary,
+              last_input_hash = excluded.last_input_hash,
+              last_proposal_id = excluded.last_proposal_id,
+              last_success_at = excluded.last_success_at,
+              updated_at = excluded.updated_at",
+        )
+        .bind(context.id().to_string())
+        .bind(memory_summary)
+        .bind(input_hash)
+        .bind(proposal_id.to_string())
+        .bind(now)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        self.get_consolidation_state(context)
+            .await?
+            .ok_or(StateError::InvalidInput(
+                "memory consolidation state was not saved",
+            ))
+    }
+
     /// Add or return one candidate by its deterministic fingerprint.
     pub async fn insert_candidate(
         &self,
@@ -797,7 +1456,7 @@ impl MemoryRepository {
         validate_score(candidate.confidence)?;
         validate_score(candidate.importance)?;
         sqlx::query(
-            "INSERT INTO memory_candidates\n             (id, vault_id, source_file_id, source_path, source_revision,\n              candidate_json, content_hash, extraction_fingerprint, confidence,\n              importance, decision, decision_reason, created_at, reviewed_at)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n             ON CONFLICT(vault_id, extraction_fingerprint) DO NOTHING",
+            "INSERT INTO memory_candidates\n             (id, vault_id, source_file_id, source_path, source_revision,\n              candidate_json, content_hash, extraction_fingerprint, confidence,\n              importance, decision, decision_reason, created_at, reviewed_at)\n             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?\n             WHERE NOT EXISTS (\n                 SELECT 1 FROM memory_candidates\n                 WHERE vault_id = ? AND content_hash = ?\n                   AND (decision IS NULL OR decision = 'review')\n             )\n             ON CONFLICT(vault_id, extraction_fingerprint) DO NOTHING",
         )
         .bind(candidate.id.to_string())
         .bind(context.id().to_string())
@@ -813,9 +1472,17 @@ impl MemoryRepository {
         .bind(candidate.decision_reason.as_deref())
         .bind(candidate.created_at)
         .bind(candidate.reviewed_at)
+        .bind(context.id().to_string())
+        .bind(&candidate.content_hash)
         .execute(&self.pool)
         .await?;
-        self.get_candidate_by_fingerprint(context, &candidate.extraction_fingerprint)
+        if let Some(saved) = self
+            .get_candidate_by_fingerprint(context, &candidate.extraction_fingerprint)
+            .await?
+        {
+            return Ok(saved);
+        }
+        self.get_review_candidate_by_content_hash(context, &candidate.content_hash)
             .await?
             .ok_or(StateError::InvalidInput("memory candidate was not saved"))
     }
@@ -852,6 +1519,29 @@ impl MemoryRepository {
         row.map(row_to_candidate).transpose()
     }
 
+    /// Fetch one pending/review candidate with exactly normalized content.
+    pub async fn get_review_candidate_by_content_hash(
+        &self,
+        context: &VaultContext,
+        content_hash: &str,
+    ) -> Result<Option<MemoryCandidateRecord>, StateError> {
+        let row = sqlx::query_as::<_, CandidateRow>(
+            "SELECT id, vault_id, source_file_id, source_path, source_revision,
+                    candidate_json, content_hash, extraction_fingerprint,
+                    confidence, importance, decision, decision_reason,
+                    created_at, reviewed_at
+             FROM memory_candidates
+             WHERE vault_id = ? AND content_hash = ?
+               AND (decision IS NULL OR decision = 'review')
+             ORDER BY created_at ASC, id ASC LIMIT 1",
+        )
+        .bind(context.id().to_string())
+        .bind(content_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_candidate).transpose()
+    }
+
     /// List reviewable candidates.
     pub async fn list_candidates(
         &self,
@@ -861,7 +1551,22 @@ impl MemoryRepository {
         offset: u32,
     ) -> Result<Vec<MemoryCandidateRecord>, StateError> {
         validate_page(limit, offset, MAX_CANDIDATE_LIMIT)?;
-        let row = if let Some(decision) = decision {
+        let row = if decision == Some("pending") {
+            sqlx::query_as::<_, CandidateRow>(
+                "SELECT id, vault_id, source_file_id, source_path, source_revision,
+                        candidate_json, content_hash, extraction_fingerprint,
+                        confidence, importance, decision, decision_reason,
+                        created_at, reviewed_at
+                 FROM memory_candidates
+                 WHERE vault_id = ? AND (decision IS NULL OR decision = 'review')
+                 ORDER BY created_at DESC, id ASC LIMIT ? OFFSET ?",
+            )
+            .bind(context.id().to_string())
+            .bind(i64::from(limit))
+            .bind(i64::from(offset))
+            .fetch_all(&self.pool)
+            .await?
+        } else if let Some(decision) = decision {
             sqlx::query_as::<_, CandidateRow>(
                 "SELECT id, vault_id, source_file_id, source_path, source_revision,\n                        candidate_json, content_hash, extraction_fingerprint,\n                        confidence, importance, decision, decision_reason,\n                        created_at, reviewed_at\n                 FROM memory_candidates\n                 WHERE vault_id = ? AND decision = ?\n                 ORDER BY created_at DESC, id ASC LIMIT ? OFFSET ?",
             )
@@ -911,6 +1616,182 @@ impl MemoryRepository {
         self.get_candidate(context, candidate_id)
             .await?
             .ok_or(StateError::InvalidInput("memory candidate disappeared"))
+    }
+
+    /// Delete only unpromoted review projections for a clean extraction rerun.
+    pub async fn clear_review_candidates(&self, context: &VaultContext) -> Result<u64, StateError> {
+        let result = sqlx::query(
+            "DELETE FROM memory_candidates
+             WHERE vault_id = ? AND (decision IS NULL OR decision = 'review')",
+        )
+        .bind(context.id().to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Delete every obsolete pre-two-phase candidate projection for a Vault.
+    pub async fn clear_all_candidates(&self, context: &VaultContext) -> Result<u64, StateError> {
+        self.ensure_vault_context(context).await?;
+        let result = sqlx::query("DELETE FROM memory_candidates WHERE vault_id = ?")
+            .bind(context.id().to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Remove derived note Phase 1 coverage before a complete regeneration.
+    pub async fn clear_note_stage1_outputs(
+        &self,
+        context: &VaultContext,
+    ) -> Result<u64, StateError> {
+        self.ensure_vault_context(context).await?;
+        let result = sqlx::query(
+            "DELETE FROM memory_stage1_outputs
+             WHERE vault_id = ? AND source_type = 'note'",
+        )
+        .bind(context.id().to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Destructively clear one Vault's complete prerelease memory state.
+    /// Managed Markdown is deleted separately through Vault Core.
+    pub async fn purge_pipeline_state(
+        &self,
+        context: &VaultContext,
+    ) -> Result<MemoryPipelinePurgeReport, StateError> {
+        self.ensure_vault_context(context).await?;
+        let vault_id = context.id().to_string();
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DELETE FROM memory_consolidation_state WHERE vault_id = ?")
+            .bind(&vault_id)
+            .execute(&mut *transaction)
+            .await?;
+        let proposals =
+            sqlx::query("DELETE FROM memory_consolidation_proposals WHERE vault_id = ?")
+                .bind(&vault_id)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected();
+        let stage1_outputs = sqlx::query("DELETE FROM memory_stage1_outputs WHERE vault_id = ?")
+            .bind(&vault_id)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+        let candidates = sqlx::query("DELETE FROM memory_candidates WHERE vault_id = ?")
+            .bind(&vault_id)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+        let diagnostics = sqlx::query("DELETE FROM memory_diagnostics WHERE vault_id = ?")
+            .bind(&vault_id)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+        sqlx::query("DELETE FROM memory_fts WHERE vault_id = ?")
+            .bind(&vault_id)
+            .execute(&mut *transaction)
+            .await?;
+        let embeddings = sqlx::query(
+            "DELETE FROM embedding_records WHERE vault_id = ? AND object_type = 'memory'",
+        )
+        .bind(&vault_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        let memories = sqlx::query("DELETE FROM memories WHERE vault_id = ?")
+            .bind(&vault_id)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+        transaction.commit().await?;
+        Ok(MemoryPipelinePurgeReport {
+            memories,
+            stage1_outputs,
+            candidates,
+            proposals,
+            diagnostics,
+            embeddings,
+        })
+    }
+
+    /// Mark the current Vault as requiring a destructive pipeline cutover.
+    /// Existing rows remain until the durable reset job purges them.
+    pub async fn invalidate_pipeline_generation(
+        &self,
+        context: &VaultContext,
+    ) -> Result<(), StateError> {
+        self.ensure_vault_context(context).await?;
+        sqlx::query("DELETE FROM memory_consolidation_state WHERE vault_id = ?")
+            .bind(context.id().to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Mark one prerelease memory pipeline generation ready for regeneration.
+    pub async fn set_pipeline_generation_state(
+        &self,
+        context: &VaultContext,
+        version: u32,
+        reextract_pending: bool,
+    ) -> Result<MemoryConsolidationStateRecord, StateError> {
+        self.ensure_vault_context(context).await?;
+        if version == 0 {
+            return Err(StateError::InvalidInput(
+                "memory pipeline generation is invalid",
+            ));
+        }
+        let now = now_millis()?;
+        sqlx::query(
+            "INSERT INTO memory_consolidation_state
+             (vault_id, generation, memory_summary, last_input_hash,
+              last_proposal_id, last_success_at, pipeline_generation,
+              regeneration_pending, updated_at)
+             VALUES (?, 0, '', NULL, NULL, NULL, ?, ?, ?)
+             ON CONFLICT(vault_id) DO UPDATE SET
+              pipeline_generation = MAX(
+                memory_consolidation_state.pipeline_generation,
+                excluded.pipeline_generation
+              ),
+              regeneration_pending = CASE
+                WHEN excluded.pipeline_generation >= memory_consolidation_state.pipeline_generation
+                THEN excluded.regeneration_pending
+                ELSE memory_consolidation_state.regeneration_pending
+              END,
+              updated_at = excluded.updated_at",
+        )
+        .bind(context.id().to_string())
+        .bind(i64::from(version))
+        .bind(i64::from(reextract_pending))
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        self.get_consolidation_state(context)
+            .await?
+            .ok_or(StateError::InvalidInput(
+                "memory consolidation state was not saved",
+            ))
+    }
+
+    /// Mark the one-time post-upgrade full note extraction as durably admitted.
+    pub async fn clear_regeneration_pending(
+        &self,
+        context: &VaultContext,
+    ) -> Result<(), StateError> {
+        self.ensure_vault_context(context).await?;
+        sqlx::query(
+            "UPDATE memory_consolidation_state
+             SET regeneration_pending = 0, updated_at = ?
+             WHERE vault_id = ?",
+        )
+        .bind(now_millis()?)
+        .bind(context.id().to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Fetch an explicit remember idempotency result.
@@ -1429,5 +2310,136 @@ fn row_to_candidate(row: CandidateRow) -> Result<MemoryCandidateRecord, StateErr
         decision_reason: row.decision_reason,
         created_at: row.created_at,
         reviewed_at: row.reviewed_at,
+    })
+}
+
+fn validate_stage1_output(
+    context: &VaultContext,
+    output: &MemoryStage1OutputRecord,
+) -> Result<(), StateError> {
+    let evidence_len = serde_json::to_vec(&output.evidence)?.len();
+    let metadata_len = serde_json::to_vec(&output.metadata)?.len();
+    let known_source = matches!(
+        output.source_type.as_str(),
+        "note" | "explicit_agent" | "explicit_admin" | "direct_markdown" | "import"
+    );
+    let content_matches_status = match output.status.as_str() {
+        "ready" => !output.raw_memory.trim().is_empty() && !output.source_summary.trim().is_empty(),
+        "no_output" => {
+            output.raw_memory.is_empty()
+                && output.source_summary.is_empty()
+                && output.evidence.as_array().is_some_and(Vec::is_empty)
+        }
+        "withdrawn" => true,
+        _ => false,
+    };
+    let note_shape = output.source_type != "note"
+        || output.source_file_id.is_some()
+            && output.source_path.is_some()
+            && output.source_revision.is_some();
+    if output.vault_id != context.id()
+        || !known_source
+        || output.source_key.is_empty()
+        || output.source_key.len() > 512
+        || output.profile_hash.is_empty()
+        || output.profile_hash.len() > 128
+        || output.pipeline_version == 0
+        || output.prompt_version.is_empty()
+        || output.prompt_version.len() > 128
+        || output.raw_memory.len() > 128 * 1024
+        || output.source_summary.len() > 256 * 1024
+        || output
+            .source_slug
+            .as_ref()
+            .is_some_and(|slug| slug.is_empty() || slug.len() > 80)
+        || !output.evidence.is_array()
+        || evidence_len > 128 * 1024
+        || !output.metadata.is_object()
+        || metadata_len > 64 * 1024
+        || output.output_hash.is_empty()
+        || output.output_hash.len() > 128
+        || !content_matches_status
+        || !note_shape
+    {
+        return Err(StateError::InvalidInput("raw memory output is invalid"));
+    }
+    Ok(())
+}
+
+fn stage1_output_from_row(row: Stage1OutputRow) -> Result<MemoryStage1OutputRecord, StateError> {
+    Ok(MemoryStage1OutputRecord {
+        id: MemoryRawId::parse(&row.id)?,
+        vault_id: VaultId::parse(&row.vault_id)?,
+        source_type: row.source_type,
+        source_key: row.source_key,
+        source_file_id: row
+            .source_file_id
+            .as_deref()
+            .map(FileId::parse)
+            .transpose()?,
+        source_path: row
+            .source_path
+            .as_deref()
+            .map(VaultPath::parse)
+            .transpose()?,
+        source_revision: row.source_revision.map(Revision::try_from).transpose()?,
+        profile_hash: row.profile_hash,
+        pipeline_version: u32::try_from(row.pipeline_version)
+            .map_err(|_| StateError::InvalidInput("raw memory pipeline version is invalid"))?,
+        prompt_version: row.prompt_version,
+        raw_memory: row.raw_memory,
+        source_summary: row.source_summary,
+        source_slug: row.source_slug,
+        evidence: serde_json::from_str(&row.evidence_json)?,
+        metadata: serde_json::from_str(&row.metadata_json)?,
+        output_hash: row.output_hash,
+        status: row.status,
+        generated_at: row.generated_at,
+        updated_at: row.updated_at,
+        usage_count: u64::try_from(row.usage_count)
+            .map_err(|_| StateError::InvalidInput("raw memory usage count is invalid"))?,
+        last_usage: row.last_usage,
+        selected_for_phase2: row.selected_for_phase2 == 1,
+        selected_for_phase2_hash: row.selected_for_phase2_hash,
+        selected_for_phase2_at: row.selected_for_phase2_at,
+    })
+}
+
+fn consolidation_proposal_from_row(
+    row: ConsolidationProposalRow,
+) -> Result<MemoryConsolidationProposalRecord, StateError> {
+    Ok(MemoryConsolidationProposalRecord {
+        id: MemoryConsolidationId::parse(&row.id)?,
+        vault_id: VaultId::parse(&row.vault_id)?,
+        input_hash: row.input_hash,
+        proposal: serde_json::from_str(&row.proposal_json)?,
+        model_id: ModelId::parse(&row.model_id)?,
+        provider_id: ProviderId::parse(&row.provider_id)?,
+        prompt_version: row.prompt_version,
+        status: row.status,
+        created_at: row.created_at,
+        applied_at: row.applied_at,
+    })
+}
+
+fn consolidation_state_from_row(
+    row: ConsolidationStateRow,
+) -> Result<MemoryConsolidationStateRecord, StateError> {
+    Ok(MemoryConsolidationStateRecord {
+        vault_id: VaultId::parse(&row.vault_id)?,
+        generation: u64::try_from(row.generation)
+            .map_err(|_| StateError::InvalidInput("memory generation is invalid"))?,
+        memory_summary: row.memory_summary,
+        last_input_hash: row.last_input_hash,
+        last_proposal_id: row
+            .last_proposal_id
+            .as_deref()
+            .map(MemoryConsolidationId::parse)
+            .transpose()?,
+        last_success_at: row.last_success_at,
+        pipeline_generation: u32::try_from(row.pipeline_generation)
+            .map_err(|_| StateError::InvalidInput("memory pipeline generation is invalid"))?,
+        regeneration_pending: row.regeneration_pending != 0,
+        updated_at: row.updated_at,
     })
 }

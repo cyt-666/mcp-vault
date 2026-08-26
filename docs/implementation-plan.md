@@ -347,6 +347,8 @@ An Agent can obtain a useful Vault map without LLM/embedding and search exact so
 - Admin-independent application configuration services;
 - OpenAI Responses/compatible structured generation adapter;
 - Anthropic-compatible adapter;
+- first-class DeepSeek, MiMo, GLM, Kimi, Gemini, and Qwen compatibility
+  presets on the shared OpenAI-compatible transport;
 - local OpenAI-compatible adapter;
 - embedding HTTP adapter;
 - optional local `fastembed` feature;
@@ -366,7 +368,9 @@ An Agent can obtain a useful Vault map without LLM/embedding and search exact so
 - remote-disabled/local-only policy;
 - provider outage does not affect core;
 - vector Vault partition;
-- model change re-embedding.
+- model change re-embedding;
+- ordinary-note chunk scheduling, stale-vector exclusion, and semantic/hybrid
+  public retrieval.
 
 ### Acceptance
 
@@ -380,22 +384,44 @@ All behavior from `memory-system.md`:
 
 - canonical memory Markdown;
 - projection/schema;
-- `remember`;
-- candidates and automatic extraction;
+- staged explicit `remember` admission;
+- Codex-style Phase 1 source distillation and Phase 2 global consolidation;
 - schema/prompt versioning;
-- validation;
-- dedup/reinforcement;
-- contradiction/supersession;
-- source invalidation;
+- exact evidence-anchor validation separated from semantic memory content;
+- global dedup/reinforcement, contradiction/supersession, and forgetting;
+- source withdrawal and revision-aware reconsolidation;
 - FTS/vector/entity/topic recall;
 - fusion, temporal behavior, continuity, diversity, budgets;
 - memory MCP tools/resources;
+- separately typed ordinary-note recall cues backed by the Index service;
 - Admin application services;
-- rebuild behavior.
+- rebuild behavior;
+- canonical `MEMORY.md`, `memory_summary.md`, `raw_memories.md`, and
+  `source_summaries/` artifacts through Vault Core;
+- Vault-level `automatic` source admission with no author-facing note metadata;
+  legacy `explicit_only`/`all_notes` settings migrate to this mode;
+- a candidate-free normal path with no score thresholds or human review queue;
+- ordinary article knowledge remains available through `related_notes` while
+  Phase 2 decides which durable semantic state belongs in global memory;
+- per-note Provider-output failure isolation, redacted schema-path diagnostics,
+  bounded consecutive-failure circuit breaking, and paid-work cursor retention;
+- durable Vault/source/revision/profile Stage 1 coverage with successful
+  `no_output`, exact output-hash selection, and `include_evaluated` override;
+- persisted prepared consolidation proposals, one active Phase 2 job per Vault,
+  optimistic snapshot revalidation, idempotent generation commit, and redacted
+  Phase 1/Phase 2 progress;
+- ADR-0017 prerelease cutover that discards old memory/jobs, removes managed
+  memory files through Vault Core, and admits a versioned fresh regeneration;
+- revision-aware Admin archive, restore, and permanent-delete lifecycle actions
+  backed by Vault Core and audit records.
 
 ### Tests
 
-Use the complete acceptance list from `memory-system.md`, plus provider/prompt injection and two-Vault isolation.
+Use the complete acceptance list from `memory-system.md`, plus provider/prompt
+injection, ordinary unmodified-note admission, semantic content differing from
+evidence, Stage 1 no-output/failure continuation, Phase 2 dedup/conflict/
+withdrawal/restart, destructive pipeline cutover/fresh regeneration, lifecycle route concurrency,
+permanent-delete audit, and two-Vault isolation.
 
 ### Acceptance
 

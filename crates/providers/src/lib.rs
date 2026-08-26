@@ -13,19 +13,23 @@ mod vector;
 
 pub use adapter::{
     AnthropicMessagesAdapter, DiscoveredModel, EmbeddingRequest, EmbeddingResult,
-    HttpEmbeddingAdapter, OpenAiCompatibleAdapter, OpenAiResponsesAdapter, ProviderAdapter,
-    StructuredGenerationRequest, StructuredGenerationResult,
+    GenerationOptions, HttpEmbeddingAdapter, MissingRequiredStringFallback,
+    OpenAiCompatibleAdapter, OpenAiResponsesAdapter, ProviderAdapter, StructuredGenerationRequest,
+    StructuredGenerationResult,
 };
 pub use error::ProviderError;
 pub use fastembed::FastEmbedAdapter;
 pub use policy::{
-    ModelCapabilities, ProviderKind, ProviderMode, ProviderSettings, endpoint_ip_allowed,
+    DEFAULT_REASONING_GENERATION_TOKENS, ModelCapabilities, ModelSettings,
+    OpenAiCompatibilityPreset, OpenAiStructuredOutputMode, OpenAiThinkingMode,
+    OpenAiTokenLimitField, ProviderKind, ProviderMode, ProviderSettings, endpoint_ip_allowed,
 };
 pub use service::{
     EmbeddingInput, EmbeddingService, EmbeddingSourceResolver, ModelInput, ProviderInput,
     ProviderModeState, ProviderService,
 };
 pub use transport::{
-    AuthStyle, JsonResponse, ProviderTransport, endpoint_url, retryable_status, validate_endpoint,
+    AuthStyle, JsonResponse, ProviderTransport, RequestOptions, endpoint_url, retryable_status,
+    validate_endpoint,
 };
 pub use vector::{EmbeddingSourceRef, SqliteVectorIndex, VectorHit, VectorIndex, new_embedding_id};

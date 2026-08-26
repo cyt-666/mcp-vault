@@ -4,21 +4,27 @@
 //! queries are delegated to the state repository.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use async_trait::async_trait;
 use comrak::{
     Arena, Options,
     nodes::{AstNode, NodeValue},
     parse_document,
 };
 use mcp_vault_core::{VaultCore, VaultError};
-use mcp_vault_domain::{FileId, Revision, VaultContext, VaultId, VaultPath};
+use mcp_vault_domain::{FileId, ModelId, Revision, VaultContext, VaultId, VaultPath};
+use mcp_vault_providers::{
+    EmbeddingRequest, EmbeddingSourceRef, EmbeddingSourceResolver, ProviderError, ProviderMode,
+    ProviderService,
+};
 use mcp_vault_state::{
     EntryType, FileRecord, HeadingProjectionInput, IndexMembershipProjectionInput,
     IndexNodeProjectionInput, IndexNodeRecord, IndexRepository, IndexStatusRecord,
-    LinkProjectionInput, NoteProjectionInput, NoteSearchRecord, StateError, TagProjectionInput,
+    LinkProjectionInput, NoteEmbeddingSourceRecord, NoteProjectionInput, NoteSearchRecord,
+    StateError, TagProjectionInput,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -36,6 +42,12 @@ pub const MAX_YAML_BYTES: usize = 256 * 1024;
 pub const MAX_YAML_DEPTH: usize = 16;
 /// Maximum YAML scalar/collection nodes decoded.
 pub const MAX_YAML_NODES: usize = 4096;
+/// Maximum Unicode scalar values sent in one note embedding chunk.
+pub const NOTE_EMBEDDING_CHUNK_CHARS: usize = 6_000;
+/// Overlap retained between adjacent semantic chunks.
+pub const NOTE_EMBEDDING_CHUNK_OVERLAP: usize = 400;
+/// Maximum semantic chunks derived from one bounded note projection.
+pub const MAX_NOTE_EMBEDDING_CHUNKS: usize = 128;
 
 /// Errors exposed by the index application boundary.
 #[derive(Debug, Error)]
@@ -46,6 +58,9 @@ pub enum IndexError {
     /// Projection state failed.
     #[error("index projection state failed")]
     State(#[from] StateError),
+    /// Optional semantic provider operation failed.
+    #[error("index semantic provider failed")]
+    Provider(#[from] ProviderError),
     /// Markdown input exceeded the analyzer bound.
     #[error("Markdown input is too large")]
     TooLarge,
@@ -117,6 +132,104 @@ pub struct IndexRebuildReport {
     pub taxonomy_valid: bool,
     /// Monotonic derived projection revision.
     pub index_revision: Revision,
+}
+
+/// Retrieval mode independent of MCP protocol DTOs.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum NoteRetrievalMode {
+    /// Deterministic FTS only.
+    #[default]
+    Lexical,
+    /// Current `embedding_note` vector projection only.
+    Semantic,
+    /// Reciprocal-rank fusion of lexical and semantic pools.
+    Hybrid,
+}
+
+/// Vault-scoped note retrieval filters.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NoteRetrievalScope {
+    /// Validated Vault-relative prefix.
+    pub path_prefix: Option<String>,
+    /// Normalized tags that must all match.
+    pub tags: Vec<String>,
+    /// Stable knowledge-map node keys that must all match.
+    pub topic_ids: Vec<String>,
+    /// Inclusive lower projection timestamp.
+    pub modified_after: Option<i64>,
+    /// Inclusive upper projection timestamp.
+    pub modified_before: Option<i64>,
+}
+
+/// One ranked ordinary-note cue with optional score diagnostics.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NoteRetrievalHit {
+    /// Bounded source metadata and snippet.
+    pub note: NoteSearchRecord,
+    /// Fused positive relevance score.
+    pub score: f64,
+    /// Stable component scores when requested.
+    pub score_breakdown: Option<BTreeMap<String, f64>>,
+}
+
+/// Bounded note retrieval result with explicit degradation.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NoteRetrievalResult {
+    /// Ranked current note cues.
+    pub hits: Vec<NoteRetrievalHit>,
+    /// Candidates available before pagination.
+    pub available_result_count: u32,
+    /// Stable optional-capability degradation codes.
+    pub degraded: Vec<String>,
+}
+
+/// Durable note-vector scheduling summary without note content.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NoteEmbeddingScheduleReport {
+    /// Current chunks represented by canonical note projections.
+    pub source_chunks: u64,
+    /// Missing/stale chunks admitted to durable jobs.
+    pub queued_chunks: u64,
+    /// Obsolete derived vectors deleted.
+    pub pruned_vectors: u64,
+    /// Durable embedding jobs admitted or deduplicated.
+    pub jobs: u64,
+}
+
+/// Redacted current-note semantic projection status for Admin diagnostics.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NoteSemanticStatus {
+    /// Whether an effective `embedding_note` binding exists.
+    pub configured: bool,
+    /// Whether provider privacy mode currently permits provider work.
+    pub provider_mode_enabled: bool,
+    /// Selected internal model identity.
+    pub model_id: Option<String>,
+    /// Provider-visible model identifier.
+    pub external_model_id: Option<String>,
+    /// Current deterministic note chunks expected.
+    pub source_chunks: u64,
+    /// Current-model vectors whose source hashes still match.
+    pub indexed_chunks: u64,
+    /// Obsolete current-model vectors awaiting pruning/rebuild.
+    pub stale_vectors: u64,
+    /// Stable non-secret readiness blockers.
+    pub blockers: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct RankedNote {
+    note: NoteSearchRecord,
+    score: f64,
+    components: BTreeMap<String, f64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NoteEmbeddingChunk {
+    key: String,
+    text: String,
+    snippet: String,
+    content_hash: String,
 }
 
 /// Analyze one Markdown payload without touching the filesystem or database.
@@ -779,6 +892,14 @@ pub fn content_hash(source: &str) -> String {
 
 /// Quote user words for a safe FTS5 AND query.
 pub fn quote_fts_query(query: &str) -> Result<String, IndexError> {
+    quote_fts_query_with(query, " AND ")
+}
+
+fn quote_fts_query_any(query: &str) -> Result<String, IndexError> {
+    quote_fts_query_with(query, " OR ")
+}
+
+fn quote_fts_query_with(query: &str, separator: &str) -> Result<String, IndexError> {
     let terms = query
         .split_whitespace()
         .map(|term| term.trim_matches(|character: char| character.is_ascii_punctuation()))
@@ -793,19 +914,34 @@ pub fn quote_fts_query(query: &str) -> Result<String, IndexError> {
         .into_iter()
         .map(|term| format!("\"{}\"", term.replace('\"', "\"\"")))
         .collect::<Vec<_>>()
-        .join(" AND "))
+        .join(separator))
 }
 
-/// Deterministic lexical/index query service.
+/// Rebuildable lexical and optional semantic note-retrieval service.
 #[derive(Clone)]
 pub struct IndexService {
     state: mcp_vault_state::StateStore,
+    providers: Option<ProviderService>,
 }
 
 impl IndexService {
     /// Bind the service to operational state.
     pub fn new(state: mcp_vault_state::StateStore) -> Self {
-        Self { state }
+        Self {
+            state,
+            providers: None,
+        }
+    }
+
+    /// Bind the service to the shared optional semantic provider boundary.
+    pub fn with_provider_service(
+        state: mcp_vault_state::StateStore,
+        providers: ProviderService,
+    ) -> Self {
+        Self {
+            state,
+            providers: Some(providers),
+        }
     }
 
     /// Return the underlying Vault-scoped projection repository.
@@ -878,6 +1014,504 @@ impl IndexService {
             )
             .await
             .map_err(IndexError::State)
+    }
+
+    /// Retrieve ordinary note cues through lexical, semantic, or fused ranking.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn retrieve_notes(
+        &self,
+        context: &VaultContext,
+        query: &str,
+        mode: NoteRetrievalMode,
+        scope: &NoteRetrievalScope,
+        limit: u32,
+        offset: u32,
+        include_score_breakdown: bool,
+    ) -> Result<NoteRetrievalResult, IndexError> {
+        if limit == 0 || limit > 100 || offset.saturating_add(limit) > 500 {
+            return Err(IndexError::InvalidInput(
+                "note retrieval page exceeds the fused candidate bound",
+            ));
+        }
+        if scope.topic_ids.len() > 20 || scope.tags.len() > 20 {
+            return Err(IndexError::InvalidInput("too many note retrieval filters"));
+        }
+        if let (Some(after), Some(before)) = (scope.modified_after, scope.modified_before)
+            && after > before
+        {
+            return Err(IndexError::InvalidInput(
+                "note retrieval time range is invalid",
+            ));
+        }
+        let pool_limit = offset.saturating_add(limit).clamp(50, 500);
+        let mut ranked = HashMap::<FileId, RankedNote>::new();
+        if !matches!(mode, NoteRetrievalMode::Semantic) {
+            let lexical = if matches!(mode, NoteRetrievalMode::Lexical) {
+                self.search_notes_scoped(
+                    context,
+                    query,
+                    scope.path_prefix.as_deref(),
+                    &scope.tags,
+                    &scope.topic_ids,
+                    scope.modified_after,
+                    scope.modified_before,
+                    pool_limit,
+                    0,
+                )
+                .await?
+            } else {
+                self.search_notes_relaxed(context, query, scope, pool_limit)
+                    .await?
+            };
+            for (rank, note) in lexical.into_iter().enumerate() {
+                let component = reciprocal_rank(1.0, rank);
+                let mut components = BTreeMap::new();
+                components.insert("lexical_rrf".to_owned(), component);
+                if let Some(raw) = note.score {
+                    components.insert("lexical_bm25".to_owned(), raw);
+                }
+                ranked.insert(
+                    note.file_id,
+                    RankedNote {
+                        note,
+                        score: component,
+                        components,
+                    },
+                );
+            }
+        }
+
+        let mut degraded = Vec::new();
+        if !matches!(mode, NoteRetrievalMode::Lexical) {
+            self.add_semantic_note_hits(
+                context,
+                query,
+                scope,
+                pool_limit,
+                &mut ranked,
+                &mut degraded,
+            )
+            .await?;
+        }
+
+        let mut ranked = ranked.into_values().collect::<Vec<_>>();
+        ranked.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.note.path.as_str().cmp(right.note.path.as_str()))
+                .then_with(|| left.note.file_id.cmp(&right.note.file_id))
+        });
+        let available_result_count = u32::try_from(ranked.len()).unwrap_or(u32::MAX);
+        let hits = ranked
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(|ranked| NoteRetrievalHit {
+                note: ranked.note,
+                score: ranked.score,
+                score_breakdown: include_score_breakdown.then_some(ranked.components),
+            })
+            .collect();
+        degraded.sort();
+        degraded.dedup();
+        Ok(NoteRetrievalResult {
+            hits,
+            available_result_count,
+            degraded,
+        })
+    }
+
+    async fn search_notes_relaxed(
+        &self,
+        context: &VaultContext,
+        query: &str,
+        scope: &NoteRetrievalScope,
+        limit: u32,
+    ) -> Result<Vec<NoteSearchRecord>, IndexError> {
+        let tags = scope
+            .tags
+            .iter()
+            .map(|tag| normalize_tag(tag))
+            .filter(|tag| !tag.is_empty())
+            .collect::<Vec<_>>();
+        self.repository()
+            .search_notes(
+                context,
+                &quote_fts_query_any(query)?,
+                scope.path_prefix.as_deref(),
+                &tags,
+                &scope.topic_ids,
+                scope.modified_after,
+                scope.modified_before,
+                limit,
+                0,
+            )
+            .await
+            .map_err(IndexError::State)
+    }
+
+    /// Admit durable embedding jobs only for missing or stale note chunks.
+    pub async fn schedule_note_embeddings(
+        &self,
+        context: &VaultContext,
+    ) -> Result<NoteEmbeddingScheduleReport, IndexError> {
+        let Some(providers) = self.providers.as_ref() else {
+            return Ok(NoteEmbeddingScheduleReport::default());
+        };
+        if providers.provider_mode(context).await? == ProviderMode::Disabled {
+            return Ok(NoteEmbeddingScheduleReport::default());
+        }
+        let Some(binding) = self
+            .state
+            .providers()
+            .resolve_binding(context, "embedding_note")
+            .await?
+        else {
+            return Ok(NoteEmbeddingScheduleReport::default());
+        };
+        let sources = self.note_embedding_sources(context).await?;
+        let existing = self
+            .note_embedding_metadata(context, binding.model_id)
+            .await?;
+        let current = sources
+            .iter()
+            .map(|source| {
+                (
+                    (source.object_id.clone(), source.chunk_key.clone()),
+                    source.content_hash.clone(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut report = NoteEmbeddingScheduleReport {
+            source_chunks: u64::try_from(sources.len()).unwrap_or(u64::MAX),
+            ..NoteEmbeddingScheduleReport::default()
+        };
+        for embedding in &existing {
+            let key = (embedding.object_id.clone(), embedding.chunk_key.clone());
+            if current
+                .get(&key)
+                .is_none_or(|content_hash| content_hash != &embedding.content_hash)
+                && self
+                    .state
+                    .providers()
+                    .delete_embedding(context, embedding.id)
+                    .await?
+            {
+                report.pruned_vectors = report.pruned_vectors.saturating_add(1);
+            }
+        }
+        let existing = existing
+            .into_iter()
+            .map(|embedding| {
+                (
+                    (embedding.object_id, embedding.chunk_key),
+                    embedding.content_hash,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let missing = sources
+            .into_iter()
+            .filter(|source| {
+                existing.get(&(source.object_id.clone(), source.chunk_key.clone()))
+                    != Some(&source.content_hash)
+            })
+            .collect::<Vec<_>>();
+        report.queued_chunks = u64::try_from(missing.len()).unwrap_or(u64::MAX);
+        for batch in missing.chunks(64) {
+            providers
+                .embeddings()
+                .schedule_reembedding(context, binding.model_id, batch)
+                .await?;
+            report.jobs = report.jobs.saturating_add(1);
+        }
+        Ok(report)
+    }
+
+    /// Inspect current note-vector coverage without invoking a provider.
+    pub async fn note_semantic_status(
+        &self,
+        context: &VaultContext,
+    ) -> Result<NoteSemanticStatus, IndexError> {
+        let sources = self.note_embedding_sources(context).await?;
+        let mut status = NoteSemanticStatus {
+            source_chunks: u64::try_from(sources.len()).unwrap_or(u64::MAX),
+            ..NoteSemanticStatus::default()
+        };
+        let Some(providers) = self.providers.as_ref() else {
+            status
+                .blockers
+                .push("provider_service_unavailable".to_owned());
+            return Ok(status);
+        };
+        status.provider_mode_enabled =
+            providers.provider_mode(context).await? != ProviderMode::Disabled;
+        if !status.provider_mode_enabled {
+            status.blockers.push("provider_mode_disabled".to_owned());
+        }
+        let Some(binding) = self
+            .state
+            .providers()
+            .resolve_binding(context, "embedding_note")
+            .await?
+        else {
+            status.blockers.push("model_binding_missing".to_owned());
+            return Ok(status);
+        };
+        status.configured = true;
+        status.model_id = Some(binding.model_id.to_string());
+        let Some(model) = self.state.providers().get_model(binding.model_id).await? else {
+            status.blockers.push("model_missing".to_owned());
+            return Ok(status);
+        };
+        status.external_model_id = Some(model.external_model_id);
+        let current = sources
+            .into_iter()
+            .map(|source| ((source.object_id, source.chunk_key), source.content_hash))
+            .collect::<HashMap<_, _>>();
+        for embedding in self
+            .note_embedding_metadata(context, binding.model_id)
+            .await?
+        {
+            let key = (embedding.object_id, embedding.chunk_key);
+            if current.get(&key) == Some(&embedding.content_hash) {
+                status.indexed_chunks = status.indexed_chunks.saturating_add(1);
+            } else {
+                status.stale_vectors = status.stale_vectors.saturating_add(1);
+            }
+        }
+        if status.indexed_chunks < status.source_chunks {
+            status
+                .blockers
+                .push("embedding_coverage_incomplete".to_owned());
+        }
+        Ok(status)
+    }
+
+    /// Resolve and rebuild reference-only ordinary-note embedding chunks.
+    pub async fn reembed_note_sources(
+        &self,
+        context: &VaultContext,
+        model_id: ModelId,
+        sources: &[EmbeddingSourceRef],
+    ) -> Result<u64, IndexError> {
+        let Some(providers) = self.providers.as_ref() else {
+            return Err(IndexError::InvalidInput(
+                "note semantic provider is unavailable",
+            ));
+        };
+        if sources.iter().any(|source| source.object_type != "note") {
+            return Err(IndexError::InvalidInput(
+                "note embedding source type is invalid",
+            ));
+        }
+        let resolver = NoteEmbeddingResolver {
+            repository: self.repository(),
+        };
+        let records = providers
+            .embeddings()
+            .reembed_with_resolver(context, model_id, sources, &resolver)
+            .await?;
+        Ok(records.len() as u64)
+    }
+
+    async fn add_semantic_note_hits(
+        &self,
+        context: &VaultContext,
+        query: &str,
+        scope: &NoteRetrievalScope,
+        pool_limit: u32,
+        ranked: &mut HashMap<FileId, RankedNote>,
+        degraded: &mut Vec<String>,
+    ) -> Result<(), IndexError> {
+        let Some(providers) = self.providers.as_ref() else {
+            degraded.push("semantic_provider_unavailable".to_owned());
+            return Ok(());
+        };
+        if providers.provider_mode(context).await? == ProviderMode::Disabled {
+            degraded.push("semantic_provider_disabled".to_owned());
+            return Ok(());
+        }
+        let Some(binding) = self
+            .state
+            .providers()
+            .resolve_binding(context, "embedding_note")
+            .await?
+        else {
+            degraded.push("semantic_provider_unconfigured".to_owned());
+            return Ok(());
+        };
+        let Some(model) = self.state.providers().get_model(binding.model_id).await? else {
+            degraded.push("semantic_model_missing".to_owned());
+            return Ok(());
+        };
+        let embedding = match providers
+            .embed(
+                context,
+                binding.model_id,
+                &EmbeddingRequest {
+                    model: model.external_model_id,
+                    inputs: vec![query.to_owned()],
+                },
+            )
+            .await
+        {
+            Ok(embedding) => embedding,
+            Err(error) => {
+                degraded.push(if error.retryable() {
+                    "semantic_provider_unavailable".to_owned()
+                } else {
+                    "semantic_provider_not_ready".to_owned()
+                });
+                return Ok(());
+            }
+        };
+        let Some(query_vector) = embedding.vectors.first() else {
+            degraded.push("semantic_provider_invalid_response".to_owned());
+            return Ok(());
+        };
+        let vector_hits = match providers
+            .embeddings()
+            .search(context, binding.model_id, query_vector, pool_limit)
+            .await
+        {
+            Ok(hits) => hits,
+            Err(_) => {
+                degraded.push("semantic_index_unavailable".to_owned());
+                return Ok(());
+            }
+        };
+        if vector_hits.is_empty() {
+            degraded.push("semantic_index_empty".to_owned());
+            return Ok(());
+        }
+        let mut sources = HashMap::<FileId, NoteEmbeddingSourceRecord>::new();
+        let mut semantic_rank = 0_usize;
+        let mut current_note_vectors = 0_usize;
+        for hit in vector_hits {
+            if hit.embedding.object_type != "note" {
+                continue;
+            }
+            let Ok(file_id) = FileId::parse(&hit.embedding.object_id) else {
+                continue;
+            };
+            let source = if let Some(source) = sources.get(&file_id) {
+                source.clone()
+            } else {
+                let Some(source) = self
+                    .repository()
+                    .get_note_embedding_source(context, file_id)
+                    .await?
+                else {
+                    continue;
+                };
+                sources.insert(file_id, source.clone());
+                source
+            };
+            let Some(chunk) = note_embedding_chunks(&source).into_iter().find(|chunk| {
+                chunk.key == hit.embedding.chunk_key
+                    && chunk.content_hash == hit.embedding.content_hash
+            }) else {
+                continue;
+            };
+            let Some(mut note) = self
+                .repository()
+                .get_note_for_retrieval(context, file_id)
+                .await?
+            else {
+                continue;
+            };
+            current_note_vectors = current_note_vectors.saturating_add(1);
+            if !note_matches_scope(&note, scope) {
+                continue;
+            }
+            let component = reciprocal_rank(1.0, semantic_rank);
+            semantic_rank = semantic_rank.saturating_add(1);
+            let entry = ranked.entry(file_id).or_insert_with(|| {
+                note.snippet = chunk.snippet.clone();
+                RankedNote {
+                    note,
+                    score: 0.0,
+                    components: BTreeMap::new(),
+                }
+            });
+            if entry.components.contains_key("semantic_rrf") {
+                continue;
+            }
+            if !entry.components.contains_key("lexical_rrf") {
+                entry.note.snippet = chunk.snippet;
+            }
+            entry.score += component;
+            entry
+                .components
+                .insert("semantic_rrf".to_owned(), component);
+            entry
+                .components
+                .insert("semantic_cosine".to_owned(), f64::from(hit.score));
+        }
+        if current_note_vectors == 0 {
+            degraded.push("semantic_note_index_empty_or_stale".to_owned());
+        }
+        Ok(())
+    }
+
+    async fn note_embedding_sources(
+        &self,
+        context: &VaultContext,
+    ) -> Result<Vec<EmbeddingSourceRef>, IndexError> {
+        let mut offset = 0_u32;
+        let mut output = Vec::new();
+        loop {
+            let page = self
+                .repository()
+                .list_note_embedding_sources(context, 100, offset)
+                .await?;
+            if page.is_empty() {
+                break;
+            }
+            for source in page.iter() {
+                output.extend(note_embedding_chunks(source).into_iter().map(|chunk| {
+                    EmbeddingSourceRef {
+                        object_type: "note".to_owned(),
+                        object_id: source.file_id.to_string(),
+                        chunk_key: chunk.key,
+                        content_hash: chunk.content_hash,
+                    }
+                }));
+            }
+            let page_len = u32::try_from(page.len()).unwrap_or(u32::MAX);
+            offset = offset.saturating_add(page_len);
+            if page_len < 100 {
+                break;
+            }
+        }
+        Ok(output)
+    }
+
+    async fn note_embedding_metadata(
+        &self,
+        context: &VaultContext,
+        model_id: ModelId,
+    ) -> Result<Vec<mcp_vault_state::EmbeddingRecord>, IndexError> {
+        let mut offset = 0_u32;
+        let mut output = Vec::new();
+        loop {
+            let page = self
+                .state
+                .providers()
+                .list_embeddings(context, model_id, "note", 1000, offset)
+                .await?;
+            if page.is_empty() {
+                break;
+            }
+            let page_len = u32::try_from(page.len()).unwrap_or(u32::MAX);
+            output.extend(page);
+            offset = offset.saturating_add(page_len);
+            if page_len < 1000 {
+                break;
+            }
+        }
+        Ok(output)
     }
 
     /// Rebuild all derived Markdown/index projections for one Vault.
@@ -1079,6 +1713,159 @@ impl IndexService {
             .await
             .map_err(IndexError::State)
     }
+}
+
+#[derive(Clone)]
+struct NoteEmbeddingResolver {
+    repository: IndexRepository,
+}
+
+#[async_trait]
+impl EmbeddingSourceResolver for NoteEmbeddingResolver {
+    async fn resolve_source(
+        &self,
+        context: &VaultContext,
+        source: &EmbeddingSourceRef,
+    ) -> Result<Option<String>, ProviderError> {
+        if source.object_type != "note" {
+            return Err(ProviderError::InvalidConfiguration(
+                "note embedding source type is invalid",
+            ));
+        }
+        let file_id = FileId::parse(&source.object_id).map_err(|_| {
+            ProviderError::InvalidConfiguration("note embedding source id is invalid")
+        })?;
+        let note = self
+            .repository
+            .get_note_embedding_source(context, file_id)
+            .await
+            .map_err(ProviderError::State)?;
+        let Some(note) = note else {
+            return Ok(None);
+        };
+        Ok(note_embedding_chunks(&note)
+            .into_iter()
+            .find(|chunk| {
+                chunk.key == source.chunk_key && chunk.content_hash == source.content_hash
+            })
+            .map(|chunk| chunk.text))
+    }
+}
+
+fn reciprocal_rank(weight: f64, rank: usize) -> f64 {
+    weight / (60.0 + rank as f64 + 1.0)
+}
+
+fn note_matches_scope(note: &NoteSearchRecord, scope: &NoteRetrievalScope) -> bool {
+    if scope
+        .path_prefix
+        .as_deref()
+        .is_some_and(|prefix| !note.path.as_str().starts_with(prefix))
+        || scope
+            .modified_after
+            .is_some_and(|after| note.updated_at < after)
+        || scope
+            .modified_before
+            .is_some_and(|before| note.updated_at > before)
+    {
+        return false;
+    }
+    let note_tags = note
+        .tags
+        .iter()
+        .map(|tag| normalize_tag(tag))
+        .collect::<Vec<_>>();
+    if scope
+        .tags
+        .iter()
+        .map(|tag| normalize_tag(tag))
+        .any(|tag| !note_tags.contains(&tag))
+    {
+        return false;
+    }
+    scope
+        .topic_ids
+        .iter()
+        .all(|topic| note.topic_ids.contains(topic))
+}
+
+fn note_embedding_chunks(source: &NoteEmbeddingSourceRecord) -> Vec<NoteEmbeddingChunk> {
+    let context = note_embedding_context(source);
+    let body = source.plain_text.trim();
+    if body.is_empty() {
+        if context.is_empty() {
+            return Vec::new();
+        }
+        return vec![NoteEmbeddingChunk {
+            key: "text-v1:0000".to_owned(),
+            snippet: source
+                .title
+                .clone()
+                .unwrap_or_else(|| source.path.as_str().to_owned()),
+            content_hash: content_hash(&context),
+            text: context,
+        }];
+    }
+    let mut boundaries = body
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .collect::<Vec<_>>();
+    boundaries.push(body.len());
+    let character_count = boundaries.len().saturating_sub(1);
+    let step = NOTE_EMBEDDING_CHUNK_CHARS.saturating_sub(NOTE_EMBEDDING_CHUNK_OVERLAP);
+    let natural_count = if character_count <= NOTE_EMBEDDING_CHUNK_CHARS {
+        1
+    } else {
+        character_count
+            .saturating_sub(NOTE_EMBEDDING_CHUNK_OVERLAP)
+            .div_ceil(step)
+    };
+    let chunk_count = natural_count.min(MAX_NOTE_EMBEDDING_CHUNKS);
+    let max_start = character_count.saturating_sub(NOTE_EMBEDDING_CHUNK_CHARS);
+    (0..chunk_count)
+        .map(|ordinal| {
+            let start_character = if natural_count <= MAX_NOTE_EMBEDDING_CHUNKS {
+                ordinal.saturating_mul(step).min(max_start)
+            } else if chunk_count <= 1 {
+                0
+            } else {
+                max_start.saturating_mul(ordinal) / (chunk_count - 1)
+            };
+            let end_character = start_character
+                .saturating_add(NOTE_EMBEDDING_CHUNK_CHARS)
+                .min(character_count);
+            let body_chunk = &body[boundaries[start_character]..boundaries[end_character]];
+            let text = if context.is_empty() {
+                body_chunk.to_owned()
+            } else {
+                format!("{context}\n\n{body_chunk}")
+            };
+            NoteEmbeddingChunk {
+                key: format!("text-v1:{ordinal:04}"),
+                text: text.clone(),
+                snippet: body_chunk.chars().take(280).collect(),
+                content_hash: content_hash(&text),
+            }
+        })
+        .collect()
+}
+
+fn note_embedding_context(source: &NoteEmbeddingSourceRecord) -> String {
+    let mut lines = vec![format!("Path: {}", source.path.as_str())];
+    if let Some(title) = source.title.as_deref() {
+        lines.push(format!("Title: {title}"));
+    }
+    if !source.headings.is_empty() {
+        let headings = source
+            .headings
+            .iter()
+            .take(32)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" > ");
+        lines.push(format!("Headings: {headings}"));
+    }
+    lines.join("\n").chars().take(2_048).collect()
 }
 
 #[derive(Clone, Debug)]
@@ -1410,15 +2197,25 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        IndexService, Taxonomy, analyze_markdown, content_hash, parse_taxonomy, quote_fts_query,
+        IndexService, MAX_NOTE_EMBEDDING_CHUNKS, NOTE_EMBEDDING_CHUNK_CHARS, NoteRetrievalMode,
+        NoteRetrievalScope, Taxonomy, analyze_markdown, content_hash, note_embedding_chunks,
+        parse_taxonomy, quote_fts_query,
     };
+    use axum::{Json, Router, routing::post};
+    use mcp_vault_auth::{AuthService, MasterKeyRing};
     use mcp_vault_core::VaultCore;
     use mcp_vault_domain::{
         Actor, Revision, SourcePlane, VaultContext, VaultId, VaultPath, VaultPathPolicy, VaultSlug,
     };
-    use mcp_vault_state::{StateStore, VaultStatus};
+    use mcp_vault_providers::{
+        ModelCapabilities, ModelInput, ModelSettings, ProviderInput, ProviderKind, ProviderMode,
+        ProviderService, ProviderSettings,
+    };
+    use mcp_vault_state::{NoteEmbeddingSourceRecord, StateStore, VaultStatus};
     use mcp_vault_storage_fs::StorageOptions;
+    use serde_json::{Value, json};
     use tempfile::tempdir;
+    use url::Url;
 
     fn fixture() -> (mcp_vault_domain::FileId, VaultId, VaultPath) {
         (
@@ -1426,6 +2223,49 @@ mod tests {
             VaultId::new(),
             VaultPath::parse("知识/设计.md").unwrap(),
         )
+    }
+
+    async fn semantic_embeddings(Json(request): Json<Value>) -> Json<Value> {
+        let inputs = request["input"].as_array().cloned().unwrap_or_default();
+        let data = inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                let input = input.as_str().unwrap_or_default().to_ascii_lowercase();
+                let vector = if input.contains("quarantine") || input.contains("isolated") {
+                    json!([1.0, 0.0])
+                } else {
+                    json!([0.0, 1.0])
+                };
+                json!({"index": index, "embedding": vector})
+            })
+            .collect::<Vec<_>>();
+        Json(json!({"model": "semantic-test", "data": data}))
+    }
+
+    #[test]
+    fn note_embedding_chunks_are_bounded_deterministic_and_cover_the_tail() {
+        let source = NoteEmbeddingSourceRecord {
+            file_id: mcp_vault_domain::FileId::new(),
+            path: VaultPath::parse("notes/long.md").unwrap(),
+            revision: Revision::new(2),
+            title: Some("Long note".to_owned()),
+            headings: vec!["Start".to_owned(), "End".to_owned()],
+            plain_text: (0..(NOTE_EMBEDDING_CHUNK_CHARS * (MAX_NOTE_EMBEDDING_CHUNKS + 5)))
+                .map(|index| char::from(b'a' + (index % 26) as u8))
+                .collect(),
+            analyzed_content_hash: "sha256:canonical".to_owned(),
+        };
+        let first = note_embedding_chunks(&source);
+        let second = note_embedding_chunks(&source);
+        assert_eq!(first, second);
+        assert_eq!(first.len(), MAX_NOTE_EMBEDDING_CHUNKS);
+        assert_eq!(first.first().unwrap().key, "text-v1:0000");
+        assert_eq!(
+            first.last().unwrap().key,
+            format!("text-v1:{:04}", MAX_NOTE_EMBEDDING_CHUNKS - 1)
+        );
+        assert!(!first.last().unwrap().snippet.is_empty());
     }
 
     #[test]
@@ -1522,6 +2362,194 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn semantic_note_retrieval_uses_current_vault_scoped_note_chunks() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/v1/embeddings", post(semantic_embeddings)),
+            )
+            .await
+            .unwrap();
+        });
+        let root = tempdir().unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("semantic").unwrap(),
+            root.path().join("vault"),
+            Revision::new(1),
+        )
+        .unwrap();
+        let other = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("semantic-other").unwrap(),
+            root.path().join("other"),
+            Revision::new(1),
+        )
+        .unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        for (context, name) in [(&context, "Semantic"), (&other, "Other")] {
+            state
+                .vaults()
+                .insert(context, name, VaultStatus::Active)
+                .await
+                .unwrap();
+        }
+        let core = VaultCore::new(
+            state.clone(),
+            root.path().join("history"),
+            VaultPathPolicy::default(),
+            StorageOptions::default(),
+            Default::default(),
+        );
+        for (path, body) in [
+            (
+                "security/recovery.md",
+                "# Recovery\n\nMalicious process quarantine restoration procedure.",
+            ),
+            ("food/cooking.md", "# Cooking\n\nBake bread with flour."),
+        ] {
+            core.create_bytes(
+                &context,
+                &VaultPath::parse(path).unwrap(),
+                body.as_bytes(),
+                Actor::system(),
+                SourcePlane::System,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let auth = AuthService::new(
+            state.auth(),
+            MasterKeyRing::from_bytes(1, &[42_u8; 32]).unwrap(),
+        );
+        let providers = ProviderService::new(state.clone(), auth);
+        providers
+            .set_provider_mode(&context, ProviderMode::LocalOnly, None)
+            .await
+            .unwrap();
+        let provider = providers
+            .create_provider(ProviderInput {
+                name: "semantic fake".to_owned(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url: Url::parse(&format!("http://{address}/v1/")).unwrap(),
+                settings: ProviderSettings::default(),
+                enabled: true,
+                secret: None,
+            })
+            .await
+            .unwrap();
+        let model = providers
+            .register_model(ModelInput {
+                provider_id: provider.id,
+                external_model_id: "semantic-test".to_owned(),
+                capabilities: ModelCapabilities {
+                    embeddings: true,
+                    dimension: Some(2),
+                    ..ModelCapabilities::default()
+                },
+                settings: ModelSettings::default(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        providers
+            .bind_model(Some(&context), "embedding_note", model.id, json!({}), None)
+            .await
+            .unwrap();
+        let service = IndexService::with_provider_service(state.clone(), providers);
+        service.rebuild_vault(&core, &context).await.unwrap();
+        let sources = service.note_embedding_sources(&context).await.unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(
+            service
+                .reembed_note_sources(&context, model.id, &sources)
+                .await
+                .unwrap(),
+            2
+        );
+        let semantic_status = service.note_semantic_status(&context).await.unwrap();
+        assert!(semantic_status.configured);
+        assert!(semantic_status.provider_mode_enabled);
+        assert_eq!(semantic_status.source_chunks, 2);
+        assert_eq!(semantic_status.indexed_chunks, 2);
+        assert_eq!(semantic_status.stale_vectors, 0);
+        assert!(semantic_status.blockers.is_empty());
+
+        let result = service
+            .retrieve_notes(
+                &context,
+                "recover an isolated threat process",
+                NoteRetrievalMode::Semantic,
+                &NoteRetrievalScope::default(),
+                1,
+                0,
+                true,
+            )
+            .await
+            .unwrap();
+        assert!(result.degraded.is_empty());
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].note.path.as_str(), "security/recovery.md");
+        assert!(
+            result.hits[0]
+                .note
+                .snippet
+                .contains("quarantine restoration")
+        );
+        assert!(
+            service
+                .retrieve_notes(
+                    &other,
+                    "recover an isolated threat process",
+                    NoteRetrievalMode::Semantic,
+                    &NoteRetrievalScope::default(),
+                    1,
+                    0,
+                    false,
+                )
+                .await
+                .unwrap()
+                .hits
+                .is_empty()
+        );
+        let current = service.schedule_note_embeddings(&context).await.unwrap();
+        assert_eq!(current.source_chunks, 2);
+        assert_eq!(current.queued_chunks, 0);
+        assert_eq!(current.pruned_vectors, 0);
+
+        let path = VaultPath::parse("security/recovery.md").unwrap();
+        let revision = core
+            .read(&context, &path)
+            .await
+            .unwrap()
+            .file
+            .current_revision;
+        core.replace_bytes(
+            &context,
+            &path,
+            revision,
+            b"# Recovery\n\nUpdated malicious process quarantine restoration procedure.",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+        service.rebuild_vault(&core, &context).await.unwrap();
+        let changed = service.schedule_note_embeddings(&context).await.unwrap();
+        assert_eq!(changed.source_chunks, 2);
+        assert_eq!(changed.queued_chunks, 1);
+        assert_eq!(changed.pruned_vectors, 1);
+        assert_eq!(changed.jobs, 1);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn rebuilds_projection_after_deletion_and_keeps_vaults_isolated() {
         let root = tempdir().unwrap();
         let content_root = root.path().join("vault");
@@ -1597,11 +2625,15 @@ mod tests {
             .unwrap();
         let other = other_staged.commit().await.unwrap();
 
-        std::fs::create_dir_all(content_root.join("_mcp-vault")).unwrap();
-        std::fs::write(
-            content_root.join("_mcp-vault/index.yaml"),
-            "topics:\n  architecture:\n    title: Architecture\n    include: [docs/**]\n    pinned: [docs/architecture.md]\n",
+        core.create_managed_bytes(
+            &context,
+            &VaultPath::parse("_mcp-vault/index.yaml").unwrap(),
+            b"topics:\n  architecture:\n    title: Architecture\n    include: [docs/**]\n    pinned: [docs/architecture.md]\n",
+            Actor::system(),
+            SourcePlane::System,
+            None,
         )
+        .await
         .unwrap();
 
         let service = IndexService::new(state.clone());
@@ -1620,6 +2652,26 @@ mod tests {
             Some(other.file.id)
         );
         assert_eq!(search[0].backlink_count, 0);
+        let recalled = service
+            .retrieve_notes(
+                &context,
+                "conflict handling",
+                NoteRetrievalMode::Hybrid,
+                &NoteRetrievalScope::default(),
+                10,
+                0,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(recalled.hits.len(), 1);
+        assert_eq!(recalled.hits[0].note.file_id, created.file.id);
+        assert!(
+            recalled
+                .degraded
+                .iter()
+                .any(|code| code == "semantic_provider_unavailable")
+        );
         assert_eq!(
             service
                 .related_notes(&context, created.file.id, 10, 0)

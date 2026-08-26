@@ -2,7 +2,7 @@
 
 ## 1. Verification date
 
-This document was verified on **2026-08-21**.
+This document was verified on **2026-08-24**.
 
 External protocols and libraries evolve. Before implementing a protocol-sensitive change, confirm the current official specification and the selected dependency’s supported revision.
 
@@ -165,6 +165,63 @@ inference on a bounded blocking task. Provider HTTP uses reqwest 0.12.28 with
 project-owned redirect, DNS, timeout, and response-size policy.
 
 Run synchronous inference on a dedicated bounded blocking pool. Model choice and license must be visible to the administrator.
+
+### 9.1 Remote structured generation
+
+Primary request-contract references:
+
+- OpenAI OpenAPI specification and official generated SDK list:
+  https://github.com/openai/openai-openapi
+- OpenAI Structured Outputs supported-schema rules, including required object
+  fields and `additionalProperties: false`:
+  https://developers.openai.com/api/docs/guides/structured-outputs
+- DeepSeek JSON Output and thinking mode:
+  https://api-docs.deepseek.com/guides/json_mode
+  https://api-docs.deepseek.com/guides/thinking_mode
+- Xiaomi MiMo structured output:
+  https://mimo.mi.com/docs/en-US/quick-start/usage-guide/text-generation/structured-output
+- Xiaomi MiMo OpenAI-compatible Chat Completions fields:
+  https://mimo.mi.com/docs/en-US/api/chat/openai-api
+- Zhipu structured output and OpenAI compatibility:
+  https://docs.bigmodel.cn/cn/guide/capabilities/struct-output
+  https://docs.bigmodel.cn/cn/guide/develop/openai/introduction
+- Moonshot/Kimi Chat and platform overview:
+  https://platform.kimi.ai/docs/api/chat
+  https://platform.kimi.ai/docs/api/overview
+- Google Gemini OpenAI compatibility:
+  https://ai.google.dev/gemini-api/docs/openai
+- Alibaba Qwen/DashScope OpenAI-compatible Chat, structured output, and
+  thinking:
+  https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions
+  https://help.aliyun.com/zh/model-studio/qwen-structured-output
+  https://help.aliyun.com/zh/model-studio/deep-thinking
+
+OpenAI's published official SDK list does not include Rust at this verification
+date. The user-proposed community `openai_rust_sdk` was evaluated but is not a
+project dependency: its current release requires a newer Rust toolchain and
+owns its HTTP client, so adopting it would bypass the Provider transport
+controls above. Wire-format compatibility remains in project-owned adapters;
+all network execution remains in `ProviderTransport`.
+
+The normalized implementation matrix and verification boundary are maintained
+in `provider-compatibility.md`. Provider documentation changes do not silently
+change stored rows: update the typed preset, local fake contract, Admin text,
+and release evidence together.
+
+### 9.2 Automatic-memory trust references
+
+Primary OpenAI references used by ADR-0014 and ADR-0015:
+
+- Codex local memories, background generation, source controls, local files,
+  and supporting evidence:
+  https://learn.chatgpt.com/docs/customization/memories
+- Long-term memory lifecycle guidance covering source-grounded distillation,
+  non-invention, deduplication, conflict resolution, forgetting, and evals:
+  https://developers.openai.com/cookbook/examples/agents_sdk/context_personalization
+
+These references do not define MCP Vault's wire contract. They support the
+design conclusion that model self-scored confidence is not trust evidence and
+that routine memory generation must not depend on per-item human approval.
 
 ## 10. Markdown parsing
 

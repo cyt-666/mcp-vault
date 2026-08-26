@@ -18,7 +18,9 @@ use mcp_vault_domain::{
     MaintenanceGate, MemoryId, Permission, Revision, SourcePlane, VaultContext, VaultPath,
     VaultPathPolicy, VaultSlug,
 };
-use mcp_vault_indexer::{IndexError, IndexService};
+use mcp_vault_indexer::{
+    IndexError, IndexService, NoteRetrievalHit, NoteRetrievalMode, NoteRetrievalScope,
+};
 use mcp_vault_memory::{
     MemoryError, MemoryOrigin, MemoryService, MemorySourceInput, MemoryStatus, MemoryType,
     MemoryUpdateInput, RecallContext, RecallRequest, RememberInput,
@@ -139,6 +141,13 @@ impl McpService {
     /// Inject the process-shared memory/provider boundary assembled by the
     /// composition root.
     pub fn with_memory_service(mut self, memory: MemoryService) -> Self {
+        self.auth_state.memory = memory;
+        self
+    }
+
+    /// Inject the process-shared note retrieval and memory services.
+    pub fn with_application_services(mut self, index: IndexService, memory: MemoryService) -> Self {
+        self.auth_state.index = index;
         self.auth_state.memory = memory;
         self
     }
@@ -532,6 +541,8 @@ struct RecallMemoryInput {
     #[serde(default)]
     max_results: Option<u32>,
     #[serde(default)]
+    max_related_notes: Option<u32>,
+    #[serde(default)]
     max_tokens: Option<u32>,
 }
 
@@ -846,16 +857,6 @@ impl McpHandler {
             ));
         }
         let mode = input.mode.unwrap_or_default();
-        if matches!(mode, SearchMode::Semantic) {
-            return Ok(error_result(
-                &context,
-                ToolErrorBody::new(
-                    "semantic_unavailable",
-                    "semantic search is not enabled; use lexical or hybrid mode",
-                    true,
-                ),
-            ));
-        }
         match search_data(&request, &input, &scope, mode, limit, offset).await {
             Ok(data) => Ok(success_result(&context, data)),
             Err(error) => Ok(error_result(&context, error)),
@@ -948,7 +949,7 @@ impl McpHandler {
 
     #[tool(
         name = "recall",
-        description = "Recall durable sourced context relevant to the current task without requiring a query-time LLM.",
+        description = "Recall durable sourced context plus related ordinary-note cues for the current task without a query-time generative LLM; read returned note sources for exact details.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -971,6 +972,10 @@ impl McpHandler {
             Err(error) => return Ok(error_result(&context, error)),
         };
         let continuity = input.context.unwrap_or_default();
+        let include_related_notes = request
+            .principal
+            .permissions
+            .contains(Permission::ReadVault);
         let result = request
             .memory
             .recall(
@@ -986,18 +991,21 @@ impl McpHandler {
                     valid_at: input.valid_at,
                     min_importance: input.min_importance.unwrap_or(0.0),
                     include_historical: input.include_historical.unwrap_or(false),
-                    include_sources: input.include_sources.unwrap_or(true),
+                    include_sources: input.include_sources.unwrap_or(false),
                     include_score_breakdown: input.include_score_breakdown.unwrap_or(false),
+                    include_related_notes,
                     max_results: input.max_results.unwrap_or(12),
+                    max_related_notes: if include_related_notes {
+                        input.max_related_notes.unwrap_or(8)
+                    } else {
+                        0
+                    },
                     max_tokens: input.max_tokens.unwrap_or(1800),
                 },
             )
             .await;
         match result {
-            Ok(result) => Ok(success_result(
-                &context,
-                serde_json::to_value(result).unwrap_or_else(|_| json!({})),
-            )),
+            Ok(result) => Ok(success_result(&context, recall_json(result))),
             Err(error) => Ok(error_result(&context, memory_error(error))),
         }
     }
@@ -1099,7 +1107,7 @@ impl McpHandler {
 
     #[tool(
         name = "remember",
-        description = "Create or reinforce one explicit atomic durable memory with provenance and idempotency.",
+        description = "Stage one explicit sourced memory input for durable background consolidation. Returns the raw input and consolidation job IDs; final recall changes after Phase 2 commits.",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1193,7 +1201,12 @@ impl McpHandler {
         {
             Ok(result) => Ok(success_result(
                 &context,
-                json!({"outcome": result.outcome, "memory": result.memory}),
+                json!({
+                    "outcome": result.outcome,
+                    "memory": result.memory,
+                    "raw_memory_id": result.raw_memory_id,
+                    "consolidation_job_id": result.consolidation_job_id,
+                }),
             )),
             Err(error) => Ok(error_result(&context, memory_error(error))),
         }
@@ -1653,7 +1666,7 @@ impl ServerHandler for McpHandler {
         .with_instructions(
             "This server is the user's persistent Markdown knowledge Vault.\n\
              Use vault_overview or browse_index when you need to understand the available knowledge.\n\
-             Use recall proactively when the task may depend on prior decisions, preferences, constraints, project state, or past work; use search_notes to verify exact source material.\n\
+             Use recall proactively when the task may depend on prior decisions, preferences, constraints, project state, past work, or knowledge that may already exist in the Vault. Treat related_notes as retrieval cues, then use read_note to verify exact source material.\n\
              Use mutation tools only when the user requests or clearly authorizes a persistent change. Preserve revisions and never overwrite a revision conflict.\n\
              MCP Vault binds each request to the Vault slug in the endpoint and the bearer credential. Recall is projection-based and does not require a query-time LLM; semantic providers are optional and report degradation.",
         )
@@ -1975,10 +1988,19 @@ fn memory_error(error: MemoryError) -> ToolErrorBody {
         MemoryError::InvalidInput(_) | MemoryError::Markdown => {
             ToolErrorBody::new("invalid_argument", "the memory request is invalid", false)
         }
+        MemoryError::SourceIngestion(code) => {
+            ToolErrorBody::new(code, "the source note could not be processed", false)
+        }
+        MemoryError::GeneratedOutput(code) => {
+            ToolErrorBody::new(code, "the generated memory output failed validation", false)
+        }
         MemoryError::NotFound => ToolErrorBody::new("not_found", "the memory was not found", false),
+        MemoryError::Configuration(code) => {
+            ToolErrorBody::new(code, "memory extraction is not fully configured", false)
+        }
         MemoryError::Conflict => ToolErrorBody::new(
             "memory_conflict",
-            "the memory changed or requires review",
+            "memory state changed while the operation was running; retry with current state",
             true,
         ),
         MemoryError::Quarantined => ToolErrorBody::new(
@@ -2185,6 +2207,11 @@ fn index_error(error: IndexError) -> ToolErrorBody {
         IndexError::Core(_) | IndexError::State(_) => {
             ToolErrorBody::new("temporarily_unavailable", "the index is unavailable", true)
         }
+        IndexError::Provider(error) => ToolErrorBody::new(
+            error.code(),
+            "the semantic note index is unavailable",
+            error.retryable(),
+        ),
     }
 }
 
@@ -2365,6 +2392,14 @@ async fn search_data(
     limit: u32,
     offset: u32,
 ) -> Result<Value, ToolErrorBody> {
+    let result_granularity = input.result_granularity.as_deref().unwrap_or("note");
+    if !matches!(result_granularity, "note" | "section") {
+        return Err(ToolErrorBody::new(
+            "invalid_argument",
+            "result granularity must be note or section",
+            false,
+        ));
+    }
     let path_prefix = match scope.path_prefix.as_deref() {
         None => None,
         Some(value) => {
@@ -2393,36 +2428,47 @@ async fn search_data(
         ));
     }
     let status = indexed_status(request).await?;
-    let records = request
+    let retrieval_mode = match mode {
+        SearchMode::Lexical => NoteRetrievalMode::Lexical,
+        SearchMode::Semantic => NoteRetrievalMode::Semantic,
+        SearchMode::Hybrid => NoteRetrievalMode::Hybrid,
+    };
+    let result = request
         .index
-        .search_notes_scoped(
+        .retrieve_notes(
             &request.vault,
             &input.query,
-            path_prefix.as_deref(),
-            &scope.tags,
-            &scope.topic_ids,
-            scope.modified_after,
-            scope.modified_before,
+            retrieval_mode,
+            &NoteRetrievalScope {
+                path_prefix,
+                tags: scope.tags.clone(),
+                topic_ids: scope.topic_ids.clone(),
+                modified_after: scope.modified_after,
+                modified_before: scope.modified_before,
+            },
             limit,
             offset,
+            input.include_score_breakdown.unwrap_or(false),
         )
         .await
         .map_err(index_error)?;
-    let degraded = matches!(mode, SearchMode::Hybrid);
+    let result_count = result.hits.len();
+    let truncated = offset.saturating_add(result_count as u32) < result.available_result_count;
     Ok(json!({
         "mode": match mode {
             SearchMode::Lexical => "lexical",
             SearchMode::Semantic => "semantic",
             SearchMode::Hybrid => "hybrid",
         },
-        "degraded": degraded,
-        "degradation_reason": degraded.then_some("semantic_index_unavailable"),
-        "results": records.iter().map(note_search_json).collect::<Vec<_>>(),
+        "degraded": !result.degraded.is_empty(),
+        "degradation_reasons": result.degraded,
+        "results": result.hits.iter().map(note_retrieval_json).collect::<Vec<_>>(),
+        "available_result_count": result.available_result_count,
         "index_revision": status.index_revision.value(),
         "coverage": status.coverage,
-        "next_cursor": (records.len() == limit as usize).then(|| format!("offset:{}", offset.saturating_add(records.len() as u32))),
-        "truncated": records.len() == limit as usize,
-        "result_granularity": input.result_granularity.as_deref().unwrap_or("note"),
+        "next_cursor": truncated.then(|| format!("offset:{}", offset.saturating_add(result_count as u32))),
+        "truncated": truncated,
+        "result_granularity": result_granularity,
         "include_score_breakdown": input.include_score_breakdown.unwrap_or(false),
     }))
 }
@@ -2467,6 +2513,7 @@ fn note_search_json(note: &mcp_vault_state::NoteSearchRecord) -> Value {
         "snippet": note.snippet,
         "score": note.score,
         "tags": note.tags,
+        "topic_ids": note.topic_ids,
         "headings": note.headings,
         "outgoing_links": note.outgoing_links.iter().map(|link| json!({
             "id": link.id,
@@ -2479,6 +2526,33 @@ fn note_search_json(note: &mcp_vault_state::NoteSearchRecord) -> Value {
         "backlink_count": note.backlink_count,
         "resource_uri": note_resource_uri(&note.path),
     })
+}
+
+fn note_retrieval_json(hit: &NoteRetrievalHit) -> Value {
+    let mut value = note_search_json(&hit.note);
+    if let Some(object) = value.as_object_mut() {
+        object.insert("score".to_owned(), json!(hit.score));
+        if let Some(breakdown) = hit.score_breakdown.as_ref() {
+            object.insert("score_breakdown".to_owned(), json!(breakdown));
+        }
+    }
+    value
+}
+
+fn recall_json(result: mcp_vault_memory::RecallResult) -> Value {
+    let mut value = serde_json::to_value(result).unwrap_or_else(|_| json!({}));
+    if let Some(notes) = value.get_mut("related_notes").and_then(Value::as_array_mut) {
+        for note in notes {
+            let path = note
+                .get("path")
+                .and_then(Value::as_str)
+                .and_then(|path| VaultPath::parse(path).ok());
+            if let (Some(object), Some(path)) = (note.as_object_mut(), path) {
+                object.insert("resource_uri".to_owned(), json!(note_resource_uri(&path)));
+            }
+        }
+    }
+    value
 }
 
 async fn read_bounded(
@@ -2570,6 +2644,7 @@ mod tests {
         Actor, Revision, Scope, ScopeSet, VaultContext, VaultId, VaultPathPolicy, VaultSlug,
     };
     use mcp_vault_indexer::IndexService;
+    use mcp_vault_memory::MEMORY_PIPELINE_GENERATION;
     use mcp_vault_state::{StateStore, VaultStatus};
     use mcp_vault_storage_fs::StorageOptions;
     use rand::rngs::OsRng;
@@ -2679,6 +2754,13 @@ mod tests {
             .insert(&other_context, "Other", VaultStatus::Active)
             .await
             .unwrap();
+        for vault_context in [&context, &other_context] {
+            state
+                .memory()
+                .set_pipeline_generation_state(vault_context, MEMORY_PIPELINE_GENERATION, false)
+                .await
+                .unwrap();
+        }
         let auth = AuthService::new(
             state.auth(),
             MasterKeyRing::from_bytes(1, &[7_u8; 32]).unwrap(),
@@ -2704,6 +2786,19 @@ mod tests {
     }
 
     async fn configured_indexed_router() -> (axum::Router, String, tempfile::TempDir) {
+        configured_indexed_router_with_scopes(full_scopes()).await
+    }
+
+    async fn configured_indexed_memory_router() -> (axum::Router, String, tempfile::TempDir) {
+        let scopes: ScopeSet = [Scope::VaultDiscover, Scope::VaultRead, Scope::MemoryRead]
+            .into_iter()
+            .collect();
+        configured_indexed_router_with_scopes(scopes).await
+    }
+
+    async fn configured_indexed_router_with_scopes(
+        scopes: ScopeSet,
+    ) -> (axum::Router, String, tempfile::TempDir) {
         let root = tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("notes")).unwrap();
         std::fs::write(
@@ -2726,6 +2821,11 @@ mod tests {
             .insert(&context, "Work", VaultStatus::Active)
             .await
             .unwrap();
+        state
+            .memory()
+            .set_pipeline_generation_state(&context, MEMORY_PIPELINE_GENERATION, false)
+            .await
+            .unwrap();
         let core = VaultCore::new(
             state.clone(),
             root.path().join("history"),
@@ -2743,7 +2843,7 @@ mod tests {
             MasterKeyRing::from_bytes(1, &[9_u8; 32]).unwrap(),
         );
         let pat = auth
-            .issue_pat(&context, "test-agent", full_scopes(), None)
+            .issue_pat(&context, "test-agent", scopes, None)
             .await
             .unwrap();
         let service = McpService::new(
@@ -3100,6 +3200,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recall_returns_related_ordinary_notes_without_memory_promotion() {
+        let (router, token, _root) = configured_indexed_memory_router().await;
+        let response = router
+            .oneshot(tool_request(
+                &token,
+                12,
+                "recall",
+                serde_json::json!({
+                    "query": "WebDAV conflict handling",
+                    "max_results": 5,
+                    "max_related_notes": 5,
+                    "max_tokens": 500
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["result"]["isError"], false, "{body}");
+        let data = &body["result"]["structuredContent"]["data"];
+        assert!(data["memories"].as_array().unwrap().is_empty());
+        assert_eq!(data["related_notes"].as_array().unwrap().len(), 1);
+        assert_eq!(data["related_notes"][0]["path"], "notes/search.md");
+        assert_eq!(
+            data["related_notes"][0]["resource_uri"],
+            "vault://note/notes/search%2Emd"
+        );
+        assert_eq!(data["available_related_note_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn memory_only_scope_cannot_receive_ordinary_note_cues() {
+        let scopes: ScopeSet = [Scope::MemoryRead].into_iter().collect();
+        let (router, token, _root) = configured_indexed_router_with_scopes(scopes).await;
+        let response = router
+            .oneshot(tool_request(
+                &token,
+                13,
+                "recall",
+                serde_json::json!({
+                    "query": "WebDAV conflict handling",
+                    "max_results": 5,
+                    "max_related_notes": 5,
+                    "max_tokens": 500
+                }),
+            ))
+            .await
+            .unwrap();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["result"]["isError"], false, "{body}");
+        let data = &body["result"]["structuredContent"]["data"];
+        assert!(data["related_notes"].as_array().unwrap().is_empty());
+        assert_eq!(data["available_related_note_count"], 0);
+    }
+
+    #[tokio::test]
     async fn tool_list_is_scope_filtered_in_documented_order() {
         let scopes: ScopeSet = [Scope::VaultDiscover, Scope::VaultRead]
             .into_iter()
@@ -3168,7 +3326,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_tools_and_context_resource_round_trip_with_memory_scopes() {
+    async fn remember_stages_input_and_context_changes_only_after_consolidation() {
         let (router, token, _root) = configured_memory_router().await;
         let remember = router
             .clone()
@@ -3192,10 +3350,20 @@ mod tests {
         let body = remember.into_body().collect().await.unwrap().to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["result"]["isError"], false);
-        let memory_id = body["result"]["structuredContent"]["data"]["memory"]["id"]
+        assert_eq!(
+            body["result"]["structuredContent"]["data"]["outcome"],
+            "staged"
+        );
+        assert!(body["result"]["structuredContent"]["data"]["memory"].is_null());
+        let raw_memory_id = body["result"]["structuredContent"]["data"]["raw_memory_id"]
             .as_str()
             .unwrap()
             .to_owned();
+        assert!(
+            body["result"]["structuredContent"]["data"]["consolidation_job_id"]
+                .as_str()
+                .is_some()
+        );
 
         let recall = router
             .clone()
@@ -3210,9 +3378,11 @@ mod tests {
         let body = recall.into_body().collect().await.unwrap().to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["result"]["isError"], false);
-        assert_eq!(
-            body["result"]["structuredContent"]["data"]["memories"][0]["id"],
-            memory_id
+        assert!(
+            body["result"]["structuredContent"]["data"]["memories"]
+                .as_array()
+                .unwrap()
+                .is_empty()
         );
 
         let resource = router
@@ -3227,10 +3397,10 @@ mod tests {
             "application/json"
         );
         assert!(
-            body["result"]["contents"][0]["text"]
+            !body["result"]["contents"][0]["text"]
                 .as_str()
                 .unwrap()
-                .contains(&memory_id)
+                .contains(&raw_memory_id)
         );
     }
 }

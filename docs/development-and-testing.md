@@ -263,6 +263,8 @@ Test application services with real temporary filesystem + SQLite:
 - provider adapter contracts use local fake HTTP servers only;
 - SSRF/redirect/privacy/retry/concurrency and response-schema failures;
 - embedding dimension/model/Vault partition and re-embedding job references;
+- deterministic bounded note chunks, missing/stale vector scheduling, semantic
+  paraphrase retrieval, lexical fallback, and two-Vault note-cue isolation;
 - memory materialization.
 
 ### 8.5 Protocol tests
@@ -433,12 +435,36 @@ Evaluate:
 
 Ranking changes require benchmark comparison and recorded rationale.
 
-WP-11 also keeps deterministic integration fixtures for remember idempotency,
-managed Markdown materialization/round-trip, invalid frontmatter quarantine,
-candidate validation, source invalidation, lifecycle filtering, contradiction
-supersession, FTS-only recall, optional vector degradation, recall budgets,
-MCP memory scopes/resources, and two-Vault memory isolation. Tests use local
-provider fakes only; recall tests prove that no query-time LLM is required.
+Memory integration fixtures cover explicit `remember` staging, Phase 1
+semantic output distinct from exact evidence, local evidence/revision checks,
+durable `no_output` coverage, unchanged-note skip, forced re-extraction,
+source update/withdrawal, Phase 2 create/update/archive/discard decisions,
+snapshot conflicts, proposal reuse, canonical artifact rendering, lifecycle
+filtering, FTS-only recall, optional vector degradation, recall budgets, MCP
+memory scopes/resources, and two-Vault isolation. Tests use local Provider
+fakes only; recall tests prove that no query-time LLM is required.
+
+The public MCP suite also proves that `recall` can return an indexed ordinary
+note without durable memory and that a `memory:read` credential lacking
+`vault:read` receives no note cue. `remember` tests require a raw-input ID and
+consolidation-job ID and prove the final memory is unavailable until Phase 2
+commits. Provider fixtures assert stable schema category/path diagnostics
+without response values; generic single-array-envelope repair remains bounded
+to schemas where the direct item/array already validates, while the multi-field
+Phase 1/Phase 2 contracts reject missing fields.
+
+Worker fixtures prove a full-Vault Phase 1 job continues after one malformed
+note output, checkpoints a bounded redacted failure, preserves its paid-work
+cursor, and admits Phase 2. State fixtures prove one active consolidation per
+Vault, exact raw-hash selection commit, idempotent applied proposals, and
+cross-Vault rejection. Migration/reset fixtures upgrade from schema 9, remove
+legacy quote-as-content extracted memory through Vault Core, stage explicit
+memory, clear legacy candidate/note rows, and preserve source history. Admin
+and frontend tests cover two-role readiness, active-run reuse, truthful
+Phase 1/Phase 2 progress, archive/restore revision conflicts, consecutive
+permanent deletes without refresh, and the absence of candidate-generation or
+review controls. Artifact pagination tests prove `MEMORY.md` includes active
+memory beyond one 200-row State page.
 
 ## 13. Crash and recovery tests
 

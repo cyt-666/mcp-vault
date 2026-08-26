@@ -203,12 +203,33 @@ pub struct NoteSearchRecord {
     pub score: Option<f64>,
     /// Tags associated with the note.
     pub tags: Vec<String>,
+    /// Stable knowledge-map topics associated with the note.
+    pub topic_ids: Vec<String>,
     /// Heading title/anchor candidates.
     pub headings: Vec<String>,
     /// Outgoing Markdown/Obsidian links.
     pub outgoing_links: Vec<NoteLinkRecord>,
     /// Number of indexed incoming links.
     pub backlink_count: u64,
+}
+
+/// Current rebuildable note text used to derive semantic embedding chunks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NoteEmbeddingSourceRecord {
+    /// Stable canonical file identity.
+    pub file_id: FileId,
+    /// Current Vault-relative path.
+    pub path: VaultPath,
+    /// Canonical revision represented by this projection.
+    pub revision: Revision,
+    /// Optional note title.
+    pub title: Option<String>,
+    /// Ordered heading titles used as compact semantic context.
+    pub headings: Vec<String>,
+    /// Plain-text projection derived from canonical Markdown.
+    pub plain_text: String,
+    /// Canonical content hash analyzed into this projection.
+    pub analyzed_content_hash: String,
 }
 
 /// One link projection returned with an indexed note summary.
@@ -239,6 +260,16 @@ struct NoteSearchRow {
     updated_at: i64,
     snippet: String,
     score: Option<f64>,
+}
+
+#[derive(Clone, Debug, FromRow)]
+struct NoteEmbeddingSourceRow {
+    file_id: String,
+    path: String,
+    revision: i64,
+    title: Option<String>,
+    plain_text: String,
+    analyzed_content_hash: String,
 }
 
 /// Repository for all Markdown/index projections.
@@ -745,6 +776,76 @@ impl IndexRepository {
         Ok(result)
     }
 
+    /// List current note text projections for bounded semantic embedding work.
+    pub async fn list_note_embedding_sources(
+        &self,
+        context: &VaultContext,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<NoteEmbeddingSourceRecord>, StateError> {
+        validate_page(limit, offset)?;
+        let rows = sqlx::query_as::<_, NoteEmbeddingSourceRow>(
+            "SELECT file_id, path, revision, title, plain_text,
+                    analyzed_content_hash
+             FROM notes WHERE vault_id = ?
+             ORDER BY path ASC, file_id ASC LIMIT ? OFFSET ?",
+        )
+        .bind(context.id().to_string())
+        .bind(i64::from(limit))
+        .bind(i64::from(offset))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut sources = Vec::with_capacity(rows.len());
+        for row in rows {
+            sources.push(note_embedding_source(row, &self.pool, context.id()).await?);
+        }
+        Ok(sources)
+    }
+
+    /// Resolve one current note projection by stable file identity.
+    pub async fn get_note_embedding_source(
+        &self,
+        context: &VaultContext,
+        file_id: FileId,
+    ) -> Result<Option<NoteEmbeddingSourceRecord>, StateError> {
+        let row = sqlx::query_as::<_, NoteEmbeddingSourceRow>(
+            "SELECT file_id, path, revision, title, plain_text,
+                    analyzed_content_hash
+             FROM notes WHERE vault_id = ? AND file_id = ?",
+        )
+        .bind(context.id().to_string())
+        .bind(file_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some(row) => Ok(Some(
+                note_embedding_source(row, &self.pool, context.id()).await?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// Return one indexed note as a bounded retrieval cue.
+    pub async fn get_note_for_retrieval(
+        &self,
+        context: &VaultContext,
+        file_id: FileId,
+    ) -> Result<Option<NoteSearchRecord>, StateError> {
+        let row = sqlx::query_as::<_, NoteSearchRow>(
+            "SELECT file_id, path, revision, title, updated_at,
+                    substr(plain_text, 1, 280) AS snippet, NULL AS score
+             FROM notes WHERE vault_id = ? AND file_id = ?",
+        )
+        .bind(context.id().to_string())
+        .bind(file_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some(row) => Ok(Some(row_to_search(row, &self.pool, context.id()).await?)),
+            None => Ok(None),
+        }
+    }
+
     /// Search indexed Markdown using a caller-sanitized FTS5 query.
     #[allow(clippy::too_many_arguments)]
     pub async fn search_notes(
@@ -924,6 +1025,20 @@ async fn row_to_search(
     .bind(file_id.to_string())
     .fetch_all(pool)
     .await?;
+    let topic_ids = sqlx::query_scalar::<_, String>(
+        "SELECT node.stable_key
+         FROM index_memberships membership
+         JOIN index_nodes node
+           ON node.vault_id = membership.vault_id
+          AND node.id = membership.node_id
+         WHERE membership.vault_id = ? AND membership.file_id = ?
+           AND node.node_type IN ('topic', 'manual_topic', 'tag')
+         ORDER BY node.stable_key ASC",
+    )
+    .bind(vault_id.to_string())
+    .bind(file_id.to_string())
+    .fetch_all(pool)
+    .await?;
     let headings = sqlx::query_scalar::<_, String>(
         "SELECT title FROM note_headings
          WHERE vault_id = ? AND file_id = ?
@@ -965,10 +1080,36 @@ async fn row_to_search(
         snippet: row.snippet,
         score: row.score,
         tags,
+        topic_ids,
         headings,
         outgoing_links,
         backlink_count: u64::try_from(backlink_count)
             .map_err(|_| StateError::InvalidInput("backlink count is invalid"))?,
+    })
+}
+
+async fn note_embedding_source(
+    row: NoteEmbeddingSourceRow,
+    pool: &SqlitePool,
+    vault_id: VaultId,
+) -> Result<NoteEmbeddingSourceRecord, StateError> {
+    let file_id = FileId::parse(&row.file_id)?;
+    let headings = sqlx::query_scalar::<_, String>(
+        "SELECT title FROM note_headings
+         WHERE vault_id = ? AND file_id = ? ORDER BY ordinal ASC",
+    )
+    .bind(vault_id.to_string())
+    .bind(file_id.to_string())
+    .fetch_all(pool)
+    .await?;
+    Ok(NoteEmbeddingSourceRecord {
+        file_id,
+        path: VaultPath::parse(&row.path)?,
+        revision: Revision::try_from(row.revision)?,
+        title: row.title,
+        headings,
+        plain_text: row.plain_text,
+        analyzed_content_hash: row.analyzed_content_hash,
     })
 }
 

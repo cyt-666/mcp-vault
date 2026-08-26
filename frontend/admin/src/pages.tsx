@@ -26,6 +26,7 @@ import {
   formatPercent,
   formatRequestError,
   formatTime,
+  jobErrorLabel,
   memoryTypeLabel,
   numberValue,
   statusLabel,
@@ -67,10 +68,10 @@ export function Dashboard({ data, onNavigate }: { data: JsonObject | null; onNav
         <Metric
           label="长期记忆"
           value={numberValue(memory.active)}
-          detail={`${numberValue(memory.candidate)} 条等待审核`}
+          detail={`${numberValue(memory.pending_consolidation)} 条原始输入等待整理`}
         />
         <Metric label="后台任务" value={numberValue(jobs.pending)} detail="等待或正在执行" />
-        <Metric label="索引覆盖率" value={formatPercent(index.coverage)} detail={`${numberValue(index.indexed_notes)} 篇已索引`} />
+        <Metric label="索引覆盖率" value={formatPercent(index.coverage_ratio)} detail={`${numberValue(index.indexed_notes)} / ${numberValue(index.total_notes)} 篇已索引`} />
       </section>
 
       <section className="panel-grid">
@@ -669,16 +670,66 @@ function OAuthForms({ notify }: { notify: Notify }) {
   );
 }
 
+type ProviderDeletionResult = {
+  deleted: boolean;
+  provider_id: string;
+  models_deleted: number;
+  bindings_deleted: number;
+  embeddings_deleted: number;
+  secrets_deleted: number;
+};
+
 function ProviderPage({ data, notify, onRefresh }: { data: JsonObject | null; notify: Notify; onRefresh: () => void }) {
   const providers = arrayRecords(data?.providers);
+  const models = arrayRecords(data?.models);
+  const bindings = arrayRecords(data?.bindings);
+  const [deletingProviderId, setDeletingProviderId] = useState<string | null>(null);
 
   async function testProvider(provider: JsonObject) {
     try {
-      await adminApi.request(`/providers/${stringValue(provider.id, '')}/test`, { method: 'POST' });
-      notify('连接测试已完成，健康状态会在刷新后显示。');
+      const result = await adminApi.request<{ models: unknown[] }>(`/providers/${stringValue(provider.id, '')}/models/refresh`, { method: 'POST' });
+      notify(`连接测试完成，发现 ${Array.isArray(result.models) ? result.models.length : 0} 个模型。`);
       onRefresh();
     } catch (error: unknown) {
       notify(formatRequestError(error), 'danger');
+    }
+  }
+
+  async function deleteProvider(provider: JsonObject, providerModels: JsonObject[]) {
+    const providerId = stringValue(provider.id, '');
+    const providerName = stringValue(provider.name, '未命名服务');
+    if (!providerId) {
+      notify('AI 服务 ID 无效，请刷新页面后重试。', 'danger');
+      return;
+    }
+    const modelIds = new Set(providerModels.map((model) => stringValue(model.id, '')).filter(Boolean));
+    const visibleBindings = bindings.filter((binding) => modelIds.has(stringValue(binding.model_id, ''))).length;
+    const confirmed = window.confirm(
+      `确定删除“${providerName}”吗？\n\n` +
+      `将删除 ${providerModels.length} 个模型，并解除所有 Vault 中使用这些模型的用途绑定` +
+      `${visibleBindings > 0 ? `（当前可见 ${visibleBindings} 个）` : ''}；相关向量索引和该服务的加密密钥也会清理。\n\n` +
+      'Vault 原始笔记、长期记忆、后台任务历史和审计记录不会被删除。此操作无法撤销。',
+    );
+    if (!confirmed) return;
+
+    setDeletingProviderId(providerId);
+    try {
+      const revision = typeof provider.revision === 'number' && Number.isInteger(provider.revision)
+        ? `?expected_revision=${provider.revision}`
+        : '';
+      const result = await adminApi.request<ProviderDeletionResult>(
+        `/providers/${encodeURIComponent(providerId)}${revision}`,
+        { method: 'DELETE' },
+      );
+      notify(
+        `已删除“${providerName}”：清理 ${result.models_deleted} 个模型、` +
+        `${result.bindings_deleted} 个用途绑定和 ${result.embeddings_deleted} 条可重建向量记录。`,
+      );
+      onRefresh();
+    } catch (error: unknown) {
+      notify(formatRequestError(error), 'danger');
+    } finally {
+      setDeletingProviderId(null);
     }
   }
 
@@ -695,14 +746,42 @@ function ProviderPage({ data, notify, onRefresh }: { data: JsonObject | null; no
             {providers.map((provider) => {
               const health = asRecord(provider.health);
               const secret = asRecord(provider.secret);
+              const providerModels = models.filter((model) => model.provider_id === provider.id);
               return (
-                <article className="record-item" key={stringValue(provider.id)}>
-                  <div className="record-main">
-                    <div className="record-title"><strong>{stringValue(provider.name)}</strong><StatusBadge tone={statusTone(health.status)}>{statusLabel(health.status)}</StatusBadge></div>
-                    <p>{providerTypeLabel(provider.provider_type)} · <code>{stringValue(provider.base_url)}</code></p>
-                    <small>{booleanValue(secret.configured) ? `密钥：${stringValue(secret.hint, '已配置')}` : '未配置密钥'} · 最近检查：{formatTime(health.checked_at)}</small>
+                <article className="record-item record-item--stack" key={stringValue(provider.id)}>
+                  <div className="record-title"><strong>{stringValue(provider.name)}</strong><StatusBadge tone={statusTone(health.status)}>{statusLabel(health.status)}</StatusBadge></div>
+                  <p>{providerTypeLabel(provider.provider_type)} · <code>{stringValue(provider.base_url)}</code></p>
+                  <small>{booleanValue(secret.configured) ? `密钥：${stringValue(secret.hint, '已配置')}` : '未配置密钥'} · 最近检查：{formatTime(health.checked_at)} · 模型 {providerModels.length} 个</small>
+                  <div className="button-row">
+                    <button className="secondary-button" disabled={deletingProviderId !== null} type="button" onClick={() => void testProvider(provider)}>发现/刷新模型</button>
+                    <button
+                      aria-label={`删除 AI 服务 ${stringValue(provider.name, '未命名服务')}`}
+                      className="danger-button"
+                      disabled={deletingProviderId !== null}
+                      type="button"
+                      onClick={() => void deleteProvider(provider, providerModels)}
+                    >
+                      {deletingProviderId === stringValue(provider.id, '') ? '正在删除…' : '删除 AI 服务'}
+                    </button>
                   </div>
-                  <button className="secondary-button" type="button" onClick={() => void testProvider(provider)}>测试连接</button>
+                  <details className="disclosure">
+                    <summary>编辑 AI 服务</summary>
+                    <EditProviderForm provider={provider} notify={notify} onRefresh={onRefresh} />
+                  </details>
+                  {providerModels.length > 0 ? (
+                    <div className="record-list">
+                      {providerModels.map((model) => (
+                        <div className="summary-row" key={stringValue(model.id)}>
+                          <span><code>{stringValue(model.external_model_id)}</code></span>
+                          <strong>{modelCapabilityLabel(asRecord(model.capabilities))}{isOpenAiChatProvider(provider.provider_type) ? ` · ${openAiCompatibilityLabel(provider, model)}` : ''}</strong>
+                        </div>
+                      ))}
+                    </div>
+                  ) : <Notice tone="info">尚未登记模型。可以先尝试自动发现，也可以手动填写提供商要求的模型 ID。</Notice>}
+                  <details className="disclosure">
+                    <summary>手动登记模型</summary>
+                    <ManualModelForm provider={provider} notify={notify} onRefresh={onRefresh} />
+                  </details>
                 </article>
               );
             })}
@@ -713,7 +792,172 @@ function ProviderPage({ data, notify, onRefresh }: { data: JsonObject | null; no
           <AddProviderForm notify={notify} onRefresh={onRefresh} />
         </details>
       </Panel>
+      <ModelBindingsPanel models={models} bindings={bindings} notify={notify} onRefresh={onRefresh} />
     </div>
+  );
+}
+
+const modelRoles = [
+  { value: 'memory_extraction', label: '自动生成长期记忆', detail: '从普通 Markdown 原文中识别并保存真正耐久的信息' },
+  { value: 'memory_consolidation', label: '记忆整理', detail: '合并重复记忆并处理生命周期' },
+  { value: 'note_summary', label: '笔记摘要', detail: '生成可重建的笔记摘要' },
+  { value: 'topic_enrichment', label: '主题增强', detail: '辅助主题和知识结构分析' },
+  { value: 'embedding_note', label: '笔记向量', detail: '让搜索和 recall 能按语义想起普通笔记' },
+  { value: 'embedding_memory', label: '记忆向量', detail: '生成长期记忆语义向量' },
+  { value: 'rerank', label: '结果重排', detail: '对候选检索结果进行可选重排' },
+];
+
+function ManualModelForm({ provider, notify, onRefresh }: { provider: JsonObject; notify: Notify; onRefresh: () => void }) {
+  const [modelId, setModelId] = useState('');
+  const [capability, setCapability] = useState('generation');
+  const [dimension, setDimension] = useState('');
+  const [contextWindow, setContextWindow] = useState('');
+  const [maxOutputTokens, setMaxOutputTokens] = useState('');
+  const [compatibilityPreset, setCompatibilityPreset] = useState('auto');
+  const [structuredOutputMode, setStructuredOutputMode] = useState('auto');
+  const [tokenLimitField, setTokenLimitField] = useState('auto');
+  const [thinkingMode, setThinkingMode] = useState('auto');
+  const [generationTokenLimit, setGenerationTokenLimit] = useState('');
+  const [busy, setBusy] = useState(false);
+  const effectivePreset = resolveCompatibilityPreset(
+    compatibilityPreset,
+    stringValue(provider.provider_type, ''),
+    stringValue(provider.base_url, ''),
+  );
+  const supportsThinkingControl = providerPresetSupportsThinking(effectivePreset);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    const parsedDimension = dimension ? Number(dimension) : null;
+    const parsedContextWindow = contextWindow ? Number(contextWindow) : null;
+    const parsedMaxOutputTokens = maxOutputTokens ? Number(maxOutputTokens) : null;
+    const parsedGenerationTokenLimit = generationTokenLimit ? Number(generationTokenLimit) : null;
+    try {
+      await adminApi.request(`/providers/${stringValue(provider.id, '')}/models`, {
+        method: 'POST',
+        body: {
+          external_model_id: modelId,
+          capabilities: {
+            structured_output: capability === 'generation',
+            embeddings: capability === 'embedding',
+            reranking: capability === 'reranking',
+            dimension: capability === 'embedding' ? parsedDimension : null,
+            context_window: parsedContextWindow,
+            max_output_tokens: capability === 'generation' ? parsedMaxOutputTokens : null,
+          },
+          settings: {
+            openai_compatibility_preset: compatibilityPreset,
+            openai_structured_output_mode: structuredOutputMode,
+            openai_token_limit_field: tokenLimitField,
+            openai_thinking_mode: supportsThinkingControl ? thinkingMode : 'auto',
+            generation_token_limit: parsedGenerationTokenLimit,
+          },
+          enabled: true,
+        },
+      });
+      notify('模型已登记，可以在下面绑定到具体用途。');
+      setModelId('');
+      setDimension('');
+      setContextWindow('');
+      setMaxOutputTokens('');
+      setCompatibilityPreset('auto');
+      setStructuredOutputMode('auto');
+      setTokenLimitField('auto');
+      setThinkingMode('auto');
+      setGenerationTokenLimit('');
+      onRefresh();
+    } catch (error: unknown) {
+      notify(formatRequestError(error), 'danger');
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <form className="compact-form" onSubmit={submit}>
+      <div className="form-grid">
+        <label>模型 ID<input required value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="例如：gpt-5-mini 或 qwen3:8b" /></label>
+        <label>主要能力<select value={capability} onChange={(event) => setCapability(event.target.value)}><option value="generation">结构化文本生成</option><option value="embedding">Embedding</option><option value="reranking">结果重排</option></select></label>
+        {capability === 'embedding' ? <label>向量维度（可选）<input min="1" type="number" value={dimension} onChange={(event) => setDimension(event.target.value)} placeholder="例如：1536" /></label> : null}
+        <label>上下文窗口（可选）<input min="1" type="number" value={contextWindow} onChange={(event) => setContextWindow(event.target.value)} placeholder="例如：128000" /></label>
+      </div>
+      {capability === 'generation' ? <details className="disclosure"><summary>高级：兼容模式与 Token 上限</summary><div className="form-grid">
+        <label>模型声明的生成上限（可选）<input min="1" type="number" value={maxOutputTokens} onChange={(event) => setMaxOutputTokens(event.target.value)} placeholder="由模型平台文档提供" /></label>
+        <label>单次生成 Token 上限（可选）<input min="1" max="1048576" type="number" value={generationTokenLimit} onChange={(event) => setGenerationTokenLimit(event.target.value)} placeholder="思考型预设默认 32768" /></label>
+        {isOpenAiChatProvider(provider.provider_type) ? <label>提供商兼容预设<select value={compatibilityPreset} onChange={(event) => setCompatibilityPreset(event.target.value)}><option value="auto">跟随 AI 服务（推荐）</option><option value="generic">通用 OpenAI 兼容</option><option value="deepseek">DeepSeek</option><option value="xiaomi_mimo">小米 MiMo</option><option value="zhipu_glm">智谱 GLM</option><option value="moonshot_kimi">Kimi / Moonshot</option><option value="google_gemini">Google Gemini</option><option value="alibaba_qwen">阿里千问 / DashScope</option></select></label> : null}
+        {isOpenAiChatProvider(provider.provider_type) ? <label>结构化输出方式<select value={structuredOutputMode} onChange={(event) => setStructuredOutputMode(event.target.value)}><option value="auto">跟随提供商预设</option><option value="strict_json_schema">严格 JSON Schema</option><option value="json_object">JSON Object</option><option value="prompt_only">仅提示词约束</option></select></label> : null}
+        {isOpenAiChatProvider(provider.provider_type) ? <label>Token 上限字段<select value={tokenLimitField} onChange={(event) => setTokenLimitField(event.target.value)}><option value="auto">跟随提供商预设</option><option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option></select></label> : null}
+        {isOpenAiChatProvider(provider.provider_type) && supportsThinkingControl ? <label>思考模式<select value={thinkingMode} onChange={(event) => setThinkingMode(event.target.value)}><option value="auto">模型/提供商默认</option><option value="enabled">开启</option><option value="disabled">关闭</option></select></label> : null}
+      </div>{isOpenAiChatProvider(provider.provider_type) ? <small>默认按 AI 服务选择官方兼容契约；旧的通用配置只会从官方 API 域名迁移识别，不会根据本地模型名称猜接口。高级覆盖用于代理域名或平台文档明确不同的场景。</small> : null}</details> : null}
+      <button className="secondary-button" disabled={busy} type="submit">{busy ? '正在登记…' : '登记模型'}</button>
+    </form>
+  );
+}
+
+function ModelBindingsPanel({ models, bindings, notify, onRefresh }: { models: JsonObject[]; bindings: JsonObject[]; notify: Notify; onRefresh: () => void }) {
+  const primaryRole = modelRoles[0]!;
+  const advancedRoles = modelRoles.slice(1);
+  return (
+    <Panel title="模型用途" eyebrow="角色绑定" description="同一个服务可以为不同任务选择不同模型；自动记忆必须先绑定模型。">
+      {models.length === 0 ? (
+        <EmptyState title="还没有可绑定模型" detail="先在上方发现或手动登记至少一个模型。" />
+      ) : (
+        <>
+          <div className="record-list">
+            <ModelBindingControl role={primaryRole} models={models} binding={bindings.find((item) => item.role === primaryRole.value)} notify={notify} onRefresh={onRefresh} />
+          </div>
+          <details className="disclosure">
+            <summary>高级：摘要、Embedding 与重排模型</summary>
+            <div className="record-list">
+              {advancedRoles.map((role) => (
+                <ModelBindingControl key={role.value} role={role} models={models} binding={bindings.find((item) => item.role === role.value)} notify={notify} onRefresh={onRefresh} />
+              ))}
+            </div>
+          </details>
+        </>
+      )}
+    </Panel>
+  );
+}
+
+function ModelBindingControl({ role, models, binding, notify, onRefresh }: { role: { value: string; label: string; detail: string }; models: JsonObject[]; binding?: JsonObject; notify: Notify; onRefresh: () => void }) {
+  const [selected, setSelected] = useState(stringValue(binding?.model_id, ''));
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => setSelected(stringValue(binding?.model_id, '')), [binding?.model_id]);
+
+  async function save() {
+    if (!selected) return;
+    setBusy(true);
+    try {
+      const isVaultBinding = typeof binding?.vault_id === 'string' && binding.vault_id.length > 0;
+      await adminApi.request(`/model-bindings/${role.value}`, {
+        method: 'PUT',
+        body: {
+          model_id: selected,
+          settings: {},
+          expected_revision: isVaultBinding ? binding?.revision : null,
+          vault_override: true,
+        },
+      });
+      notify(`${role.label}模型已保存。`);
+      onRefresh();
+    } catch (error: unknown) {
+      notify(formatRequestError(error), 'danger');
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <article className="record-item">
+      <div className="record-main">
+        <div className="record-title"><strong>{role.label}</strong>{binding ? <StatusBadge tone="success">已绑定</StatusBadge> : <StatusBadge tone="warning">未绑定</StatusBadge>}</div>
+        <small>{role.detail}</small>
+        <select aria-label={`${role.label}模型`} value={selected} onChange={(event) => setSelected(event.target.value)}>
+          <option value="">请选择模型</option>
+          {models.map((model) => <option key={stringValue(model.id)} value={stringValue(model.id)}>{stringValue(model.external_model_id)} — {stringValue(model.provider_name, 'AI 服务')}</option>)}
+        </select>
+      </div>
+      <button className="secondary-button" disabled={busy || !selected || selected === binding?.model_id} type="button" onClick={() => void save()}>{busy ? '正在保存…' : '保存'}</button>
+    </article>
   );
 }
 
@@ -754,9 +998,152 @@ function ProviderModeForm({ data, notify, onRefresh }: { data: JsonObject; notif
   );
 }
 
+const providerBaseUrlDefaults: Record<string, string> = {
+  openai_responses: 'https://api.openai.com/v1/',
+  openai_compatible: '',
+  deepseek: 'https://api.deepseek.com/v1/',
+  xiaomi_mimo: 'https://api.xiaomimimo.com/v1/',
+  zhipu_glm: 'https://open.bigmodel.cn/api/paas/v4/',
+  moonshot_kimi: 'https://api.moonshot.ai/v1/',
+  google_gemini: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+  alibaba_qwen: 'https://dashscope.aliyuncs.com/compatible-mode/v1/',
+  anthropic_messages: 'https://api.anthropic.com/v1/',
+  embedding_http: '',
+};
+
+const providerTypeOptions = [
+  ['openai_responses', 'OpenAI'],
+  ['anthropic_messages', 'Anthropic'],
+  ['deepseek', 'DeepSeek'],
+  ['xiaomi_mimo', '小米 MiMo'],
+  ['zhipu_glm', '智谱 GLM'],
+  ['moonshot_kimi', 'Kimi / Moonshot'],
+  ['google_gemini', 'Google Gemini'],
+  ['alibaba_qwen', '阿里千问 / DashScope'],
+  ['openai_compatible', '其他 OpenAI 兼容服务'],
+  ['embedding_http', '仅 Embedding HTTP'],
+] as const;
+
+function EditProviderForm({ provider, notify, onRefresh }: { provider: JsonObject; notify: Notify; onRefresh: () => void }) {
+  const providerSettings = asRecord(provider.settings);
+  const [values, setValues] = useState({
+    name: stringValue(provider.name, ''),
+    provider_type: stringValue(provider.provider_type, 'openai_compatible'),
+    base_url: stringValue(provider.base_url, ''),
+    enabled: booleanValue(provider.enabled),
+    secret: '',
+  });
+  const [timeoutSeconds, setTimeoutSeconds] = useState(numberValue(providerSettings.timeout_ms, 30_000) / 1_000);
+  const [connectTimeoutSeconds, setConnectTimeoutSeconds] = useState(numberValue(providerSettings.connect_timeout_ms, 5_000) / 1_000);
+  const [maxRetries, setMaxRetries] = useState(numberValue(providerSettings.max_retries, 2));
+  const [maxConcurrency, setMaxConcurrency] = useState(numberValue(providerSettings.max_concurrency, 4));
+  const [allowPrivateNetworks, setAllowPrivateNetworks] = useState(booleanValue(providerSettings.allow_private_networks));
+  const [organization, setOrganization] = useState(stringValue(providerSettings.organization, ''));
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const settings = asRecord(provider.settings);
+    setValues({
+      name: stringValue(provider.name, ''),
+      provider_type: stringValue(provider.provider_type, 'openai_compatible'),
+      base_url: stringValue(provider.base_url, ''),
+      enabled: booleanValue(provider.enabled),
+      secret: '',
+    });
+    setTimeoutSeconds(numberValue(settings.timeout_ms, 30_000) / 1_000);
+    setConnectTimeoutSeconds(numberValue(settings.connect_timeout_ms, 5_000) / 1_000);
+    setMaxRetries(numberValue(settings.max_retries, 2));
+    setMaxConcurrency(numberValue(settings.max_concurrency, 4));
+    setAllowPrivateNetworks(booleanValue(settings.allow_private_networks));
+    setOrganization(stringValue(settings.organization, ''));
+  }, [provider]);
+
+  function selectProviderType(providerType: string) {
+    const priorDefault = providerBaseUrlDefaults[values.provider_type] ?? '';
+    const preserveCustomUrl = values.base_url.length > 0 && values.base_url !== priorDefault;
+    setValues({
+      ...values,
+      provider_type: providerType,
+      base_url: preserveCustomUrl ? values.base_url : (providerBaseUrlDefaults[providerType] ?? ''),
+    });
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const providerId = stringValue(provider.id, '');
+    if (!providerId) {
+      notify('AI 服务 ID 无效，请刷新页面后重试。', 'danger');
+      return;
+    }
+    setBusy(true);
+    try {
+      await adminApi.request(`/providers/${encodeURIComponent(providerId)}`, {
+        method: 'PATCH',
+        body: {
+          name: values.name,
+          provider_type: values.provider_type,
+          base_url: values.base_url,
+          enabled: values.enabled,
+          secret: values.secret || null,
+          expected_revision: typeof provider.revision === 'number' ? provider.revision : null,
+          settings: {
+            ...asRecord(provider.settings),
+            timeout_ms: Math.round(timeoutSeconds * 1_000),
+            connect_timeout_ms: Math.round(connectTimeoutSeconds * 1_000),
+            max_retries: maxRetries,
+            max_concurrency: maxConcurrency,
+            allow_private_networks: allowPrivateNetworks,
+            organization: organization || null,
+          },
+        },
+      });
+      notify(values.secret ? 'AI 服务配置和密钥已更新。' : 'AI 服务配置已更新，原密钥保持不变。');
+      setValues((current) => ({ ...current, secret: '' }));
+      onRefresh();
+    } catch (error: unknown) {
+      notify(formatRequestError(error), 'danger');
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <form aria-label={`编辑 ${stringValue(provider.name, '未命名服务')}`} className="compact-form" onSubmit={submit}>
+      <div className="form-grid">
+        <label>显示名称<input name="provider-name" required value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} /></label>
+        <label>AI 服务类型<select name="provider-type" value={values.provider_type} onChange={(event) => selectProviderType(event.target.value)}>{providerTypeOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+        <label>Base URL<input name="provider-base-url" required type="url" value={values.base_url} onChange={(event) => setValues({ ...values, base_url: event.target.value })} /></label>
+        <label>替换 API 密钥（可选）<input autoComplete="new-password" name="provider-secret" type="password" value={values.secret} onChange={(event) => setValues({ ...values, secret: event.target.value })} placeholder="留空则保持当前密钥" /></label>
+        <label className="checkbox-field"><input checked={values.enabled} name="provider-enabled" type="checkbox" onChange={(event) => setValues({ ...values, enabled: event.target.checked })} />启用此 AI 服务</label>
+      </div>
+      <details className="disclosure">
+        <summary>高级：超时、重试与并发</summary>
+        <div className="form-grid">
+          <label>请求超时（秒）<input max="600" min="1" name="provider-timeout" required step="1" type="number" value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} /></label>
+          <label>连接超时（秒）<input max="600" min="1" name="provider-connect-timeout" required step="1" type="number" value={connectTimeoutSeconds} onChange={(event) => setConnectTimeoutSeconds(Number(event.target.value))} /></label>
+          <label>瞬时错误重试次数<input max="8" min="0" name="provider-retries" required step="1" type="number" value={maxRetries} onChange={(event) => setMaxRetries(Number(event.target.value))} /></label>
+          <label>最大并发请求<input max="64" min="1" name="provider-concurrency" required step="1" type="number" value={maxConcurrency} onChange={(event) => setMaxConcurrency(Number(event.target.value))} /></label>
+          <label>组织/项目标识（可选）<input name="provider-organization" value={organization} onChange={(event) => setOrganization(event.target.value)} /></label>
+          <label className="checkbox-field"><input checked={allowPrivateNetworks} name="provider-private-networks" type="checkbox" onChange={(event) => setAllowPrivateNetworks(event.target.checked)} />远程模式下允许显式配置的私有网络地址</label>
+        </div>
+      </details>
+      <small>替换密钥留空时不会读取、覆盖或清除现有密钥。修改服务类型后请重新检查已登记模型是否仍兼容。</small>
+      <button className="primary-button" disabled={busy} type="submit">{busy ? '正在保存…' : '保存修改'}</button>
+    </form>
+  );
+}
+
 function AddProviderForm({ notify, onRefresh }: { notify: Notify; onRefresh: () => void }) {
   const [values, setValues] = useState({ name: '', provider_type: 'openai_compatible', base_url: '', secret: '' });
   const [busy, setBusy] = useState(false);
+
+  function selectProviderType(providerType: string) {
+    const priorDefault = providerBaseUrlDefaults[values.provider_type] ?? '';
+    const preserveCustomUrl = values.base_url.length > 0 && values.base_url !== priorDefault;
+    setValues({
+      ...values,
+      provider_type: providerType,
+      base_url: preserveCustomUrl ? values.base_url : (providerBaseUrlDefaults[providerType] ?? ''),
+    });
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -775,7 +1162,7 @@ function AddProviderForm({ notify, onRefresh }: { notify: Notify; onRefresh: () 
     <form className="compact-form" onSubmit={submit}>
       <div className="form-grid">
         <label>名称<input required value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} placeholder="例如：本地 Ollama" /></label>
-        <label>接口类型<select value={values.provider_type} onChange={(event) => setValues({ ...values, provider_type: event.target.value })}><option value="openai_compatible">OpenAI 兼容</option><option value="openai_responses">OpenAI Responses</option><option value="anthropic_messages">Anthropic Messages</option><option value="embedding_http">Embedding HTTP</option></select></label>
+        <label>AI 服务类型<select value={values.provider_type} onChange={(event) => selectProviderType(event.target.value)}>{providerTypeOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         <label>Base URL<input required type="url" value={values.base_url} onChange={(event) => setValues({ ...values, base_url: event.target.value })} placeholder="https://provider.example/v1/" /></label>
         <label>API 密钥（可选）<input type="password" value={values.secret} onChange={(event) => setValues({ ...values, secret: event.target.value })} autoComplete="new-password" /></label>
       </div>
@@ -786,6 +1173,8 @@ function AddProviderForm({ notify, onRefresh }: { notify: Notify; onRefresh: () 
 
 function IndexPage({ data, notify, onRefresh }: { data: JsonObject | null; notify: Notify; onRefresh: () => void }) {
   const status = asRecord(data?.status);
+  const noteSemantic = asRecord(data?.note_semantic);
+  const semanticBlockers = Array.isArray(noteSemantic.blockers) ? noteSemantic.blockers.map(String) : [];
   const [busy, setBusy] = useState(false);
 
   async function rebuild() {
@@ -806,12 +1195,21 @@ function IndexPage({ data, notify, onRefresh }: { data: JsonObject | null; notif
       ) : (
         <>
           <section className="metric-grid metric-grid--compact">
-            <Metric label="覆盖率" value={formatPercent(status.coverage)} detail="已处理的可索引内容" />
+            <Metric label="覆盖率" value={formatPercent(status.coverage_ratio)} detail={`${numberValue(status.indexed_notes)} / ${numberValue(status.total_notes)} 篇 Markdown`} />
             <Metric label="Markdown" value={numberValue(status.indexed_notes)} detail="已索引笔记" />
             <Metric label="全部条目" value={numberValue(status.indexed_entries)} detail="包括附件元数据" />
             <Metric label="索引内容" value={formatBytes(status.indexed_bytes)} detail={`分析器 ${stringValue(status.analyzer_version)}`} />
+            <Metric
+              label="笔记语义召回"
+              value={booleanValue(noteSemantic.configured) ? formatPercent(noteSemantic.coverage_ratio) : '未配置'}
+              detail={booleanValue(noteSemantic.configured)
+                ? `${numberValue(noteSemantic.indexed_chunks)} / ${numberValue(noteSemantic.source_chunks)} 个内容分块`
+                : '绑定“笔记向量”模型后启用；当前仍可全文检索'}
+            />
           </section>
           <p className="muted compact-text">上次完成：{formatTime(status.last_rebuilt_at)} · 索引版本：{numberValue(status.revision)}</p>
+          {booleanValue(noteSemantic.configured) ? <p className="muted compact-text">语义模型：<code>{stringValue(noteSemantic.external_model_id, '模型记录缺失')}</code>{numberValue(noteSemantic.stale_vectors) > 0 ? ` · ${numberValue(noteSemantic.stale_vectors)} 条过期向量待重建` : ''}</p> : null}
+          {semanticBlockers.length > 0 && booleanValue(noteSemantic.configured) ? <Notice tone="warning">语义召回尚未完全就绪：{semanticBlockers.map(noteSemanticBlockerLabel).join('；')}。</Notice> : null}
           {typeof status.last_error === 'string' && status.last_error ? <Notice tone="danger">最近错误：{status.last_error}</Notice> : null}
         </>
       )}
@@ -819,41 +1217,100 @@ function IndexPage({ data, notify, onRefresh }: { data: JsonObject | null; notif
   );
 }
 
-function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; notify: Notify; onRefresh: () => void }) {
-  const memories = arrayRecords(data?.memories);
-  const candidates = arrayRecords(data?.candidates);
+function noteSemanticBlockerLabel(code: string): string {
+  const labels: Record<string, string> = {
+    provider_service_unavailable: 'AI 服务边界不可用',
+    provider_mode_disabled: 'AI 数据发送策略仍为禁用',
+    model_binding_missing: '尚未绑定“笔记向量”模型',
+    model_missing: '绑定的模型记录不存在',
+    embedding_coverage_incomplete: '仍有笔记分块等待生成向量',
+    semantic_status_unavailable: '暂时无法读取语义索引状态',
+  };
+  return labels[code] ?? code;
+}
 
-  async function review(candidate: JsonObject, action: 'promote' | 'reject') {
+function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; notify: Notify; onRefresh: () => void }) {
+  const [memories, setMemories] = useState(() => arrayRecords(data?.memories));
+  const extraction = asRecord(data?.extraction);
+  const memoryJobs = arrayRecords(data?.memory_jobs);
+  const [memoryActionId, setMemoryActionId] = useState('');
+
+  useEffect(() => setMemories(arrayRecords(data?.memories)), [data?.memories]);
+
+  async function changeMemory(memory: JsonObject, action: 'archive' | 'restore' | 'delete') {
+    const id = stringValue(memory.id, '');
+    const revision = numberValue(memory.revision);
+    if (!id || revision <= 0) {
+      notify('记忆 ID 或 revision 无效，请刷新后重试。', 'danger');
+      return;
+    }
+    if (action === 'delete') {
+      const content = stringValue(memory.content, '这条记忆').slice(0, 120);
+      if (!window.confirm(`确定永久删除这条长期记忆吗？\n\n${content}\n\n当前规范 Markdown 和记忆投影会删除；修订历史或备份仍按保留策略存在。此操作不能通过“恢复”按钮撤销。`)) return;
+    }
+    setMemoryActionId(id);
     try {
-      await adminApi.request(`/memory-candidates/${stringValue(candidate.id, '')}/${action}`, {
-        method: 'POST',
-        body: action === 'reject' ? { reason: '管理员在控制台拒绝' } : undefined,
-      });
-      notify(action === 'promote' ? '候选记忆已提升并写入规范 Markdown。' : '候选记忆已拒绝。');
+      let updated: JsonObject | null = null;
+      if (action === 'delete') {
+        await adminApi.request(`/memories/${encodeURIComponent(id)}?expected_revision=${revision}`, { method: 'DELETE' });
+      } else {
+        updated = asRecord(await adminApi.request(`/memories/${encodeURIComponent(id)}/${action}`, {
+          method: 'POST',
+          body: { expected_revision: revision },
+        }));
+      }
+      setMemories((current) => action === 'delete'
+        ? current.filter((item) => stringValue(item.id) !== id)
+        : current.map((item) => stringValue(item.id) === id
+          ? (updated && Object.keys(updated).length > 0
+              ? updated
+              : { ...item, status: action === 'archive' ? 'archived' : 'active', revision: revision + 1 })
+          : item));
+      notify(action === 'archive' ? '长期记忆已归档，不再参与正常召回。' : action === 'restore' ? '长期记忆已恢复。' : '长期记忆已永久删除。');
       onRefresh();
     } catch (error: unknown) {
       notify(formatRequestError(error), 'danger');
+    } finally {
+      setMemoryActionId('');
     }
   }
 
   return (
     <div className="page-stack">
-      <Notice tone="info">生效记忆会物化为 Vault 中的 Markdown；数据库、全文索引和向量只是可重建投影。</Notice>
-      <Panel title={`待审核候选（${candidates.length}）`} eyebrow="需要判断" description="模型输出只是提议，提升前请检查内容和来源。">
-        {candidates.length === 0 ? (
-          <EmptyState title="没有待审核候选" detail="自动提取的新候选会出现在这里。" />
+      <Notice tone="info">照常写笔记即可，不需要添加特殊标记或逐条审核。系统先从每篇笔记提炼带来源的原始记忆，再在后台合并、去重和处理冲突；只有整理后的语义内容会进入长期记忆。</Notice>
+      <MemoryExtractionPanel data={extraction} jobs={memoryJobs} notify={notify} onRefresh={onRefresh} />
+      <Panel title={`长期记忆（${memories.length}）`} eyebrow="有来源的上下文" description="默认召回不调用在线模型。">
+        {memories.length === 0 ? (
+          <EmptyState title="还没有长期记忆" detail="Agent 主动记住或系统从普通笔记自动识别出的耐久信息会出现在这里。" />
         ) : (
           <div className="record-list">
-            {candidates.map((candidate) => {
-              const proposal = asRecord(candidate.candidate);
+            {memories.map((memory) => {
+              const sources = arrayRecords(memory.sources);
               return (
-                <article className="record-item record-item--stack" key={stringValue(candidate.id)}>
-                  <div className="record-title"><strong>{stringValue(proposal.content, '未提供候选内容')}</strong><StatusBadge tone="warning">待审核</StatusBadge></div>
-                  <p>来源：<code>{stringValue(candidate.source_path)}</code></p>
-                  <small>置信度 {formatPercent(candidate.confidence)} · 重要度 {formatPercent(candidate.importance)} · {formatTime(candidate.created_at)}</small>
+                <article className="record-item record-item--stack" key={stringValue(memory.id)}>
+                  <div className="record-title"><strong>{stringValue(memory.content, '无内容')}</strong><StatusBadge tone={statusTone(memory.status)}>{statusLabel(memory.status)}</StatusBadge></div>
+                  <p>{memoryTypeLabel(memory.memory_type)} · <code>{stringValue(memory.canonical_path)}</code></p>
+                  <small>最近更新 {formatTime(memory.updated_at)}</small>
+                  {sources.length > 0 ? (
+                    <details className="disclosure memory-source-details">
+                      <summary>查看来源与证据定位（{sources.length}）</summary>
+                      <div className="summary-list">
+                        {sources.map((source, index) => (
+                          <SummaryRow
+                            key={`${stringValue(source.file_id, stringValue(source.source_type, 'source'))}-${index}`}
+                            label={memorySourceTypeLabel(source.source_type)}
+                            value={memorySourceLocation(source)}
+                            mono={typeof source.path === 'string'}
+                          />
+                        ))}
+                      </div>
+                      <small>这里显示的是证据定位元数据；原文仍保留在对应笔记及其修订历史中，不会被复制成记忆正文。</small>
+                    </details>
+                  ) : <small>来源：已认证的显式记忆输入。</small>}
                   <div className="button-row">
-                    <button className="primary-button" type="button" onClick={() => void review(candidate, 'promote')}>提升为长期记忆</button>
-                    <button className="secondary-button" type="button" onClick={() => void review(candidate, 'reject')}>拒绝</button>
+                    {stringValue(memory.status) === 'active' ? <button aria-label={`归档长期记忆 ${stringValue(memory.id)}`} className="secondary-button" disabled={memoryActionId === stringValue(memory.id)} type="button" onClick={() => void changeMemory(memory, 'archive')}>归档</button> : null}
+                    {['archived', 'stale', 'rejected'].includes(stringValue(memory.status)) ? <button aria-label={`恢复长期记忆 ${stringValue(memory.id)}`} className="secondary-button" disabled={memoryActionId === stringValue(memory.id)} type="button" onClick={() => void changeMemory(memory, 'restore')}>恢复</button> : null}
+                    <button aria-label={`永久删除长期记忆 ${stringValue(memory.id)}`} className="danger-button" disabled={memoryActionId === stringValue(memory.id)} type="button" onClick={() => void changeMemory(memory, 'delete')}>永久删除</button>
                   </div>
                 </article>
               );
@@ -861,27 +1318,213 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
           </div>
         )}
       </Panel>
-      <Panel title={`长期记忆（${memories.length}）`} eyebrow="有来源的上下文" description="默认召回不调用在线模型。">
-        {memories.length === 0 ? (
-          <EmptyState title="还没有长期记忆" detail="Agent 的 remember 或审核通过的候选会出现在这里。" />
-        ) : (
-          <div className="record-list">
-            {memories.map((memory) => (
-              <article className="record-item record-item--stack" key={stringValue(memory.id)}>
-                <div className="record-title"><strong>{stringValue(memory.content, '无内容')}</strong><StatusBadge tone={statusTone(memory.status)}>{statusLabel(memory.status)}</StatusBadge></div>
-                <p>{memoryTypeLabel(memory.memory_type)} · <code>{stringValue(memory.canonical_path)}</code></p>
-                <small>置信度 {formatPercent(memory.confidence)} · 重要度 {formatPercent(memory.importance)} · 最近更新 {formatTime(memory.updated_at)}</small>
-              </article>
-            ))}
-          </div>
-        )}
-      </Panel>
     </div>
   );
 }
 
+function memorySourceTypeLabel(value: unknown): string {
+  const labels: Record<string, string> = {
+    note: 'Vault 笔记',
+    explicit_agent: 'Agent 显式记忆',
+    explicit_admin: 'Admin 显式记忆',
+    direct_markdown: '托管 Markdown',
+    import: '导入内容',
+  };
+  const sourceType = stringValue(value, 'unknown');
+  return labels[sourceType] ?? sourceType;
+}
+
+function memorySourceLocation(source: JsonObject): string {
+  const parts: string[] = [];
+  const path = stringValue(source.path, '');
+  if (path) parts.push(path);
+  const revision = numberValue(source.revision);
+  if (revision > 0) parts.push(`修订 ${revision}`);
+  const startLine = numberValue(source.start_line);
+  const endLine = numberValue(source.end_line);
+  if (startLine > 0) parts.push(endLine > startLine ? `第 ${startLine}–${endLine} 行` : `第 ${startLine} 行`);
+  const heading = Array.isArray(source.heading) ? source.heading.map(String).filter(Boolean).join(' › ') : '';
+  if (heading) parts.push(`标题 ${heading}`);
+  return parts.join(' · ') || '已认证的显式输入（无笔记行号）';
+}
+
+function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonObject; jobs: JsonObject[]; notify: Notify; onRefresh: () => void }) {
+  const policy = asRecord(data.policy);
+  const readiness = asRecord(data.readiness);
+  const phase1Readiness = asRecord(data.phase1_readiness);
+  const phase2Readiness = asRecord(data.phase2_readiness);
+  const stage1 = asRecord(data.stage1);
+  const consolidation = asRecord(data.consolidation);
+  const blockers = Array.isArray(readiness.blockers) ? readiness.blockers.map(String) : [];
+  const configuredEvidenceLimit = numberValue(policy.max_evidence_per_note, numberValue(policy.max_candidates_per_note, 3));
+  const [enabled, setEnabled] = useState(booleanValue(policy.enabled));
+  const [maxEvidencePerNote, setMaxEvidencePerNote] = useState(configuredEvidenceLimit);
+  const [requestTimeoutSeconds, setRequestTimeoutSeconds] = useState(numberValue(policy.request_timeout_seconds, 300));
+  const [busy, setBusy] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [submittedJob, setSubmittedJob] = useState<JsonObject | null>(null);
+  const [operationMessage, setOperationMessage] = useState<{ text: string; tone: NoticeTone } | null>(null);
+
+  const submittedJobId = stringValue(submittedJob?.id, '');
+  const visibleJobs = submittedJob && !jobs.some((job) => stringValue(job.id) === submittedJobId)
+    ? [submittedJob, ...jobs]
+    : jobs;
+  const activeJob = visibleJobs.find((job) => ['queued', 'running', 'retry_wait'].includes(stringValue(job.status)));
+
+  useEffect(() => {
+    if (dirty) return;
+    setEnabled(booleanValue(policy.enabled));
+    setMaxEvidencePerNote(configuredEvidenceLimit);
+    setRequestTimeoutSeconds(numberValue(policy.request_timeout_seconds, 300));
+  }, [configuredEvidenceLimit, dirty, policy.enabled, policy.request_timeout_seconds]);
+
+  useEffect(() => {
+    if (submittedJobId && jobs.some((job) => stringValue(job.id) === submittedJobId)) setSubmittedJob(null);
+  }, [jobs, submittedJobId]);
+
+  async function save() {
+    setBusy(true);
+    try {
+      await adminApi.request('/memory/extraction', {
+        method: 'PUT',
+        body: {
+          enabled,
+          source_mode: 'automatic',
+          max_evidence_per_note: maxEvidencePerNote,
+          request_timeout_seconds: requestTimeoutSeconds,
+          expected_revision: typeof data.revision === 'number' ? data.revision : null,
+        },
+      });
+      setOperationMessage({ text: '两阶段记忆设置已保存。', tone: 'success' });
+      notify('两阶段记忆设置已保存。');
+      setDirty(false);
+      onRefresh();
+    } catch (error: unknown) {
+      notify(formatRequestError(error), 'danger');
+    } finally { setBusy(false); }
+  }
+
+  async function processExistingNotes(includeEvaluated: boolean) {
+    const prompt = includeEvaluated
+      ? '确定重新提取全部现有笔记吗？未修改且已经成功提取的笔记也会再次调用提取模型，然后由整理模型重新合并；这会增加 Token 消耗。'
+      : '确定处理新增、内容有变化、配置有变化或上次失败的笔记吗？未变化且已经成功提取的笔记不会再次调用模型。';
+    if (!window.confirm(prompt)) return;
+    setBusy(true);
+    try {
+      const job = asRecord(await adminApi.request('/memory/extraction/run', {
+        method: 'POST',
+        body: { include_evaluated: includeEvaluated },
+      }));
+      const jobId = stringValue(job.id, '未知任务');
+      const reused = stringValue(job.admission) === 'existing';
+      setSubmittedJob(job);
+      const text = reused
+        ? `已有记忆任务 ${truncateId(jobId)} 正在执行，没有重复创建。`
+        : includeEvaluated
+          ? `任务 ${truncateId(jobId)} 已开始重新提取全部笔记，提取完成后会自动整理。`
+          : `任务 ${truncateId(jobId)} 已开始处理新增或变化的笔记，提取完成后会自动整理。`;
+      setOperationMessage({ text, tone: 'success' });
+      notify(text);
+      onRefresh();
+    } catch (error: unknown) {
+      const text = formatRequestError(error);
+      setOperationMessage({ text, tone: 'danger' });
+      notify(text, 'danger');
+    } finally { setBusy(false); }
+  }
+
+  const pipelineReady = booleanValue(readiness.ready);
+  const configurationReady = booleanValue(phase1Readiness.ready) && booleanValue(phase2Readiness.ready);
+  const regenerationPending = booleanValue(consolidation.regeneration_pending);
+  return (
+    <Panel
+      title="两阶段长期记忆"
+      eyebrow="先提取 · 再整理"
+      description="阶段一逐篇提炼带证据的原始记忆；阶段二在 Vault 范围内合并、去重、处理冲突，并写入最终语义记忆。"
+      actions={<StatusBadge tone={pipelineReady ? 'success' : 'warning'}>{pipelineReady ? '可以运行' : configurationReady && regenerationPending ? '准备重新生成' : '尚未就绪'}</StatusBadge>}
+    >
+      <div className="compact-form">
+        <div className="choice-group">
+          <Choice checked={enabled} label="自动处理笔记变更" detail="笔记新建或更新后自动执行阶段一，并在后台触发阶段二整理" onChange={() => { setEnabled((value) => !value); setDirty(true); }} />
+        </div>
+        <div className="button-row">
+          <button className="secondary-button" disabled={busy || !dirty} type="button" onClick={() => void save()}>{busy ? '正在保存…' : '保存设置'}</button>
+        </div>
+      </div>
+      <Notice tone="info">原文只作为可追溯证据，最终记忆是模型归纳后的简短语义。阶段二会自动决定保留、合并、更新或遗忘，不存在“待审核候选”，也不需要人工逐条确认。</Notice>
+      {operationMessage ? <Notice tone={operationMessage.tone}>{operationMessage.text}</Notice> : null}
+      <div className="summary-list">
+        <SummaryRow label="阶段一 · 提取模型" value={stringValue(phase1Readiness.external_model_id, '未绑定')} mono />
+        <SummaryRow label="阶段二 · 整理模型" value={stringValue(phase2Readiness.external_model_id, '未绑定')} mono />
+        <SummaryRow label="已处理笔记来源" value={`${numberValue(stage1.total)}（有原始记忆 ${numberValue(stage1.ready)} · 无需记忆 ${numberValue(stage1.no_output)}）`} />
+        <SummaryRow label="等待整理的原始输入" value={numberValue(stage1.pending)} />
+        <SummaryRow label="已提交全局记忆版本" value={numberValue(consolidation.generation)} />
+        <SummaryRow label="最近整理完成" value={formatTime(consolidation.last_success_at)} />
+      </div>
+      {numberValue(consolidation.pipeline_generation) < 1 ? <Notice tone="warning">旧版记忆系统正在整体作废并清理；普通 Vault 笔记不会删除，清理完成后会从第 1 篇重新提取。</Notice> : null}
+      {numberValue(consolidation.pipeline_generation) >= 1 && regenerationPending ? <Notice tone="warning">旧版记忆和任务已清理；配置就绪后会立即创建全量任务，也可以点击下方按钮立即触发。</Notice> : null}
+      {blockers.length > 0 ? <Notice tone="warning">{blockers.map(extractionBlockerLabel).join('；')}。</Notice> : null}
+      <details className="disclosure">
+        <summary>高级设置</summary>
+        <div className="form-grid">
+          <label>每篇最多保留原文证据（1–10）<input max="10" min="1" step="1" type="number" value={maxEvidencePerNote} onChange={(event) => { setMaxEvidencePerNote(Number(event.target.value)); setDirty(true); }} /></label>
+          <label>单篇提取超时（秒，30–1800）<input max="1800" min="30" step="1" type="number" value={requestTimeoutSeconds} onChange={(event) => { setRequestTimeoutSeconds(Number(event.target.value)); setDirty(true); }} /></label>
+        </div>
+      </details>
+      <div className="button-row">
+        <button className="primary-button" disabled={busy || Boolean(activeJob) || !enabled || !configurationReady} type="button" onClick={() => void processExistingNotes(false)}>{activeJob ? `任务执行中 · ${jobProgressLabel(activeJob)}` : regenerationPending ? '立即开始全量生成' : '处理新增或变化的笔记'}</button>
+        <button className="secondary-button" disabled={busy || Boolean(activeJob) || !enabled || !configurationReady} type="button" onClick={() => void processExistingNotes(true)}>重新提取全部笔记</button>
+      </div>
+      {visibleJobs.length > 0 ? (
+        <details className="disclosure" open={Boolean(activeJob)}>
+          <summary>最近的记忆任务（{visibleJobs.length}）</summary>
+          <div className="record-list">
+            {visibleJobs.slice(0, 12).map((job) => (
+              <div className="summary-row" key={stringValue(job.id)}>
+                <span>
+                  <strong>{jobTypeLabel(job.job_type)}</strong> · <code>{truncateId(job.id)}</code> · {formatTime(job.updated_at)}
+                  <small>{jobProgressDetail(job)}</small>
+                  {typeof job.last_error === 'string' && job.last_error ? <small>{jobErrorContextLabel(job)}</small> : null}
+                </span>
+                <strong>{jobStatusLabel(job)} · {jobProgressLabel(job)}</strong>
+              </div>
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </Panel>
+  );
+}
+
+function extractionBlockerLabel(code: string): string {
+  const labels: Record<string, string> = {
+    memory_pipeline_reset_pending: '新版记忆系统正在清理旧数据并准备从头生成',
+    memory_pipeline_regeneration_pending: '新版记忆系统正在创建必须的全量重新提取任务',
+    extraction_disabled: '尚未启用自动记忆',
+    provider_mode_disabled: 'AI 数据发送策略仍为禁用',
+    model_binding_missing: '尚未绑定阶段一“记忆提取”模型',
+    model_missing: '阶段一绑定的模型记录不存在',
+    model_disabled: '阶段一绑定的模型已停用',
+    provider_missing: '阶段一模型所属 AI 服务不存在',
+    provider_disabled: '阶段一模型所属 AI 服务已停用',
+    consolidation_model_binding_missing: '尚未绑定阶段二“记忆整理”模型',
+    consolidation_model_missing: '阶段二绑定的模型记录不存在',
+    consolidation_model_disabled: '阶段二绑定的模型已停用',
+    consolidation_provider_missing: '阶段二模型所属 AI 服务不存在',
+    consolidation_provider_disabled: '阶段二模型所属 AI 服务已停用',
+  };
+  return labels[code] ?? code;
+}
+
 function JobsPage({ data, notify, onRefresh }: { data: JsonObject | null; notify: Notify; onRefresh: () => void }) {
-  const jobs = arrayRecords(data?.jobs);
+  const running = arrayRecords(data?.running);
+  const queued = arrayRecords(data?.queued);
+  const retryWait = arrayRecords(data?.retry_wait);
+  const history = arrayRecords(data?.history);
+  const counts = asRecord(data?.counts);
+  const truncated = asRecord(data?.truncated);
+  const activeCount = numberValue(counts.active, running.length + queued.length + retryWait.length);
+  const terminalCount = numberValue(counts.terminal, history.length);
 
   async function act(job: JsonObject, action: 'retry' | 'cancel') {
     if (action === 'cancel' && !window.confirm('确定请求取消这个后台任务吗？正在执行的安全关键任务可能拒绝取消。')) return;
@@ -894,33 +1537,240 @@ function JobsPage({ data, notify, onRefresh }: { data: JsonObject | null; notify
     }
   }
 
+  function records(jobs: JsonObject[]) {
+    return (
+      <div className="record-list">
+        {jobs.map((job) => {
+          const status = stringValue(job.status, 'unknown');
+          const jobType = stringValue(job.job_type);
+          const protectedWhileRunning = status === 'running' && ['memory.consolidate', 'memory.reset_pipeline'].includes(jobType);
+          const cancellable = ['queued', 'running', 'retry_wait'].includes(status) && !protectedWhileRunning;
+          return (
+            <article className="record-item" key={stringValue(job.id)}>
+              <div className="record-main">
+                <div className="record-title"><strong>{jobTypeLabel(job.job_type)}</strong><StatusBadge tone={jobStatusTone(job)}>{jobStatusLabel(job)}</StatusBadge></div>
+                <p><code>{truncateId(job.id)}</code> · {jobProgressDetail(job)}</p>
+                <small>尝试 {numberValue(job.attempts)} / {numberValue(job.max_attempts)} · 更新于 {formatTime(job.updated_at)}{typeof job.last_error === 'string' && job.last_error ? ` · ${jobErrorContextLabel(job)}` : ''}</small>
+              </div>
+              <div className="button-column">
+                {status === 'failed' ? <button className="secondary-button" type="button" onClick={() => void act(job, 'retry')}>重试</button> : null}
+                {cancellable ? <button className="danger-link" type="button" onClick={() => void act(job, 'cancel')}>取消</button> : null}
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    );
+  }
+
   return (
-    <Panel title={`最近任务（${jobs.length}）`} eyebrow="持久化队列" description="服务重启后任务仍可恢复，不依赖内存中的临时线程。">
-      {jobs.length === 0 ? (
+    <Panel title="后台任务" eyebrow="持久化队列" description="正在执行的任务始终置顶显示；等待任务和已结束历史不会再把它们挤出页面。">
+      {activeCount === 0 && terminalCount === 0 ? (
         <EmptyState title="当前没有任务" detail="扫描、索引、备份和记忆处理任务会显示在这里。" />
       ) : (
-        <div className="record-list">
-          {jobs.map((job) => {
-            const status = stringValue(job.status, 'unknown');
-            const cancellable = ['queued', 'running', 'retry_wait'].includes(status);
-            return (
-              <article className="record-item" key={stringValue(job.id)}>
-                <div className="record-main">
-                  <div className="record-title"><strong>{jobTypeLabel(job.job_type)}</strong><StatusBadge tone={statusTone(status)}>{statusLabel(status)}</StatusBadge></div>
-                  <p><code>{truncateId(job.id)}</code> · 进度 {formatPercent(job.progress)}</p>
-                  <small>尝试 {numberValue(job.attempts)} / {numberValue(job.max_attempts)} · 更新于 {formatTime(job.updated_at)}{typeof job.last_error === 'string' && job.last_error ? ` · ${job.last_error}` : ''}</small>
-                </div>
-                <div className="button-column">
-                  {status === 'failed' ? <button className="secondary-button" type="button" onClick={() => void act(job, 'retry')}>重试</button> : null}
-                  {cancellable ? <button className="danger-link" type="button" onClick={() => void act(job, 'cancel')}>取消</button> : null}
-                </div>
-              </article>
-            );
-          })}
+        <div className="job-groups">
+          <section className="job-group" aria-labelledby="running-jobs-title">
+            <div className="job-group-heading">
+              <div><p className="eyebrow">当前占用 Worker</p><h3 id="running-jobs-title">正在执行（{numberValue(counts.running, running.length)}）</h3></div>
+              <StatusBadge tone={running.length > 0 ? 'warning' : 'neutral'}>{running.length > 0 ? '自动刷新' : '当前空闲'}</StatusBadge>
+            </div>
+            {running.length > 0 ? records(running) : <p className="muted-copy">当前没有正在执行的任务。</p>}
+            {booleanValue(truncated.running) ? <Notice tone="warning">运行任务超过页面安全上限，请通过单个任务接口继续诊断。</Notice> : null}
+          </section>
+
+          <section className="job-group" aria-labelledby="waiting-jobs-title">
+            <div className="job-group-heading">
+              <div><p className="eyebrow">尚未占用 Worker</p><h3 id="waiting-jobs-title">等待与重试（{numberValue(counts.queued, queued.length) + numberValue(counts.retry_wait, retryWait.length)}）</h3></div>
+            </div>
+            {queued.length > 0 ? <><h4>等待执行（{numberValue(counts.queued, queued.length)}）</h4>{records(queued)}</> : null}
+            {retryWait.length > 0 ? <><h4>等待重试（{numberValue(counts.retry_wait, retryWait.length)}）</h4>{records(retryWait)}</> : null}
+            {queued.length === 0 && retryWait.length === 0 ? <p className="muted-copy">当前没有排队或等待重试的任务。</p> : null}
+            {booleanValue(truncated.queued) || booleanValue(truncated.retry_wait) ? <Notice tone="info">这里显示前 {queued.length + retryWait.length} 条，队列总数以上方数字为准。</Notice> : null}
+          </section>
+
+          <section className="job-group" aria-labelledby="history-jobs-title">
+            <div className="job-group-heading">
+              <div><p className="eyebrow">不会影响当前调度</p><h3 id="history-jobs-title">已结束历史（显示 {history.length} / 共 {terminalCount}）</h3></div>
+            </div>
+            {history.length > 0 ? records(history) : <p className="muted-copy">还没有已完成、失败或取消的任务。</p>}
+          </section>
         </div>
       )}
     </Panel>
   );
+}
+
+function jobProgressLabel(job: JsonObject): string {
+  const status = stringValue(job.status, 'unknown');
+  if (status === 'completed') return '100%';
+  const projected = progressRatio(job.progress_ratio) ?? progressRatio(job.progress);
+  return projected === null ? '未报告' : formatPercent(projected);
+}
+
+function jobStatusLabel(job: JsonObject): string {
+  const status = stringValue(job.status, 'unknown');
+  if (booleanValue(job.cancel_requested) && ['queued', 'running', 'retry_wait'].includes(status)) return '正在取消';
+  if (status === 'completed' && jobHasNoteFailures(job)) return '完成但有失败';
+  return statusLabel(status);
+}
+
+function jobStatusTone(job: JsonObject): 'success' | 'warning' | 'danger' | 'neutral' {
+  const status = stringValue(job.status, 'unknown');
+  if (status === 'completed' && jobHasNoteFailures(job)) return 'warning';
+  return statusTone(status);
+}
+
+function jobHasNoteFailures(job: JsonObject): boolean {
+  const progress = asRecord(job.progress);
+  return stringValue(progress.phase, '') === 'completed_with_errors'
+    || numberValue(progress.source_ingestion_failures) > 0
+    || numberValue(progress.generated_output_failures) > 0;
+}
+
+function jobProgressDetail(job: JsonObject): string {
+  const progress = asRecord(job.progress);
+  const details = asRecord(job.details);
+  const phase = stringValue(progress.phase, '');
+  const completed = numberValue(progress.completed);
+  const total = numberValue(progress.total);
+  const currentIndex = numberValue(progress.current_index);
+  const currentPath = stringValue(progress.current_path, '');
+  const rawMemoriesStaged = numberValue(progress.raw_memories_staged);
+  const phase1NoOutput = numberValue(progress.phase1_no_output);
+  const sourceIngestionFailures = numberValue(progress.source_ingestion_failures);
+  const sourceIngestionFailureNotes = arrayRecords(progress.source_ingestion_failure_notes);
+  const generatedOutputFailures = numberValue(progress.generated_output_failures);
+  const generatedOutputFailureNotes = arrayRecords(progress.generated_output_failure_notes);
+  const notesEvaluated = numberValue(progress.notes_evaluated);
+  const sourcePolicySkipped = numberValue(progress.source_policy_skipped);
+  const alreadyEvaluatedSkipped = numberValue(progress.already_evaluated_skipped);
+  const created = numberValue(progress.created);
+  const updated = numberValue(progress.updated);
+  const retired = numberValue(progress.retired);
+  const discarded = numberValue(progress.discarded);
+  const pendingRawInputs = numberValue(progress.pending_raw_inputs);
+  const generation = numberValue(progress.generation);
+  const noteStartedAt = numberValue(progress.note_started_at);
+  const lastNoteElapsedMs = numberValue(progress.last_note_elapsed_ms);
+
+  let detail: string;
+  if (phase === 'consolidating') {
+    detail = `正在整理原始记忆：已处理 ${completed} / ${total || completed + pendingRawInputs} 条${pendingRawInputs > 0 ? `，仍待 ${pendingRawInputs} 条` : ''}`;
+  } else if (phase === 'resetting_memory_pipeline') {
+    detail = '正在清空旧版记忆系统';
+  } else if (phase === 'extracting_note') {
+    detail = `正在处理第 ${currentIndex || completed + 1} / ${total || 1} 篇${currentPath ? `：${currentPath}` : ''}`;
+  } else if (phase === 'waiting_retry' || phase === 'failed') {
+    detail = `第 ${currentIndex || completed + 1} / ${total || 1} 篇未完成${currentPath ? `：${currentPath}` : ''}`;
+  } else if (phase === 'stopped_output_failures') {
+    detail = `已处理 ${completed} / ${total} 篇，因连续模型输出错误暂停`;
+  } else if (phase === 'enumerated') {
+    detail = `已发现 ${total} 篇 Markdown，准备开始`;
+  } else if (phase === 'completed' && stringValue(job.job_type) === 'memory.consolidate') {
+    detail = `已完成第 ${generation} 版全局记忆整理`;
+  } else if (phase === 'completed' && stringValue(job.job_type) === 'memory.reset_pipeline') {
+    detail = '旧版记忆和任务已作废，准备从头生成';
+  } else if (phase === 'note_completed' || phase === 'completed' || phase === 'completed_with_errors') {
+    detail = `已处理 ${completed} / ${total} 篇`;
+  } else if (stringValue(details.scope, '') === 'all') {
+    detail = '等待扫描当前 Vault 的 Markdown';
+  } else if (stringValue(details.source_path, '')) {
+    detail = `等待处理：${stringValue(details.source_path, '')}`;
+  } else {
+    detail = `进度 ${jobProgressLabel(job)}`;
+  }
+
+  const outcomes = [];
+  if (phase === 'extracting_note' && noteStartedAt > 0) {
+    outcomes.push(`本篇已处理 ${formatJobDuration(Date.now() - noteStartedAt)}`);
+  } else if (lastNoteElapsedMs > 0) {
+    outcomes.push(`本篇耗时 ${formatJobDuration(lastNoteElapsedMs)}`);
+  }
+  if (notesEvaluated > 0) outcomes.push(`模型处理 ${notesEvaluated} 篇`);
+  if (rawMemoriesStaged > 0) outcomes.push(`提炼原始记忆 ${rawMemoriesStaged} 篇`);
+  if (phase1NoOutput > 0) outcomes.push(`无需形成记忆 ${phase1NoOutput} 篇`);
+  if (sourcePolicySkipped > 0) outcomes.push(`处理前跳过 ${sourcePolicySkipped} 篇`);
+  if (alreadyEvaluatedSkipped > 0) outcomes.push(`未变化且已处理，跳过模型 ${alreadyEvaluatedSkipped} 篇`);
+  if (created > 0) outcomes.push(`新增长期记忆 ${created} 条`);
+  if (updated > 0) outcomes.push(`更新长期记忆 ${updated} 条`);
+  if (retired > 0) outcomes.push(`归档或替代 ${retired} 条`);
+  if (discarded > 0) outcomes.push(`丢弃低价值原始输入 ${discarded} 条`);
+  if (sourceIngestionFailures > 0) outcomes.push(`源文件无法处理 ${sourceIngestionFailures} 篇（模型未调用）`);
+  const latestSourceFailure = sourceIngestionFailureNotes.length > 0
+    ? sourceIngestionFailureNotes[sourceIngestionFailureNotes.length - 1]
+    : null;
+  if (latestSourceFailure) {
+    const failurePath = stringValue(latestSourceFailure.path, '未知笔记');
+    const errorCode = stringValue(latestSourceFailure.error_code, 'memory_source_read_failed');
+    outcomes.push(`最近源文件问题 ${failurePath}：${jobErrorLabel(errorCode)}`);
+  }
+  if (generatedOutputFailures > 0) outcomes.push(`模型输出校验失败 ${generatedOutputFailures} 篇（模型已调用）`);
+  const latestGeneratedFailure = generatedOutputFailureNotes.length > 0
+    ? generatedOutputFailureNotes[generatedOutputFailureNotes.length - 1]
+    : null;
+  if (latestGeneratedFailure) {
+    const failurePath = stringValue(latestGeneratedFailure.path, '未知笔记');
+    const errorCode = stringValue(latestGeneratedFailure.error_code, 'provider_response_invalid');
+    const schemaIssue = stringValue(latestGeneratedFailure.schema_issue, '');
+    const schemaPath = stringValue(latestGeneratedFailure.schema_path, '');
+    const schemaDetail = schemaIssue ? `（${schemaViolationLabel(schemaIssue, schemaPath)}）` : '';
+    outcomes.push(`最近模型输出问题 ${failurePath}：${jobErrorLabel(errorCode)}${schemaDetail}`);
+  }
+  if (numberValue(progress.removed_managed_files) > 0) outcomes.push(`删除旧版托管记忆文件 ${numberValue(progress.removed_managed_files)} 个`);
+  if (numberValue(progress.cleared_memories) > 0) outcomes.push(`清空旧版长期记忆 ${numberValue(progress.cleared_memories)} 条`);
+  if (numberValue(progress.cleared_stage1_outputs) > 0) outcomes.push(`清空旧版原始记忆 ${numberValue(progress.cleared_stage1_outputs)} 条`);
+  if (booleanValue(details.include_evaluated)) outcomes.push('任务模式：重新提取全部笔记');
+  if (phase === 'completed' && total === 0) outcomes.push('没有 Markdown 笔记');
+  return outcomes.length > 0 ? `${detail} · ${outcomes.join(' · ')}` : detail;
+}
+
+function schemaViolationLabel(issue: string, path: string): string {
+  const location = path || '返回对象';
+  const labels: Record<string, string> = {
+    type_mismatch: `${location} 的类型不正确`,
+    enum_mismatch: `${location} 不在允许值中`,
+    required_property_missing: `缺少必填字段 ${location}`,
+    unexpected_property: `${location} 包含未允许的字段`,
+    array_too_long: `${location} 的项目数超过上限`,
+    array_too_short: `${location} 的项目数不足`,
+    schema_invalid: `${location} 的校验规则无效`,
+  };
+  return labels[issue] ?? `${location} 未通过结构校验`;
+}
+
+function formatJobDuration(milliseconds: number): string {
+  const seconds = Math.max(0, Math.round(milliseconds / 1_000));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remaining = seconds % 60;
+  return remaining === 0 ? `${minutes} 分钟` : `${minutes} 分 ${remaining} 秒`;
+}
+
+function jobErrorContextLabel(job: JsonObject): string {
+  const status = stringValue(job.status, 'unknown');
+  const prefix = status === 'running' || status === 'queued' ? '上次尝试' : '失败原因';
+  return `${prefix}：${jobErrorLabel(job.last_error)}`;
+}
+
+function progressRatio(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.max(0, Math.min(1, value > 1 ? value / 100 : value));
+  }
+  const progress = asRecord(value);
+  const direct = typeof progress.ratio === 'number'
+    ? progress.ratio
+    : typeof progress.percent === 'number'
+      ? progress.percent / 100
+      : null;
+  if (direct !== null && Number.isFinite(direct)) return Math.max(0, Math.min(1, direct));
+  const completed = typeof progress.completed === 'number'
+    ? progress.completed
+    : typeof progress.done === 'number'
+      ? progress.done
+      : null;
+  const total = typeof progress.total === 'number' ? progress.total : null;
+  if (completed === null || total === null || total <= 0) return null;
+  return Math.max(0, Math.min(1, completed / total));
 }
 
 function AuditPage({ data }: { data: JsonObject | null }) {
@@ -1060,6 +1910,12 @@ function providerTypeLabel(value: unknown): string {
   const labels: Record<string, string> = {
     openai_compatible: 'OpenAI 兼容',
     openai_responses: 'OpenAI Responses',
+    deepseek: 'DeepSeek',
+    xiaomi_mimo: '小米 MiMo',
+    zhipu_glm: '智谱 GLM',
+    moonshot_kimi: 'Kimi / Moonshot',
+    google_gemini: 'Google Gemini',
+    alibaba_qwen: '阿里千问 / DashScope',
     anthropic_messages: 'Anthropic Messages',
     embedding_http: 'Embedding HTTP',
   };
@@ -1067,12 +1923,98 @@ function providerTypeLabel(value: unknown): string {
   return labels[providerType] ?? providerType;
 }
 
+function modelCapabilityLabel(capabilities: JsonObject): string {
+  const values = [];
+  if (booleanValue(capabilities.structured_output)) values.push('结构化生成');
+  if (booleanValue(capabilities.embeddings)) {
+    const dimension = typeof capabilities.dimension === 'number' ? ` ${capabilities.dimension} 维` : '';
+    values.push(`Embedding${dimension}`);
+  }
+  if (booleanValue(capabilities.reranking)) values.push('重排');
+  return values.length > 0 ? values.join(' · ') : '能力待确认';
+}
+
+const openAiChatProviderTypes = new Set([
+  'openai_compatible', 'deepseek', 'xiaomi_mimo', 'zhipu_glm',
+  'moonshot_kimi', 'google_gemini', 'alibaba_qwen',
+]);
+
+function isOpenAiChatProvider(value: unknown): boolean {
+  return openAiChatProviderTypes.has(stringValue(value, ''));
+}
+
+function detectProviderPreset(baseUrl: string): string {
+  let host = '';
+  try { host = new URL(baseUrl).hostname.toLowerCase(); } catch { return 'generic'; }
+  if (host === 'api.deepseek.com') return 'deepseek';
+  if (host === 'api.xiaomimimo.com') return 'xiaomi_mimo';
+  if (host === 'open.bigmodel.cn') return 'zhipu_glm';
+  if (host === 'api.moonshot.ai' || host === 'api.moonshot.cn') return 'moonshot_kimi';
+  if (host === 'generativelanguage.googleapis.com') return 'google_gemini';
+  if (host === 'dashscope.aliyuncs.com' || host === 'dashscope-intl.aliyuncs.com' || host.endsWith('.dashscope.aliyuncs.com') || host.endsWith('.maas.aliyuncs.com')) return 'alibaba_qwen';
+  return 'generic';
+}
+
+function resolveCompatibilityPreset(configured: string, providerType: string, baseUrl: string): string {
+  if (configured !== 'auto') return configured;
+  if (providerType === 'openai_compatible') return detectProviderPreset(baseUrl);
+  return openAiChatProviderTypes.has(providerType) ? providerType : 'generic';
+}
+
+function providerPresetSupportsThinking(preset: string): boolean {
+  return ['deepseek', 'xiaomi_mimo', 'zhipu_glm', 'moonshot_kimi', 'google_gemini', 'alibaba_qwen'].includes(preset);
+}
+
+function openAiCompatibilityLabel(provider: JsonObject, model: JsonObject): string {
+  const settings = asRecord(model.settings);
+  const preset = resolveCompatibilityPreset(
+    stringValue(settings.openai_compatibility_preset, 'auto'),
+    stringValue(provider.provider_type, ''),
+    stringValue(provider.base_url, ''),
+  );
+  const presetLabels: Record<string, string> = {
+    generic: '通用 OpenAI', deepseek: 'DeepSeek', xiaomi_mimo: '小米 MiMo',
+    zhipu_glm: '智谱 GLM', moonshot_kimi: 'Kimi', google_gemini: 'Gemini',
+    alibaba_qwen: '千问',
+  };
+  const configuredOutput = stringValue(settings.openai_structured_output_mode, 'auto');
+  const output = configuredOutput !== 'auto'
+    ? configuredOutput
+    : ['deepseek', 'xiaomi_mimo', 'zhipu_glm', 'alibaba_qwen'].includes(preset)
+      ? 'json_object'
+      : 'strict_json_schema';
+  const outputLabels: Record<string, string> = {
+    strict_json_schema: '严格 JSON Schema', json_object: 'JSON Object', prompt_only: '提示词 JSON',
+  };
+  const configuredThinking = stringValue(settings.openai_thinking_mode, 'auto');
+  const thinking = configuredThinking === 'enabled'
+    ? '思考开启'
+    : configuredThinking === 'disabled'
+      ? '思考关闭'
+      : ['deepseek', 'xiaomi_mimo'].includes(preset) ? '思考开启' : '思考按模型默认';
+  const defaultReasoningLimit = ['deepseek', 'xiaomi_mimo', 'moonshot_kimi', 'google_gemini', 'alibaba_qwen'].includes(preset);
+  const configuredLimit = typeof settings.generation_token_limit === 'number'
+    ? settings.generation_token_limit
+    : defaultReasoningLimit ? 32_768 : null;
+  const modelMaximum = asRecord(model.capabilities).max_output_tokens;
+  const effectiveLimit = configuredLimit !== null && typeof modelMaximum === 'number'
+    ? Math.min(configuredLimit, modelMaximum)
+    : configuredLimit;
+  const limit = effectiveLimit === null ? '按任务上限' : `单次上限 ${effectiveLimit}`;
+  return `${presetLabels[preset] ?? preset} · ${outputLabels[output] ?? output} · ${thinking} · ${limit}`;
+}
+
 function jobTypeLabel(value: unknown): string {
   const labels: Record<string, string> = {
     'vault.reconcile': 'Vault 重新扫描',
     'index.rebuild': '重建知识索引',
     'outbox.event': '文件事件处理',
-    'memory.extract': '记忆提取',
+    'memory.extract': '阶段一：提取原始记忆',
+    'memory.consolidate': '阶段二：整理长期记忆',
+    'memory.reset_pipeline': '重置记忆系统',
+    'memory.revalidate': '记忆来源校验',
+    'memory.rebuild': '重建记忆投影',
+    'embedding.rebuild': '重建语义向量',
     'backup.create': '创建备份',
     'backup.verify': '验证备份',
     'backup.restore': '恢复备份',
@@ -1094,7 +2036,18 @@ function auditActionLabel(value: unknown): string {
     'admin.mcp_token.issued': '创建 MCP PAT',
     'admin.mcp_token.revoked': '撤销 MCP PAT',
     'admin.provider.created': '创建 AI 服务',
+    'admin.provider.updated': '编辑 AI 服务',
+    'admin.provider.deleted': '删除 AI 服务',
     'admin.provider.tested': '测试 AI 服务',
+    'admin.provider_model.created': '登记 AI 模型',
+    'admin.model_binding.updated': '更新模型用途',
+    'admin.memory_extraction.updated': '更新自动记忆设置',
+    'admin.memory_extraction.queued': '处理现有笔记',
+    'admin.memory_extraction.restarted': '重置并重新处理自动记忆',
+    'admin.memory.updated': '编辑长期记忆',
+    'admin.memory.archived': '归档长期记忆',
+    'admin.memory.restored': '恢复长期记忆',
+    'admin.memory.deleted': '永久删除长期记忆',
     'admin.index.rebuild_queued': '提交索引重建',
     'admin.backup.created': '创建备份',
     'admin.restore.requested': '请求恢复',

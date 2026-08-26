@@ -12,7 +12,9 @@ The first supported deployment is a single owner and a single configured Vault. 
 
 ### Vault owner
 
-The owner deploys the service, connects Obsidian, configures MCP clients, chooses LLM and embedding providers, reviews what the system remembers, monitors jobs, and restores data.
+The owner deploys the service, connects Obsidian, configures MCP clients,
+chooses LLM and embedding providers, inspects what the system remembers,
+monitors jobs, and restores data.
 
 ### AI Agent
 
@@ -62,6 +64,8 @@ The service MUST provide:
 - full-text search;
 - semantic search when an embedding provider is enabled;
 - hybrid ranking;
+- automatic rebuildable note-level semantic projections when the
+  `embedding_note` role is configured;
 - scoped search by path, topic, tag, type, and time;
 - full note reads;
 - section/outline reads that avoid loading an entire long note unnecessarily;
@@ -93,16 +97,42 @@ It MUST provide:
 
 - proactive-recall instructions through MCP server discovery;
 - `recall` with hybrid ranking and task context;
-- `remember` for explicit durable memories;
+- separately typed related-note cues so an Agent can remember that ordinary
+  Vault knowledge exists without promoting article contents to durable facts;
+- `remember` as explicit durable input admission followed by background global
+  consolidation;
 - memory types including preferences, decisions, constraints, facts, projects, progress, events, relationships, and procedures;
 - provenance, confidence, importance, temporal validity, and lifecycle status;
-- automatic memory extraction from ordinary notes when configured;
-- schema validation, deduplication, contradiction detection, and promotion policy;
-- user inspection, editing, merging, rejection, archival, and deletion;
-- canonical Markdown materialization for active durable memories;
+- Vault-level automatic memory generation from ordinary Markdown without
+  requiring note authors to add service-specific markers, tags, or folders;
+- a bounded Phase 1 policy that permits `no_output` and caps exact evidence
+  anchors per note;
+- exact source evidence and current revision checks; model-generated
+  confidence/importance scores MUST NOT be used as trust evidence;
+- separate extraction and consolidation model roles, persisted raw-memory
+  staging, schema validation, global deduplication, contradiction resolution,
+  supersession, and forgetting;
+- autonomous consolidation so ordinary operation never depends on a human
+  review queue or candidate inbox;
+- user inspection, editing, merging, archival, restoration, and
+  revision-aware permanent deletion;
+- canonical Markdown materialization for committed semantic memories and
+  inspectable generated raw/summary layers;
 - recall that does not require a live LLM call.
 
-The service cannot force every MCP Host to invoke recall. It MUST make correct recall behavior likely through server instructions, clear tool descriptions, a compact memory-context resource, and low latency.
+While the memory format remains explicitly prerelease, an incompatible
+pipeline-generation upgrade MUST discard old memory jobs/state and regenerate
+only from canonical Vault notes. It MUST NOT run an unversioned old job through
+the new handler. Managed memory files are removed through Vault Core; ordinary
+notes, revisions, Provider settings, audits, backups, and non-memory jobs remain
+out of scope for that cutover.
+
+Related-note cues are derived, rebuildable, revision-bound source pointers and
+require Vault read permission. They are not durable memories and MUST remain
+distinguishable in the response. The service cannot force every MCP Host to
+invoke recall. It MUST make correct recall behavior likely through server
+instructions, clear tool descriptions, a compact memory-context resource, and
+low latency.
 
 ### 3.6 LLM and model providers
 
@@ -112,16 +142,45 @@ The owner MUST be able to configure and test:
 - one or more embedding providers;
 - optional local embedding models;
 - role-specific model bindings such as extraction, summarization, topic enrichment, and optional reranking;
+- a bounded role-specific extraction deadline suitable for slower reasoning models;
 - global defaults with future per-Vault overrides;
 - provider timeouts, concurrency, retry, and privacy policy.
+- revision-safe editing, disabling, secret rotation, and deletion of Provider
+  configurations from Admin without direct database access.
+
+Deleting a Provider MUST atomically remove its model inventory, every global
+and Vault-specific role binding to those models, and Provider-owned derived
+vectors and encrypted secrets. It MUST NOT delete canonical Vault files,
+durable memories or generated memory artifacts, job history, or audit history.
 
 The service MUST support at least:
 
 - OpenAI-compatible HTTP endpoints;
 - an Anthropic-compatible adapter;
+- first-class official-endpoint presets for DeepSeek, Xiaomi MiMo, Zhipu GLM,
+  Moonshot/Kimi, Google Gemini, and Alibaba Qwen/DashScope;
 - local OpenAI-compatible endpoints such as Ollama or vLLM;
 - remote embedding endpoints;
 - a local embedding implementation behind an optional feature.
+
+Each OpenAI-compatible generation model MUST have typed compatibility settings
+rather than relying on one request shape for every vendor. Provider preset,
+structured-output mode, token-limit field, thinking control, and per-call
+generation bound remain independent. The generic type MUST NOT infer an API
+dialect from a locally served model name; first-class Provider type, exact
+official host migration, or explicit model configuration selects vendor
+extensions. Regardless of provider-side enforcement, MCP Vault MUST parse and
+validate the returned JSON against its own phase-specific schema before it can
+enter Stage 1 state or a prepared consolidation proposal.
+For a schema with one required array envelope, a compatibility adapter MAY add
+that envelope only when the returned direct object or array already satisfies
+the complete item schema. It MUST run full root-schema validation afterward and
+MUST NOT reinterpret an empty, renamed, or ambiguous object as a successful
+zero-result response.
+
+Provider libraries or SDKs MAY help serialize a protocol, but they MUST NOT
+bypass the project-owned endpoint validation, SSRF policy, bounded body,
+timeout, concurrency, redaction, or cost-safe retry boundary.
 
 Provider failure MUST NOT block WebDAV, normal Vault writes, lexical search, or explicit memory access.
 
@@ -136,7 +195,7 @@ The service MUST provide a browser-based administration console for:
 - permissions and revocation;
 - LLM, embedding, and model-role configuration;
 - index status and rebuild;
-- memory browser and candidate review;
+- memory browser and exceptional processing diagnostics;
 - background jobs and provider health;
 - audit logs;
 - backup, restore, and retention configuration;
@@ -164,6 +223,30 @@ persisting the session bearer in JavaScript-accessible browser storage. The UI
 MUST confirm the server-side session before rendering authenticated content and
 MUST retain the session-bound CSRF protection required for later mutations.
 
+Provider configuration MUST include an operable model inventory and explicit
+role bindings; a configured Base URL alone is not a selected model. The owner
+MUST be able to refresh provider-advertised models, manually register a model
+when discovery is unavailable, and bind the current Vault's extraction,
+embedding, enrichment, and reranking roles.
+
+Automatic memory MUST be visibly opt-in and event-driven, with durable
+incremental/full note actions, separate Phase 1/Phase 2 readiness, pending raw
+counts, committed generation, and recent job evidence. There is no normal
+candidate-generation or per-result approval control. Admin progress MUST
+distinguish unknown work from zero work and report model-evaluated notes,
+pre-provider skips, raw inputs staged, `no_output`, isolated note failures, and
+Phase 2 create/update/retire/discard outcomes.
+Successful Stage 1 coverage MUST be persisted per Vault/source identity,
+source revision, and effective extraction profile even when the model returns
+`no_output`. Automatic events and manual backfill MUST check that coverage
+before a Provider call. The default manual action processes only new, changed,
+previously failed, or profile-stale notes; an explicit off-by-default option may
+include already evaluated unchanged notes with a clear token-cost warning.
+One malformed generated result MUST NOT abandon the remaining existing-note
+backfill. The service MUST checkpoint that note without replaying its paid
+request, continue later notes, and retain a bounded redacted failure reason;
+repeated consecutive contract failures MAY open a cost-safety circuit.
+
 The Admin UI and Admin API MUST run on a separate listener that is not publicly exposed by default. Network restriction does not replace authentication.
 
 ### 3.8 Authentication and authorization
@@ -190,7 +273,11 @@ The service MUST:
 - maintain FTS, metadata, link, topic, memory, and embedding projections;
 - use a durable job queue and transactional outbox;
 - retry transient failures safely;
+- avoid automatic replay when a provider may already have completed billable
+  work, including response-body failures after a successful HTTP status;
 - expose job state and failures;
+- expose bounded current-unit progress for long jobs without persisting note
+  bodies, prompts, or provider responses in operational diagnostics;
 - allow independent rebuild of derived projections.
 
 ### 3.10 Backup and recovery
@@ -279,8 +366,11 @@ The service is complete for the first release when:
 2. Concurrent writes are detected, revision history is available, and recovery tests pass.
 3. An MCP client can authenticate, discover server instructions, explore the Vault index, search, read, and perform authorized edits.
 4. The MCP implementation passes conformance for supported revisions.
-5. An Agent can `remember` a decision, see it materialized as Markdown, and `recall` it later from a semantically related task.
-6. Automatic extraction can create reviewable candidates and safely promote configured high-confidence memories.
+5. An Agent can `remember` a decision, receive durable staging/job identities,
+   and recall the semantic Markdown memory after Phase 2 commits.
+6. Automatic Phase 1 can verify exact source evidence and Phase 2 can safely
+   consolidate semantic memory without routine human review or model
+   self-score trust.
 7. The owner can configure and test LLM and embedding providers from the LAN-only console.
 8. Provider outages leave WebDAV, file writes, lexical search, and existing memory recall operational.
 9. Indexes can be deleted and rebuilt without loss of canonical knowledge.

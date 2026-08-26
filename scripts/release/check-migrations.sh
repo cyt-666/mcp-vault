@@ -8,4 +8,6 @@ set -Eeuo pipefail
 cargo test -p mcp-vault-state empty_pre_wp02_fixture_upgrades_through_embedded_migration -- --nocapture
 cargo test -p mcp-vault-state migration_creates_operational_tables_and_integrity_is_green -- --nocapture
 cargo test -p mcp-vault-state migration_0009_clears_legacy_jwks_and_adds_key_verifier_state -- --nocapture
+cargo test -p mcp-vault-state migration_0010_adds_codex_style_two_phase_memory_state -- --nocapture
+cargo test -p mcp-vault-state migration_0011_discards_only_prerelease_memory_state_and_jobs -- --nocapture
 echo "migration fixture checks passed"

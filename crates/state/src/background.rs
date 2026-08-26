@@ -95,6 +95,23 @@ impl JobStatus {
     }
 }
 
+/// Exact Vault-scoped job counts used by operational projections.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct JobStatusCounts {
+    /// Jobs not yet leased.
+    pub queued: u64,
+    /// Jobs with an active worker lease.
+    pub running: u64,
+    /// Jobs waiting for their next retry timestamp.
+    pub retry_wait: u64,
+    /// Successfully completed jobs.
+    pub completed: u64,
+    /// Permanently failed jobs.
+    pub failed: u64,
+    /// Explicitly cancelled jobs.
+    pub cancelled: u64,
+}
+
 /// One leased persistent job.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JobRecord {
@@ -530,6 +547,48 @@ impl JobRepository {
         .await
     }
 
+    /// Enqueue at most one non-terminal job of this type for a Vault.
+    ///
+    /// A schema-level partial unique index supplies cross-task/process safety
+    /// for singleton job types; callers still provide a per-trigger dedup key
+    /// so a later trigger can proceed after an earlier terminal failure.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enqueue_singleton(
+        &self,
+        context: &VaultContext,
+        job_type: &str,
+        dedup_key: &str,
+        payload: &Value,
+        priority: i32,
+        max_attempts: u32,
+        available_at: i64,
+    ) -> Result<JobRecord, StateError> {
+        if let Some(existing) = self.find_active_by_type(context, job_type).await? {
+            return Ok(existing);
+        }
+        match self
+            .enqueue(
+                context,
+                job_type,
+                dedup_key,
+                payload,
+                priority,
+                max_attempts,
+                available_at,
+            )
+            .await
+        {
+            Ok(job) => Ok(job),
+            Err(error) => {
+                if let Some(existing) = self.find_active_by_type(context, job_type).await? {
+                    Ok(existing)
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
     /// Enqueue or return an explicitly global job.
     pub async fn enqueue_global(
         &self,
@@ -608,6 +667,32 @@ impl JobRepository {
     ) -> Result<Option<JobRecord>, StateError> {
         self.ensure_context(context).await?;
         self.find_by_scope(Some(context.id()), dedup_key).await
+    }
+
+    /// Return the newest non-terminal job of one type in this exact Vault.
+    pub async fn find_active_by_type(
+        &self,
+        context: &VaultContext,
+        job_type: &str,
+    ) -> Result<Option<JobRecord>, StateError> {
+        self.ensure_context(context).await?;
+        validate_job_labels(job_type, "active-job-type")?;
+        let row = sqlx::query_as::<_, JobRow>(
+            "SELECT id, vault_id, job_type, dedup_key, payload_json, status,
+                    priority, attempts, max_attempts, available_at, lease_owner,
+                    lease_until, progress_json, last_error, created_at,
+                    updated_at, completed_at, cancel_requested
+             FROM jobs
+             WHERE vault_id = ? AND job_type = ?
+               AND status IN ('queued', 'running', 'retry_wait')
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1",
+        )
+        .bind(context.id().to_string())
+        .bind(job_type)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_job).transpose()
     }
 
     /// Claim queued/retry or expired-running jobs with one worker lease.
@@ -800,7 +885,11 @@ impl JobRepository {
                  completed_at = CASE WHEN status IN ('queued', 'retry_wait') THEN ? ELSE completed_at END,
                  updated_at = ?
              WHERE id = ? AND vault_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')
-               AND NOT (status = 'running' AND job_type LIKE 'backup.%')",
+               AND NOT (
+                 status = 'running'
+                 AND (job_type LIKE 'backup.%'
+                      OR job_type IN ('memory.consolidate', 'memory.reset_pipeline'))
+               )",
         )
         .bind(now)
         .bind(now)
@@ -814,7 +903,43 @@ impl JobRepository {
         Ok(())
     }
 
+    /// Request cancellation for every non-terminal job of one Vault/type.
+    pub async fn request_cancel_type(
+        &self,
+        context: &VaultContext,
+        job_type: &str,
+    ) -> Result<u64, StateError> {
+        self.ensure_context(context).await?;
+        validate_job_labels(job_type, "job-type-cancel")?;
+        let now = now_millis()?;
+        let result = sqlx::query(
+            "UPDATE jobs
+             SET cancel_requested = 1,
+                 status = CASE WHEN status IN ('queued', 'retry_wait') THEN 'cancelled' ELSE status END,
+                 completed_at = CASE WHEN status IN ('queued', 'retry_wait') THEN ? ELSE completed_at END,
+                 updated_at = ?
+             WHERE vault_id = ? AND job_type = ?
+               AND status IN ('queued', 'running', 'retry_wait')
+               AND NOT (
+                 status = 'running'
+                 AND (job_type LIKE 'backup.%'
+                      OR job_type IN ('memory.consolidate', 'memory.reset_pipeline'))
+               )",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(context.id().to_string())
+        .bind(job_type)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Requeue one failed job after an explicit Admin retry action.
+    ///
+    /// Memory extraction keeps its paid-work cursor so a full-Vault retry
+    /// resumes after the last durably completed note. Other job types retain
+    /// their existing reset-to-start behavior.
     pub async fn request_retry(
         &self,
         context: &VaultContext,
@@ -824,7 +949,11 @@ impl JobRepository {
         let result = sqlx::query(
             "UPDATE jobs
              SET status = 'queued', available_at = ?, lease_owner = NULL,
-                 lease_until = NULL, attempts = 0, progress_json = NULL,
+                 lease_until = NULL, attempts = 0,
+                 progress_json = CASE
+                     WHEN job_type = 'memory.extract' THEN progress_json
+                     ELSE NULL
+                 END,
                  cancel_requested = 0, last_error = NULL, completed_at = NULL,
                  updated_at = ?
              WHERE id = ? AND vault_id = ? AND status = 'failed'",
@@ -947,6 +1076,7 @@ impl JobRepository {
         &self,
         context: &VaultContext,
         status: Option<JobStatus>,
+        job_type: Option<&str>,
         limit: u32,
         offset: u32,
     ) -> Result<Vec<JobRecord>, StateError> {
@@ -966,6 +1096,11 @@ impl JobRepository {
             query.push(" AND status = ");
             query.push_bind(status.as_str());
         }
+        if let Some(job_type) = job_type {
+            validate_job_labels(job_type, "job-type-filter")?;
+            query.push(" AND job_type = ");
+            query.push_bind(job_type);
+        }
         query.push(" ORDER BY created_at DESC, id ASC LIMIT ");
         query.push_bind(i64::from(limit));
         query.push(" OFFSET ");
@@ -977,6 +1112,69 @@ impl JobRepository {
             .into_iter()
             .map(row_to_job)
             .collect()
+    }
+
+    /// List bounded terminal history without allowing active work to consume
+    /// the history page.
+    pub async fn list_terminal(
+        &self,
+        context: &VaultContext,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<JobRecord>, StateError> {
+        self.ensure_context(context).await?;
+        if limit == 0 || limit > 200 || offset > 1_000_000 {
+            return Err(StateError::InvalidInput("job page is invalid"));
+        }
+        sqlx::query_as::<_, JobRow>(
+            "SELECT id, vault_id, job_type, dedup_key, payload_json, status,
+                    priority, attempts, max_attempts, available_at, lease_owner,
+                    lease_until, progress_json, last_error, created_at,
+                    updated_at, completed_at, cancel_requested
+             FROM jobs
+             WHERE vault_id = ? AND status IN ('completed', 'failed', 'cancelled')
+             ORDER BY COALESCE(completed_at, updated_at) DESC, id DESC
+             LIMIT ? OFFSET ?",
+        )
+        .bind(context.id().to_string())
+        .bind(i64::from(limit))
+        .bind(i64::from(offset))
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(row_to_job)
+        .collect()
+    }
+
+    /// Count every lifecycle status for one exact Vault.
+    pub async fn status_counts(
+        &self,
+        context: &VaultContext,
+    ) -> Result<JobStatusCounts, StateError> {
+        self.ensure_context(context).await?;
+        let rows = sqlx::query_as::<_, (String, i64)>(
+            "SELECT status, COUNT(*)
+             FROM jobs
+             WHERE vault_id = ?
+             GROUP BY status",
+        )
+        .bind(context.id().to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut counts = JobStatusCounts::default();
+        for (status, count) in rows {
+            let count = u64::try_from(count)
+                .map_err(|_| StateError::InvalidInput("job count is invalid"))?;
+            match JobStatus::parse(&status)? {
+                JobStatus::Queued => counts.queued = count,
+                JobStatus::Running => counts.running = count,
+                JobStatus::RetryWait => counts.retry_wait = count,
+                JobStatus::Completed => counts.completed = count,
+                JobStatus::Failed => counts.failed = count,
+                JobStatus::Cancelled => counts.cancelled = count,
+            }
+        }
+        Ok(counts)
     }
 
     /// Count non-terminal jobs for one Vault.

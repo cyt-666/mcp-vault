@@ -62,7 +62,7 @@ export const pageMeta: Record<Page, PageMeta> = {
   memory: {
     label: '长期记忆',
     shortLabel: '记忆',
-    description: '检查已生效记忆、来源状态和待审核候选。',
+    description: '查看自动生成的长期记忆、来源状态和异常处理结果。',
     icon: '忆',
   },
   jobs: {
@@ -115,8 +115,69 @@ const errorMessages: Record<string, string> = {
   not_found: '没有找到对应记录。',
   backup_unavailable: '备份服务暂时不可用。',
   provider_unavailable: 'AI 服务暂时不可用。',
+  capability_unavailable: '所选模型不支持这项用途。',
+  model_exists: '这个模型 ID 已经登记过了。',
+  memory_extraction_not_ready: '记忆提取尚未就绪，请先启用策略、允许 AI 调用并绑定记忆提取模型。',
+  memory_extraction_model_unbound: '尚未给记忆提取绑定模型。',
+  memory_extraction_model_missing: '记忆提取绑定的模型不存在，请重新选择。',
+  memory_pipeline_reset_pending: '新版记忆系统正在清理旧数据，请等待自动重置完成。',
+  memory_pipeline_regeneration_pending: '新版记忆系统正在创建必须的全量重新提取任务，请稍候。',
   memory_unavailable: '记忆服务暂时不可用。',
   index_unavailable: '知识索引暂时不可用。',
+};
+
+const jobErrorMessages: Record<string, string> = {
+  memory_pipeline_reset_waiting_for_jobs: '正在等待旧记忆任务安全停止',
+  memory_pipeline_reset_quiesce_failed: '暂时无法停止旧记忆任务，将自动重试',
+  memory_pipeline_reset_retryable: '记忆系统重置暂时失败，将自动重试',
+  memory_pipeline_reset_failed: '记忆系统重置失败，请检查服务日志',
+  memory_pipeline_regeneration_admission_failed: '旧数据已清理，但暂时无法创建全量重新提取任务',
+  memory_extract_retryable: '记忆提取暂时失败，将自动重试',
+  memory_extract_input_invalid: '笔记内容不符合记忆提取要求',
+  memory_extract_not_found: '待提取的笔记已不存在',
+  memory_extract_path_invalid: '任务中的笔记路径无效',
+  memory_extract_lease_missing: '记忆提取任务没有有效执行租约',
+  memory_extract_progress_failed: '记忆提取进度暂时无法保存，将自动重试',
+  memory_extract_progress_finalize_failed: '模型调用可能已经完成，但任务进度无法落盘；为避免重复计费，任务已停止，请检查数据库状态后再手动重试',
+  memory_extract_output_failure_limit: '连续 3 次模型输出都不符合契约，已暂停后续调用以避免持续无效计费；修正模型兼容设置后可从当前进度重试',
+  memory_source_not_found: '笔记在处理前已被删除或移动',
+  memory_source_read_failed: '无法读取笔记内容',
+  memory_source_too_large: '笔记达到或超过 512 KiB 的单篇提取上限',
+  memory_source_not_utf8: '笔记不是 UTF-8 文本',
+  memory_phase1_output_invalid: 'AI 返回的阶段一结果无法解析',
+  memory_phase1_no_output_inconsistent: 'AI 同时返回了空记忆和非空辅助字段',
+  memory_phase1_output_too_large: 'AI 返回的原始记忆或来源摘要超过大小上限',
+  memory_phase1_evidence_missing: 'AI 返回了原始记忆，但没有提供支持证据',
+  memory_phase1_evidence_too_many: 'AI 返回的支持证据超过每篇笔记上限',
+  memory_phase1_slug_invalid: 'AI 返回的来源标识格式不正确',
+  memory_phase1_evidence_anchor_invalid: 'AI 返回的证据行号超出笔记范围',
+  memory_phase1_evidence_too_large: 'AI 选择的单段证据范围超过 16 KiB 上限',
+  memory_extraction_disabled: '记忆自动提取已停用',
+  memory_extraction_model_unbound: '尚未绑定记忆提取模型',
+  memory_extraction_model_missing: '绑定的记忆提取模型不存在',
+  provider_connect_failed: '无法连接 AI 服务，将自动重试',
+  provider_dns_failed: '无法解析 AI 服务地址，将自动重试',
+  provider_request_failed: 'AI 请求发送或等待响应时失败；请求是否已被远端处理无法确认，请检查网络后手动重试',
+  provider_timeout: 'AI 服务响应超时，将自动重试',
+  provider_response_timeout: 'AI 服务已接受请求，但响应正文未在记忆提取时限内读取完成；为避免重复计费，不会自动重试',
+  provider_response_incomplete: 'AI 服务已接受请求，但响应正文中途断开或不完整；为避免重复计费，不会自动重试',
+  provider_response_read_failed: 'AI 服务已接受请求，但响应正文读取失败；为避免重复计费，不会自动重试',
+  provider_response_too_large: 'AI 服务响应超过配置的大小上限',
+  provider_http_error: 'AI 服务返回了不可重试的 HTTP 错误',
+  provider_rate_limited: 'AI 服务触发限流，将自动重试',
+  provider_server_error: 'AI 服务端暂时异常，将自动重试',
+  provider_auth_failed: 'AI 服务认证失败，请检查密钥',
+  provider_endpoint_denied: 'AI 服务地址被安全策略拒绝',
+  provider_capability_unavailable: '所选模型不支持这项用途',
+  provider_response_content_type_invalid: 'AI 服务返回的正文不是 JSON；请检查 API 地址是否指向兼容接口，而不是网页或代理错误页',
+  provider_response_json_invalid: 'AI 服务返回的 HTTP 正文不是有效 JSON；请检查兼容接口或反向代理',
+  provider_final_content_missing: 'AI 服务返回了成功响应，但没有最终文本内容；请检查模型兼容模式和模型平台日志',
+  provider_structured_json_invalid: 'AI 服务返回了文本，但不是完整的 JSON；请检查模型兼容模式或输出是否被截断',
+  provider_output_truncated: 'AI 输出达到 Token 上限，结构化 JSON 未完成；任务不会自动重复计费，请调整模型输出上限后手动重试',
+  provider_output_filtered: 'AI 输出被模型平台的内容策略拦截；任务不会自动重试',
+  provider_output_repetition_truncated: 'AI 输出因重复内容被模型平台截断；任务不会自动重试',
+  provider_response_invalid: 'AI 服务返回了无法识别的响应',
+  provider_schema_invalid: 'AI 返回了 JSON，但阶段输出结构不符合要求',
 };
 
 const statusLabels: Record<string, string> = {
@@ -136,7 +197,7 @@ const statusLabels: Record<string, string> = {
   cancelled: '已取消',
   verified: '已验证',
   pending: '等待中',
-  candidate: '待审核',
+  candidate: '旧版候选（待迁移）',
   stale: '来源已失效',
   superseded: '已被替代',
   archived: '已归档',
@@ -165,6 +226,11 @@ export function formatRequestError(error: unknown): string {
     return errorMessages[error.code] ?? `请求失败（${error.code}），请稍后重试。`;
   }
   return '请求失败，请检查服务状态和网络连接。';
+}
+
+export function jobErrorLabel(value: unknown): string {
+  const code = stringValue(value, 'unknown');
+  return jobErrorMessages[code] ?? errorMessages[code] ?? code;
 }
 
 export function asRecord(value: unknown): JsonObject {
@@ -232,7 +298,8 @@ export function formatBytes(value: unknown): string {
 }
 
 export function formatPercent(value: unknown): string {
-  const amount = numberValue(value, 0);
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+  const amount = value;
   const percentage = amount <= 1 ? amount * 100 : amount;
   return `${Math.max(0, Math.min(100, percentage)).toFixed(0)}%`;
 }

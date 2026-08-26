@@ -86,7 +86,7 @@ Stored beneath the Vault content root:
 - attachments;
 - Obsidian configuration;
 - user taxonomy files;
-- active explicit or promoted memory records.
+- committed semantic memory records and generated raw/summary memory artifacts.
 
 A copied content root remains a valid ordinary Obsidian Vault.
 
@@ -118,7 +118,8 @@ Rebuildable from canonical knowledge plus configuration:
 - FTS indexes;
 - topic and knowledge-index projections;
 - embeddings;
-- automatic memory candidates;
+- Stage 1 and final-memory query projections reconstructed from managed
+  memory artifacts and source notes;
 - semantic relationships and optional knowledge graph.
 
 Deleting derived state must not delete current notes or durable memories.
@@ -355,6 +356,13 @@ active jobs terminate without rebuilding and only the newest generation runs.
 If a newer dirty event arrives during that rebuild, its durable job remains for
 one follow-up pass.
 
+The Worker claim loop is capacity-driven rather than batch-drained. It owns one
+process-level bounded task set, claims no more rows than the currently free
+handler slots, and immediately fills a slot when any handler finishes. A
+multi-hour extraction therefore cannot leave other configured slots idle or
+prevent later eligible jobs from being claimed. Shutdown drains that task set
+before releasing the worker's remaining leases.
+
 Metadata commits reserve the SQLite writer before reading precondition state.
 This avoids upgrading a stale WAL snapshot after another commit and leaving a
 canonical file stranded ahead of its revision, audit, and outbox transaction.
@@ -396,11 +404,18 @@ FileCreated
 FileUpdated
 FileMoved
 FileDeleted
+FileRestored
 MemoryMaterialized
 VaultSettingsChanged
 ProviderSettingsChanged
 EmbeddingModelChanged
 ```
+
+The revision operation and event type answer different questions. Reconciled
+filesystem edits remain `external_change` revisions for audit/history, while
+their outbox event uses the semantic lifecycle type (`FileCreated`,
+`FileUpdated`, `FileDeleted`, or `FileRestored`) so derived consumers do not
+need to infer what changed from a reconciliation implementation detail.
 
 An in-process channel may reduce latency but never replaces the durable outbox.
 
@@ -412,9 +427,9 @@ Long-running or retryable work is represented in SQLite:
 - note analysis;
 - FTS update;
 - topic-index update;
-- memory extraction;
-- candidate consolidation;
-- memory materialization;
+- Phase 1 memory extraction;
+- Phase 2 memory consolidation;
+- prerelease memory-pipeline reset and fresh regeneration;
 - embedding;
 - re-embedding after model change;
 - index rebuild;
@@ -424,6 +439,10 @@ Workers use renewable leases, bounded concurrency, exponential backoff,
 dead-letter state, deterministic deduplication keys, and cooperative persistent
 cancellation. Generic `outbox.event` fan-out jobs have a terminal compatibility
 handler; the retained source outbox row remains the durable event record.
+Workers checkpoint only bounded, redaction-safe current-unit metadata. A
+reclaimed multi-note extraction resumes from its last durable completed-path
+cursor; it does not use a volatile in-memory loop position as the recovery
+boundary.
 
 ## 10. Index architecture
 
@@ -451,6 +470,11 @@ When configured:
 - memory extraction and semantic recall.
 
 Semantic projections are versioned by provider, model, prompt, and content hash.
+The current note embedding projection uses deterministic bounded overlapping
+chunks derived from the current note projection. Durable jobs contain only
+Vault-scoped source references and hashes; the Index service resolves text at
+execution and excludes stale hashes. A missing `embedding_note` binding
+degrades note retrieval to FTS without affecting canonical writes.
 
 ### 10.3 User taxonomy
 
@@ -472,11 +496,11 @@ Memory has separate command and query paths.
 
 ```text
 explicit remember or note change
-    → candidate extraction
-    → validation
-    → duplicate/conflict analysis
-    → promotion policy/review
-    → canonical Markdown materialization
+    → Phase 1 semantic distillation and exact-source validation
+    → sourced raw-memory staging
+    → Phase 2 global deduplication/conflict/forgetting decisions
+    → prepared-proposal and revision-snapshot validation
+    → canonical semantic Markdown materialization
     → projection and embedding
 ```
 
@@ -484,21 +508,67 @@ explicit remember or note change
 
 ```text
 recall request
-    → lexical/vector/entity/topic candidate generation
+    → durable-memory lexical/vector/entity/topic candidate generation
+    → ordinary-note lexical/vector cue generation
     → Vault/status/temporal filtering
     → rank fusion and diversity
-    → token-budgeted sourced results
+    → token-budgeted typed memories + related-note cues
 ```
 
 Normal recall is an index query and does not call an LLM. See `memory-system.md`.
 
-WP-11 implements this boundary in `mcp-vault-memory`: explicit commands and
-candidate validation precede promotion, while recall consumes Vault-scoped
-memory FTS/entity/tag/recent projections and optional ProviderService vectors.
-Promoted records are rendered as deterministic Markdown under the managed
-namespace through Vault Core, so a projection rebuild never becomes a hidden
-database-only memory store. Managed file rows are excluded from ordinary
-reconciliation and note indexing loops.
+The Memory application service uses the Codex-style boundary adopted by
+ADR-0016. `memory.extract` distills one ordinary note revision into semantic
+`raw_memory`, a detailed source summary, and exact evidence anchors. The exact
+evidence text is derived by MCP Vault from model-selected ranges in an
+explicitly line-numbered view of the current revision; the model never supplies
+the canonical quotation. Only file/revision/line/hash metadata is persisted. A valid zero-result is durable
+`no_output` coverage. Phase 1 does not create final memory or FTS rows.
+
+`memory.consolidate` is a separate Vault-scoped persistent job using the
+`memory_consolidation` binding. It consumes dirty Stage 1 rows and current
+global memory, then proposes create/update/keep/archive, supersession, raw-input
+disposition, and compact-summary changes. Local code validates every reference,
+captures base revisions, persists the prepared proposal, rechecks the complete
+input snapshot, writes canonical artifacts through Vault Core, and atomically
+marks exact raw hashes selected. One active consolidation job is permitted per
+Vault. Before preparation, snapshot changes retry instead of overwriting
+concurrent Admin work. Once prepared, memory mutations yield a retryable
+conflict until the persisted generation finishes; a restarted worker reuses
+that proposal, adopts byte-identical file-first writes, and drains successive
+bounded batches. Startup and periodic reconciliation re-admit any durable dirty
+input left while the singleton job was completing.
+
+Explicit `remember` uses the same Stage 1/Phase 2 path and returns raw-input and
+job IDs rather than an immediate final memory. Final semantic content and
+supporting evidence are distinct. Normal recall consumes only the latest
+committed Vault-scoped memory FTS/entity/tag/recent/vector projections and
+defaults to omitting sources. It also delegates ordinary-note cues to the Index
+application service; those cues require Vault read permission and never acquire
+memory lifecycle or canonical memory Markdown.
+
+Incremental Phase 1 compares note revision and an effective profile hash over
+policy, prompt/pipeline, binding, model, and Provider configuration. Explicit
+full re-extraction includes unchanged rows. Malformed output is a note-local
+failure and later notes continue; bounded consecutive failures stop repeated
+invalid paid calls while preserving the durable cursor. Progress and logs expose
+only redacted counts, timings, stable error codes, and trusted schema paths.
+
+Canonical artifacts are `_mcp-vault/memory/MEMORY.md`,
+`memory_summary.md`, `raw_memories.md`, `source_summaries/`, and per-record
+Markdown. Legacy quote-as-content extracted memories are removed and
+all discarded during the ADR-0017 prerelease cutover. Migration 0011 deletes
+every old memory row and `memory.*` job; no explicit or extracted memory is
+converted. The idempotent `memory.reset_pipeline` job removes all current
+managed memory files through Vault Core, writes empty current artifacts, and
+admits a fresh full-Vault extraction at note one. Managed files remain excluded
+from ordinary reconciliation and note-indexing loops.
+
+Every durable memory job carries `pipeline_generation`. The Worker cancels a
+missing or mismatched generation before handler or Provider invocation. Reset
+is exclusive with extraction/consolidation/revalidation/rebuild work for the
+same Vault, and `regeneration_pending` is cleared only after the dedicated
+current-generation `fresh_start` job has been admitted.
 
 ## 12. Provider architecture
 
@@ -520,6 +590,33 @@ Provider requests use:
 - path privacy policy;
 - schema validation.
 
+OpenAI-compatible generation resolves a typed Provider preset and independent
+model axes before serialization. First-class Provider kinds cover DeepSeek,
+Xiaomi MiMo, Zhipu GLM, Moonshot/Kimi, Google Gemini, and Alibaba
+Qwen/DashScope. Model settings may separately override structured-output mode,
+token-limit field, thinking control, and one-call generation limit. This avoids
+both a lowest-common-denominator request and a combinatorial adapter per field
+combination.
+
+The generic OpenAI-compatible kind does not guess a vendor from a model name:
+the same `qwen` identifier can be served by DashScope, Ollama, vLLM, or a
+proxy with different extensions. `auto` uses a first-class kind or recognizes
+an exact official host only for legacy Provider rows. Detailed contracts and
+primary references live in `provider-compatibility.md`. Every preset still
+performs the same local schema validation; provider-side JSON mode is not
+trusted as proof of correctness.
+
+An adapter may use an SDK only when its network execution remains behind
+`ProviderTransport`. It may not instantiate an independent HTTP client that
+would evade URL resolution policy, redirect denial, response-size limits,
+shared concurrency, redaction, or post-success no-replay behavior.
+
+Operation-specific deadlines may override a Provider default without creating
+a second transport boundary. A structured generation is not replay-safe after
+the provider has returned a successful HTTP status: timeout, truncation, or
+failure while reading that response body is terminal until explicit operator
+retry because billable work may already have completed.
+
 Provider adapters cannot write files or SQL projections directly.
 
 The WP-10 provider boundary also owns endpoint policy, bounded transport,
@@ -528,6 +625,16 @@ VectorIndex implementation. Provider definitions are global operational
 configuration; model bindings resolve a Vault override before a global
 default. Embeddings and vectors remain derived, Vault-partitioned state with
 an exact SQLite fallback.
+
+Provider configuration edits and deletions remain Provider application
+operations. PATCH uses an optimistic Provider revision and keeps an existing
+encrypted secret unless Admin supplies a replacement. Replacement removes
+superseded Provider-owned ciphertext after the Provider row references the new
+secret. DELETE is one immediate State transaction: remove bindings for the
+Provider's models, remove Vault-partitioned derived embeddings/vectors, remove
+models and health/configuration, then remove every encrypted secret owned by
+that Provider. It deliberately retains canonical notes, memory lifecycle
+records/materialized Markdown, durable job history, and append-only audit.
 
 ## 13. Multi-Vault evolution
 

@@ -1,9 +1,13 @@
 use std::path::PathBuf;
 
 use mcp_vault_domain::{
-    ActorId, DomainError, Revision, VaultContext, VaultId, VaultSlug, WritePrecondition,
+    ActorId, DomainError, MemoryConsolidationId, MemoryRawId, ModelId, ProviderId, Revision,
+    VaultContext, VaultId, VaultSlug, WritePrecondition,
 };
-use mcp_vault_state::{StateStore, VaultRepository, VaultStatus};
+use mcp_vault_state::{
+    MemoryConsolidationProposalRecord, MemoryStage1OutputRecord, StateStore, VaultRepository,
+    VaultStatus,
+};
 use serde_json::json;
 
 async fn store() -> StateStore {
@@ -234,4 +238,126 @@ async fn settings_require_a_registered_vault_context() {
         .unwrap_err();
 
     assert!(matches!(error, mcp_vault_state::StateError::Database(_)));
+}
+
+#[tokio::test]
+async fn two_phase_memory_state_is_vault_scoped_and_commits_idempotently() {
+    let store = store().await;
+    let first = context("first-memory", "/srv/first-memory");
+    let second = context("second-memory", "/srv/second-memory");
+    insert(&store.vaults(), &first).await;
+    insert(&store.vaults(), &second).await;
+    let repository = store.memory();
+
+    let first_raw_id = MemoryRawId::new();
+    let second_raw_id = MemoryRawId::new();
+    let raw_output = |id, vault_id, content: &str| MemoryStage1OutputRecord {
+        id,
+        vault_id,
+        source_type: "explicit_agent".to_owned(),
+        source_key: "same-client-key".to_owned(),
+        source_file_id: None,
+        source_path: None,
+        source_revision: None,
+        profile_hash: "profile-v1".to_owned(),
+        pipeline_version: 1,
+        prompt_version: "stage1-v1".to_owned(),
+        raw_memory: content.to_owned(),
+        source_summary: format!("Summary for {content}"),
+        source_slug: Some("explicit-input".to_owned()),
+        evidence: json!([]),
+        metadata: json!({"memory_type": "decision"}),
+        output_hash: format!("hash-{content}"),
+        status: "ready".to_owned(),
+        generated_at: 10,
+        updated_at: 10,
+        usage_count: 0,
+        last_usage: None,
+        selected_for_phase2: false,
+        selected_for_phase2_hash: None,
+        selected_for_phase2_at: None,
+    };
+    let first_output = raw_output(first_raw_id, first.id(), "first");
+    let second_output = raw_output(second_raw_id, second.id(), "second");
+    repository
+        .upsert_stage1_output(&first, &first_output)
+        .await
+        .unwrap();
+    repository
+        .upsert_stage1_output(&second, &second_output)
+        .await
+        .unwrap();
+
+    assert_eq!(repository.pending_stage1_count(&first).await.unwrap(), 1);
+    assert_eq!(repository.pending_stage1_count(&second).await.unwrap(), 1);
+    assert_eq!(
+        repository
+            .get_stage1_output(&first, "explicit_agent", "same-client-key")
+            .await
+            .unwrap()
+            .unwrap()
+            .raw_memory,
+        "first"
+    );
+    let cross_vault = repository
+        .upsert_stage1_output(&first, &second_output)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        cross_vault,
+        mcp_vault_state::StateError::InvalidInput(_)
+    ));
+
+    let proposal_id = MemoryConsolidationId::new();
+    repository
+        .insert_consolidation_proposal(
+            &first,
+            &MemoryConsolidationProposalRecord {
+                id: proposal_id,
+                vault_id: first.id(),
+                input_hash: "input-first-v1".to_owned(),
+                proposal: json!({"memory_summary": "first summary"}),
+                model_id: ModelId::new(),
+                provider_id: ProviderId::new(),
+                prompt_version: "consolidation-v1".to_owned(),
+                status: "prepared".to_owned(),
+                created_at: 20,
+                applied_at: None,
+            },
+        )
+        .await
+        .unwrap();
+    let selected = vec![(first_raw_id, first_output.output_hash.clone())];
+    let committed = repository
+        .commit_consolidation(
+            &first,
+            proposal_id,
+            "input-first-v1",
+            "first summary",
+            &selected,
+        )
+        .await
+        .unwrap();
+    let repeated = repository
+        .commit_consolidation(
+            &first,
+            proposal_id,
+            "input-first-v1",
+            "first summary",
+            &selected,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(committed.generation, 1);
+    assert_eq!(repeated.generation, 1);
+    assert_eq!(repository.pending_stage1_count(&first).await.unwrap(), 0);
+    assert_eq!(repository.pending_stage1_count(&second).await.unwrap(), 1);
+    assert!(
+        repository
+            .get_consolidation_state(&second)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

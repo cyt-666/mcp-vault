@@ -20,6 +20,7 @@ Read these first:
 Then consult:
 
 - [`admin-and-configuration.md`](admin-and-configuration.md) for the management plane and provider settings;
+- [`provider-compatibility.md`](provider-compatibility.md) for first-class model providers and their tested wire contracts;
 - [`deployment-and-operations.md`](deployment-and-operations.md) for Docker, backup, monitoring, and upgrades;
 - [`development-and-testing.md`](development-and-testing.md) for workspace, coding, CI, and conformance practices;
 - [`compatibility-matrix.md`](compatibility-matrix.md) for automated WebDAV/MCP evidence and manual Obsidian client records;
@@ -36,8 +37,9 @@ Then consult:
 | `architecture.md` | Components, dependencies, consistency, event/job flows, future multi-Vault shape |
 | `interfaces.md` | MCP, WebDAV, Admin HTTP contracts and authorization scopes |
 | `data-model.md` | Filesystem layout, SQLite schema, revisions, migrations, rebuildability |
-| `memory-system.md` | Durable memory, extraction, lifecycle, recall ranking, provenance |
+| `memory-system.md` | Durable memory, low-noise extraction, related-note recall, lifecycle, ranking, provenance |
 | `admin-and-configuration.md` | Setup, UI pages, configuration hierarchy, provider management |
+| `provider-compatibility.md` | OpenAI, Anthropic, DeepSeek, MiMo, GLM, Kimi, Gemini, and Qwen wire compatibility |
 | `security.md` | Threat model, control/data/agent planes, secrets, path and provider safety |
 | `deployment-and-operations.md` | Docker, networking, TLS, health, backup, recovery, upgrade |
 | `development-and-testing.md` | Rust implementation rules, test strategy, CI and tooling |

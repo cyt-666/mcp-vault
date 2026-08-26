@@ -148,6 +148,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state.clone(),
         provider_service.clone(),
     );
+    let index_service = mcp_vault_indexer::IndexService::with_provider_service(
+        state.clone(),
+        provider_service.clone(),
+    );
     let mcp_service = mcp_vault_mcp::McpService::new(
         state.clone(),
         auth.clone(),
@@ -157,7 +161,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         data_hosts.iter().cloned().collect(),
         data_origins.clone(),
     )
-    .with_memory_service(memory_service.clone());
+    .with_application_services(index_service, memory_service.clone());
     let data_router = data_router_with_webdav_and_mcp_and_metrics(
         readiness.clone(),
         webdav_service,

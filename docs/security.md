@@ -352,6 +352,12 @@ Notes are untrusted content.
 
 Automatic extraction treats note content as data.
 
+It is disabled by default per Vault. Both future file-event extraction and an
+Admin-requested existing-note backfill require the same typed enabled policy,
+non-disabled provider mode, and effective model binding. Disabling the policy
+before a queued job runs prevents that job from sending note content. A missing
+binding/provider is reported as a safe job error rather than a false success.
+
 The provider request:
 
 - places system extraction rules outside note content;
@@ -417,13 +423,51 @@ Do not send:
 - secrets from configuration;
 - revision-history blobs unrelated to the request.
 
-Promoted memory Markdown is written only through the explicit Vault Core
+All managed memory Markdown is written only through the explicit Vault Core
 managed-path boundary. Ordinary WebDAV/MCP file operations cannot address the
 reserved namespace, reconciliation does not infer managed-file deletion, and
 memory extraction skips managed files to prevent self-triggering loops.
+Automatic memory is enabled once per Vault and does not inspect an author-facing
+frontmatter key, tag, path, or folder convention. Eligible ordinary Markdown
+changes may therefore reach the configured Phase 1 Provider. Legacy
+`explicit_only` and `all_notes` configuration deserialize to `automatic`;
+every other path/content privacy rule continues to apply.
+
+Phase 1 and Phase 2 model output is untrusted. Phase 1 must return semantic raw
+memory separately from bounded source-line selections. The Provider receives a
+numbered untrusted view and returns only start/end labels. Local code validates
+the range against the current note revision, derives the exact excerpt itself,
+and persists only Vault/file/revision/line metadata plus an excerpt hash; model
+text never becomes evidence. Phase 2 may paraphrase and merge only referenced Stage 1 inputs.
+Local code rejects unknown or cross-Vault references, missing evidence,
+unsupported lifecycle actions, stale base revisions, and incomplete raw-input
+dispositions before any canonical write or selection commit. Neither phase
+accepts model-generated confidence or importance as trust evidence.
+
+Generated raw memory, source summaries, global summaries, final semantic
+content, reasons, and metadata strings receive best-effort secret redaction
+before persistence. Provider schema-envelope repair is allowed only for an
+unambiguous single-array schema whose direct item/array already passes the
+complete item schema; the multi-field Phase 1 and Phase 2 contracts do not
+qualify. Every repaired value is revalidated against the full root schema.
+No response content is emitted into logs or progress.
+
+Schema failures persist only a project-owned category, a path assembled from
+the trusted request schema, and a bounded Admin-visible source path. Unknown
+Provider property names, response values, note bodies, prompts, and response
+bodies are not written to progress or logs; process logs hash the source path.
+Stage 1 coverage is the Vault/source identity, source/configuration revisions,
+one-way profile/output hashes, status, and bounded timestamps/counters. The
+default manual action consults that coverage before a remote request; the
+explicit `include_evaluated` option is authenticated/CSRF-protected and
+accompanied by an Admin cost warning.
 Recall returns only Vault-scoped projection rows after lifecycle, temporal,
 permission, and budget filtering; it never scans the filesystem or sends a
-query to an LLM.
+query to a generative LLM. Its `related_notes` cues are emitted only when the
+authenticated principal has `vault:read`; `memory:read` alone cannot reveal
+ordinary note paths, titles, snippets, tags, or headings. Query embeddings and
+durable `embedding_note` jobs remain subject to the same per-Vault provider
+mode and path/content privacy policy as other provider requests.
 
 Provider audit records include byte/token estimates and model, not note body.
 
@@ -467,11 +511,17 @@ Audit security-sensitive actions:
 - OAuth grant changes;
 - provider/secret changes;
 - note mutation/delete/restore;
-- memory promotion/edit/archive/delete;
+- memory consolidation/edit/archive/delete and prerelease pipeline reset;
 - backup/restore;
 - permission/settings changes.
 
 Audit is append-oriented. A future tamper-evident chain may be added, but access control and backups are required now.
+
+Provider edits and deletions are revision-aware Admin operations. A Provider
+delete removes its encrypted secrets and rebuildable vector/model state but
+retains the deletion audit fact, durable jobs, canonical notes, and durable
+memories. Audit metadata contains only affected-row counts; neither the old nor
+replacement secret is logged.
 
 ### Telemetry
 

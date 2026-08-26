@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use mcp_vault_domain::{Revision, VaultContext, VaultId, VaultSlug};
 use mcp_vault_state::{JobStatus, ScanStatus, StateStore, VaultStatus};
 use serde_json::json;
+use tokio::time::{Duration, sleep};
 
 async fn store_and_context() -> (StateStore, VaultContext) {
     let store = StateStore::connect_and_migrate("sqlite::memory:")
@@ -103,6 +104,77 @@ async fn jobs_deduplicate_claim_retry_and_reclaim_expired_leases() {
 }
 
 #[tokio::test]
+async fn active_jobs_remain_queryable_outside_bounded_terminal_history() {
+    let (store, context) = store_and_context().await;
+    let long_running = store
+        .jobs()
+        .enqueue(
+            &context,
+            "memory.extract",
+            "jobs:old-running",
+            &json!({"scope": "all"}),
+            0,
+            3,
+            0,
+        )
+        .await
+        .unwrap();
+    store
+        .jobs()
+        .claim_batch("long-worker", 1, i64::MAX / 2, 1)
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(2)).await;
+
+    for index in 0..55_u32 {
+        store
+            .jobs()
+            .enqueue(
+                &context,
+                "index.note",
+                &format!("jobs:terminal:{index}"),
+                &json!({"index": index}),
+                0,
+                3,
+                0,
+            )
+            .await
+            .unwrap();
+    }
+    let terminal = store
+        .jobs()
+        .claim_batch("short-worker", 2, i64::MAX / 2, 55)
+        .await
+        .unwrap();
+    assert_eq!(terminal.len(), 55);
+    for job in terminal {
+        store.jobs().complete(job.id, "short-worker").await.unwrap();
+    }
+
+    let recent = store
+        .jobs()
+        .list(&context, None, None, 50, 0)
+        .await
+        .unwrap();
+    assert_eq!(recent.len(), 50);
+    assert!(recent.iter().all(|job| job.id != long_running.id));
+    let running = store
+        .jobs()
+        .list(&context, Some(JobStatus::Running), None, 200, 0)
+        .await
+        .unwrap();
+    assert_eq!(running.len(), 1);
+    assert_eq!(running[0].id, long_running.id);
+    let history = store.jobs().list_terminal(&context, 50, 0).await.unwrap();
+    assert_eq!(history.len(), 50);
+    assert!(history.iter().all(|job| job.status == JobStatus::Completed));
+    let counts = store.jobs().status_counts(&context).await.unwrap();
+    assert_eq!(counts.running, 1);
+    assert_eq!(counts.completed, 55);
+    assert_eq!(counts.queued, 0);
+}
+
+#[tokio::test]
 async fn exhausted_jobs_and_cancelled_jobs_are_terminal_and_visible() {
     let (store, context) = store_and_context().await;
     let failed = store
@@ -178,6 +250,242 @@ async fn exhausted_jobs_and_cancelled_jobs_are_terminal_and_visible() {
             .status,
         JobStatus::Cancelled
     );
+}
+
+#[tokio::test]
+async fn manual_memory_retry_preserves_paid_work_cursor() {
+    let (store, context) = store_and_context().await;
+    let extraction = store
+        .jobs()
+        .enqueue(
+            &context,
+            "memory.extract",
+            "memory:partial",
+            &json!({"scope": "all"}),
+            0,
+            3,
+            0,
+        )
+        .await
+        .unwrap();
+    store
+        .jobs()
+        .claim_batch("memory-worker", 1, 10, 1)
+        .await
+        .unwrap();
+    let progress = json!({
+        "phase": "failed",
+        "completed": 10,
+        "total": 178,
+        "last_completed_path": "notes/ten.md",
+        "generated_output_failures": 1,
+    });
+    store
+        .jobs()
+        .update_progress(extraction.id, "memory-worker", &progress)
+        .await
+        .unwrap();
+    store
+        .jobs()
+        .fail_permanently(
+            extraction.id,
+            "memory-worker",
+            "memory_extract_output_failure_limit",
+        )
+        .await
+        .unwrap();
+
+    store
+        .jobs()
+        .request_retry(&context, extraction.id)
+        .await
+        .unwrap();
+    let retried = store
+        .jobs()
+        .get(&context, extraction.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retried.status, JobStatus::Queued);
+    assert_eq!(retried.progress, Some(progress));
+    assert!(retried.last_error.is_none());
+}
+
+#[tokio::test]
+async fn active_job_lookup_is_type_and_vault_scoped_and_ignores_terminal_rows() {
+    let (store, context) = store_and_context().await;
+    let first = store
+        .jobs()
+        .enqueue(
+            &context,
+            "memory.extract",
+            "memory:first",
+            &json!({"scope": "all"}),
+            0,
+            3,
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .jobs()
+            .find_active_by_type(&context, "memory.extract")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        first.id
+    );
+    assert!(
+        store
+            .jobs()
+            .find_active_by_type(&context, "index.rebuild")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    store
+        .jobs()
+        .request_cancel(&context, first.id)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .jobs()
+            .find_active_by_type(&context, "memory.extract")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let other = VaultContext::new(
+        VaultId::new(),
+        VaultSlug::new("other-active-job").unwrap(),
+        "/srv/other-active-job".into(),
+        Revision::new(1),
+    )
+    .unwrap();
+    store
+        .vaults()
+        .insert(&other, "Other", VaultStatus::Active)
+        .await
+        .unwrap();
+    store
+        .jobs()
+        .enqueue(
+            &other,
+            "memory.extract",
+            "memory:other",
+            &json!({"scope": "all"}),
+            0,
+            3,
+            0,
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .jobs()
+            .find_active_by_type(&context, "memory.extract")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn memory_consolidation_is_a_vault_scoped_non_cancellable_singleton() {
+    let (store, context) = store_and_context().await;
+    let first = store
+        .jobs()
+        .enqueue_singleton(
+            &context,
+            "memory.consolidate",
+            "memory:consolidate:first",
+            &json!({"generation": 1}),
+            0,
+            3,
+            0,
+        )
+        .await
+        .unwrap();
+    let duplicate = store
+        .jobs()
+        .enqueue_singleton(
+            &context,
+            "memory.consolidate",
+            "memory:consolidate:second-trigger",
+            &json!({"generation": 1}),
+            0,
+            3,
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.id, duplicate.id);
+
+    let claimed = store
+        .jobs()
+        .claim_batch("consolidation-worker", 1, 10, 1)
+        .await
+        .unwrap();
+    assert_eq!(claimed[0].id, first.id);
+    assert!(
+        store
+            .jobs()
+            .request_cancel(&context, first.id)
+            .await
+            .is_err()
+    );
+    store
+        .jobs()
+        .complete(first.id, "consolidation-worker")
+        .await
+        .unwrap();
+
+    let next = store
+        .jobs()
+        .enqueue_singleton(
+            &context,
+            "memory.consolidate",
+            "memory:consolidate:next-generation",
+            &json!({"generation": 2}),
+            0,
+            3,
+            0,
+        )
+        .await
+        .unwrap();
+    assert_ne!(next.id, first.id);
+
+    let other = VaultContext::new(
+        VaultId::new(),
+        VaultSlug::new("other-consolidation").unwrap(),
+        "/srv/other-consolidation".into(),
+        Revision::new(1),
+    )
+    .unwrap();
+    store
+        .vaults()
+        .insert(&other, "Other", VaultStatus::Active)
+        .await
+        .unwrap();
+    let other_job = store
+        .jobs()
+        .enqueue_singleton(
+            &other,
+            "memory.consolidate",
+            "memory:consolidate:other",
+            &json!({"generation": 1}),
+            0,
+            3,
+            0,
+        )
+        .await
+        .unwrap();
+    assert_ne!(other_job.id, next.id);
 }
 
 #[tokio::test]

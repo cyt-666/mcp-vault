@@ -160,11 +160,12 @@ knowledge exists and do not yet know exact search terms.
 
 Use recall proactively before answering when the current request may
 depend on prior preferences, decisions, constraints, project state,
-progress, events, relationships, or past work.
+progress, events, relationships, past work, or knowledge that may already
+exist in ordinary Vault notes.
 
-Use search_notes to locate source material and read_note to verify exact
-details. Treat recalled memories as sourced context, observing their
-confidence, validity, lifecycle status, and provenance.
+Treat related_notes returned by recall as retrieval cues and use read_note to
+verify exact details. Treat recalled memories as sourced durable context,
+observing their confidence, validity, lifecycle status, and provenance.
 
 Use mutation tools only when the user requests or clearly authorizes a
 persistent change. Preserve revisions and do not retry a conflict by
@@ -208,8 +209,10 @@ The MCP foundation advertises deterministic discovery, browse, lexical
 when the credential grants the corresponding memory scopes. Memory resources
 are authorization-dependent and include `vault://memory/context` plus the
 `vault://memory/{memory_id}` template. `search_notes` remains lexical-safe
-when semantic providers are unavailable; `recall` reports semantic
-degradation while preserving projection-based lexical/context results.
+when semantic providers are unavailable. With an `embedding_note` binding it
+uses deterministic note chunks for semantic/hybrid ranking. `recall` reports
+semantic degradation while preserving projection-based lexical/context
+results.
 
 ## 5. MCP scopes
 
@@ -493,7 +496,17 @@ The complete schema and ranking behavior are in `memory-system.md`.
 
 Input includes query, optional current project/entities/topics, type filters, time range, importance threshold, result and token budgets, and source/score options.
 
-Output includes atomic memories with status, confidence, importance, temporal validity, provenance, relations, and scores.
+Output keeps two collections distinct:
+
+- `memories`: atomic durable memories with status, confidence, importance,
+  temporal validity, provenance, relations, and scores;
+- `related_notes`: current revision-bound note cues with file ID, path, title,
+  bounded matching snippet, tags/topics/headings, score, and resource URI.
+
+`related_notes` is populated only when the credential also has `vault:read`.
+The caller may bound it independently with `max_related_notes`. A cue is not an
+accepted fact; the Agent reads the canonical note before relying on exact
+details.
 
 ### 6.8 `get_memory`
 
@@ -610,7 +623,7 @@ Restoration creates a new current revision; it never rewinds revision numbers.
 
 ### 6.16 `remember`
 
-Purpose: create or reinforce an explicit durable memory.
+Purpose: stage an explicit sourced memory input for background consolidation.
 
 Scope: `memory:write`.
 
@@ -629,7 +642,20 @@ Input:
 }
 ```
 
-Output states whether a memory was created, reinforced, merged, or flagged as a conflict.
+Output is truthful about the asynchronous boundary:
+
+```json
+{
+  "outcome": "staged",
+  "memory": null,
+  "raw_memory_id": "...",
+  "consolidation_job_id": "..."
+}
+```
+
+Recall changes only after the referenced Phase 2 job commits. Reusing an
+idempotency key with the same input returns the existing raw identity; using it
+with different input is rejected.
 
 ### 6.17 `update_memory`
 
@@ -824,6 +850,8 @@ GET    /api/v1/providers/{id}
 PATCH  /api/v1/providers/{id}
 DELETE /api/v1/providers/{id}
 POST   /api/v1/providers/{id}/test
+GET    /api/v1/providers/{id}/models
+POST   /api/v1/providers/{id}/models
 POST   /api/v1/providers/{id}/models/refresh
 GET    /api/v1/model-bindings
 PUT    /api/v1/model-bindings/{role}
@@ -835,14 +863,17 @@ GET    /api/v1/index/nodes
 GET    /api/v1/memories
 GET    /api/v1/memories/{id}
 PATCH  /api/v1/memories/{id}
+DELETE /api/v1/memories/{id}?expected_revision={revision}
 POST   /api/v1/memories/{id}/archive
 POST   /api/v1/memories/{id}/restore
 POST   /api/v1/memories/merge
-GET    /api/v1/memory-candidates
-POST   /api/v1/memory-candidates/{id}/promote
-POST   /api/v1/memory-candidates/{id}/reject
+GET    /api/v1/memory/extraction
+PUT    /api/v1/memory/extraction
+POST   /api/v1/memory/extraction/run
+POST   /api/v1/memory/extraction/restart
 
 GET    /api/v1/jobs
+GET    /api/v1/jobs/overview
 GET    /api/v1/jobs/{id}
 POST   /api/v1/jobs/{id}/retry
 POST   /api/v1/jobs/{id}/cancel
@@ -857,11 +888,213 @@ POST   /api/v1/restore
 POST   /api/v1/maintenance/recover
 ```
 
+Memory archive and restore accept
+`{"expected_revision": <current revision>}`. Permanent deletion uses the
+required `expected_revision` query parameter so generic HTTP clients do not
+need a DELETE request body. All three operations are authenticated,
+Origin/CSRF checked, Vault-scoped, revision-aware, and audited. Permanent
+deletion removes the current managed Markdown and memory projection; retained
+file history and backup artifacts remain governed by their own retention
+policies.
+
+The extraction policy returned by `GET /api/v1/memory/extraction` and accepted
+by `PUT` contains `enabled`, fixed `source_mode: "automatic"`,
+`max_evidence_per_note`, and `request_timeout_seconds`. Legacy
+`max_candidates_per_note`, `explicit_only`, and `all_notes` inputs are migration
+aliases. Source admission does not depend on note frontmatter, tags, paths, or
+folders, and there are no model-score threshold fields.
+
+The status response separates `phase1_readiness` and `phase2_readiness`, adds a
+combined `readiness`, Stage 1 `total|ready|no_output|withdrawn|pending` counts,
+and redacted consolidation generation/success/cutover state. The complete manual
+pipeline requires both `memory_extraction` and `memory_consolidation` bindings.
+Cutover state reports `pipeline_generation` and `regeneration_pending`; startup
+and periodic admission clear the latter only after a current-generation fresh
+Phase 1 full-Vault job exists.
+
+The Phase 1 Provider root is:
+
+```json
+{
+  "source_summary": "...",
+  "source_slug": "...",
+  "raw_memory": "...",
+  "evidence": [{"start_line": 1, "end_line": 1}]
+}
+```
+
+The untrusted Markdown sent to Phase 1 carries stable `L<number>:` prefixes.
+An empty result uses empty semantic strings, `source_slug: null`, and an empty
+evidence array. Local validation checks selected ranges and derives exact
+excerpt hashes from the current revision, then persists only source/revision/
+line/hash metadata. Phase 1 does not write final memory. When a
+Provider returns every core field but omits only `source_summary`, the adapter
+may copy the already returned `raw_memory` string into that auxiliary field and
+then rerun the complete schema and evidence validation. It does not repair an
+empty object, invent a summary, or accept missing/invalid evidence.
+
+`POST /memory/extraction/run` accepts optional
+`{"include_evaluated": false}`. The default skips current successful Stage 1
+coverage before a Provider call; `true` includes unchanged notes. It returns
+the active `memory.extract` job with `admission: "existing"` instead of creating
+a duplicate, or a queued job with `admission: "queued"`. Phase 1 automatically
+admits the singleton `memory.consolidate` follow-up. If a required fresh
+regeneration is pending, saving the final ready extraction policy/model binding
+immediately admits its singleton full-Vault job; the run endpoint may perform
+the same admission and return that job rather than rejecting the operator until
+the five-minute reconciliation loop runs. The compatibility restart
+endpoint cancels non-running Phase 1 work and admits a full re-extraction; it no
+longer clears or exposes candidate review state.
+
+`GET /api/v1/index/status` returns ordinary Markdown/FTS coverage separately
+from `note_semantic`: effective `embedding_note` model, current/expected chunk
+counts, stale vectors, coverage ratio, and stable readiness blockers. A missing
+semantic binding is not an index failure because lexical retrieval remains
+operational.
+
 Connection info uses the configured canonical data public origin. Without an
 external origin, direct-listener URLs include the actual data bind port; the
 default WebDAV endpoint is
 `http://127.0.0.1:8080/dav/v1/vaults/default/`. Host and Origin allow-lists are
 validation policy and do not silently remove or replace the advertised port.
+
+Provider model discovery is optional. `GET/POST
+/api/v1/providers/{id}/models` lists or manually registers provider-specific
+model IDs and typed capability metadata; refresh uses the provider model-list
+operation when available. Model-role binding remains a separate operation so a
+Base URL or provider display name is never mistaken for a model selection.
+
+Manual registration accepts typed model settings. For an OpenAI-compatible
+generation model, the relevant shape is:
+
+```json
+{
+  "external_model_id": "mimo-v2.5",
+  "capabilities": {
+    "structured_output": true,
+    "context_window": null,
+    "max_output_tokens": null
+  },
+  "settings": {
+    "openai_compatibility_preset": "auto",
+    "openai_structured_output_mode": "auto",
+    "openai_token_limit_field": "auto",
+    "openai_thinking_mode": "auto",
+    "generation_token_limit": null
+  },
+  "enabled": true
+}
+```
+
+Existing `{}` settings mean every axis is `auto`. Compatibility preset values
+are `generic`, `deepseek`, `xiaomi_mimo`, `zhipu_glm`, `moonshot_kimi`,
+`google_gemini`, and `alibaba_qwen`; output modes are
+`strict_json_schema`, `json_object`, and `prompt_only`; token fields are
+`max_tokens` and `max_completion_tokens`; thinking is `enabled` or `disabled`.
+Each enum also accepts `auto`. Nullable `generation_token_limit` is a bounded
+one-call generated-token ceiling. Responses return the stored typed settings
+and revision. Arbitrary headers, secrets, and request bodies are not model
+settings.
+
+`POST /api/v1/providers` accepts first-class `provider_type` values
+`deepseek`, `xiaomi_mimo`, `zhipu_glm`, `moonshot_kimi`, `google_gemini`, and
+`alibaba_qwen` in addition to the existing OpenAI, Anthropic, generic, and
+embedding types. Base URL is the exact API root; suffixes are appended without
+inserting an extra `/v1` into an existing provider path.
+
+`PATCH /api/v1/providers/{id}` accepts the same complete Provider fields plus
+an optional `expected_revision`. `secret: null` preserves the current secret;
+a non-empty secret rotates it. A stale revision returns HTTP 409 with
+`revision_conflict`, and successful edits return the next revision with only a
+masked secret hint.
+
+`DELETE /api/v1/providers/{id}?expected_revision=<revision>` performs one
+Provider lifecycle transaction. The revision query is optional for older
+Admin clients but the bundled console always supplies it. The response is
+redacted and has this shape:
+
+```json
+{
+  "deleted": true,
+  "provider_id": "provider-id",
+  "models_deleted": 2,
+  "bindings_deleted": 1,
+  "embeddings_deleted": 42,
+  "secrets_deleted": 1
+}
+```
+
+Bindings are removed across global and all Vault override scopes. Embedding
+metadata/vectors are derived and removed across their Vault partitions;
+canonical notes, durable memories, job history, and audit history
+are retained. The deletion audit fact stores only these counts.
+
+`GET /api/v1/index/status` and the dashboard return `indexed_notes`,
+`total_notes`, and a nullable numeric `coverage_ratio`; the structured
+`coverage` object remains the detailed analyzer/degradation record. A zero-note
+Vault reports an unknown ratio rather than a false `0%` failure.
+
+The extraction endpoint returns the typed policy, optimistic revision, separate
+Phase 1/Phase 2 readiness, raw-input counts, and consolidation generation.
+Manual admission requires extraction enabled, Provider policy enabled, and both
+model roles usable. `GET /api/v1/jobs` accepts optional `status` and exact
+`job_type` filters. Completed jobs project progress ratio `1.0`; unknown
+non-terminal progress remains null.
+
+`GET /api/v1/jobs/overview?limit={history_limit}&offset={history_offset}` is the
+Admin operational projection. It returns separate `running`, `queued`,
+`retry_wait`, and terminal `history` arrays; exact per-status counts; truncation
+flags for bounded waiting projections; and `next_history_offset`. Running jobs
+are queried independently at the server maximum page size, so the bounded
+terminal history cannot hide an older long-running task. Every row remains
+Vault-scoped and uses the same redacted `job_summary` contract as
+`GET /api/v1/jobs`.
+
+Full-Vault Phase 1 reports `phase`, `completed`, `total`, `current_index`,
+`current_path`, `last_completed_path`, `note_started_at`,
+`last_note_elapsed_ms`, `notes_evaluated`, `raw_memories_staged`,
+`phase1_no_output`, `source_policy_skipped`, `already_evaluated_skipped`,
+`source_ingestion_failures`, bounded `source_ingestion_failure_notes`,
+`generated_output_failures`, bounded `generated_output_failure_notes`, and
+nullable `error_code`.
+Phase 2 reports cumulative `completed|total|raw_inputs`,
+`pending_raw_inputs`, `created`, `updated`, `retired`, `discarded`,
+`generation`, and `reused_proposal` while one job drains bounded generations.
+Pipeline reset reports removed managed memory files; cleared final/Stage 1/
+candidate/proposal/diagnostic/vector counts; and fresh-regeneration follow-up
+state.
+
+Job `details` exposes the non-secret `include_evaluated` mode. Each failure-note
+array retains at most 20 objects containing ordinal, source path, stable error
+code, and elapsed time; generated-output diagnostics may additionally contain
+trusted `schema_issue`/`schema_path`. A source-ingestion failure occurs before a
+Provider call and includes missing, unreadable, over-512-KiB, and non-UTF-8
+notes. A generated-output failure occurs after a Provider call and includes
+wire-schema, Stage 1 bounds, and evidence-anchor/source mismatches. Responses
+and logs never expose arbitrary payloads, note content, prompts, Provider
+response text, or secrets.
+
+Provider-backed jobs may report the stable redacted codes
+`provider_response_content_type_invalid`, `provider_response_json_invalid`,
+`provider_final_content_missing`, `provider_structured_json_invalid`,
+`provider_output_truncated`, `provider_output_filtered`, or
+`provider_output_repetition_truncated`. `provider_schema_invalid` additionally
+reports one of `type_mismatch`, `enum_mismatch`,
+`required_property_missing`, `unexpected_property`, `array_too_long`, or
+`array_too_short` plus its trusted schema path. They expose response-contract
+state, not response text.
+
+One source-ingestion or generated-output failure is a completed note unit
+inside a full-Vault backfill, and later notes continue. Only generated-output
+failures participate in the consecutive cost-safety circuit. A mixed run
+finishes with progress phase
+`completed_with_errors` and normal terminal job status `completed`. Three
+consecutive output-contract failures stop the job with progress phase
+`stopped_output_failures` and error
+`memory_extract_output_failure_limit`; an explicit job retry preserves the
+full-Vault `last_completed_path` cursor. Systemic configuration,
+authentication, endpoint, state, lease, and retryable transport errors retain
+their job-level behavior.
 
 Deletion endpoints use explicit confirmation payloads and return operation/job IDs when asynchronous.
 

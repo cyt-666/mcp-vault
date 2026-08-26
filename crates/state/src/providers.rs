@@ -1,11 +1,14 @@
 //! SQL repositories for provider configuration, model bindings, health, and
 //! Vault-scoped embedding/vector projections.
 
+use std::sync::Arc;
+
 use serde_json::Value;
 use sqlx::{FromRow, SqlitePool};
+use tokio::sync::Semaphore;
 
 use mcp_vault_domain::{
-    EmbeddingId, ModelId, ProviderId, Revision, SecretId, VaultContext, VaultId,
+    DomainError, EmbeddingId, ModelId, ProviderId, Revision, SecretId, VaultContext, VaultId,
 };
 
 use crate::{StateError, now_millis};
@@ -36,6 +39,19 @@ pub struct ProviderRecord {
     pub created_at: i64,
     /// Last configuration update timestamp.
     pub updated_at: i64,
+}
+
+/// Redacted counts from one atomic Provider lifecycle deletion.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ProviderDeletionSummary {
+    /// Provider-owned model inventory rows removed.
+    pub models_deleted: u64,
+    /// Global and Vault-specific role bindings removed.
+    pub bindings_deleted: u64,
+    /// Rebuildable embedding metadata rows removed; vector rows cascade.
+    pub embeddings_deleted: u64,
+    /// Encrypted secret rows owned by the Provider removed.
+    pub secrets_deleted: u64,
 }
 
 /// A model advertised or manually registered for one provider.
@@ -217,15 +233,32 @@ struct EmbeddingRow {
     vector_blob: Vec<u8>,
 }
 
+#[derive(Clone, Debug, FromRow)]
+struct EmbeddingMetadataRow {
+    id: String,
+    vault_id: String,
+    object_type: String,
+    object_id: String,
+    chunk_key: String,
+    provider_id: String,
+    model_id: String,
+    dimension: i64,
+    content_hash: String,
+    vector_backend_key: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
 /// SQL boundary for provider and vector state.
 #[derive(Clone)]
 pub struct ProviderRepository {
     pool: SqlitePool,
+    write_gate: Arc<Semaphore>,
 }
 
 impl ProviderRepository {
-    pub(crate) fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub(crate) fn new(pool: SqlitePool, write_gate: Arc<Semaphore>) -> Self {
+        Self { pool, write_gate }
     }
 
     /// Insert a global provider configuration.
@@ -295,8 +328,30 @@ impl ProviderRepository {
         record: &ProviderRecord,
     ) -> Result<ProviderRecord, StateError> {
         validate_provider_record(record)?;
+        let _write_permit = self
+            .write_gate
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| StateError::InvalidInput("state write gate is closed"))?;
         let updated_at = now_millis()?;
         let next_revision = record.revision.next()?;
+        let provider_id = record.id.to_string();
+        let secret_id = record.secret_id.map(|id| id.to_string());
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let current_revision =
+            sqlx::query_scalar::<_, i64>("SELECT revision FROM providers WHERE id = ?")
+                .bind(&provider_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(StateError::InvalidInput("provider does not exist"))?;
+        let current_revision = Revision::try_from(current_revision)?;
+        if current_revision != record.revision {
+            return Err(StateError::InvalidDomain(DomainError::RevisionConflict {
+                expected: record.revision,
+                current: current_revision,
+            }));
+        }
         let result = sqlx::query(
             "UPDATE providers
              SET name = ?, provider_type = ?, base_url = ?, secret_id = ?,
@@ -306,34 +361,129 @@ impl ProviderRepository {
         .bind(&record.name)
         .bind(&record.provider_type)
         .bind(&record.base_url)
-        .bind(record.secret_id.map(|id| id.to_string()))
+        .bind(secret_id.as_deref())
         .bind(serde_json::to_string(&record.settings)?)
         .bind(if record.enabled { 1_i64 } else { 0_i64 })
         .bind(next_revision.as_i64()?)
         .bind(updated_at)
-        .bind(record.id.to_string())
+        .bind(&provider_id)
         .bind(record.revision.as_i64()?)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
         if result.rows_affected() != 1 {
             return Err(StateError::InvalidInput("provider revision conflict"));
         }
+        if let Some(secret_id) = secret_id.as_deref() {
+            sqlx::query(
+                "DELETE FROM encrypted_secrets
+                 WHERE owner_type = 'provider' AND owner_id = ? AND id <> ?",
+            )
+            .bind(&provider_id)
+            .bind(secret_id)
+            .execute(&mut *transaction)
+            .await?;
+        } else {
+            sqlx::query(
+                "DELETE FROM encrypted_secrets
+                 WHERE owner_type = 'provider' AND owner_id = ?",
+            )
+            .bind(&provider_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
         self.get_provider(record.id)
             .await?
             .ok_or(StateError::InvalidInput("updated provider was not found"))
     }
 
-    /// Delete a provider configuration. Encrypted secrets remain recoverable
-    /// and are not deleted implicitly by this repository.
-    pub async fn delete_provider(&self, provider_id: ProviderId) -> Result<(), StateError> {
-        let result = sqlx::query("DELETE FROM providers WHERE id = ?")
-            .bind(provider_id.to_string())
-            .execute(&self.pool)
-            .await?;
-        if result.rows_affected() != 1 {
-            return Err(StateError::InvalidInput("provider does not exist"));
+    /// Delete one Provider lifecycle atomically, including only its dependent
+    /// operational/derived state and owned encrypted secrets.
+    pub async fn delete_provider(
+        &self,
+        provider_id: ProviderId,
+        expected_revision: Option<Revision>,
+    ) -> Result<Option<ProviderDeletionSummary>, StateError> {
+        let _write_permit = self
+            .write_gate
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| StateError::InvalidInput("state write gate is closed"))?;
+        let provider_id = provider_id.to_string();
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let current_revision =
+            sqlx::query_scalar::<_, i64>("SELECT revision FROM providers WHERE id = ?")
+                .bind(&provider_id)
+                .fetch_optional(&mut *transaction)
+                .await?;
+        let Some(current_revision) = current_revision else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let current_revision = Revision::try_from(current_revision)?;
+        if let Some(expected_revision) = expected_revision
+            && expected_revision != current_revision
+        {
+            return Err(StateError::InvalidDomain(DomainError::RevisionConflict {
+                expected: expected_revision,
+                current: current_revision,
+            }));
         }
-        Ok(())
+
+        let bindings_deleted = sqlx::query(
+            "DELETE FROM model_bindings
+             WHERE model_id IN (
+                 SELECT id FROM models WHERE provider_id = ?
+             )",
+        )
+        .bind(&provider_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        let embeddings_deleted = sqlx::query(
+            "DELETE FROM embedding_records
+             WHERE provider_id = ? OR model_id IN (
+                 SELECT id FROM models WHERE provider_id = ?
+             )",
+        )
+        .bind(&provider_id)
+        .bind(&provider_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        let models_deleted = sqlx::query("DELETE FROM models WHERE provider_id = ?")
+            .bind(&provider_id)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+        let provider_deleted = sqlx::query("DELETE FROM providers WHERE id = ? AND revision = ?")
+            .bind(&provider_id)
+            .bind(current_revision.as_i64()?)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+        if provider_deleted != 1 {
+            return Err(StateError::InvalidInput(
+                "provider deletion lost its selected row",
+            ));
+        }
+        let secrets_deleted = sqlx::query(
+            "DELETE FROM encrypted_secrets
+             WHERE owner_type = 'provider' AND owner_id = ?",
+        )
+        .bind(&provider_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+
+        transaction.commit().await?;
+        Ok(Some(ProviderDeletionSummary {
+            models_deleted,
+            bindings_deleted,
+            embeddings_deleted,
+            secrets_deleted,
+        }))
     }
 
     /// Insert one model record.
@@ -450,10 +600,18 @@ impl ProviderRepository {
             self.ensure_vault_context(context).await?;
         }
         let current = self.get_binding(context, role).await?;
-        if let Some(expected_revision) = expected_revision
-            && current.as_ref().map(|binding| binding.revision) != Some(expected_revision)
-        {
-            return Err(StateError::InvalidInput("model binding revision conflict"));
+        if let Some(expected_revision) = expected_revision {
+            let Some(current) = current.as_ref() else {
+                return Err(StateError::InvalidDomain(DomainError::PreconditionFailed {
+                    reason: "model binding does not exist",
+                }));
+            };
+            if current.revision != expected_revision {
+                return Err(StateError::InvalidDomain(DomainError::RevisionConflict {
+                    expected: expected_revision,
+                    current: current.revision,
+                }));
+            }
         }
         let now = now_millis()?;
         let id = current
@@ -732,6 +890,53 @@ impl ProviderRepository {
         row.map(row_to_embedding).transpose()
     }
 
+    /// List bounded embedding metadata without loading vector blobs.
+    pub async fn list_embeddings(
+        &self,
+        context: &VaultContext,
+        model_id: ModelId,
+        object_type: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<EmbeddingRecord>, StateError> {
+        self.ensure_vault_context(context).await?;
+        validate_label(object_type, "embedding object type")?;
+        if limit == 0 || limit > MAX_PROVIDER_LIMIT || offset > 1_000_000 {
+            return Err(StateError::InvalidInput("embedding page is invalid"));
+        }
+        let rows = sqlx::query_as::<_, EmbeddingMetadataRow>(
+            "SELECT id, vault_id, object_type, object_id, chunk_key,
+                    provider_id, model_id, dimension, content_hash,
+                    vector_backend_key, created_at, updated_at
+             FROM embedding_records
+             WHERE vault_id = ? AND model_id = ? AND object_type = ?
+             ORDER BY object_id ASC, chunk_key ASC, id ASC LIMIT ? OFFSET ?",
+        )
+        .bind(context.id().to_string())
+        .bind(model_id.to_string())
+        .bind(object_type)
+        .bind(i64::from(limit))
+        .bind(i64::from(offset))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_embedding_metadata).collect()
+    }
+
+    /// Delete one Vault-scoped derived embedding and its cascading vector.
+    pub async fn delete_embedding(
+        &self,
+        context: &VaultContext,
+        embedding_id: EmbeddingId,
+    ) -> Result<bool, StateError> {
+        self.ensure_vault_context(context).await?;
+        let result = sqlx::query("DELETE FROM embedding_records WHERE vault_id = ? AND id = ?")
+            .bind(context.id().to_string())
+            .bind(embedding_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     /// Load bounded vector candidates for one Vault/model/dimension.
     pub async fn list_vectors(
         &self,
@@ -918,6 +1123,24 @@ fn row_to_health(row: HealthRow) -> Result<ProviderHealthRecord, StateError> {
 }
 
 fn row_to_embedding(row: EmbeddingRow) -> Result<EmbeddingRecord, StateError> {
+    Ok(EmbeddingRecord {
+        id: EmbeddingId::parse(&row.id)?,
+        vault_id: VaultId::parse(&row.vault_id)?,
+        object_type: row.object_type,
+        object_id: row.object_id,
+        chunk_key: row.chunk_key,
+        provider_id: ProviderId::parse(&row.provider_id)?,
+        model_id: ModelId::parse(&row.model_id)?,
+        dimension: u32::try_from(row.dimension)
+            .map_err(|_| StateError::InvalidInput("embedding dimension is invalid"))?,
+        content_hash: row.content_hash,
+        vector_backend_key: row.vector_backend_key,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
+}
+
+fn row_to_embedding_metadata(row: EmbeddingMetadataRow) -> Result<EmbeddingRecord, StateError> {
     Ok(EmbeddingRecord {
         id: EmbeddingId::parse(&row.id)?,
         vault_id: VaultId::parse(&row.vault_id)?,

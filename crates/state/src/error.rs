@@ -22,6 +22,9 @@ pub enum StateError {
     /// A caller supplied an invalid operational value.
     #[error("invalid state input: {0}")]
     InvalidInput(&'static str),
+    /// Compared operational input changed before a multi-step commit.
+    #[error("state changed during operation")]
+    Conflict,
     /// The connection URL or options could not be parsed.
     #[error("invalid state connection configuration: {0}")]
     Connection(String),

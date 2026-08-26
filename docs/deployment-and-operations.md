@@ -215,6 +215,135 @@ encrypted secrets/PATs exist is a hard startup failure and is never replaced.
 
 Provider health is not required for core readiness because providers are optional/degradable.
 
+Every Markdown note is available to lexical search and related-note recall
+after the ordinary index rebuild; this requires no LLM and no memory review.
+For semantic paraphrase matching, register an embedding-capable model and bind
+it to `embedding_note`. Binding, startup, and later note index rebuilds enqueue
+only missing/stale reference-only chunks. Until those jobs complete,
+`search_notes`/`recall` explicitly report semantic degradation and continue
+lexically.
+
+To enable AI memory extraction after first setup, use Admin in this order:
+
+1. choose `local_only` or `remote_allowed` data-send policy;
+2. create the Provider and discover its model list, or manually register the
+   exact provider model ID when discovery is absent/inaccurate;
+3. bind that model to `memory_extraction`;
+4. bind a suitable model to `memory_consolidation` (it may be the same
+   registered model, but remains a separate role binding);
+5. enable automatic memory; source admission is fixed to `automatic`;
+6. optionally request “处理新增或有变化的笔记” once, then rely on future
+   Markdown create/update/move/restore events.
+
+No note frontmatter, tag, folder, or path convention is required. Enabling the
+Vault-level feature allows eligible ordinary Markdown changes to reach the
+extraction model. Legacy `explicit_only` and `all_notes` settings deserialize
+as aliases for `automatic`; operators do not need to rewrite stored settings or
+edit notes during upgrade.
+
+Successful Phase 1 evaluation is persisted independently from whether raw
+memory was generated. Later automatic events and default manual runs compare
+the current file revision and effective extraction profile before sending
+content, so an unchanged current note costs no generation call. The one-time
+prerelease pipeline cutover removes all prior memory state and memory jobs;
+current notes are then evaluated from note one under the current Phase 1
+contract.
+
+Enable “包含已处理且未变化的笔记” only when intentionally forcing a complete
+re-evaluation despite unchanged recorded configuration, for example after an
+upstream model alias changes behavior without a local revision. It may produce
+a different semantic raw memory from the unchanged note and consume the same
+per-note model budget again. A failed forced evaluation leaves the note stale
+for the next default incremental run.
+
+Phase 1 returns a semantic `raw_memory`, a detailed source summary, and bounded
+line ranges selected from a server-numbered source view. MCP Vault validates
+the ranges, derives the exact excerpt hash from the current revision, and stages
+only source metadata; the Provider does not echo canonical evidence text and
+Phase 1 does not write final memory. A separate durable
+`memory.consolidate` job uses the `memory_consolidation` model to merge,
+deduplicate, supersede, archive, or discard staged inputs. Only a fully
+validated prepared proposal is materialized as canonical semantic memory.
+Neither phase asks the Provider for confidence/importance scores, and neither
+requires per-result human approval.
+
+Select the first-class AI service type whenever possible. The Admin form fills
+the current official global API root for DeepSeek, MiMo, Zhipu, Kimi, and
+Gemini; Qwen/DashScope uses the exact region/workspace URL copied from its
+console. A proxy/reseller domain keeps its custom URL but should select the
+matching compatibility preset during manual model registration. The generic
+type does not guess a vendor from model names such as `qwen3` because that name
+may refer to a local Ollama/vLLM deployment.
+
+The Base URL is an API root, not a full `chat/completions` URL. Paths already
+containing `/api/paas/v4/`, `/v1beta/openai/`, or `/compatible-mode/v1/` are
+preserved exactly; MCP Vault does not insert another `/v1`. Refer to
+`provider-compatibility.md` for the current endpoints and wire matrix.
+
+Reasoning-first presets default to a 32,768 generated-token bound per note.
+The model form can change it and, where the official model permits, override
+thinking. For a full-Vault backfill, multiply the per-note ceiling by the
+eligible-note count to understand the theoretical worst case before starting;
+actual usage is returned by the provider and is normally lower than the bound.
+
+This is not a periodic LLM sweep. Disabled extraction admits no new
+`memory.extract` event jobs, while the explicit backfill is a durable job that
+survives restart. The Memory page reports readiness blockers and recent
+extraction failures without exposing note bodies or provider responses.
+The Phase 1 policy returns either `no_output` or one bounded semantic raw input
+with up to the configured number of exact evidence anchors. Ordinary
+article/reference and technical content always remains in the note retrieval
+index even when Phase 1 returns `no_output`. On upgrade, migration 0011 deletes
+all prerelease memory rows and `memory.*` jobs. The automatically admitted
+`memory.reset_pipeline` job removes the old managed memory namespace through
+Vault Core and admits a brand-new current-generation full-Vault extraction with
+no inherited cursor. Vault source notes, revision history, existing backups,
+Provider settings, non-memory jobs, and audit history remain intact; old
+explicit memories are intentionally not converted. If Phase 1 is not
+configured, `regeneration_pending` remains visible and periodic reconciliation
+admits the fresh pass after configuration becomes ready.
+
+One structured memory-extraction call has a five-minute default response
+deadline, configurable per Vault from 30 through 1800 seconds; the provider's
+shorter default timeout continues to cover ordinary provider operations. The
+Jobs and Memory pages show the current note and refresh every five seconds
+while extraction is active. If a job reports `provider_response_timeout`,
+`provider_response_incomplete`, or `provider_response_read_failed`, MCP Vault
+had already received a successful HTTP status but could not finish reading the
+body. It deliberately stops rather than automatically issuing another possibly
+billable request. Check the provider/network path and then use the explicit
+Admin retry only when repeating that note is acceptable.
+
+If the job instead reports `provider_output_truncated`, the provider completed
+an HTTP response but stopped at its token limit; inspect the registered model's
+maximum-output limit before an explicit retry. `provider_final_content_missing`
+means the successful response contained no final assistant text, commonly due
+to a mismatched compatibility profile. `provider_structured_json_invalid`
+means final text existed but was not one complete JSON value. Non-JSON HTTP
+body errors usually indicate that the Base URL points to a web/proxy response
+rather than the compatible API. None of these diagnostics retain or display
+the provider response body.
+
+`provider_schema_invalid` is narrower than malformed JSON: the model returned
+one complete JSON value, but a required field, type, enum, array bound, or
+additional-property rule did not match. Current jobs show the redacted mismatch
+category and trusted schema path. Phase 1 requires exactly
+`source_summary`, nullable `source_slug`, `raw_memory`, and `evidence`; its
+zero-result form uses empty summary/raw strings, a null slug, and an empty
+evidence array. Phase 2 requires a summary, bounded memory actions, and one
+disposition for every dirty raw input. These are multi-field contracts, so the
+generic single-array-envelope repair does not apply; missing or renamed fields
+remain visible contract failures rather than being guessed locally.
+
+During a full-Vault run, one malformed generated output is recorded against
+that note and later notes continue. The final job can read “完成但有失败” while
+still reaching 100%. Three consecutive output-contract failures open a
+cost-safety circuit; after fixing the model compatibility setting, explicit
+retry resumes after the last checkpoint instead of resubmitting earlier paid
+notes. Configuration/authentication/endpoint failures and retryable transport
+outages remain job-level because continuing would only repeat a systemic
+problem.
+
 For a fresh installation, open the Admin listener and enter the desired Admin
 username and password. No secret generation, container command, or token copy
 step is required. Until that first account commits, any client admitted by the
@@ -300,6 +429,39 @@ result
 
 Respect redaction rules from `security.md`.
 
+Durable background jobs emit additional structured events under the
+`mcp_vault::jobs` target:
+
+```text
+job_started
+job_progress
+job_completed
+job_retry_scheduled
+job_failed
+job_cancelled
+job_progress_persist_failed
+memory_extract_source_ingestion_failed
+memory_extract_note_output_failed
+```
+
+For automatic memory, Phase 1 `job_progress` includes the current
+ordinal/total, model-evaluated notes, unchanged-note skips, raw inputs staged,
+`no_output` results, source-ingestion failures that prove no Provider call, and
+generated-output failures after a Provider call, plus elapsed milliseconds and
+a one-way hash of the current path. Phase 2 progress includes
+dirty raw inputs plus created, updated, retired, discarded, generation, and
+prepared-proposal reuse counts. Error events include only stable redacted error
+codes. The events never include job payloads, note bodies, raw/generated memory,
+prompts, provider responses, API keys, or raw upstream error text. With the
+default JSON logging configuration, follow them with:
+
+```bash
+docker compose logs -f mcp-vault
+```
+
+The Admin Jobs/Memory pages remain the authoritative current-state view;
+container logs provide the live execution timeline and post-restart diagnosis.
+
 ### Metrics
 
 Recommended metrics:
@@ -362,7 +524,11 @@ The scanner skips `_mcp-vault`, symlinks, special files, invalid names, and
 unsafe entries without following them. If scan evidence is incomplete, Core
 does not infer missing-file deletes. Direct creates/edits/deletes that are
 safe to prove are imported as `external_change` revisions through Vault Core,
-with history, audit, and outbox rows committed together.
+with history, audit, and outbox rows committed together. The revision keeps the
+`external_change` operation for provenance, while the outbox row reports the
+semantic lifecycle event (`FileCreated`, `FileUpdated`, `FileDeleted`, or
+`FileRestored`). Workers also accept the former `external_change` event label
+so already-persisted rows remain drainable after an upgrade.
 
 ## 11. Backup
 

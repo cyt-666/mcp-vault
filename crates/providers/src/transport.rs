@@ -30,6 +30,31 @@ pub enum AuthStyle {
     None,
 }
 
+/// Per-request authentication and deadline overrides.
+#[derive(Clone, Copy)]
+pub struct RequestOptions<'a> {
+    secret: Option<&'a SecretString>,
+    auth_style: AuthStyle,
+    timeout: Option<Duration>,
+}
+
+impl<'a> RequestOptions<'a> {
+    /// Construct options using the Provider's configured total timeout.
+    pub const fn new(auth_style: AuthStyle, secret: Option<&'a SecretString>) -> Self {
+        Self {
+            secret,
+            auth_style,
+            timeout: None,
+        }
+    }
+
+    /// Override the Provider's configured total timeout for this operation.
+    pub const fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
+        self
+    }
+}
+
 /// One validated JSON response.
 #[derive(Clone, Debug)]
 pub struct JsonResponse {
@@ -66,9 +91,8 @@ impl ProviderTransport {
         method: Method,
         endpoint: &Url,
         mode: ProviderMode,
-        secret: Option<&SecretString>,
-        auth_style: AuthStyle,
         body: &Value,
+        options: RequestOptions<'_>,
     ) -> Result<JsonResponse, ProviderError> {
         let serialized = serde_json::to_vec(body)
             .map_err(|_| ProviderError::InvalidConfiguration("request JSON is invalid"))?;
@@ -80,14 +104,7 @@ impl ProviderTransport {
         let mut attempt = 0_u32;
         loop {
             match self
-                .request_once(
-                    method.clone(),
-                    endpoint,
-                    mode,
-                    secret,
-                    auth_style,
-                    &serialized,
-                )
+                .request_once(method.clone(), endpoint, mode, &serialized, options)
                 .await
             {
                 Ok(response) => return Ok(response),
@@ -106,9 +123,8 @@ impl ProviderTransport {
         method: Method,
         endpoint: &Url,
         mode: ProviderMode,
-        secret: Option<&SecretString>,
-        auth_style: AuthStyle,
         body: &[u8],
+        options: RequestOptions<'_>,
     ) -> Result<JsonResponse, ProviderError> {
         if mode == ProviderMode::Disabled {
             return Err(ProviderError::PrivacyDenied);
@@ -136,6 +152,9 @@ impl ProviderTransport {
             .request(method, endpoint.clone())
             .header(CONTENT_TYPE, "application/json")
             .body(body.to_owned());
+        if let Some(timeout) = options.timeout {
+            request = request.timeout(timeout);
+        }
         for (name, value) in &self.settings.headers {
             if name.eq_ignore_ascii_case("authorization")
                 || name.eq_ignore_ascii_case("x-api-key")
@@ -154,11 +173,11 @@ impl ProviderTransport {
             })?;
             request = request.header(name, value);
         }
-        if auth_style == AuthStyle::Anthropic {
+        if options.auth_style == AuthStyle::Anthropic {
             request = request.header("anthropic-version", "2023-06-01");
         }
-        if let Some(secret) = secret {
-            match auth_style {
+        if let Some(secret) = options.secret {
+            match options.auth_style {
                 AuthStyle::Bearer => {
                     let value = format!("Bearer {}", secret.expose_secret());
                     request = request.header(AUTHORIZATION, value);
@@ -209,10 +228,7 @@ impl ProviderTransport {
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| ProviderError::Transport {
-                code: "provider_response_read_failed",
-                retryable: true,
-            })?;
+            let chunk = chunk.map_err(response_read_error)?;
             if bytes.len().saturating_add(chunk.len()) > self.settings.max_response_bytes {
                 return Err(ProviderError::ResponseTooLarge);
             }
@@ -221,6 +237,25 @@ impl ProviderTransport {
         let body = serde_json::from_slice(&bytes)
             .map_err(|_| ProviderError::InvalidResponse("response is not JSON"))?;
         Ok(JsonResponse { status, body })
+    }
+}
+
+fn response_read_error(error: reqwest::Error) -> ProviderError {
+    let code = if error.is_timeout() {
+        "provider_response_timeout"
+    } else {
+        // This mapper is called only after an HTTP success while consuming
+        // the response byte stream. Reqwest does not consistently expose
+        // nested Hyper/body source errors through `is_body()`, so every
+        // non-timeout stream error is an interrupted/incomplete response.
+        "provider_response_incomplete"
+    };
+    // A successful status was already received. The remote model may have
+    // completed billable work, so automatically replaying the request is not
+    // safe even when the body failure itself looks transient.
+    ProviderError::Transport {
+        code,
+        retryable: false,
     }
 }
 
@@ -238,12 +273,10 @@ pub fn endpoint_url(base: &Url, suffix: &str) -> Result<Url, ProviderError> {
     }
     let mut url = base.clone();
     let path = base.path().trim_end_matches('/');
-    let path = if path.ends_with("/v1") || path == "v1" {
-        format!("{path}/{suffix}")
-    } else if path.is_empty() {
+    let path = if path.is_empty() {
         format!("/v1/{suffix}")
     } else {
-        format!("{path}/v1/{suffix}")
+        format!("{path}/{suffix}")
     };
     url.set_path(&path);
     url.set_query(None);

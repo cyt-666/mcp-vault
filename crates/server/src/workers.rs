@@ -11,26 +11,35 @@ use std::{
         Arc, RwLock,
         atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use mcp_vault_backup::{BackupError, BackupService};
 use mcp_vault_domain::{
-    BackupId, EventId, FileId, MaintenanceGate, ModelId, VaultPath, VaultPathPolicy,
+    BackupId, EventId, FileId, JobId, MaintenanceGate, MaintenanceOperationGuard, ModelId,
+    VaultContext, VaultPath, VaultPathPolicy,
 };
-use mcp_vault_memory::{MemoryError, MemoryService};
+use mcp_vault_memory::{
+    MEMORY_PIPELINE_GENERATION, MemoryError, MemoryService, NoteExtractionOptions,
+    PipelineRegenerationAdmission,
+};
 use mcp_vault_providers::EmbeddingSourceRef;
 use mcp_vault_state::{JobRecord, JobRepository, OutboxEventRecord, OutboxRepository, StateStore};
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::{
     sync::{Notify, Semaphore},
-    task::JoinSet,
+    task::{JoinError, JoinSet},
     time::sleep,
 };
+use tracing::{error, info, warn};
 
 use crate::metrics::Metrics;
 
 type BoxWorkerFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+type JobTaskResult = (JobId, Option<JobOutcome>, Option<MaintenanceOperationGuard>);
+
+const MAX_RECORDED_MEMORY_NOTE_FAILURES: usize = 20;
+const MAX_CONSECUTIVE_MEMORY_OUTPUT_FAILURES: u32 = 3;
 
 /// A static, redaction-safe handler failure code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,6 +206,12 @@ impl WorkerHealth {
         if let Ok(mut last_error) = self.last_error.write() {
             *last_error = Some(code);
         }
+        warn!(
+            target: "mcp_vault::workers",
+            event = "worker_health_error",
+            error_code = code,
+            "background worker health error"
+        );
     }
 
     fn snapshot(&self) -> WorkerHealthSnapshot {
@@ -410,68 +425,134 @@ impl WorkerSupervisor {
     async fn run_job_loop(&self, shutdown: Cancellation) {
         let repository = self.state.jobs();
         let worker_id = format!("job-{}", EventId::new());
+        let mut tasks = JoinSet::<JobTaskResult>::new();
         while !shutdown.is_cancelled() {
-            let Some(claim_operation) = self.maintenance.try_start_write() else {
-                wait_poll(&shutdown, self.config.poll_interval).await;
-                continue;
-            };
             let has_handlers = self
                 .job_handlers
                 .read()
                 .map(|handlers| !handlers.is_empty())
                 .unwrap_or(false);
             if !has_handlers {
-                drop(claim_operation);
-                wait_poll(&shutdown, self.config.poll_interval).await;
+                self.wait_for_job_capacity(&mut tasks, &repository, &worker_id, &shutdown)
+                    .await;
                 continue;
             }
-            let now = now_millis();
-            self.refresh_counts().await;
-            let lease_until = now.saturating_add(duration_millis(self.config.lease_duration));
-            match repository
-                .claim_batch(&worker_id, now, lease_until, self.config.batch_size)
-                .await
-            {
-                Ok(jobs) if jobs.is_empty() => {
-                    drop(claim_operation);
-                    wait_poll(&shutdown, self.config.poll_interval).await
+
+            let free_capacity = self.config.concurrency.saturating_sub(tasks.len());
+            if free_capacity > 0 {
+                let Some(claim_operation) = self.maintenance.try_start_write() else {
+                    self.wait_for_job_capacity(&mut tasks, &repository, &worker_id, &shutdown)
+                        .await;
+                    continue;
+                };
+                let now = now_millis();
+                self.refresh_counts().await;
+                let lease_until = now.saturating_add(duration_millis(self.config.lease_duration));
+                let claim_limit = u32::try_from(free_capacity)
+                    .unwrap_or(u32::MAX)
+                    .min(self.config.batch_size);
+                match repository
+                    .claim_batch(&worker_id, now, lease_until, claim_limit)
+                    .await
+                {
+                    Ok(jobs) if jobs.is_empty() => {}
+                    Ok(jobs) => {
+                        drop(claim_operation);
+                        self.spawn_claimed_jobs(
+                            &repository,
+                            &worker_id,
+                            jobs,
+                            &shutdown,
+                            &mut tasks,
+                        )
+                        .await;
+                        continue;
+                    }
+                    Err(_) => {
+                        self.health.error("job_claim_failed");
+                    }
                 }
-                Ok(jobs) => {
-                    drop(claim_operation);
-                    self.dispatch_job_batch(&repository, &worker_id, jobs, &shutdown)
-                        .await
-                }
-                Err(_) => {
-                    drop(claim_operation);
-                    self.health.error("job_claim_failed");
-                    wait_poll(&shutdown, self.config.poll_interval).await;
-                }
+                drop(claim_operation);
             }
+
+            self.wait_for_job_capacity(&mut tasks, &repository, &worker_id, &shutdown)
+                .await;
+        }
+        while let Some(result) = tasks.join_next().await {
+            self.persist_job_task_result(&repository, &worker_id, result)
+                .await;
         }
         let _ = repository.release_worker_leases(&worker_id).await;
     }
 
-    async fn dispatch_job_batch(
+    async fn wait_for_job_capacity(
+        &self,
+        tasks: &mut JoinSet<JobTaskResult>,
+        repository: &JobRepository,
+        worker_id: &str,
+        shutdown: &Cancellation,
+    ) {
+        if tasks.is_empty() {
+            wait_poll(shutdown, self.config.poll_interval).await;
+            return;
+        }
+        tokio::select! {
+            _ = shutdown.cancelled() => {}
+            _ = sleep(self.config.poll_interval) => {}
+            result = tasks.join_next() => {
+                if let Some(result) = result {
+                    self.persist_job_task_result(repository, worker_id, result).await;
+                }
+            }
+        }
+    }
+
+    async fn spawn_claimed_jobs(
         &self,
         repository: &JobRepository,
         worker_id: &str,
         jobs: Vec<JobRecord>,
         shutdown: &Cancellation,
+        tasks: &mut JoinSet<JobTaskResult>,
     ) {
-        let semaphore = Arc::new(Semaphore::new(self.config.concurrency));
         let monitor_interval = self
             .config
             .poll_interval
             .min(self.config.lease_duration / 3);
         let lease_duration = self.config.lease_duration;
-        let mut tasks = JoinSet::new();
         for job in jobs {
+            if job.job_type.starts_with("memory.")
+                && job
+                    .payload
+                    .get("pipeline_generation")
+                    .and_then(Value::as_u64)
+                    != Some(u64::from(MEMORY_PIPELINE_GENERATION))
+            {
+                info!(
+                    target: "mcp_vault::jobs",
+                    event = "obsolete_memory_job_discarded",
+                    job_id = %job.id,
+                    job_type = %job.job_type,
+                    vault_id = ?job.vault_id,
+                    "obsolete prerelease memory job was discarded before handler execution"
+                );
+                let _ = repository.cancel_claimed(job.id, worker_id).await;
+                continue;
+            }
             let handler = self
                 .job_handlers
                 .read()
                 .ok()
                 .and_then(|handlers| handlers.get(&job.job_type).cloned());
             let Some(handler) = handler else {
+                warn!(
+                    target: "mcp_vault::jobs",
+                    event = "job_handler_missing",
+                    job_id = %job.id,
+                    job_type = %job.job_type,
+                    vault_id = ?job.vault_id,
+                    "durable job has no registered handler"
+                );
                 let _ = repository
                     .release_claimed(
                         job.id,
@@ -482,13 +563,17 @@ impl WorkerSupervisor {
                 continue;
             };
             if job.cancel_requested {
+                info!(
+                    target: "mcp_vault::jobs",
+                    event = "job_cancelled_before_start",
+                    job_id = %job.id,
+                    job_type = %job.job_type,
+                    vault_id = ?job.vault_id,
+                    "durable job was cancelled before execution"
+                );
                 let _ = repository.cancel_claimed(job.id, worker_id).await;
                 continue;
             }
-            let permit = match semaphore.clone().acquire_owned().await {
-                Ok(permit) => permit,
-                Err(_) => return,
-            };
             let shutdown = shutdown.clone();
             let maintenance = self.maintenance.clone();
             let repository_for_task = repository.clone();
@@ -504,12 +589,21 @@ impl WorkerSupervisor {
                             break Some(operation);
                         }
                         if shutdown.is_cancelled() {
-                            drop(permit);
+                            warn!(
+                                target: "mcp_vault::jobs",
+                                event = "job_wait_interrupted",
+                                job_id = %job.id,
+                                job_type = %job.job_type,
+                                vault_id = ?job.vault_id,
+                                "durable job wait interrupted by shutdown"
+                            );
                             return (job.id, None, None);
                         }
                         wait_poll(&shutdown, Duration::from_millis(25)).await;
                     }
                 };
+                let started_at = Instant::now();
+                log_job_started(&job);
                 let cancellation = Cancellation::default();
                 let monitor = {
                     let repository = repository_for_task.clone();
@@ -558,61 +652,109 @@ impl WorkerSupervisor {
                     outcome = JobOutcome::Cancelled;
                 }
                 if shutdown.is_cancelled() {
-                    drop(permit);
+                    warn!(
+                        target: "mcp_vault::jobs",
+                        event = "job_interrupted_by_shutdown",
+                        job_id = %job.id,
+                        job_type = %job.job_type,
+                        vault_id = ?job.vault_id,
+                        "durable job result was not persisted because shutdown started"
+                    );
                     return (job.id, None, maintenance_operation);
                 }
-                drop(permit);
+                log_job_outcome(&job, outcome, started_at.elapsed());
                 (job.id, Some(outcome), maintenance_operation)
             });
         }
-        while let Some(result) = tasks.join_next().await {
-            self.health.in_flight.fetch_sub(1, Ordering::AcqRel);
-            let (job_id, outcome, _maintenance_operation) = match result {
-                Ok(value) => value,
-                Err(_) => {
-                    self.health.error("job_handler_panicked");
-                    continue;
+    }
+
+    async fn persist_job_task_result(
+        &self,
+        repository: &JobRepository,
+        worker_id: &str,
+        result: Result<JobTaskResult, JoinError>,
+    ) {
+        self.health.in_flight.fetch_sub(1, Ordering::AcqRel);
+        let (job_id, outcome, _maintenance_operation) = match result {
+            Ok(value) => value,
+            Err(_) => {
+                self.health.error("job_handler_panicked");
+                error!(
+                    target: "mcp_vault::jobs",
+                    event = "job_handler_panicked",
+                    "durable job handler panicked"
+                );
+                return;
+            }
+        };
+        let Some(outcome) = outcome else {
+            // Maintenance may remain offline after a failed restore. Leave
+            // the durable lease to expire instead of mutating state while
+            // the process is offline.
+            return;
+        };
+        match outcome {
+            JobOutcome::Complete => {
+                if repository.complete(job_id, worker_id).await.is_err() {
+                    self.health.error("job_complete_failed");
+                    error!(
+                        target: "mcp_vault::jobs",
+                        event = "job_state_transition_failed",
+                        job_id = %job_id,
+                        transition = "completed",
+                        "failed to persist completed job state"
+                    );
                 }
-            };
-            let Some(outcome) = outcome else {
-                // Maintenance may remain offline after a failed restore. Leave
-                // the durable lease to expire instead of mutating state while
-                // the process is offline.
-                continue;
-            };
-            match outcome {
-                JobOutcome::Complete => {
-                    if repository.complete(job_id, worker_id).await.is_err() {
-                        self.health.error("job_complete_failed");
-                    }
+            }
+            JobOutcome::Retry { delay, code } => {
+                if repository
+                    .retry_or_fail(
+                        job_id,
+                        worker_id,
+                        now_millis().saturating_add(duration_millis(delay)),
+                        code,
+                    )
+                    .await
+                    .is_err()
+                {
+                    self.health.error("job_retry_failed");
+                    error!(
+                        target: "mcp_vault::jobs",
+                        event = "job_state_transition_failed",
+                        job_id = %job_id,
+                        transition = "retry",
+                        error_code = code,
+                        "failed to persist retry job state"
+                    );
                 }
-                JobOutcome::Retry { delay, code } => {
-                    if repository
-                        .retry_or_fail(
-                            job_id,
-                            worker_id,
-                            now_millis().saturating_add(duration_millis(delay)),
-                            code,
-                        )
-                        .await
-                        .is_err()
-                    {
-                        self.health.error("job_retry_failed");
-                    }
+            }
+            JobOutcome::Failed { code } => {
+                if repository
+                    .fail_permanently(job_id, worker_id, code)
+                    .await
+                    .is_err()
+                {
+                    self.health.error("job_fail_failed");
+                    error!(
+                        target: "mcp_vault::jobs",
+                        event = "job_state_transition_failed",
+                        job_id = %job_id,
+                        transition = "failed",
+                        error_code = code,
+                        "failed to persist failed job state"
+                    );
                 }
-                JobOutcome::Failed { code } => {
-                    if repository
-                        .fail_permanently(job_id, worker_id, code)
-                        .await
-                        .is_err()
-                    {
-                        self.health.error("job_fail_failed");
-                    }
-                }
-                JobOutcome::Cancelled => {
-                    if repository.cancel_claimed(job_id, worker_id).await.is_err() {
-                        self.health.error("job_cancel_failed");
-                    }
+            }
+            JobOutcome::Cancelled => {
+                if repository.cancel_claimed(job_id, worker_id).await.is_err() {
+                    self.health.error("job_cancel_failed");
+                    error!(
+                        target: "mcp_vault::jobs",
+                        event = "job_state_transition_failed",
+                        job_id = %job_id,
+                        transition = "cancelled",
+                        "failed to persist cancelled job state"
+                    );
                 }
             }
         }
@@ -628,12 +770,189 @@ impl WorkerSupervisor {
     }
 }
 
+fn log_job_started(job: &JobRecord) {
+    info!(
+        target: "mcp_vault::jobs",
+        event = "job_started",
+        job_id = %job.id,
+        job_type = %job.job_type,
+        vault_id = ?job.vault_id,
+        attempt = job.attempts,
+        "durable job started"
+    );
+}
+
+fn log_job_outcome(job: &JobRecord, outcome: JobOutcome, elapsed: Duration) {
+    let elapsed_ms = elapsed_millis(elapsed);
+    match outcome {
+        JobOutcome::Complete => info!(
+            target: "mcp_vault::jobs",
+            event = "job_completed",
+            job_id = %job.id,
+            job_type = %job.job_type,
+            vault_id = ?job.vault_id,
+            elapsed_ms,
+            "durable job completed"
+        ),
+        JobOutcome::Retry { delay, code } => warn!(
+            target: "mcp_vault::jobs",
+            event = "job_retry_scheduled",
+            job_id = %job.id,
+            job_type = %job.job_type,
+            vault_id = ?job.vault_id,
+            elapsed_ms,
+            retry_delay_ms = duration_millis(delay),
+            error_code = code,
+            "durable job will retry"
+        ),
+        JobOutcome::Failed { code } => error!(
+            target: "mcp_vault::jobs",
+            event = "job_failed",
+            job_id = %job.id,
+            job_type = %job.job_type,
+            vault_id = ?job.vault_id,
+            elapsed_ms,
+            error_code = code,
+            "durable job failed"
+        ),
+        JobOutcome::Cancelled => warn!(
+            target: "mcp_vault::jobs",
+            event = "job_cancelled",
+            job_id = %job.id,
+            job_type = %job.job_type,
+            vault_id = ?job.vault_id,
+            elapsed_ms,
+            "durable job cancelled"
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_job_progress(
+    job: &JobRecord,
+    phase: &str,
+    completed: u64,
+    total: u64,
+    current_index: Option<u64>,
+    current_path: Option<&VaultPath>,
+    raw_memories_staged: u64,
+    phase1_no_output: u64,
+    source_ingestion_failures: u64,
+    generated_output_failures: u64,
+    notes_evaluated: u64,
+    source_policy_skipped: u64,
+    already_evaluated_skipped: u64,
+    elapsed_ms: Option<i64>,
+    error_code: Option<&str>,
+) {
+    let current_path_hash = current_path.map(redacted_path_hash);
+    info!(
+        target: "mcp_vault::jobs",
+        event = "job_progress",
+        job_id = %job.id,
+        job_type = %job.job_type,
+        vault_id = ?job.vault_id,
+        phase,
+        completed,
+        total,
+        current_index = ?current_index,
+        raw_memories_staged,
+        phase1_no_output,
+        source_ingestion_failures,
+        generated_output_failures,
+        notes_evaluated,
+        source_policy_skipped,
+        already_evaluated_skipped,
+        elapsed_ms = ?elapsed_ms,
+        current_path_hash = ?current_path_hash,
+        error_code = ?error_code,
+        "durable job progress"
+    );
+}
+
+fn log_memory_note_source_failure(
+    job: &JobRecord,
+    current_index: u64,
+    total: u64,
+    path: &VaultPath,
+    elapsed_ms: i64,
+    error_code: &'static str,
+) {
+    warn!(
+        target: "mcp_vault::jobs",
+        event = "memory_extract_source_ingestion_failed",
+        job_id = %job.id,
+        job_type = %job.job_type,
+        vault_id = ?job.vault_id,
+        current_index,
+        total,
+        elapsed_ms,
+        current_path_hash = redacted_path_hash(path),
+        error_code,
+        provider_called = false,
+        "memory extraction skipped one unreadable source and will continue"
+    );
+}
+
+fn log_job_progress_persist_failed(job: &JobRecord, phase: &str, error_code: &str) {
+    warn!(
+        target: "mcp_vault::jobs",
+        event = "job_progress_persist_failed",
+        job_id = %job.id,
+        job_type = %job.job_type,
+        vault_id = ?job.vault_id,
+        phase,
+        error_code,
+        "durable job progress could not be persisted"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_memory_note_output_failure(
+    job: &JobRecord,
+    current_index: u64,
+    total: u64,
+    path: &VaultPath,
+    elapsed_ms: i64,
+    error_code: &'static str,
+    schema_diagnostic: Option<(&'static str, &str)>,
+    consecutive_failures: u32,
+) {
+    let current_path_hash = redacted_path_hash(path);
+    let (schema_issue, schema_path) = schema_diagnostic.unzip();
+    warn!(
+        target: "mcp_vault::jobs",
+        event = "memory_extract_note_output_failed",
+        job_id = %job.id,
+        job_type = %job.job_type,
+        vault_id = ?job.vault_id,
+        current_index,
+        total,
+        elapsed_ms,
+        current_path_hash,
+        error_code,
+        schema_issue = ?schema_issue,
+        schema_path = ?schema_path,
+        consecutive_failures,
+        "memory extraction skipped one generated output and will continue when safe"
+    );
+}
+
+fn elapsed_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn redacted_path_hash(path: &VaultPath) -> String {
+    mcp_vault_indexer::content_hash(path.as_str())
+}
+
 /// Convert one transactional outbox event into a durable derived-work job.
 /// File events also enqueue a Vault-scoped rebuild job. The ordinary outbox
 /// event remains durable for later consumers and audit/reconciliation.
-pub fn outbox_to_job_handler(state: StateStore) -> OutboxHandler {
+pub fn outbox_to_job_handler(state: StateStore, memory: MemoryService) -> OutboxHandler {
     Arc::new(move |event| {
         let state = state.clone();
+        let memory = memory.clone();
         Box::pin(async move {
             let event_id = event.id.to_string();
             let is_file_event = event.aggregate_type == "file";
@@ -644,6 +963,14 @@ pub fn outbox_to_job_handler(state: StateStore) -> OutboxHandler {
                 "aggregate_id": event.aggregate_id,
                 "payload": event.payload,
             });
+            let mut memory_payload = payload.clone();
+            memory_payload
+                .as_object_mut()
+                .expect("job payload is an object")
+                .insert(
+                    "pipeline_generation".to_owned(),
+                    json!(MEMORY_PIPELINE_GENERATION),
+                );
             let result = if let Some(vault_id) = event.vault_id {
                 let vault = state
                     .vaults()
@@ -654,13 +981,22 @@ pub fn outbox_to_job_handler(state: StateStore) -> OutboxHandler {
                 let context = vault
                     .context()
                     .map_err(|_| WorkerFailure::permanent("outbox_vault_context_invalid"))?;
+                let memory_pipeline_ready = state
+                    .memory()
+                    .get_consolidation_state(&context)
+                    .await
+                    .map_err(|_| WorkerFailure::retryable("memory_pipeline_state_unavailable"))?
+                    .is_some_and(|pipeline| {
+                        pipeline.pipeline_generation >= MEMORY_PIPELINE_GENERATION
+                            && !pipeline.regeneration_pending
+                    });
                 let reserved_path = event
                     .payload
                     .get("path")
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|path| path_in_reserved_namespace(&vault.reserved_root, path));
-                let is_memory_extract_event = is_file_event
-                    && matches!(event.event_type.as_str(), "FileCreated" | "FileUpdated")
+                let is_memory_extract_candidate = is_file_event
+                    && is_memory_extract_event_type(&event.event_type)
                     && event
                         .payload
                         .get("path")
@@ -668,14 +1004,30 @@ pub fn outbox_to_job_handler(state: StateStore) -> OutboxHandler {
                         .is_some_and(|path| {
                             path.to_ascii_lowercase().ends_with(".md") && !reserved_path
                         });
+                let is_memory_extract_event =
+                    if memory_pipeline_ready && is_memory_extract_candidate {
+                        match memory.extraction_policy(&context).await {
+                            Ok(policy) => policy.policy.enabled,
+                            Err(error) if error.retryable() => {
+                                return Err(WorkerFailure::retryable(
+                                    "memory_extraction_policy_unavailable",
+                                ));
+                            }
+                            // Preserve indexing/outbox delivery and admit a visible
+                            // terminal extraction job instead of poisoning an
+                            // otherwise valid file event with optional AI config.
+                            Err(_) => true,
+                        }
+                    } else {
+                        false
+                    };
                 let is_memory_revalidate_event = is_file_event
-                    && matches!(event.event_type.as_str(), "FileDeleted" | "FileUpdated")
+                    && memory_pipeline_ready
+                    && is_memory_revalidate_event_type(&event.event_type)
                     && !reserved_path;
                 let is_memory_projection_event = is_file_event
-                    && matches!(
-                        event.event_type.as_str(),
-                        "FileCreated" | "FileUpdated" | "FileDeleted"
-                    )
+                    && memory_pipeline_ready
+                    && is_memory_projection_event_type(&event.event_type)
                     && reserved_path;
                 if event.aggregate_type == "file" {
                     state
@@ -698,7 +1050,7 @@ pub fn outbox_to_job_handler(state: StateStore) -> OutboxHandler {
                                 &context,
                                 "memory.extract",
                                 &format!("vault:{vault_id}:memory-extract:{event_id}"),
-                                &payload,
+                                &memory_payload,
                                 0,
                                 10,
                                 now_millis(),
@@ -715,7 +1067,7 @@ pub fn outbox_to_job_handler(state: StateStore) -> OutboxHandler {
                                 &context,
                                 "memory.revalidate",
                                 &format!("vault:{vault_id}:memory-revalidate:{event_id}"),
-                                &payload,
+                                &memory_payload,
                                 0,
                                 10,
                                 now_millis(),
@@ -732,7 +1084,7 @@ pub fn outbox_to_job_handler(state: StateStore) -> OutboxHandler {
                                 &context,
                                 "memory.rebuild",
                                 &format!("vault:{vault_id}:memory-rebuild:{event_id}"),
-                                &payload,
+                                &memory_payload,
                                 0,
                                 10,
                                 now_millis(),
@@ -773,6 +1125,32 @@ pub fn outbox_to_job_handler(state: StateStore) -> OutboxHandler {
             result.map_err(|_| WorkerFailure::retryable("outbox_job_admission_failed"))
         })
     })
+}
+
+fn is_memory_extract_event_type(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "FileCreated" | "FileUpdated" | "FileRestored" | "FileMoved" | "external_change"
+    )
+}
+
+fn is_memory_revalidate_event_type(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "FileDeleted" | "FileUpdated" | "FileRestored" | "FileMoved" | "external_change"
+    )
+}
+
+fn is_memory_projection_event_type(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "FileCreated"
+            | "FileUpdated"
+            | "FileDeleted"
+            | "FileRestored"
+            | "FileMoved"
+            | "external_change"
+    )
 }
 
 /// Handle one durable backup creation job.
@@ -896,11 +1274,13 @@ pub fn index_rebuild_job_handler(
     state: StateStore,
     history_root: std::path::PathBuf,
     core_runtime: mcp_vault_core::VaultCoreRuntime,
+    index: mcp_vault_indexer::IndexService,
 ) -> JobHandler {
     Arc::new(move |job, shutdown| {
         let state = state.clone();
         let history_root = history_root.clone();
         let core_runtime = core_runtime.clone();
+        let index = index.clone();
         Box::pin(async move {
             if shutdown.is_cancelled() {
                 return JobOutcome::Cancelled;
@@ -961,13 +1341,33 @@ pub fn index_rebuild_job_handler(
                     };
                 }
             };
-            let index = mcp_vault_indexer::IndexService::new(state);
             let result = tokio::select! {
                 _ = shutdown.cancelled() => return JobOutcome::Cancelled,
                 result = index.rebuild_vault(&core, &context) => result,
             };
             match result {
-                Ok(_) => JobOutcome::Complete,
+                Ok(_) => {
+                    match index.schedule_note_embeddings(&context).await {
+                        Ok(report) => info!(
+                            target: "mcp_vault::workers",
+                            event = "note_embeddings_scheduled",
+                            vault_id = %context.id(),
+                            source_chunks = report.source_chunks,
+                            queued_chunks = report.queued_chunks,
+                            pruned_vectors = report.pruned_vectors,
+                            jobs = report.jobs,
+                            "note embedding projection scheduling completed"
+                        ),
+                        Err(_) => warn!(
+                            target: "mcp_vault::workers",
+                            event = "note_embedding_schedule_failed",
+                            vault_id = %context.id(),
+                            error_code = "note_embedding_schedule_failed",
+                            "optional note embedding scheduling failed"
+                        ),
+                    }
+                    JobOutcome::Complete
+                }
                 Err(mcp_vault_indexer::IndexError::InvalidInput(_))
                 | Err(mcp_vault_indexer::IndexError::TooLarge)
                 | Err(mcp_vault_indexer::IndexError::Yaml) => JobOutcome::Failed {
@@ -1079,17 +1479,37 @@ pub fn memory_extract_job_handler(
                     };
                 }
             };
-            let path = job
-                .payload
-                .get("payload")
-                .and_then(|value| value.get("path"))
+            if job
+                .progress
+                .as_ref()
+                .and_then(|progress| progress.get("phase"))
                 .and_then(serde_json::Value::as_str)
-                .and_then(|value| VaultPath::parse(value).ok());
-            let Some(path) = path else {
-                return JobOutcome::Failed {
-                    code: "memory_extract_path_invalid",
-                };
+                .is_some_and(|phase| matches!(phase, "completed" | "completed_with_errors"))
+            {
+                // The handler may have checkpointed all provider work before
+                // the final job transition failed. Complete the reclaimed job
+                // without submitting the same paid work again.
+                return JobOutcome::Complete;
+            }
+            let policy = match memory.extraction_policy(&context).await {
+                Ok(policy) => policy.policy,
+                Err(error) if error.retryable() => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(10),
+                        code: "memory_extraction_policy_unavailable",
+                    };
+                }
+                Err(_) => {
+                    return JobOutcome::Failed {
+                        code: "memory_extraction_policy_invalid",
+                    };
+                }
             };
+            if !policy.enabled {
+                return JobOutcome::Failed {
+                    code: "memory_extraction_disabled",
+                };
+            }
             let core = match super::core_for_vault(&state, &history_root, &vault, &core_runtime) {
                 Ok(core) => core,
                 Err(_) => {
@@ -1099,32 +1519,931 @@ pub fn memory_extract_job_handler(
                     };
                 }
             };
-            let result = tokio::select! {
-                _ = shutdown.cancelled() => return JobOutcome::Cancelled,
-                result = memory.extract_note(&context, &core, &path) => result,
-            };
-            match result {
-                Ok(_) => JobOutcome::Complete,
-                Err(MemoryError::NotFound) => JobOutcome::Complete,
-                Err(error) if error.retryable() => JobOutcome::Retry {
-                    delay: Duration::from_secs(10),
-                    code: "memory_extract_retryable",
-                },
-                Err(MemoryError::InvalidInput(_)) | Err(MemoryError::Markdown) => {
-                    JobOutcome::Failed {
-                        code: "memory_extract_input_invalid",
+            if job.payload.get("scope").and_then(serde_json::Value::as_str) == Some("all") {
+                let entries = match state.files().list_active_entries(&context).await {
+                    Ok(entries) => entries,
+                    Err(_) => {
+                        return JobOutcome::Retry {
+                            delay: Duration::from_secs(10),
+                            code: "memory_extract_source_list_failed",
+                        };
+                    }
+                };
+                let entries = entries
+                    .into_iter()
+                    .filter(|entry| {
+                        entry.entry_type.as_str() == "file"
+                            && entry.path.as_str().to_ascii_lowercase().ends_with(".md")
+                            && !core.is_managed_path(&entry.path)
+                    })
+                    .collect::<Vec<_>>();
+                let Some(worker_id) = job.lease_owner.as_deref() else {
+                    return JobOutcome::Failed {
+                        code: "memory_extract_lease_missing",
+                    };
+                };
+                let total = entries.len();
+                let include_evaluated = job
+                    .payload
+                    .get("include_evaluated")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let previous_progress = job.progress.as_ref();
+                let last_completed_path = previous_progress
+                    .and_then(|progress| progress.get("last_completed_path"))
+                    .and_then(serde_json::Value::as_str);
+                let resume_index = last_completed_path.map_or(0, |last_path| {
+                    entries.partition_point(|entry| entry.path.as_str() <= last_path)
+                });
+                let mut raw_memories_staged = previous_progress
+                    .and_then(|progress| progress.get("raw_memories_staged"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let mut phase1_no_output = previous_progress
+                    .and_then(|progress| progress.get("phase1_no_output"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let mut source_ingestion_failures = previous_progress
+                    .and_then(|progress| progress.get("source_ingestion_failures"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let mut source_ingestion_failure_notes = previous_progress
+                    .and_then(|progress| progress.get("source_ingestion_failure_notes"))
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut notes_evaluated = previous_progress
+                    .and_then(|progress| progress.get("notes_evaluated"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let mut source_policy_skipped = previous_progress
+                    .and_then(|progress| progress.get("source_policy_skipped"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let mut already_evaluated_skipped = previous_progress
+                    .and_then(|progress| progress.get("already_evaluated_skipped"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let mut generated_output_failures = previous_progress
+                    .and_then(|progress| progress.get("generated_output_failures"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let mut generated_output_failure_notes = previous_progress
+                    .and_then(|progress| progress.get("generated_output_failure_notes"))
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if source_ingestion_failure_notes.len() > MAX_RECORDED_MEMORY_NOTE_FAILURES {
+                    source_ingestion_failure_notes = source_ingestion_failure_notes.split_off(
+                        source_ingestion_failure_notes.len() - MAX_RECORDED_MEMORY_NOTE_FAILURES,
+                    );
+                }
+                if generated_output_failure_notes.len() > MAX_RECORDED_MEMORY_NOTE_FAILURES {
+                    generated_output_failure_notes = generated_output_failure_notes.split_off(
+                        generated_output_failure_notes.len() - MAX_RECORDED_MEMORY_NOTE_FAILURES,
+                    );
+                }
+                let mut consecutive_output_failures = 0_u32;
+                let mut last_note_elapsed_ms = previous_progress
+                    .and_then(|progress| progress.get("last_note_elapsed_ms"))
+                    .and_then(serde_json::Value::as_i64);
+                let enumeration_phase = if resume_index == total
+                    && (source_ingestion_failures > 0 || generated_output_failures > 0)
+                {
+                    "completed_with_errors"
+                } else if resume_index == total {
+                    "completed"
+                } else {
+                    "enumerated"
+                };
+                if state
+                    .jobs()
+                    .update_progress(
+                        job.id,
+                        worker_id,
+                        &json!({
+                            "phase": enumeration_phase,
+                            "completed": resume_index,
+                            "total": total,
+                            "current_index": null,
+                            "current_path": null,
+                            "last_completed_path": last_completed_path,
+                            "raw_memories_staged": raw_memories_staged,
+                            "phase1_no_output": phase1_no_output,
+                            "source_ingestion_failures": source_ingestion_failures,
+                            "source_ingestion_failure_notes": &source_ingestion_failure_notes,
+                            "generated_output_failures": generated_output_failures,
+                            "generated_output_failure_notes": &generated_output_failure_notes,
+                            "notes_evaluated": notes_evaluated,
+                            "source_policy_skipped": source_policy_skipped,
+                            "already_evaluated_skipped": already_evaluated_skipped,
+                            "note_started_at": null,
+                            "last_note_elapsed_ms": last_note_elapsed_ms,
+                            "error_code": null,
+                        }),
+                    )
+                    .await
+                    .is_err()
+                {
+                    log_job_progress_persist_failed(
+                        &job,
+                        enumeration_phase,
+                        "memory_extract_progress_failed",
+                    );
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "memory_extract_progress_failed",
+                    };
+                }
+                log_job_progress(
+                    &job,
+                    enumeration_phase,
+                    resume_index as u64,
+                    total as u64,
+                    None,
+                    None,
+                    raw_memories_staged,
+                    phase1_no_output,
+                    source_ingestion_failures,
+                    generated_output_failures,
+                    notes_evaluated,
+                    source_policy_skipped,
+                    already_evaluated_skipped,
+                    last_note_elapsed_ms,
+                    None,
+                );
+                for (index, entry) in entries.iter().enumerate().skip(resume_index) {
+                    let note_started_at = now_millis();
+                    if state
+                        .jobs()
+                        .update_progress(
+                            job.id,
+                            worker_id,
+                            &json!({
+                                "phase": "extracting_note",
+                                "completed": index,
+                                "total": total,
+                                "current_index": index.saturating_add(1),
+                                "current_path": entry.path.as_str(),
+                                "last_completed_path": if index == 0 {
+                                    last_completed_path
+                                } else {
+                                    Some(entries[index - 1].path.as_str())
+                                },
+                                "raw_memories_staged": raw_memories_staged,
+                                "phase1_no_output": phase1_no_output,
+                                "source_ingestion_failures": source_ingestion_failures,
+                                "source_ingestion_failure_notes": &source_ingestion_failure_notes,
+                                "generated_output_failures": generated_output_failures,
+                                "generated_output_failure_notes": &generated_output_failure_notes,
+                                "notes_evaluated": notes_evaluated,
+                                "source_policy_skipped": source_policy_skipped,
+                                "already_evaluated_skipped": already_evaluated_skipped,
+                                "note_started_at": note_started_at,
+                                "last_note_elapsed_ms": last_note_elapsed_ms,
+                                "error_code": null,
+                            }),
+                        )
+                        .await
+                        .is_err()
+                    {
+                        // No provider call has happened for this note, so this
+                        // checkpoint failure is safe to retry automatically.
+                        log_job_progress_persist_failed(
+                            &job,
+                            "extracting_note",
+                            "memory_extract_progress_failed",
+                        );
+                        return JobOutcome::Retry {
+                            delay: Duration::from_secs(5),
+                            code: "memory_extract_progress_failed",
+                        };
+                    }
+                    log_job_progress(
+                        &job,
+                        "extracting_note",
+                        index as u64,
+                        total as u64,
+                        Some(index.saturating_add(1) as u64),
+                        Some(&entry.path),
+                        raw_memories_staged,
+                        phase1_no_output,
+                        source_ingestion_failures,
+                        generated_output_failures,
+                        notes_evaluated,
+                        source_policy_skipped,
+                        already_evaluated_skipped,
+                        None,
+                        None,
+                    );
+                    let result = tokio::select! {
+                        _ = shutdown.cancelled() => return JobOutcome::Cancelled,
+                        result = memory.extract_note_with_options(
+                            &context,
+                            &core,
+                            &entry.path,
+                            NoteExtractionOptions { include_evaluated },
+                        ) => result,
+                    };
+                    let note_elapsed_ms = now_millis().saturating_sub(note_started_at);
+                    let mut stop_after_checkpoint = None;
+                    match result {
+                        Ok(extraction) => {
+                            consecutive_output_failures = 0;
+                            if extraction.already_evaluated {
+                                already_evaluated_skipped =
+                                    already_evaluated_skipped.saturating_add(1);
+                            } else if extraction.source_admitted {
+                                notes_evaluated = notes_evaluated.saturating_add(1);
+                            } else {
+                                source_policy_skipped = source_policy_skipped.saturating_add(1);
+                            }
+                            raw_memories_staged = raw_memories_staged
+                                .saturating_add(u64::from(extraction.raw_memory_staged));
+                            phase1_no_output =
+                                phase1_no_output.saturating_add(u64::from(extraction.no_output));
+                        }
+                        Err(error) => {
+                            let generated_output_diagnostic = match &error {
+                                MemoryError::GeneratedOutput(code) => Some((*code, None)),
+                                MemoryError::Provider(provider)
+                                    if provider.is_generation_output_failure() =>
+                                {
+                                    Some((provider.code(), provider.schema_diagnostic()))
+                                }
+                                _ => None,
+                            };
+                            if let MemoryError::SourceIngestion(code) = &error {
+                                source_ingestion_failures =
+                                    source_ingestion_failures.saturating_add(1);
+                                source_ingestion_failure_notes.push(json!({
+                                    "index": index.saturating_add(1),
+                                    "path": entry.path.as_str(),
+                                    "error_code": code,
+                                    "elapsed_ms": note_elapsed_ms,
+                                }));
+                                if source_ingestion_failure_notes.len()
+                                    > MAX_RECORDED_MEMORY_NOTE_FAILURES
+                                {
+                                    let excess = source_ingestion_failure_notes.len()
+                                        - MAX_RECORDED_MEMORY_NOTE_FAILURES;
+                                    source_ingestion_failure_notes.drain(..excess);
+                                }
+                                log_memory_note_source_failure(
+                                    &job,
+                                    index.saturating_add(1) as u64,
+                                    total as u64,
+                                    &entry.path,
+                                    note_elapsed_ms,
+                                    code,
+                                );
+                            } else if let Some((code, schema_diagnostic)) =
+                                generated_output_diagnostic
+                            {
+                                notes_evaluated = notes_evaluated.saturating_add(1);
+                                generated_output_failures =
+                                    generated_output_failures.saturating_add(1);
+                                consecutive_output_failures =
+                                    consecutive_output_failures.saturating_add(1);
+                                generated_output_failure_notes.push(json!({
+                                    "index": index.saturating_add(1),
+                                    "path": entry.path.as_str(),
+                                    "error_code": code,
+                                    "schema_issue": schema_diagnostic.map(|(issue, _)| issue),
+                                    "schema_path": schema_diagnostic.map(|(_, path)| path),
+                                    "elapsed_ms": note_elapsed_ms,
+                                }));
+                                if generated_output_failure_notes.len()
+                                    > MAX_RECORDED_MEMORY_NOTE_FAILURES
+                                {
+                                    let excess = generated_output_failure_notes.len()
+                                        - MAX_RECORDED_MEMORY_NOTE_FAILURES;
+                                    generated_output_failure_notes.drain(..excess);
+                                }
+                                log_memory_note_output_failure(
+                                    &job,
+                                    index.saturating_add(1) as u64,
+                                    total as u64,
+                                    &entry.path,
+                                    note_elapsed_ms,
+                                    code,
+                                    schema_diagnostic,
+                                    consecutive_output_failures,
+                                );
+                                if memory_output_failure_limit_reached(consecutive_output_failures)
+                                {
+                                    stop_after_checkpoint =
+                                        Some("memory_extract_output_failure_limit");
+                                }
+                            } else {
+                                let outcome = memory_extract_error_outcome(error);
+                                let (phase, code) = match outcome {
+                                    JobOutcome::Retry { code, .. } => ("waiting_retry", code),
+                                    JobOutcome::Failed { code } => ("failed", code),
+                                    JobOutcome::Cancelled => {
+                                        ("cancelled", "memory_extract_cancelled")
+                                    }
+                                    JobOutcome::Complete => {
+                                        ("completed", "memory_extract_completed")
+                                    }
+                                };
+                                let progress_saved = state
+                                    .jobs()
+                                    .update_progress(
+                                        job.id,
+                                        worker_id,
+                                        &json!({
+                                            "phase": phase,
+                                            "completed": index,
+                                            "total": total,
+                                            "current_index": index.saturating_add(1),
+                                            "current_path": entry.path.as_str(),
+                                            "last_completed_path": if index == 0 {
+                                                last_completed_path
+                                            } else {
+                                                Some(entries[index - 1].path.as_str())
+                                            },
+                                            "raw_memories_staged": raw_memories_staged,
+                                            "phase1_no_output": phase1_no_output,
+                                            "source_ingestion_failures": source_ingestion_failures,
+                                            "source_ingestion_failure_notes": &source_ingestion_failure_notes,
+                                            "generated_output_failures": generated_output_failures,
+                                            "generated_output_failure_notes": &generated_output_failure_notes,
+                                            "notes_evaluated": notes_evaluated,
+                                            "source_policy_skipped": source_policy_skipped,
+                                            "already_evaluated_skipped": already_evaluated_skipped,
+                                            "note_started_at": note_started_at,
+                                            "last_note_elapsed_ms": note_elapsed_ms,
+                                            "error_code": code,
+                                        }),
+                                    )
+                                    .await
+                                    .is_ok();
+                                if progress_saved {
+                                    log_job_progress(
+                                        &job,
+                                        phase,
+                                        index as u64,
+                                        total as u64,
+                                        Some(index.saturating_add(1) as u64),
+                                        Some(&entry.path),
+                                        raw_memories_staged,
+                                        phase1_no_output,
+                                        source_ingestion_failures,
+                                        generated_output_failures,
+                                        notes_evaluated,
+                                        source_policy_skipped,
+                                        already_evaluated_skipped,
+                                        Some(note_elapsed_ms),
+                                        Some(code),
+                                    );
+                                } else {
+                                    log_job_progress_persist_failed(&job, phase, code);
+                                }
+                                return outcome;
+                            }
+                        }
+                    }
+                    let note_phase = if stop_after_checkpoint.is_some() {
+                        "stopped_output_failures"
+                    } else if index.saturating_add(1) == total
+                        && (source_ingestion_failures > 0 || generated_output_failures > 0)
+                    {
+                        "completed_with_errors"
+                    } else if index.saturating_add(1) == total {
+                        "completed"
+                    } else {
+                        "note_completed"
+                    };
+                    if state
+                        .jobs()
+                        .update_progress(
+                            job.id,
+                            worker_id,
+                            &json!({
+                                "phase": note_phase,
+                                "completed": index.saturating_add(1),
+                                "total": total,
+                                "current_index": null,
+                                "current_path": null,
+                                "last_completed_path": entry.path.as_str(),
+                                "raw_memories_staged": raw_memories_staged,
+                                "phase1_no_output": phase1_no_output,
+                                "source_ingestion_failures": source_ingestion_failures,
+                                "source_ingestion_failure_notes": &source_ingestion_failure_notes,
+                                "generated_output_failures": generated_output_failures,
+                                "generated_output_failure_notes": &generated_output_failure_notes,
+                                "notes_evaluated": notes_evaluated,
+                                "source_policy_skipped": source_policy_skipped,
+                                "already_evaluated_skipped": already_evaluated_skipped,
+                                "note_started_at": null,
+                                "last_note_elapsed_ms": note_elapsed_ms,
+                                "error_code": stop_after_checkpoint,
+                            }),
+                        )
+                        .await
+                        .is_err()
+                    {
+                        // The provider may already have completed billable
+                        // work. Stop instead of automatically replaying it.
+                        log_job_progress_persist_failed(
+                            &job,
+                            note_phase,
+                            "memory_extract_progress_finalize_failed",
+                        );
+                        return JobOutcome::Failed {
+                            code: "memory_extract_progress_finalize_failed",
+                        };
+                    }
+                    log_job_progress(
+                        &job,
+                        note_phase,
+                        index.saturating_add(1) as u64,
+                        total as u64,
+                        None,
+                        None,
+                        raw_memories_staged,
+                        phase1_no_output,
+                        source_ingestion_failures,
+                        generated_output_failures,
+                        notes_evaluated,
+                        source_policy_skipped,
+                        already_evaluated_skipped,
+                        Some(note_elapsed_ms),
+                        stop_after_checkpoint,
+                    );
+                    last_note_elapsed_ms = Some(note_elapsed_ms);
+                    if let Some(code) = stop_after_checkpoint {
+                        if enqueue_memory_consolidation(&state, &context, job.id)
+                            .await
+                            .is_err()
+                        {
+                            return JobOutcome::Failed {
+                                code: "memory_consolidation_admission_failed",
+                            };
+                        }
+                        return JobOutcome::Failed { code };
                     }
                 }
-                Err(_) => JobOutcome::Failed {
-                    code: "memory_extract_failed",
-                },
+                if enqueue_memory_consolidation(&state, &context, job.id)
+                    .await
+                    .is_err()
+                {
+                    return JobOutcome::Failed {
+                        code: "memory_consolidation_admission_failed",
+                    };
+                }
+                JobOutcome::Complete
+            } else {
+                let Some(worker_id) = job.lease_owner.as_deref() else {
+                    return JobOutcome::Failed {
+                        code: "memory_extract_lease_missing",
+                    };
+                };
+                let path = job
+                    .payload
+                    .get("payload")
+                    .and_then(|value| value.get("path"))
+                    .or_else(|| job.payload.get("path"))
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| VaultPath::parse(value).ok());
+                let Some(path) = path else {
+                    return JobOutcome::Failed {
+                        code: "memory_extract_path_invalid",
+                    };
+                };
+                let include_evaluated = job
+                    .payload
+                    .get("include_evaluated")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let note_started_at = now_millis();
+                if state
+                    .jobs()
+                    .update_progress(
+                        job.id,
+                        worker_id,
+                        &json!({
+                            "phase": "extracting_note",
+                            "completed": 0,
+                            "total": 1,
+                            "current_index": 1,
+                            "current_path": path.as_str(),
+                            "last_completed_path": null,
+                            "raw_memories_staged": 0,
+                            "phase1_no_output": 0,
+                            "source_ingestion_failures": 0,
+                            "source_ingestion_failure_notes": [],
+                            "generated_output_failures": 0,
+                            "generated_output_failure_notes": [],
+                            "notes_evaluated": 0,
+                            "source_policy_skipped": 0,
+                            "already_evaluated_skipped": 0,
+                            "note_started_at": note_started_at,
+                            "last_note_elapsed_ms": null,
+                            "error_code": null,
+                        }),
+                    )
+                    .await
+                    .is_err()
+                {
+                    log_job_progress_persist_failed(
+                        &job,
+                        "extracting_note",
+                        "memory_extract_progress_failed",
+                    );
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "memory_extract_progress_failed",
+                    };
+                }
+                log_job_progress(
+                    &job,
+                    "extracting_note",
+                    0,
+                    1,
+                    Some(1),
+                    Some(&path),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                );
+                let result = tokio::select! {
+                    _ = shutdown.cancelled() => return JobOutcome::Cancelled,
+                    result = memory.extract_note_with_options(
+                        &context,
+                        &core,
+                        &path,
+                        NoteExtractionOptions { include_evaluated },
+                    ) => result,
+                };
+                let note_elapsed_ms = now_millis().saturating_sub(note_started_at);
+                match result {
+                    Ok(extraction) => {
+                        let notes_evaluated = u64::from(extraction.source_admitted);
+                        let already_evaluated_skipped = u64::from(extraction.already_evaluated);
+                        let source_policy_skipped =
+                            u64::from(!extraction.source_admitted && !extraction.already_evaluated);
+                        if state
+                            .jobs()
+                            .update_progress(
+                                job.id,
+                                worker_id,
+                                &json!({
+                                    "phase": "completed",
+                                    "completed": 1,
+                                    "total": 1,
+                                    "current_index": null,
+                                    "current_path": null,
+                                    "last_completed_path": path.as_str(),
+                                    "raw_memories_staged": u64::from(extraction.raw_memory_staged),
+                                    "phase1_no_output": u64::from(extraction.no_output),
+                                    "source_ingestion_failures": 0,
+                                    "source_ingestion_failure_notes": [],
+                                    "generated_output_failures": 0,
+                                    "generated_output_failure_notes": [],
+                                    "notes_evaluated": notes_evaluated,
+                                    "source_policy_skipped": source_policy_skipped,
+                                    "already_evaluated_skipped": already_evaluated_skipped,
+                                    "note_started_at": null,
+                                    "last_note_elapsed_ms": note_elapsed_ms,
+                                    "error_code": null,
+                                }),
+                            )
+                            .await
+                            .is_err()
+                        {
+                            log_job_progress_persist_failed(
+                                &job,
+                                "completed",
+                                "memory_extract_progress_finalize_failed",
+                            );
+                            return JobOutcome::Failed {
+                                code: "memory_extract_progress_finalize_failed",
+                            };
+                        }
+                        log_job_progress(
+                            &job,
+                            "completed",
+                            1,
+                            1,
+                            None,
+                            None,
+                            u64::from(extraction.raw_memory_staged),
+                            u64::from(extraction.no_output),
+                            0,
+                            0,
+                            notes_evaluated,
+                            source_policy_skipped,
+                            already_evaluated_skipped,
+                            Some(note_elapsed_ms),
+                            None,
+                        );
+                        if enqueue_memory_consolidation(&state, &context, job.id)
+                            .await
+                            .is_err()
+                        {
+                            return JobOutcome::Failed {
+                                code: "memory_consolidation_admission_failed",
+                            };
+                        }
+                        JobOutcome::Complete
+                    }
+                    Err(error) => {
+                        let source_failure_code = match &error {
+                            MemoryError::SourceIngestion(code) => Some(*code),
+                            _ => None,
+                        };
+                        let generated_output_diagnostic = match &error {
+                            MemoryError::GeneratedOutput(code) => Some((*code, None)),
+                            MemoryError::Provider(provider)
+                                if provider.is_generation_output_failure() =>
+                            {
+                                Some((
+                                    provider.code(),
+                                    provider
+                                        .schema_diagnostic()
+                                        .map(|(issue, path)| (issue, path.to_owned())),
+                                ))
+                            }
+                            _ => None,
+                        };
+                        let output_failure = generated_output_diagnostic.is_some();
+                        let outcome = memory_extract_error_outcome(error);
+                        let (phase, code) = match outcome {
+                            JobOutcome::Retry { code, .. } => ("waiting_retry", code),
+                            JobOutcome::Failed { code } => ("failed", code),
+                            JobOutcome::Cancelled => ("cancelled", "memory_extract_cancelled"),
+                            JobOutcome::Complete => ("completed", "memory_extract_completed"),
+                        };
+                        let source_ingestion_failure_notes =
+                            source_failure_code.map_or_else(Vec::<Value>::new, |code| {
+                                vec![json!({
+                                    "index": 1,
+                                    "path": path.as_str(),
+                                    "error_code": code,
+                                    "elapsed_ms": note_elapsed_ms,
+                                })]
+                            });
+                        let generated_output_failure_notes = generated_output_diagnostic
+                            .as_ref()
+                            .map_or_else(Vec::<Value>::new, |(code, schema_diagnostic)| {
+                            vec![json!({
+                                "index": 1,
+                                "path": path.as_str(),
+                                "error_code": code,
+                                "schema_issue": schema_diagnostic.as_ref().map(|(issue, _)| *issue),
+                                "schema_path": schema_diagnostic.as_ref().map(|(_, path)| path),
+                                "elapsed_ms": note_elapsed_ms,
+                            })]
+                        });
+                        if let Some(code) = source_failure_code {
+                            log_memory_note_source_failure(
+                                &job,
+                                1,
+                                1,
+                                &path,
+                                note_elapsed_ms,
+                                code,
+                            );
+                        }
+                        if let Some((code, schema_diagnostic)) =
+                            generated_output_diagnostic.as_ref()
+                        {
+                            log_memory_note_output_failure(
+                                &job,
+                                1,
+                                1,
+                                &path,
+                                note_elapsed_ms,
+                                code,
+                                schema_diagnostic
+                                    .as_ref()
+                                    .map(|(issue, path)| (*issue, path.as_str())),
+                                1,
+                            );
+                        }
+                        let progress_saved = state
+                            .jobs()
+                            .update_progress(
+                                job.id,
+                                worker_id,
+                                &json!({
+                                    "phase": phase,
+                                    "completed": 0,
+                                    "total": 1,
+                                    "current_index": 1,
+                                    "current_path": path.as_str(),
+                                    "last_completed_path": null,
+                                    "raw_memories_staged": 0,
+                                    "phase1_no_output": 0,
+                                    "source_ingestion_failures": u64::from(source_failure_code.is_some()),
+                                    "source_ingestion_failure_notes": &source_ingestion_failure_notes,
+                                    "generated_output_failures": u64::from(output_failure),
+                                    "generated_output_failure_notes": &generated_output_failure_notes,
+                                    "notes_evaluated": u64::from(output_failure),
+                                    "source_policy_skipped": 0,
+                                    "already_evaluated_skipped": 0,
+                                    "schema_issue": generated_output_diagnostic.as_ref().and_then(|(_, diagnostic)| diagnostic.as_ref().map(|(issue, _)| *issue)),
+                                    "schema_path": generated_output_diagnostic.as_ref().and_then(|(_, diagnostic)| diagnostic.as_ref().map(|(_, path)| path)),
+                                    "note_started_at": note_started_at,
+                                    "last_note_elapsed_ms": note_elapsed_ms,
+                                    "error_code": code,
+                                }),
+                            )
+                            .await
+                            .is_ok();
+                        if progress_saved {
+                            log_job_progress(
+                                &job,
+                                phase,
+                                0,
+                                1,
+                                Some(1),
+                                Some(&path),
+                                0,
+                                0,
+                                u64::from(source_failure_code.is_some()),
+                                u64::from(output_failure),
+                                u64::from(output_failure),
+                                0,
+                                0,
+                                Some(note_elapsed_ms),
+                                Some(code),
+                            );
+                        } else {
+                            log_job_progress_persist_failed(&job, phase, code);
+                        }
+                        outcome
+                    }
+                }
             }
         })
     })
 }
 
-/// Revalidate extracted memory provenance after a note event.
-pub fn memory_revalidate_job_handler(
+fn memory_extract_error_outcome(error: MemoryError) -> JobOutcome {
+    match error {
+        MemoryError::Configuration(code) => JobOutcome::Failed { code },
+        MemoryError::SourceIngestion(code) | MemoryError::GeneratedOutput(code) => {
+            JobOutcome::Failed { code }
+        }
+        MemoryError::Provider(error) if error.retryable() => JobOutcome::Retry {
+            delay: Duration::from_secs(10),
+            code: error.code(),
+        },
+        MemoryError::Provider(error) => JobOutcome::Failed { code: error.code() },
+        error if error.retryable() => JobOutcome::Retry {
+            delay: Duration::from_secs(10),
+            code: "memory_extract_retryable",
+        },
+        MemoryError::InvalidInput(_) | MemoryError::Markdown => JobOutcome::Failed {
+            code: "memory_extract_input_invalid",
+        },
+        MemoryError::NotFound => JobOutcome::Failed {
+            code: "memory_extract_not_found",
+        },
+        _ => JobOutcome::Failed {
+            code: "memory_extract_failed",
+        },
+    }
+}
+
+const fn memory_output_failure_limit_reached(consecutive_failures: u32) -> bool {
+    consecutive_failures >= MAX_CONSECUTIVE_MEMORY_OUTPUT_FAILURES
+}
+
+async fn enqueue_memory_consolidation(
+    state: &StateStore,
+    context: &VaultContext,
+    source_job_id: JobId,
+) -> Result<(), mcp_vault_state::StateError> {
+    ensure_memory_consolidation_job(state, context, "phase1_completed", Some(source_job_id)).await
+}
+
+/// Ensure durable Phase 2 admission whenever persisted dirty Stage 1 inputs
+/// exist. Startup and periodic reconciliation use this to close the small
+/// race where new input arrives while an older singleton job is completing.
+pub(crate) async fn ensure_memory_consolidation_job(
+    state: &StateStore,
+    context: &VaultContext,
+    reason: &'static str,
+    source_job_id: Option<JobId>,
+) -> Result<(), mcp_vault_state::StateError> {
+    if state.memory().pending_stage1_count(context).await? == 0 {
+        return Ok(());
+    }
+    let next_generation = state
+        .memory()
+        .get_consolidation_state(context)
+        .await?
+        .map_or(1, |current| current.generation.saturating_add(1));
+    state
+        .jobs()
+        .enqueue_singleton(
+            context,
+            "memory.consolidate",
+            &format!(
+                "vault:{}:memory-consolidate:{next_generation}",
+                context.id()
+            ),
+            &json!({
+                "pipeline_generation": MEMORY_PIPELINE_GENERATION,
+                "reason": reason,
+                "source_job_id": source_job_id,
+                "generation": next_generation,
+            }),
+            3,
+            5,
+            now_millis(),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Ensure one current-generation destructive cutover job exists whenever a
+/// Vault has not completed the prerelease memory pipeline reset.
+pub(crate) async fn ensure_memory_pipeline_reset_job(
+    state: &StateStore,
+    context: &VaultContext,
+) -> Result<Option<JobRecord>, mcp_vault_state::StateError> {
+    if state
+        .memory()
+        .get_consolidation_state(context)
+        .await?
+        .is_some_and(|current| current.pipeline_generation >= MEMORY_PIPELINE_GENERATION)
+    {
+        return Ok(None);
+    }
+    for job_type in [
+        "memory.extract",
+        "memory.consolidate",
+        "memory.revalidate",
+        "memory.rebuild",
+    ] {
+        state.jobs().request_cancel_type(context, job_type).await?;
+    }
+    let job = state
+        .jobs()
+        .enqueue_singleton(
+            context,
+            "memory.reset_pipeline",
+            &format!(
+                "vault:{}:memory-reset:g{}:{}",
+                context.id(),
+                MEMORY_PIPELINE_GENERATION,
+                EventId::new()
+            ),
+            &json!({"pipeline_generation": MEMORY_PIPELINE_GENERATION}),
+            7,
+            5,
+            now_millis(),
+        )
+        .await?;
+    Ok(Some(job))
+}
+
+/// Admit one fresh full Phase 1 regeneration after a pipeline cutover.
+pub(crate) async fn ensure_memory_pipeline_regeneration_job(
+    _state: &StateStore,
+    memory: &MemoryService,
+    context: &VaultContext,
+    source_job_id: Option<JobId>,
+) -> Result<PipelineRegenerationAdmission, MemoryError> {
+    memory
+        .ensure_pipeline_regeneration(context, source_job_id)
+        .await
+}
+
+async fn quiesce_memory_pipeline_jobs(
+    state: &StateStore,
+    context: &VaultContext,
+) -> Result<bool, mcp_vault_state::StateError> {
+    let mut quiescent = true;
+    for job_type in [
+        "memory.extract",
+        "memory.consolidate",
+        "memory.revalidate",
+        "memory.rebuild",
+    ] {
+        state.jobs().request_cancel_type(context, job_type).await?;
+        quiescent &= state
+            .jobs()
+            .find_active_by_type(context, job_type)
+            .await?
+            .is_none();
+    }
+    Ok(quiescent)
+}
+
+/// Execute one Vault-scoped Codex-style Phase 2 consolidation job.
+pub fn memory_consolidate_job_handler(
     state: StateStore,
     history_root: std::path::PathBuf,
     core_runtime: mcp_vault_core::VaultCoreRuntime,
@@ -1134,6 +2453,469 @@ pub fn memory_revalidate_job_handler(
         let state = state.clone();
         let history_root = history_root.clone();
         let core_runtime = core_runtime.clone();
+        let memory = memory.clone();
+        Box::pin(async move {
+            if shutdown.is_cancelled() {
+                return JobOutcome::Cancelled;
+            }
+            let Some(vault_id) = job.vault_id else {
+                return JobOutcome::Failed {
+                    code: "memory_consolidation_vault_missing",
+                };
+            };
+            let vault = match state.vaults().find_by_id(vault_id).await {
+                Ok(Some(vault)) => vault,
+                Ok(None) => {
+                    return JobOutcome::Failed {
+                        code: "memory_consolidation_vault_missing",
+                    };
+                }
+                Err(_) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "memory_consolidation_vault_lookup_failed",
+                    };
+                }
+            };
+            let context = match vault.context() {
+                Ok(context) => context,
+                Err(_) => {
+                    return JobOutcome::Failed {
+                        code: "memory_consolidation_context_invalid",
+                    };
+                }
+            };
+            let core = match super::core_for_vault(&state, &history_root, &vault, &core_runtime) {
+                Ok(core) => core,
+                Err(_) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "memory_consolidation_core_unavailable",
+                    };
+                }
+            };
+            let Some(worker_id) = job.lease_owner.as_deref() else {
+                return JobOutcome::Failed {
+                    code: "memory_consolidation_lease_missing",
+                };
+            };
+            let initial_pending = match state.memory().pending_stage1_count(&context).await {
+                Ok(pending) => pending,
+                Err(_) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "memory_consolidation_input_count_failed",
+                    };
+                }
+            };
+            if state
+                .jobs()
+                .update_progress(
+                    job.id,
+                    worker_id,
+                    &json!({
+                        "phase": "consolidating",
+                        "completed": 0,
+                        "total": initial_pending,
+                        "raw_inputs": 0,
+                        "pending_raw_inputs": initial_pending,
+                        "created": 0,
+                        "updated": 0,
+                        "retired": 0,
+                        "discarded": 0,
+                        "error_code": null,
+                    }),
+                )
+                .await
+                .is_err()
+            {
+                return JobOutcome::Retry {
+                    delay: Duration::from_secs(5),
+                    code: "memory_consolidation_progress_failed",
+                };
+            }
+            info!(
+                target: "mcp_vault::jobs",
+                event = "memory_consolidation_progress",
+                job_id = %job.id,
+                vault_id = %context.id(),
+                phase = "consolidating",
+                pending_raw_inputs = initial_pending,
+                "memory consolidation started"
+            );
+            let mut completed = 0_u64;
+            let mut total = initial_pending;
+            let mut created = 0_u64;
+            let mut updated = 0_u64;
+            let mut retired = 0_u64;
+            let mut discarded = 0_u64;
+            let mut generation = match state.memory().get_consolidation_state(&context).await {
+                Ok(current) => current.map_or(0, |current| current.generation),
+                Err(_) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "memory_consolidation_state_read_failed",
+                    };
+                }
+            };
+            let mut reused_proposal = false;
+            let mut pending = initial_pending;
+            if pending == 0 {
+                if state
+                    .jobs()
+                    .update_progress(
+                        job.id,
+                        worker_id,
+                        &json!({
+                            "phase": "completed",
+                            "completed": 0,
+                            "total": 0,
+                            "raw_inputs": 0,
+                            "pending_raw_inputs": 0,
+                            "created": 0,
+                            "updated": 0,
+                            "retired": 0,
+                            "discarded": 0,
+                            "generation": generation,
+                            "reused_proposal": false,
+                            "error_code": null,
+                        }),
+                    )
+                    .await
+                    .is_err()
+                {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "memory_consolidation_progress_failed",
+                    };
+                }
+                return JobOutcome::Complete;
+            }
+            while pending > 0 {
+                let report = match tokio::select! {
+                    _ = shutdown.cancelled() => return JobOutcome::Cancelled,
+                    result = memory.consolidate(&context, &core) => result,
+                } {
+                    Ok(report) => report,
+                    Err(error) => return memory_consolidation_error_outcome(error),
+                };
+                if report.raw_inputs == 0 {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(2),
+                        code: "memory_consolidation_no_progress",
+                    };
+                }
+                completed = completed.saturating_add(u64::from(report.raw_inputs));
+                created = created.saturating_add(u64::from(report.created));
+                updated = updated.saturating_add(u64::from(report.updated));
+                retired = retired.saturating_add(u64::from(report.retired));
+                discarded = discarded.saturating_add(u64::from(report.discarded));
+                generation = report.generation;
+                reused_proposal |= report.reused_proposal;
+                pending = match state.memory().pending_stage1_count(&context).await {
+                    Ok(pending) => pending,
+                    Err(_) => {
+                        return JobOutcome::Retry {
+                            delay: Duration::from_secs(5),
+                            code: "memory_consolidation_input_count_failed",
+                        };
+                    }
+                };
+                total = total.max(completed.saturating_add(pending));
+                if state
+                    .jobs()
+                    .update_progress(
+                        job.id,
+                        worker_id,
+                        &json!({
+                            "phase": if pending == 0 { "completed" } else { "consolidating" },
+                            "completed": completed,
+                            "total": total,
+                            "raw_inputs": completed,
+                            "pending_raw_inputs": pending,
+                            "created": created,
+                            "updated": updated,
+                            "retired": retired,
+                            "discarded": discarded,
+                            "generation": generation,
+                            "reused_proposal": reused_proposal,
+                            "error_code": null,
+                        }),
+                    )
+                    .await
+                    .is_err()
+                {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "memory_consolidation_progress_failed",
+                    };
+                }
+                info!(
+                    target: "mcp_vault::jobs",
+                    event = "memory_consolidation_progress",
+                    job_id = %job.id,
+                    vault_id = %context.id(),
+                    phase = if pending == 0 { "completed" } else { "consolidating" },
+                    raw_inputs = completed,
+                    pending_raw_inputs = pending,
+                    created,
+                    updated,
+                    retired,
+                    discarded,
+                    generation,
+                    reused_proposal,
+                    "memory consolidation batch committed"
+                );
+            }
+            JobOutcome::Complete
+        })
+    })
+}
+
+fn memory_consolidation_error_outcome(error: MemoryError) -> JobOutcome {
+    match error {
+        MemoryError::Configuration(code) => JobOutcome::Failed { code },
+        MemoryError::Provider(error) if error.retryable() => JobOutcome::Retry {
+            delay: Duration::from_secs(10),
+            code: error.code(),
+        },
+        MemoryError::Provider(error) => JobOutcome::Failed { code: error.code() },
+        MemoryError::Conflict => JobOutcome::Retry {
+            delay: Duration::from_secs(2),
+            code: "memory_consolidation_snapshot_changed",
+        },
+        error if error.retryable() => JobOutcome::Retry {
+            delay: Duration::from_secs(10),
+            code: "memory_consolidation_retryable",
+        },
+        _ => JobOutcome::Failed {
+            code: "memory_consolidation_failed",
+        },
+    }
+}
+
+/// Execute one destructive prerelease memory-pipeline cutover.
+pub fn memory_reset_pipeline_job_handler(
+    state: StateStore,
+    history_root: std::path::PathBuf,
+    core_runtime: mcp_vault_core::VaultCoreRuntime,
+    memory: MemoryService,
+) -> JobHandler {
+    Arc::new(move |job, shutdown| {
+        let state = state.clone();
+        let history_root = history_root.clone();
+        let core_runtime = core_runtime.clone();
+        let memory = memory.clone();
+        Box::pin(async move {
+            if shutdown.is_cancelled() {
+                return JobOutcome::Cancelled;
+            }
+            let Some(vault_id) = job.vault_id else {
+                return JobOutcome::Failed {
+                    code: "memory_pipeline_reset_vault_missing",
+                };
+            };
+            let vault = match state.vaults().find_by_id(vault_id).await {
+                Ok(Some(vault)) => vault,
+                Ok(None) => {
+                    return JobOutcome::Failed {
+                        code: "memory_pipeline_reset_vault_missing",
+                    };
+                }
+                Err(_) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "memory_pipeline_reset_vault_lookup_failed",
+                    };
+                }
+            };
+            let context = match vault.context() {
+                Ok(context) => context,
+                Err(_) => {
+                    return JobOutcome::Failed {
+                        code: "memory_pipeline_reset_context_invalid",
+                    };
+                }
+            };
+            let core = match super::core_for_vault(&state, &history_root, &vault, &core_runtime) {
+                Ok(core) => core,
+                Err(_) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "memory_pipeline_reset_core_unavailable",
+                    };
+                }
+            };
+            let Some(worker_id) = job.lease_owner.as_deref() else {
+                return JobOutcome::Failed {
+                    code: "memory_pipeline_reset_lease_missing",
+                };
+            };
+            let reset_complete = match state.memory().get_consolidation_state(&context).await {
+                Ok(current) => current.is_some_and(|current| {
+                    current.pipeline_generation >= MEMORY_PIPELINE_GENERATION
+                }),
+                Err(_) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "memory_pipeline_reset_state_read_failed",
+                    };
+                }
+            };
+            if !reset_complete {
+                match quiesce_memory_pipeline_jobs(&state, &context).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let _ = state
+                            .jobs()
+                            .update_progress(
+                                job.id,
+                                worker_id,
+                                &json!({
+                                    "phase": "waiting_for_previous_memory_jobs",
+                                    "completed": 0,
+                                    "total": 1,
+                                    "error_code": "memory_pipeline_reset_waiting_for_jobs",
+                                }),
+                            )
+                            .await;
+                        return JobOutcome::Retry {
+                            delay: Duration::from_secs(2),
+                            code: "memory_pipeline_reset_waiting_for_jobs",
+                        };
+                    }
+                    Err(_) => {
+                        return JobOutcome::Retry {
+                            delay: Duration::from_secs(5),
+                            code: "memory_pipeline_reset_quiesce_failed",
+                        };
+                    }
+                }
+            }
+            if state
+                .jobs()
+                .update_progress(
+                    job.id,
+                    worker_id,
+                    &json!({
+                        "phase": "resetting_memory_pipeline",
+                        "completed": 0,
+                        "total": 1,
+                        "removed_managed_files": 0,
+                        "cleared_memories": 0,
+                        "cleared_stage1_outputs": 0,
+                        "cleared_candidates": 0,
+                        "cleared_proposals": 0,
+                        "cleared_diagnostics": 0,
+                        "cleared_embeddings": 0,
+                        "error_code": null,
+                    }),
+                )
+                .await
+                .is_err()
+            {
+                return JobOutcome::Retry {
+                    delay: Duration::from_secs(5),
+                    code: "memory_pipeline_reset_progress_failed",
+                };
+            }
+            let result = tokio::select! {
+                _ = shutdown.cancelled() => return JobOutcome::Cancelled,
+                result = memory.reset_pipeline(&context, &core) => result,
+            };
+            let report = match result {
+                Ok(report) => report,
+                Err(error) if error.retryable() => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(10),
+                        code: "memory_pipeline_reset_retryable",
+                    };
+                }
+                Err(_) => {
+                    return JobOutcome::Failed {
+                        code: "memory_pipeline_reset_failed",
+                    };
+                }
+            };
+            info!(
+                target: "mcp_vault::jobs",
+                event = "memory_pipeline_reset_progress",
+                job_id = %job.id,
+                vault_id = %context.id(),
+                removed_managed_files = report.removed_managed_files,
+                cleared_memories = report.cleared_memories,
+                cleared_stage1_outputs = report.cleared_stage1_outputs,
+                cleared_candidates = report.cleared_candidates,
+                cleared_proposals = report.cleared_proposals,
+                cleared_diagnostics = report.cleared_diagnostics,
+                cleared_embeddings = report.cleared_embeddings,
+                already_completed = report.already_completed,
+                "prerelease memory pipeline reset prepared fresh regeneration"
+            );
+
+            let followup = match ensure_memory_pipeline_regeneration_job(
+                &state,
+                &memory,
+                &context,
+                Some(job.id),
+            )
+            .await
+            {
+                Ok(PipelineRegenerationAdmission::Admitted) => "phase1_full_regeneration",
+                Ok(PipelineRegenerationAdmission::AwaitingConfiguration) => {
+                    "awaiting_extraction_configuration"
+                }
+                Ok(PipelineRegenerationAdmission::AwaitingOtherExtraction) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(2),
+                        code: "memory_pipeline_reset_waiting_for_extraction",
+                    };
+                }
+                Ok(PipelineRegenerationAdmission::NotPending) => "none",
+                Err(_) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(10),
+                        code: "memory_pipeline_regeneration_admission_failed",
+                    };
+                }
+            };
+            if state
+                .jobs()
+                .update_progress(
+                    job.id,
+                    worker_id,
+                    &json!({
+                        "phase": "completed",
+                        "completed": 1,
+                        "total": 1,
+                        "already_completed": report.already_completed,
+                        "removed_managed_files": report.removed_managed_files,
+                        "cleared_memories": report.cleared_memories,
+                        "cleared_stage1_outputs": report.cleared_stage1_outputs,
+                        "cleared_candidates": report.cleared_candidates,
+                        "cleared_proposals": report.cleared_proposals,
+                        "cleared_diagnostics": report.cleared_diagnostics,
+                        "cleared_embeddings": report.cleared_embeddings,
+                        "followup": followup,
+                        "error_code": null,
+                    }),
+                )
+                .await
+                .is_err()
+            {
+                return JobOutcome::Failed {
+                    code: "memory_pipeline_reset_progress_finalize_failed",
+                };
+            }
+            JobOutcome::Complete
+        })
+    })
+}
+
+/// Revalidate extracted memory provenance after a note event.
+pub fn memory_revalidate_job_handler(state: StateStore, memory: MemoryService) -> JobHandler {
+    Arc::new(move |job, shutdown| {
+        let state = state.clone();
         let memory = memory.clone();
         Box::pin(async move {
             if shutdown.is_cancelled() {
@@ -1176,26 +2958,46 @@ pub fn memory_revalidate_job_handler(
                     };
                 }
             };
-            let core = match super::core_for_vault(&state, &history_root, &vault, &core_runtime) {
-                Ok(core) => core,
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_revalidate_core_unavailable",
-                    };
-                }
-            };
-            let deleted = job
+            let event_type = job
                 .payload
                 .get("event_type")
-                .and_then(serde_json::Value::as_str)
-                == Some("FileDeleted");
+                .and_then(serde_json::Value::as_str);
+            let deleted = if event_type == Some("FileDeleted") {
+                true
+            } else if event_type == Some("external_change") {
+                match state.files().get_by_id(&context, file_id).await {
+                    Ok(Some(file)) => file.deleted_at.is_some(),
+                    Ok(None) => true,
+                    Err(_) => {
+                        return JobOutcome::Retry {
+                            delay: Duration::from_secs(5),
+                            code: "memory_revalidate_file_lookup_failed",
+                        };
+                    }
+                }
+            } else {
+                false
+            };
+            if !deleted {
+                return JobOutcome::Complete;
+            }
             let result = tokio::select! {
                 _ = shutdown.cancelled() => return JobOutcome::Cancelled,
-                result = memory.invalidate_source(&context, &core, file_id, deleted) => result,
+                result = memory.withdraw_note_source(&context, file_id) => result,
             };
             match result {
-                Ok(_) => JobOutcome::Complete,
+                Ok(changed) => {
+                    if changed
+                        && enqueue_memory_consolidation(&state, &context, job.id)
+                            .await
+                            .is_err()
+                    {
+                        return JobOutcome::Failed {
+                            code: "memory_consolidation_admission_failed",
+                        };
+                    }
+                    JobOutcome::Complete
+                }
                 Err(error) if error.retryable() => JobOutcome::Retry {
                     delay: Duration::from_secs(10),
                     code: "memory_revalidate_retryable",
@@ -1278,10 +3080,15 @@ pub fn memory_rebuild_job_handler(
     })
 }
 
-/// Handle ProviderService reference-only embedding rebuilds for memory bodies.
-pub fn memory_embedding_job_handler(state: StateStore, memory: MemoryService) -> JobHandler {
+/// Handle reference-only embedding rebuilds for note chunks or memory bodies.
+pub fn embedding_job_handler(
+    state: StateStore,
+    index: mcp_vault_indexer::IndexService,
+    memory: MemoryService,
+) -> JobHandler {
     Arc::new(move |job, shutdown| {
         let state = state.clone();
+        let index = index.clone();
         let memory = memory.clone();
         Box::pin(async move {
             if shutdown.is_cancelled() {
@@ -1328,19 +3135,61 @@ pub fn memory_embedding_job_handler(state: StateStore, memory: MemoryService) ->
                     code: "embedding_payload_invalid",
                 };
             };
-            let result = tokio::select! {
-                _ = shutdown.cancelled() => return JobOutcome::Cancelled,
-                result = memory.reembed_sources(&context, model_id, &sources) => result,
-            };
-            match result {
-                Ok(_) => JobOutcome::Complete,
-                Err(MemoryError::NotFound) => JobOutcome::Complete,
-                Err(error) if error.retryable() => JobOutcome::Retry {
-                    delay: Duration::from_secs(10),
-                    code: "embedding_retryable",
-                },
-                Err(_) => JobOutcome::Failed {
-                    code: "embedding_rebuild_failed",
+            let source_type = sources.first().map(|source| source.object_type.as_str());
+            if sources
+                .iter()
+                .any(|source| Some(source.object_type.as_str()) != source_type)
+            {
+                return JobOutcome::Failed {
+                    code: "embedding_payload_mixed_sources",
+                };
+            }
+            match source_type {
+                Some("note") => {
+                    let result = tokio::select! {
+                        _ = shutdown.cancelled() => return JobOutcome::Cancelled,
+                        result = index.reembed_note_sources(&context, model_id, &sources) => result,
+                    };
+                    match result {
+                        Ok(_) => JobOutcome::Complete,
+                        Err(
+                            mcp_vault_indexer::IndexError::State(_)
+                            | mcp_vault_indexer::IndexError::Core(_),
+                        ) => JobOutcome::Retry {
+                            delay: Duration::from_secs(10),
+                            code: "embedding_retryable",
+                        },
+                        Err(mcp_vault_indexer::IndexError::Provider(error))
+                            if error.retryable() =>
+                        {
+                            JobOutcome::Retry {
+                                delay: Duration::from_secs(10),
+                                code: "embedding_retryable",
+                            }
+                        }
+                        Err(_) => JobOutcome::Failed {
+                            code: "embedding_rebuild_failed",
+                        },
+                    }
+                }
+                Some("memory") => {
+                    let result = tokio::select! {
+                        _ = shutdown.cancelled() => return JobOutcome::Cancelled,
+                        result = memory.reembed_sources(&context, model_id, &sources) => result,
+                    };
+                    match result {
+                        Ok(_) | Err(MemoryError::NotFound) => JobOutcome::Complete,
+                        Err(error) if error.retryable() => JobOutcome::Retry {
+                            delay: Duration::from_secs(10),
+                            code: "embedding_retryable",
+                        },
+                        Err(_) => JobOutcome::Failed {
+                            code: "embedding_rebuild_failed",
+                        },
+                    }
+                }
+                _ => JobOutcome::Failed {
+                    code: "embedding_source_unsupported",
                 },
             }
         })
@@ -1399,23 +3248,380 @@ fn status_from_code(code: u8) -> WorkerStatus {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc};
+    use std::{
+        path::PathBuf,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use super::{
-        Cancellation, JobHandler, JobOutcome, OutboxHandler, WorkerConfig, WorkerFailure,
-        WorkerStatus, WorkerSupervisor, index_rebuild_job_handler, memory_extract_job_handler,
-        outbox_event_job_handler, outbox_to_job_handler,
+        Cancellation, JobHandler, JobOutcome, OutboxHandler, PipelineRegenerationAdmission,
+        WorkerConfig, WorkerFailure, WorkerStatus, WorkerSupervisor,
+        ensure_memory_pipeline_regeneration_job, index_rebuild_job_handler,
+        memory_consolidate_job_handler, memory_extract_error_outcome, memory_extract_job_handler,
+        memory_output_failure_limit_reached, now_millis, outbox_event_job_handler,
+        outbox_to_job_handler, quiesce_memory_pipeline_jobs, redacted_path_hash,
     };
+    use axum::{Json, Router, extract::State as AxumState, routing::post};
     use mcp_vault_auth::{AuthService, MasterKeyRing};
     use mcp_vault_core::VaultCore;
     use mcp_vault_domain::{
-        Actor, MaintenanceGate, Revision, SourcePlane, VaultContext, VaultId, VaultPath,
-        VaultPathPolicy, VaultSlug,
+        Actor, EventId, FileId, MaintenanceGate, MemoryRawId, Revision, SourcePlane, VaultContext,
+        VaultId, VaultPath, VaultPathPolicy, VaultSlug, WritePrecondition,
     };
-    use mcp_vault_memory::MemoryService;
-    use mcp_vault_state::{JobStatus, StateStore, VaultStatus};
+    use mcp_vault_memory::{
+        ExtractionPolicy, MEMORY_PIPELINE_GENERATION, MemoryError, MemoryService,
+    };
+    use mcp_vault_providers::{
+        ModelCapabilities, ModelInput, ModelSettings, ProviderError, ProviderInput, ProviderKind,
+        ProviderMode, ProviderService, ProviderSettings,
+    };
+    use mcp_vault_state::{
+        JobStatus, MemoryStage1OutputRecord, OutboxEventRecord, StateStore, VaultStatus,
+    };
     use mcp_vault_storage_fs::StorageOptions;
-    use tokio::time::{Duration, sleep, timeout};
+    use serde_json::{Value, json};
+    use tokio::{
+        sync::Notify,
+        time::{Duration, sleep, timeout},
+    };
+
+    fn test_memory_service(state: &StateStore) -> MemoryService {
+        let auth = AuthService::new(
+            state.auth(),
+            MasterKeyRing::from_bytes(1, &[8_u8; 32]).unwrap(),
+        );
+        MemoryService::new(state.clone(), auth)
+    }
+
+    async fn mark_pipeline_current(state: &StateStore, context: &VaultContext) {
+        state
+            .memory()
+            .set_pipeline_generation_state(context, MEMORY_PIPELINE_GENERATION, false)
+            .await
+            .unwrap();
+    }
+
+    fn test_outbox_handler(state: &StateStore) -> OutboxHandler {
+        outbox_to_job_handler(state.clone(), test_memory_service(state))
+    }
+
+    async fn mixed_extraction_response(
+        AxumState(calls): AxumState<Arc<AtomicUsize>>,
+        Json(request): Json<Value>,
+    ) -> Json<Value> {
+        if request["model"] == "fake-consolidation" {
+            let user = request["messages"]
+                .as_array()
+                .and_then(|messages| messages.last())
+                .and_then(|message| message["content"].as_str())
+                .unwrap();
+            let payload = user
+                .strip_prefix("<untrusted_memory_state>\n")
+                .and_then(|value| value.strip_suffix("\n</untrusted_memory_state>"))
+                .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                .unwrap();
+            let dirty = payload["dirty_inputs"].as_array().unwrap();
+            let raw_memories = payload["raw_memories"].as_array().unwrap();
+            let current = payload["current_memories"].as_array().unwrap();
+            let mut actions = Vec::new();
+            let mut dispositions = Vec::new();
+            for item in dirty {
+                let stage1_id = item["stage1_id"].as_str().unwrap();
+                let raw = raw_memories
+                    .iter()
+                    .find(|raw| raw["stage1_id"].as_str() == Some(stage1_id))
+                    .unwrap();
+                let existing = current.first();
+                actions.push(json!({
+                    "operation": if existing.is_some() { "update" } else { "create" },
+                    "memory_id": existing.map_or(Value::Null, |memory| memory["memory_id"].clone()),
+                    "content": raw["raw_memory"],
+                    "memory_type": "decision",
+                    "source_refs": [{"stage1_id": stage1_id, "evidence_indexes": [0]}],
+                    "supersedes": [],
+                    "reason": "Durable test input"
+                }));
+                dispositions.push(json!({
+                    "stage1_id": stage1_id,
+                    "disposition": "used",
+                    "reason": "Consolidated"
+                }));
+            }
+            return Json(json!({
+                "choices": [{
+                    "message": {"content": json!({
+                        "memory_summary": "Durable decisions from test notes.",
+                        "actions": actions,
+                        "raw_dispositions": dispositions,
+                    }).to_string()},
+                    "finish_reason": "stop"
+                }]
+            }));
+        }
+        let call = calls.fetch_add(1, Ordering::SeqCst);
+        let content = if call == 0 {
+            r#"{"source_summary":"First summary","source_slug":"first","raw_memory":"The first note records a durable decision."}"#
+        } else if call == 1 {
+            r#"{"source_slug":"second","raw_memory":"The second note records a durable decision.","evidence":[{"start_line":1,"end_line":1}]}"#
+        } else if call == 2 || call == 3 {
+            r#"{"source_summary":"First summary","source_slug":"first","raw_memory":"The first note records a durable decision.","evidence":[{"start_line":1,"end_line":1}]}"#
+        } else {
+            r#"{"source_summary":"Second summary","source_slug":"second","raw_memory":"The second note records a durable decision.","evidence":[{"start_line":1,"end_line":1}]}"#
+        };
+        assert_eq!(request["model"], "fake-extraction");
+        Json(json!({
+            "choices": [{
+                "message": {"content": content},
+                "finish_reason": "stop"
+            }]
+        }))
+    }
+
+    #[test]
+    fn memory_extraction_jobs_preserve_redacted_provider_error_codes() {
+        assert_eq!(
+            memory_extract_error_outcome(MemoryError::Provider(ProviderError::Transport {
+                code: "provider_connect_failed",
+                retryable: true,
+            })),
+            JobOutcome::Retry {
+                delay: Duration::from_secs(10),
+                code: "provider_connect_failed",
+            }
+        );
+        assert_eq!(
+            memory_extract_error_outcome(MemoryError::Provider(ProviderError::EndpointDenied)),
+            JobOutcome::Failed {
+                code: "provider_endpoint_denied",
+            }
+        );
+        assert_eq!(
+            memory_extract_error_outcome(MemoryError::Provider(ProviderError::Transport {
+                code: "provider_response_timeout",
+                retryable: false,
+            })),
+            JobOutcome::Failed {
+                code: "provider_response_timeout",
+            }
+        );
+    }
+
+    #[test]
+    fn one_model_output_failure_does_not_open_the_batch_circuit() {
+        assert!(!memory_output_failure_limit_reached(1));
+        assert!(!memory_output_failure_limit_reached(2));
+        assert!(memory_output_failure_limit_reached(3));
+    }
+
+    #[test]
+    fn job_progress_path_logging_is_stable_but_does_not_emit_the_path() {
+        let path = VaultPath::parse("private/project/roadmap.md").unwrap();
+        let hash = redacted_path_hash(&path);
+        assert!(hash.starts_with("sha256:"));
+        assert_eq!(hash, redacted_path_hash(&path));
+        assert!(!hash.contains(path.as_str()));
+    }
+
+    #[tokio::test]
+    async fn legacy_external_change_event_still_admits_memory_extraction() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("legacy-event").unwrap(),
+            PathBuf::from(directory.path()).join("content"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Legacy event", VaultStatus::Active)
+            .await
+            .unwrap();
+        mark_pipeline_current(&state, &context).await;
+        let memory = test_memory_service(&state);
+        memory
+            .set_extraction_policy(
+                &context,
+                ExtractionPolicy {
+                    enabled: true,
+                    ..ExtractionPolicy::default()
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let event = OutboxEventRecord {
+            id: EventId::new(),
+            vault_id: Some(context.id()),
+            event_type: "external_change".to_owned(),
+            aggregate_type: "file".to_owned(),
+            aggregate_id: FileId::new().to_string(),
+            payload: serde_json::json!({
+                "operation": "external_change",
+                "path": "legacy.md",
+            }),
+            created_at: 1,
+            available_at: 1,
+            claimed_by: None,
+            claimed_until: None,
+            delivered_at: None,
+            attempts: 0,
+            last_error: None,
+            dead_lettered: false,
+            dead_letter_reason: None,
+        };
+        outbox_to_job_handler(state.clone(), memory.clone())(event)
+            .await
+            .unwrap();
+
+        let extraction_jobs = state
+            .jobs()
+            .list(&context, None, Some("memory.extract"), 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(extraction_jobs.len(), 1);
+        assert_eq!(
+            extraction_jobs[0].payload["pipeline_generation"],
+            MEMORY_PIPELINE_GENERATION
+        );
+        let revalidation_jobs = state
+            .jobs()
+            .list(&context, None, Some("memory.revalidate"), 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(revalidation_jobs.len(), 1);
+        assert_eq!(
+            revalidation_jobs[0].payload["pipeline_generation"],
+            MEMORY_PIPELINE_GENERATION
+        );
+
+        state
+            .settings()
+            .set_vault(
+                &context,
+                "memory.extraction.policy",
+                &json!({"enabled": true, "max_candidates_per_note": 11}),
+                WritePrecondition::ExactRevision(Revision::new(1)),
+                None,
+            )
+            .await
+            .unwrap();
+        let invalid_policy_event = OutboxEventRecord {
+            id: EventId::new(),
+            vault_id: Some(context.id()),
+            event_type: "FileUpdated".to_owned(),
+            aggregate_type: "file".to_owned(),
+            aggregate_id: FileId::new().to_string(),
+            payload: json!({"operation": "replace", "path": "invalid-policy.md"}),
+            created_at: 2,
+            available_at: 2,
+            claimed_by: None,
+            claimed_until: None,
+            delivered_at: None,
+            attempts: 0,
+            last_error: None,
+            dead_lettered: false,
+            dead_letter_reason: None,
+        };
+        outbox_to_job_handler(state.clone(), memory)(invalid_policy_event)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .jobs()
+                .list(&context, None, Some("memory.extract"), 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            state
+                .jobs()
+                .list(&context, None, Some("index.rebuild"), 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_cutover_blocks_memory_event_jobs_until_reset_completes() {
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("pipeline-cutover-event").unwrap(),
+            "/srv/pipeline-cutover-event".into(),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Pipeline cutover event", VaultStatus::Active)
+            .await
+            .unwrap();
+        let memory = test_memory_service(&state);
+        memory
+            .set_extraction_policy(
+                &context,
+                ExtractionPolicy {
+                    enabled: true,
+                    ..ExtractionPolicy::default()
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let event = OutboxEventRecord {
+            id: EventId::new(),
+            vault_id: Some(context.id()),
+            event_type: "FileUpdated".to_owned(),
+            aggregate_type: "file".to_owned(),
+            aggregate_id: FileId::new().to_string(),
+            payload: json!({"operation": "replace", "path": "note.md"}),
+            created_at: 1,
+            available_at: 1,
+            claimed_by: None,
+            claimed_until: None,
+            delivered_at: None,
+            attempts: 0,
+            last_error: None,
+            dead_lettered: false,
+            dead_letter_reason: None,
+        };
+        outbox_to_job_handler(state.clone(), memory)(event)
+            .await
+            .unwrap();
+
+        assert!(
+            state
+                .jobs()
+                .list(&context, None, Some("memory.extract"), 10, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            state
+                .jobs()
+                .list(&context, None, Some("index.rebuild"), 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 
     #[tokio::test]
     async fn cancellation_wakes_waiters_and_supervisor_has_safe_start_state() {
@@ -1433,7 +3639,7 @@ mod tests {
             .unwrap();
         let supervisor = WorkerSupervisor::new(
             state.clone(),
-            outbox_to_job_handler(state),
+            test_outbox_handler(&state),
             WorkerConfig::default(),
         )
         .unwrap();
@@ -1478,7 +3684,7 @@ mod tests {
         });
         let supervisor = WorkerSupervisor::new(
             state.clone(),
-            outbox_to_job_handler(state.clone()),
+            test_outbox_handler(&state),
             WorkerConfig {
                 poll_interval: Duration::from_millis(5),
                 lease_duration: Duration::from_millis(100),
@@ -1538,6 +3744,380 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn long_job_does_not_block_later_jobs_from_free_capacity() {
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("fair-job-dispatch").unwrap(),
+            "/srv/fair-job-dispatch".into(),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Fair job dispatch", VaultStatus::Active)
+            .await
+            .unwrap();
+        let blocker = state
+            .jobs()
+            .enqueue(
+                &context,
+                "test.fair",
+                "fair:blocker",
+                &json!({"blocked": true}),
+                0,
+                3,
+                0,
+            )
+            .await
+            .unwrap();
+        state
+            .jobs()
+            .enqueue(
+                &context,
+                "test.fair",
+                "fair:first-short",
+                &json!({"blocked": false}),
+                0,
+                3,
+                0,
+            )
+            .await
+            .unwrap();
+
+        let release = Arc::new(Notify::new());
+        let short_completions = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum_active = Arc::new(AtomicUsize::new(0));
+        let handler: JobHandler = Arc::new({
+            let release = release.clone();
+            let short_completions = short_completions.clone();
+            let active = active.clone();
+            let maximum_active = maximum_active.clone();
+            move |job, cancellation| {
+                let release = release.clone();
+                let short_completions = short_completions.clone();
+                let active = active.clone();
+                let maximum_active = maximum_active.clone();
+                Box::pin(async move {
+                    let running = active.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+                    maximum_active.fetch_max(running, Ordering::SeqCst);
+                    let outcome = if job.payload["blocked"].as_bool().unwrap_or(false) {
+                        tokio::select! {
+                            _ = release.notified() => JobOutcome::Complete,
+                            _ = cancellation.cancelled() => JobOutcome::Cancelled,
+                        }
+                    } else {
+                        short_completions.fetch_add(1, Ordering::SeqCst);
+                        JobOutcome::Complete
+                    };
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    outcome
+                })
+            }
+        });
+        let supervisor = WorkerSupervisor::new(
+            state.clone(),
+            test_outbox_handler(&state),
+            WorkerConfig {
+                poll_interval: Duration::from_millis(5),
+                lease_duration: Duration::from_millis(100),
+                batch_size: 16,
+                concurrency: 2,
+                ..WorkerConfig::default()
+            },
+        )
+        .unwrap();
+        supervisor
+            .register_job_handler("test.fair", handler)
+            .unwrap();
+        let shutdown = Cancellation::default();
+        let running = tokio::spawn({
+            let supervisor = supervisor.clone();
+            let shutdown = shutdown.clone();
+            async move { supervisor.run(shutdown).await }
+        });
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let blocker_running = state
+                    .jobs()
+                    .get(&context, blocker.id)
+                    .await
+                    .unwrap()
+                    .is_some_and(|job| job.status == JobStatus::Running);
+                if blocker_running && short_completions.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let later = state
+            .jobs()
+            .enqueue(
+                &context,
+                "test.fair",
+                "fair:later-short",
+                &json!({"blocked": false}),
+                0,
+                3,
+                now_millis(),
+            )
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let later_completed = state
+                    .jobs()
+                    .get(&context, later.id)
+                    .await
+                    .unwrap()
+                    .is_some_and(|job| job.status == JobStatus::Completed);
+                let blocker_still_running = state
+                    .jobs()
+                    .get(&context, blocker.id)
+                    .await
+                    .unwrap()
+                    .is_some_and(|job| job.status == JobStatus::Running);
+                if later_completed && blocker_still_running {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(short_completions.load(Ordering::SeqCst), 2);
+        assert!(maximum_active.load(Ordering::SeqCst) <= 2);
+
+        release.notify_one();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if state.jobs().pending_count().await.unwrap() == 0 {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        shutdown.cancel();
+        timeout(Duration::from_secs(2), running)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pipeline_reset_waits_for_running_extraction_and_cancels_queued_memory_work() {
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("legacy-reset-quiescence").unwrap(),
+            "/srv/legacy-reset-quiescence".into(),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Legacy reset quiescence", VaultStatus::Active)
+            .await
+            .unwrap();
+        let extraction = state
+            .jobs()
+            .enqueue(
+                &context,
+                "memory.extract",
+                "legacy:old-extraction",
+                &json!({"scope": "all"}),
+                0,
+                5,
+                0,
+            )
+            .await
+            .unwrap();
+        let now = now_millis();
+        state
+            .jobs()
+            .claim_batch("legacy-worker", now, now.saturating_add(60_000), 1)
+            .await
+            .unwrap();
+        let consolidation = state
+            .jobs()
+            .enqueue(
+                &context,
+                "memory.consolidate",
+                "legacy:old-consolidation",
+                &json!({}),
+                0,
+                5,
+                0,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !quiesce_memory_pipeline_jobs(&state, &context)
+                .await
+                .unwrap()
+        );
+        let extraction = state
+            .jobs()
+            .get(&context, extraction.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(extraction.status, JobStatus::Running);
+        assert!(extraction.cancel_requested);
+        assert_eq!(
+            state
+                .jobs()
+                .get(&context, consolidation.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Cancelled
+        );
+
+        state
+            .jobs()
+            .cancel_claimed(extraction.id, "legacy-worker")
+            .await
+            .unwrap();
+        assert!(
+            quiesce_memory_pipeline_jobs(&state, &context)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn obsolete_memory_job_with_old_cursor_is_discarded_before_handler_call() {
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("obsolete-memory-job").unwrap(),
+            "/srv/obsolete-memory-job".into(),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Obsolete memory job", VaultStatus::Active)
+            .await
+            .unwrap();
+        let old = state
+            .jobs()
+            .enqueue(
+                &context,
+                "memory.extract",
+                "obsolete:memory-extract",
+                &json!({
+                    "scope": "all",
+                    "reason": "old_pipeline",
+                }),
+                0,
+                5,
+                0,
+            )
+            .await
+            .unwrap();
+        let now = now_millis();
+        state
+            .jobs()
+            .claim_batch("old-worker", now, now.saturating_add(60_000), 1)
+            .await
+            .unwrap();
+        state
+            .jobs()
+            .update_progress(
+                old.id,
+                "old-worker",
+                &json!({
+                    "phase": "extracting_note",
+                    "completed": 68,
+                    "total": 178,
+                    "last_completed_path": "notes/068.md",
+                }),
+            )
+            .await
+            .unwrap();
+        state
+            .jobs()
+            .release_worker_leases("old-worker")
+            .await
+            .unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler: JobHandler = Arc::new({
+            let calls = calls.clone();
+            move |_job, _cancellation| {
+                let calls = calls.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    JobOutcome::Complete
+                })
+            }
+        });
+        let supervisor = WorkerSupervisor::new(
+            state.clone(),
+            test_outbox_handler(&state),
+            WorkerConfig {
+                poll_interval: Duration::from_millis(5),
+                lease_duration: Duration::from_millis(100),
+                concurrency: 1,
+                ..WorkerConfig::default()
+            },
+        )
+        .unwrap();
+        supervisor
+            .register_job_handler("memory.extract", handler)
+            .unwrap();
+        let shutdown = Cancellation::default();
+        let running = tokio::spawn({
+            let supervisor = supervisor.clone();
+            let shutdown = shutdown.clone();
+            async move { supervisor.run(shutdown).await }
+        });
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if state
+                    .jobs()
+                    .get(&context, old.id)
+                    .await
+                    .unwrap()
+                    .is_some_and(|job| job.status == JobStatus::Cancelled)
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let discarded = state.jobs().get(&context, old.id).await.unwrap().unwrap();
+        assert_eq!(discarded.progress.unwrap()["completed"], 68);
+
+        shutdown.cancel();
+        timeout(Duration::from_secs(2), running)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn supervisor_admits_outbox_to_a_durable_job_before_ack() {
         let directory = tempfile::tempdir().unwrap();
         let state = StateStore::connect_and_migrate("sqlite::memory:")
@@ -1576,7 +4156,7 @@ mod tests {
 
         let supervisor = WorkerSupervisor::new(
             state.clone(),
-            outbox_to_job_handler(state.clone()),
+            test_outbox_handler(&state),
             WorkerConfig {
                 poll_interval: Duration::from_millis(5),
                 lease_duration: Duration::from_millis(100),
@@ -1594,7 +4174,7 @@ mod tests {
         timeout(Duration::from_secs(2), async {
             loop {
                 if state.outbox().pending_count().await.unwrap() == 0
-                    && state.jobs().pending_count().await.unwrap() == 3
+                    && state.jobs().pending_count().await.unwrap() == 2
                 {
                     break;
                 }
@@ -1611,7 +4191,758 @@ mod tests {
             .unwrap();
         assert_eq!(supervisor.health().status, WorkerStatus::Stopped);
         assert_eq!(state.outbox().pending_count().await.unwrap(), 0);
-        assert_eq!(state.jobs().pending_count().await.unwrap(), 3);
+        assert_eq!(state.jobs().pending_count().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn full_vault_extraction_distinguishes_source_and_generated_output_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("mixed-extraction").unwrap(),
+            PathBuf::from(directory.path()).join("content"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Mixed extraction", VaultStatus::Active)
+            .await
+            .unwrap();
+        mark_pipeline_current(&state, &context).await;
+        let core_runtime = mcp_vault_core::VaultCoreRuntime::default();
+        let history_root = PathBuf::from(directory.path()).join("history");
+        let core = VaultCore::new(
+            state.clone(),
+            history_root.clone(),
+            VaultPathPolicy::default(),
+            StorageOptions::default(),
+            core_runtime.clone(),
+        );
+        let mut source_files = Vec::new();
+        for (path, body) in [
+            ("a.md", b"First note.".as_slice()),
+            ("b.md", b"Second note.".as_slice()),
+            ("source-invalid.md", b"\xff\xfe".as_slice()),
+        ] {
+            let created = core
+                .create_bytes(
+                    &context,
+                    &VaultPath::parse(path).unwrap(),
+                    body,
+                    Actor::system(),
+                    SourcePlane::System,
+                    None,
+                )
+                .await
+                .unwrap();
+            source_files.push(created.file);
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let provider_server = tokio::spawn({
+            let calls = calls.clone();
+            async move {
+                axum::serve(
+                    listener,
+                    Router::new()
+                        .route("/v1/chat/completions", post(mixed_extraction_response))
+                        .with_state(calls),
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let auth = AuthService::new(
+            state.auth(),
+            MasterKeyRing::from_bytes(1, &[8_u8; 32]).unwrap(),
+        );
+        let providers = ProviderService::new(state.clone(), auth);
+        providers
+            .set_provider_mode(&context, ProviderMode::LocalOnly, None)
+            .await
+            .unwrap();
+        let provider = providers
+            .create_provider(ProviderInput {
+                name: "mixed-extraction".to_owned(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url: url::Url::parse(&format!("http://{address}/v1/")).unwrap(),
+                settings: ProviderSettings::default(),
+                enabled: true,
+                secret: None,
+            })
+            .await
+            .unwrap();
+        let model = providers
+            .register_model(ModelInput {
+                provider_id: provider.id,
+                external_model_id: "fake-extraction".to_owned(),
+                capabilities: ModelCapabilities {
+                    structured_output: true,
+                    ..ModelCapabilities::default()
+                },
+                settings: ModelSettings::default(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        providers
+            .bind_model(
+                Some(&context),
+                "memory_extraction",
+                model.id,
+                json!({}),
+                None,
+            )
+            .await
+            .unwrap();
+        let consolidation_model = providers
+            .register_model(ModelInput {
+                provider_id: provider.id,
+                external_model_id: "fake-consolidation".to_owned(),
+                capabilities: ModelCapabilities {
+                    structured_output: true,
+                    ..ModelCapabilities::default()
+                },
+                settings: ModelSettings::default(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        providers
+            .bind_model(
+                Some(&context),
+                "memory_consolidation",
+                consolidation_model.id,
+                json!({}),
+                None,
+            )
+            .await
+            .unwrap();
+        let memory = MemoryService::with_provider_service(state.clone(), providers);
+        memory
+            .set_extraction_policy(
+                &context,
+                ExtractionPolicy {
+                    enabled: true,
+                    ..ExtractionPolicy::default()
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let job = state
+            .jobs()
+            .enqueue(
+                &context,
+                "memory.extract",
+                "test:mixed-extraction:all",
+                &json!({
+                    "pipeline_generation": MEMORY_PIPELINE_GENERATION,
+                    "scope": "all",
+                    "reason": "test",
+                }),
+                0,
+                5,
+                now_millis(),
+            )
+            .await
+            .unwrap();
+        let now = now_millis();
+        let mut claimed = state
+            .jobs()
+            .claim_batch("mixed-worker", now, now.saturating_add(60_000), 1)
+            .await
+            .unwrap();
+        let claimed = claimed.remove(0);
+        let outcome = memory_extract_job_handler(
+            state.clone(),
+            history_root.clone(),
+            core_runtime.clone(),
+            memory.clone(),
+        )(claimed, Cancellation::default())
+        .await;
+
+        assert_eq!(outcome, JobOutcome::Complete);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let progress = state
+            .jobs()
+            .get(&context, job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .progress
+            .unwrap();
+        assert_eq!(progress["phase"], "completed_with_errors");
+        assert_eq!(progress["completed"], 3);
+        assert_eq!(progress["notes_evaluated"], 2);
+        assert_eq!(progress["generated_output_failures"], 1);
+        assert_eq!(progress["source_ingestion_failures"], 1);
+        assert_eq!(progress["raw_memories_staged"], 1);
+        assert_eq!(
+            progress["generated_output_failure_notes"][0]["path"],
+            "a.md"
+        );
+        assert_eq!(
+            progress["generated_output_failure_notes"][0]["error_code"],
+            "provider_schema_invalid"
+        );
+        assert_eq!(
+            progress["generated_output_failure_notes"][0]["schema_issue"],
+            "required_property_missing"
+        );
+        assert_eq!(
+            progress["generated_output_failure_notes"][0]["schema_path"],
+            "$.evidence"
+        );
+        assert_eq!(
+            progress["source_ingestion_failure_notes"][0]["path"],
+            "source-invalid.md"
+        );
+        assert_eq!(
+            progress["source_ingestion_failure_notes"][0]["error_code"],
+            "memory_source_not_utf8"
+        );
+        assert!(
+            state
+                .memory()
+                .get_stage1_output(&context, "note", &source_files[0].id.to_string())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let second_output = state
+            .memory()
+            .get_stage1_output(&context, "note", &source_files[1].id.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second_output.source_summary, second_output.raw_memory);
+        assert!(
+            state
+                .memory()
+                .get_stage1_output(&context, "note", &source_files[2].id.to_string())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        state.jobs().complete(job.id, "mixed-worker").await.unwrap();
+        let now = now_millis();
+        let mut consolidation_jobs = state
+            .jobs()
+            .claim_batch("consolidation-worker", now, now.saturating_add(60_000), 1)
+            .await
+            .unwrap();
+        let consolidation_job = consolidation_jobs.remove(0);
+        assert_eq!(consolidation_job.job_type, "memory.consolidate");
+        let consolidation_id = consolidation_job.id;
+        let consolidation_outcome = memory_consolidate_job_handler(
+            state.clone(),
+            history_root.clone(),
+            core_runtime.clone(),
+            memory.clone(),
+        )(consolidation_job, Cancellation::default())
+        .await;
+        assert_eq!(consolidation_outcome, JobOutcome::Complete);
+        let consolidation_progress = state
+            .jobs()
+            .get(&context, consolidation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .progress
+            .unwrap();
+        assert_eq!(consolidation_progress["phase"], "completed");
+        assert_eq!(consolidation_progress["created"], 1);
+        assert_eq!(consolidation_progress["generation"], 1);
+        assert_eq!(state.memory().counts(&context).await.unwrap().active, 1);
+        state
+            .jobs()
+            .complete(consolidation_id, "consolidation-worker")
+            .await
+            .unwrap();
+
+        let incremental = state
+            .jobs()
+            .enqueue(
+                &context,
+                "memory.extract",
+                "test:mixed-extraction:incremental",
+                &json!({
+                    "pipeline_generation": MEMORY_PIPELINE_GENERATION,
+                    "scope": "all",
+                    "include_evaluated": false,
+                }),
+                0,
+                5,
+                now_millis(),
+            )
+            .await
+            .unwrap();
+        let now = now_millis();
+        let mut claimed = state
+            .jobs()
+            .claim_batch("incremental-worker", now, now.saturating_add(60_000), 1)
+            .await
+            .unwrap();
+        let incremental_outcome = memory_extract_job_handler(
+            state.clone(),
+            history_root.clone(),
+            core_runtime.clone(),
+            memory.clone(),
+        )(claimed.remove(0), Cancellation::default())
+        .await;
+        assert_eq!(incremental_outcome, JobOutcome::Complete);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        let incremental_progress = state
+            .jobs()
+            .get(&context, incremental.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .progress
+            .unwrap();
+        assert_eq!(incremental_progress["phase"], "completed_with_errors");
+        assert_eq!(incremental_progress["notes_evaluated"], 1);
+        assert_eq!(incremental_progress["already_evaluated_skipped"], 1);
+        assert_eq!(incremental_progress["source_ingestion_failures"], 1);
+        state
+            .jobs()
+            .complete(incremental.id, "incremental-worker")
+            .await
+            .unwrap();
+        state
+            .jobs()
+            .request_cancel_type(&context, "memory.consolidate")
+            .await
+            .unwrap();
+
+        let forced = state
+            .jobs()
+            .enqueue(
+                &context,
+                "memory.extract",
+                "test:mixed-extraction:forced",
+                &json!({
+                    "pipeline_generation": MEMORY_PIPELINE_GENERATION,
+                    "scope": "all",
+                    "include_evaluated": true,
+                }),
+                0,
+                5,
+                now_millis(),
+            )
+            .await
+            .unwrap();
+        let now = now_millis();
+        let mut claimed = state
+            .jobs()
+            .claim_batch("forced-worker", now, now.saturating_add(60_000), 1)
+            .await
+            .unwrap();
+        let forced_outcome =
+            memory_extract_job_handler(state.clone(), history_root, core_runtime, memory)(
+                claimed.remove(0),
+                Cancellation::default(),
+            )
+            .await;
+        assert_eq!(forced_outcome, JobOutcome::Complete);
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+        let forced_progress = state
+            .jobs()
+            .get(&context, forced.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .progress
+            .unwrap();
+        assert_eq!(forced_progress["notes_evaluated"], 2);
+        assert_eq!(forced_progress["already_evaluated_skipped"], 0);
+        provider_server.abort();
+    }
+
+    #[tokio::test]
+    async fn consolidation_worker_drains_more_than_one_bounded_phase2_batch() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("consolidation-batches").unwrap(),
+            directory.path().join("content"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Consolidation batches", VaultStatus::Active)
+            .await
+            .unwrap();
+        let history_root = directory.path().join("history");
+        let core_runtime = mcp_vault_core::VaultCoreRuntime::default();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let provider_server = tokio::spawn({
+            let calls = calls.clone();
+            async move {
+                axum::serve(
+                    listener,
+                    Router::new()
+                        .route("/v1/chat/completions", post(mixed_extraction_response))
+                        .with_state(calls),
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let auth = AuthService::new(
+            state.auth(),
+            MasterKeyRing::from_bytes(1, &[8_u8; 32]).unwrap(),
+        );
+        let providers = ProviderService::new(state.clone(), auth);
+        providers
+            .set_provider_mode(&context, ProviderMode::LocalOnly, None)
+            .await
+            .unwrap();
+        let provider = providers
+            .create_provider(ProviderInput {
+                name: "batched-consolidation".to_owned(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url: url::Url::parse(&format!("http://{address}/v1/")).unwrap(),
+                settings: ProviderSettings::default(),
+                enabled: true,
+                secret: None,
+            })
+            .await
+            .unwrap();
+        let model = providers
+            .register_model(ModelInput {
+                provider_id: provider.id,
+                external_model_id: "fake-consolidation".to_owned(),
+                capabilities: ModelCapabilities {
+                    structured_output: true,
+                    ..ModelCapabilities::default()
+                },
+                settings: ModelSettings::default(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        providers
+            .bind_model(
+                Some(&context),
+                "memory_consolidation",
+                model.id,
+                json!({}),
+                None,
+            )
+            .await
+            .unwrap();
+        let memory = MemoryService::with_provider_service(state.clone(), providers);
+        for index in 0..257_u32 {
+            state
+                .memory()
+                .upsert_stage1_output(
+                    &context,
+                    &MemoryStage1OutputRecord {
+                        id: MemoryRawId::new(),
+                        vault_id: context.id(),
+                        source_type: "explicit_agent".to_owned(),
+                        source_key: format!("batch-source-{index}"),
+                        source_file_id: None,
+                        source_path: None,
+                        source_revision: None,
+                        profile_hash: "batch-test".to_owned(),
+                        pipeline_version: 8,
+                        prompt_version: "batch-test".to_owned(),
+                        raw_memory: format!("Durable batched decision {index}."),
+                        source_summary: format!("Summary {index}."),
+                        source_slug: Some(format!("batch-{index}")),
+                        evidence: json!([{
+                            "source_type": "explicit_agent",
+                            "source_file_id": null,
+                            "source_path": null,
+                            "source_revision": null,
+                            "start_line": null,
+                            "end_line": null,
+                            "excerpt_hash": null
+                        }]),
+                        metadata: json!({"memory_type": "decision"}),
+                        output_hash: format!("batch-output-{index}"),
+                        status: "ready".to_owned(),
+                        generated_at: i64::from(index),
+                        updated_at: i64::from(index),
+                        usage_count: 0,
+                        last_usage: None,
+                        selected_for_phase2: false,
+                        selected_for_phase2_hash: None,
+                        selected_for_phase2_at: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let job = state
+            .jobs()
+            .enqueue(
+                &context,
+                "memory.consolidate",
+                "test:memory-consolidate:multiple-batches",
+                &json!({
+                    "pipeline_generation": MEMORY_PIPELINE_GENERATION,
+                    "reason": "test",
+                }),
+                0,
+                5,
+                now_millis(),
+            )
+            .await
+            .unwrap();
+        let now = now_millis();
+        let mut claimed = state
+            .jobs()
+            .claim_batch("batch-worker", now, now.saturating_add(600_000), 1)
+            .await
+            .unwrap();
+        let outcome =
+            memory_consolidate_job_handler(state.clone(), history_root, core_runtime, memory)(
+                claimed.remove(0),
+                Cancellation::default(),
+            )
+            .await;
+        assert_eq!(outcome, JobOutcome::Complete);
+        assert_eq!(
+            state.memory().pending_stage1_count(&context).await.unwrap(),
+            0
+        );
+        let progress = state
+            .jobs()
+            .get(&context, job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .progress
+            .unwrap();
+        assert_eq!(progress["phase"], "completed");
+        assert_eq!(progress["raw_inputs"], 257);
+        assert_eq!(progress["generation"], 2);
+        assert_eq!(progress["created"], 256);
+        assert_eq!(progress["updated"], 1);
+        provider_server.abort();
+    }
+
+    #[tokio::test]
+    async fn pipeline_regeneration_is_fresh_after_delayed_phase1_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("delayed-legacy-reextract").unwrap(),
+            directory.path().join("content"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Delayed re-extract", VaultStatus::Active)
+            .await
+            .unwrap();
+        let core = VaultCore::new(
+            state.clone(),
+            directory.path().join("history"),
+            VaultPathPolicy::default(),
+            StorageOptions::default(),
+            Default::default(),
+        );
+        let auth = AuthService::new(
+            state.auth(),
+            MasterKeyRing::from_bytes(1, &[8_u8; 32]).unwrap(),
+        );
+        let providers = ProviderService::new(state.clone(), auth);
+        let memory = MemoryService::with_provider_service(state.clone(), providers.clone());
+        memory.reset_pipeline(&context, &core).await.unwrap();
+        assert_eq!(
+            ensure_memory_pipeline_regeneration_job(&state, &memory, &context, None)
+                .await
+                .unwrap(),
+            PipelineRegenerationAdmission::AwaitingConfiguration
+        );
+        assert!(
+            state
+                .memory()
+                .get_consolidation_state(&context)
+                .await
+                .unwrap()
+                .unwrap()
+                .regeneration_pending
+        );
+
+        providers
+            .set_provider_mode(&context, ProviderMode::LocalOnly, None)
+            .await
+            .unwrap();
+        let provider = providers
+            .create_provider(ProviderInput {
+                name: "delayed-extraction".to_owned(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url: url::Url::parse("http://127.0.0.1:1/v1/").unwrap(),
+                settings: ProviderSettings::default(),
+                enabled: true,
+                secret: None,
+            })
+            .await
+            .unwrap();
+        let model = providers
+            .register_model(ModelInput {
+                provider_id: provider.id,
+                external_model_id: "delayed-model".to_owned(),
+                capabilities: ModelCapabilities {
+                    structured_output: true,
+                    ..ModelCapabilities::default()
+                },
+                settings: ModelSettings::default(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        providers
+            .bind_model(
+                Some(&context),
+                "memory_extraction",
+                model.id,
+                json!({}),
+                None,
+            )
+            .await
+            .unwrap();
+        providers
+            .bind_model(
+                Some(&context),
+                "memory_consolidation",
+                model.id,
+                json!({}),
+                None,
+            )
+            .await
+            .unwrap();
+        memory
+            .set_extraction_policy(
+                &context,
+                ExtractionPolicy {
+                    enabled: true,
+                    ..ExtractionPolicy::default()
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let previous = state
+            .jobs()
+            .enqueue(
+                &context,
+                "memory.extract",
+                "test:pre-reset-extraction",
+                &json!({
+                    "pipeline_generation": MEMORY_PIPELINE_GENERATION,
+                    "scope": "all",
+                    "include_evaluated": false,
+                    "reason": "pre_reset_version",
+                }),
+                100,
+                5,
+                now_millis(),
+            )
+            .await
+            .unwrap();
+        let now = now_millis();
+        let claimed = state
+            .jobs()
+            .claim_batch("pre-reset-worker", now, now.saturating_add(60_000), 1)
+            .await
+            .unwrap();
+        assert_eq!(claimed.first().map(|job| job.id), Some(previous.id));
+        state
+            .jobs()
+            .update_progress(
+                previous.id,
+                "pre-reset-worker",
+                &json!({
+                    "phase": "extracting_note",
+                    "completed": 57,
+                    "total": 178,
+                    "last_completed_path": "notes/057.md",
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            ensure_memory_pipeline_regeneration_job(&state, &memory, &context, None)
+                .await
+                .unwrap(),
+            PipelineRegenerationAdmission::AwaitingOtherExtraction
+        );
+        assert!(
+            state
+                .memory()
+                .get_consolidation_state(&context)
+                .await
+                .unwrap()
+                .unwrap()
+                .regeneration_pending
+        );
+        state
+            .jobs()
+            .request_cancel(&context, previous.id)
+            .await
+            .unwrap();
+        state
+            .jobs()
+            .cancel_claimed(previous.id, "pre-reset-worker")
+            .await
+            .unwrap();
+        assert_eq!(
+            ensure_memory_pipeline_regeneration_job(&state, &memory, &context, None)
+                .await
+                .unwrap(),
+            PipelineRegenerationAdmission::Admitted
+        );
+        assert!(
+            !state
+                .memory()
+                .get_consolidation_state(&context)
+                .await
+                .unwrap()
+                .unwrap()
+                .regeneration_pending
+        );
+        let job = state
+            .jobs()
+            .find_active_by_type(&context, "memory.extract")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.payload["scope"], "all");
+        assert_eq!(job.payload["include_evaluated"], false);
+        assert_eq!(job.payload["fresh_start"], true);
+        assert_eq!(job.payload["reason"], "pipeline_cutover");
+        assert_eq!(
+            job.payload["pipeline_generation"],
+            MEMORY_PIPELINE_GENERATION
+        );
+        assert_ne!(job.id, previous.id);
+        assert!(job.progress.is_none());
     }
 
     #[tokio::test]
@@ -1632,6 +4963,7 @@ mod tests {
             .insert(&context, "Drain test", VaultStatus::Active)
             .await
             .unwrap();
+        mark_pipeline_current(&state, &context).await;
         let maintenance = MaintenanceGate::new();
         let core_runtime = mcp_vault_core::VaultCoreRuntime::new(maintenance.clone());
         let history_root = PathBuf::from(directory.path()).join("history");
@@ -1657,9 +4989,38 @@ mod tests {
             MasterKeyRing::from_bytes(1, &[8_u8; 32]).unwrap(),
         );
         let memory = MemoryService::new(state.clone(), auth);
+        memory
+            .set_extraction_policy(
+                &context,
+                ExtractionPolicy {
+                    enabled: true,
+                    ..ExtractionPolicy::default()
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let backfill = state
+            .jobs()
+            .enqueue(
+                &context,
+                "memory.extract",
+                "test:memory-extract:all",
+                &json!({
+                    "pipeline_generation": MEMORY_PIPELINE_GENERATION,
+                    "scope": "all",
+                    "reason": "test_backfill",
+                }),
+                0,
+                5,
+                now_millis(),
+            )
+            .await
+            .unwrap();
         let supervisor = WorkerSupervisor::new(
             state.clone(),
-            outbox_to_job_handler(state.clone()),
+            outbox_to_job_handler(state.clone(), memory.clone()),
             WorkerConfig {
                 poll_interval: Duration::from_millis(5),
                 lease_duration: Duration::from_millis(250),
@@ -1678,6 +5039,7 @@ mod tests {
                     state.clone(),
                     history_root.clone(),
                     core_runtime.clone(),
+                    mcp_vault_indexer::IndexService::new(state.clone()),
                 ),
             )
             .unwrap();
@@ -1706,9 +5068,43 @@ mod tests {
         })
         .await
         .unwrap();
-        let jobs = state.jobs().list(&context, None, 10, 0).await.unwrap();
-        assert_eq!(jobs.len(), 3);
-        assert!(jobs.iter().all(|job| job.status == JobStatus::Completed));
+        let jobs = state
+            .jobs()
+            .list(&context, None, None, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(jobs.len(), 4);
+        assert!(
+            jobs.iter()
+                .all(|job| matches!(job.status, JobStatus::Completed | JobStatus::Failed))
+        );
+        let extraction = jobs
+            .iter()
+            .find(|job| job.job_type == "memory.extract" && job.id != backfill.id)
+            .unwrap();
+        assert_eq!(extraction.status, JobStatus::Failed);
+        assert_eq!(
+            extraction.last_error.as_deref(),
+            Some("memory_extraction_model_unbound")
+        );
+        let backfill = jobs.iter().find(|job| job.id == backfill.id).unwrap();
+        assert_eq!(backfill.status, JobStatus::Failed);
+        let progress = backfill.progress.as_ref().unwrap();
+        assert_eq!(progress["phase"], "failed");
+        assert_eq!(progress["completed"], 0);
+        assert_eq!(progress["total"], 1);
+        assert_eq!(progress["current_index"], 1);
+        assert_eq!(progress["current_path"], "note.md");
+        assert!(progress["last_completed_path"].is_null());
+        assert_eq!(progress["raw_memories_staged"], 0);
+        assert_eq!(progress["source_ingestion_failures"], 0);
+        assert_eq!(progress["generated_output_failures"], 0);
+        assert_eq!(progress["error_code"], "memory_extraction_model_unbound");
+        assert!(progress["note_started_at"].is_number());
+        assert!(progress["last_note_elapsed_ms"].is_number());
+        assert!(progress.get("note_body").is_none());
+        assert!(progress.get("prompt").is_none());
+        assert!(progress.get("provider_response").is_none());
         assert_eq!(
             state
                 .index()

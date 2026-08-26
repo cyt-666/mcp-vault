@@ -136,6 +136,12 @@ CREATE TABLE encrypted_secrets (
 
 Encryption uses an installation master key and authenticated encryption. Provider secrets are never returned after save; the UI receives only presence and a masked hint stored separately.
 
+Provider secrets are owned by `owner_type = 'provider'` and the Provider ID.
+A successful secret-bearing Provider edit retains only the newly referenced
+ciphertext. Deleting the Provider removes all ciphertext owned by that ID in
+the same State transaction as dependent model/binding/vector cleanup; audit
+metadata records counts only, never hints or secret values.
+
 Migration `0003_auth_security.sql` adds the non-secret `hint`, records the
 digest key version used by Admin sessions and MCP PATs, and adds the protected
 OAuth resource identifier. Existing migrations remain immutable.
@@ -669,7 +675,8 @@ The complete memory schema is defined in `memory-system.md`. At minimum it inclu
 
 - canonical memories;
 - multiple provenance sources;
-- candidates and review decisions;
+- sourced Phase 1 raw outputs and no-output coverage;
+- prepared Phase 2 proposals and committed consolidation generations;
 - entities, tags, and relations;
 - FTS projection;
 - embeddings;
@@ -678,15 +685,58 @@ The complete memory schema is defined in `memory-system.md`. At minimum it inclu
 
 Memory queries always include `vault_id`.
 
-Migration `0007_memory_state.sql` owns `memories`, `memory_sources`,
-`memory_entities`, `memory_tags`, `memory_relations`, `memory_candidates`,
-`memory_idempotency`, `memory_diagnostics`, and the rebuildable `memory_fts`
-projection. Composite foreign keys include `(vault_id, memory_id)` or
-`(vault_id, file_id)` wherever a row references another Vault-owned object.
+Migration `0007_memory_state.sql` owns final `memories`, `memory_sources`,
+`memory_entities`, `memory_tags`, `memory_relations`, legacy
+`memory_candidates`, explicit-command idempotency, diagnostics, and the
+rebuildable `memory_fts` projection. `memory_candidates` is retained only as an
+obsolete prerelease schema and is cleared by migration 0011; current Admin/MCP paths
+do not create, review, or promote candidate rows. Composite foreign keys
+include `(vault_id, memory_id)` or `(vault_id, file_id)` wherever a row
+references another Vault-owned object.
 Active and archived memory Markdown is materialized under the reserved
 managed namespace through explicit Vault Core methods; its `file_entries` and
 `file_revisions` rows are hidden from ordinary protocol paths and excluded
 from reconciliation delete inference.
+
+The Vault-scoped extraction setting includes fixed `source_mode: "automatic"`,
+`max_evidence_per_note`, and a per-note timeout. Legacy `explicit_only`,
+`all_notes`, and `max_candidates_per_note` inputs deserialize as migration
+aliases. No author-facing note metadata or score threshold controls source
+admission.
+
+Migration `0010_codex_two_phase_memory.sql` adds the Codex-style operational
+state:
+
+- `memory_stage1_outputs`: one current Vault/source row with source identity,
+  optional note revision, extraction profile/prompt/pipeline, redacted semantic
+  raw memory and source summary, evidence metadata JSON, admission metadata,
+  output hash, `ready|no_output|withdrawn`, and exact Phase 2 selection state;
+- `memory_consolidation_proposals`: one prepared/applied/rejected untrusted
+  proposal per Vault/input hash, including model/Provider/prompt identity,
+  exact raw/current-memory snapshot metadata, locally captured base revisions,
+  and the validated Phase 2 output;
+- `memory_consolidation_state`: committed generation, compact summary, last
+  input/proposal, success time, current `pipeline_generation`, and the durable
+  post-cutover `regeneration_pending` admission flag;
+- a partial unique index that permits at most one queued/running/retry-wait
+  `memory.consolidate` job per Vault.
+
+Stage 1 evidence JSON contains source type, file ID/path/revision, optional line
+range, and excerpt hash; exact model quotations are not persisted. Generated
+raw/summary/final strings are best-effort secret-redacted before storage.
+`profile_hash` covers output-affecting policy, prompt/pipeline, binding, model,
+and Provider configuration. A valid `no_output` is successful coverage. A
+failed call does not replace the current output.
+
+Phase 2 input selection and generation advancement are separate. The prepared
+proposal is persisted before Vault Core writes. `commit_consolidation` marks the
+proposal applied, selects exact `(raw_id, output_hash)` pairs, increments usage,
+and advances the Vault generation in one SQLite transaction. The commit is
+idempotent for an already applied proposal/input hash. Prepared proposals also
+provide the recovery identity for byte-identical managed-file adoption after a
+file-write/projection-commit interruption. Permanent final-memory
+deletion removes the current projection and managed current file while Vault
+Core history and backup retention remain independent.
 
 ## 14. Provider and model configuration
 
@@ -781,6 +831,15 @@ embedding_vectors BLOB row referenced by embedding_records. Both metadata and
 vector bytes are derived and may be deleted and rebuilt independently of
 canonical notes and memory Markdown.
 
+For `object_type = 'note'`, `object_id` is the stable `FileId` and `chunk_key`
+is a versioned deterministic plain-text chunk key such as `text-v1:0000`.
+`content_hash` covers the exact title/path/heading context and chunk text sent
+to the embedding model. The Index service resolves the reference from the
+current `notes` projection before a job sends content, skips a stale hash, and
+removes obsolete current-model vectors before scheduling replacements. No
+separate canonical chunk table is required; chunks are reproducible from the
+canonical note-derived projection.
+
 ## 16. Audit
 
 ```sql
@@ -841,7 +900,8 @@ artifact.
 | FTS | Note projection or files | Yes |
 | Embeddings | Canonical text + model configuration | Yes |
 | Topic projections | Files + taxonomy + provider config | Yes |
-| Automatic candidates | Source notes + extraction version | Yes |
+| Stage 1 SQLite projection | Managed raw/source-summary artifacts + source notes | Yes |
+| Phase 2/query projection | Canonical memory artifacts | Yes |
 | Active memory Markdown | Canonical memory files | No; must be preserved |
 | Credentials and settings | Operational DB | No |
 | Revisions/history | Operational DB + blob store | No |
@@ -857,10 +917,19 @@ artifact.
 - Provider/model changes schedule new derived work; they do not rewrite source notes.
 - Migration 0006 upgrades provider/model configuration and adds rebuildable
   provider health and Vault-scoped embedding/vector state.
-- Migration 0007 adds the Vault-scoped memory projection, candidates,
-  provenance, lifecycle/recall state, idempotency, diagnostics, and FTS.
+- Migration 0007 adds the Vault-scoped final-memory projection, legacy
+  candidate upgrade state, provenance, lifecycle/recall state, idempotency,
+  diagnostics, and FTS.
 - Migration 0008 adds the backup catalog and keeps artifact data outside
   SQLite so catalog cleanup cannot become an implicit knowledge deletion.
 - Migration 0009 adds the installation-key verifier and removes legacy cached
   OAuth key JSON that cannot be proven public-only.
+- Migration 0010 adds Phase 1 raw/no-output state, prepared Phase 2 proposals,
+  committed generations, pipeline state, and the one-active-
+  consolidation-per-Vault index.
+- Migration 0011 performs the ADR-0017 prerelease cutover: it deletes every old
+  memory job and database memory row, preserves ordinary Vault/provider/audit/
+  backup/non-memory state, recreates generation state with explicit
+  `pipeline_generation`/`regeneration_pending` fields, and admits filesystem
+  cleanup through the durable `memory.reset_pipeline` job.
 - Every migration must preserve Vault IDs and credential bindings.

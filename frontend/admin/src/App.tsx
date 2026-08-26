@@ -18,7 +18,7 @@ const pageEndpoints: Partial<Record<Page, string>> = {
   webdav: '/webdav/credentials',
   providers: '/providers',
   index: '/index/status',
-  jobs: '/jobs?limit=50',
+  jobs: '/jobs/overview?limit=50',
   audit: '/audit?limit=50',
   backup: '/backups?limit=50',
   system: '/system',
@@ -41,12 +41,55 @@ async function loadPage(page: Page): Promise<JsonObject> {
     return { ...connection, tokens: tokenData.tokens };
   }
 
-  if (page === 'memory') {
-    const [memoryData, candidateData] = await Promise.all([
-      adminApi.request<JsonObject>('/memories?limit=50'),
-      adminApi.request<{ candidates: unknown[] }>('/memory-candidates?limit=50'),
+  if (page === 'providers') {
+    const [providerData, bindingData] = await Promise.all([
+      adminApi.request<{ providers: unknown[]; provider_mode: unknown }>('/providers'),
+      adminApi.request<{ bindings: unknown[] }>('/model-bindings'),
     ]);
-    return { ...memoryData, candidates: candidateData.candidates };
+    const providers = Array.isArray(providerData.providers) ? providerData.providers : [];
+    const modelGroups = await Promise.all(
+      providers.map(async (provider) => {
+        const id = typeof provider === 'object' && provider !== null && 'id' in provider
+          ? String(provider.id)
+          : '';
+        if (!id) return [];
+        const result = await adminApi.request<{ models: unknown[] }>(`/providers/${encodeURIComponent(id)}/models`);
+        const providerName = typeof provider === 'object' && provider !== null && 'name' in provider
+          ? String(provider.name)
+          : id;
+        return result.models.map((model) => (
+          typeof model === 'object' && model !== null
+            ? { ...model, provider_name: providerName }
+            : model
+        ));
+      }),
+    );
+    return {
+      ...providerData,
+      bindings: bindingData.bindings,
+      models: modelGroups.flat(),
+    };
+  }
+
+  if (page === 'memory') {
+    const [memoryData, extractionData, jobsOverview] = await Promise.all([
+      adminApi.request<JsonObject>('/memories?limit=50'),
+      adminApi.request<JsonObject>('/memory/extraction'),
+      adminApi.request<JsonObject>('/jobs/overview?limit=50'),
+    ]);
+    const memoryJobs = ['running', 'queued', 'retry_wait', 'history']
+      .flatMap((group) => Array.isArray(jobsOverview[group]) ? jobsOverview[group] : [])
+      .filter((job) => (
+        typeof job === 'object'
+        && job !== null
+        && 'job_type' in job
+        && String(job.job_type).startsWith('memory.')
+      ));
+    return {
+      ...memoryData,
+      extraction: extractionData,
+      memory_jobs: memoryJobs,
+    };
   }
 
   const endpoint = pageEndpoints[page];
@@ -134,6 +177,24 @@ export function App() {
       cancelled = true;
     };
   }, [authenticated, page, refreshRevision]);
+
+  useEffect(() => {
+    if (!authenticated || !['jobs', 'memory'].includes(page)) return;
+    const memoryHasActiveJob = page === 'memory'
+      && Array.isArray(data?.memory_jobs)
+      && data.memory_jobs.some((job) => (
+        typeof job === 'object'
+        && job !== null
+        && 'status' in job
+        && ['queued', 'running', 'retry_wait'].includes(String(job.status))
+      ));
+    if (page === 'memory' && !memoryHasActiveJob) return;
+    const timer = window.setInterval(
+      () => setRefreshRevision((revision) => revision + 1),
+      5_000,
+    );
+    return () => window.clearInterval(timer);
+  }, [authenticated, data, page]);
 
   function navigate(nextPage: Page) {
     setPage(nextPage);

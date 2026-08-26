@@ -17,8 +17,9 @@ pub use actor::{Actor, ActorId, ActorType, SourcePlane};
 pub use error::{DomainError, PathError};
 pub use id::{
     AdminSessionId, AdminUserId, BackupId, CredentialId, EmbeddingId, EventId, FileId, IdentityId,
-    JobId, MemoryCandidateId, MemoryId, MemoryRelationId, MemorySourceId, ModelId, OAuthGrantId,
-    OAuthIssuerId, OperationId, ProviderId, RevisionId, ScanId, SecretId, VaultId,
+    JobId, MemoryCandidateId, MemoryConsolidationId, MemoryId, MemoryRawId, MemoryRelationId,
+    MemorySourceId, ModelId, OAuthGrantId, OAuthIssuerId, OperationId, ProviderId, RevisionId,
+    ScanId, SecretId, VaultId,
 };
 pub use maintenance::{MaintenanceGate, MaintenanceMode, MaintenanceOperationGuard};
 pub use path::{

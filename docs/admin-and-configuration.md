@@ -320,13 +320,23 @@ when surrounding labels and guidance are Chinese.
 
 ## 7. Dashboard
 
-Display:
+The page separates operational state instead of treating every row as one
+"latest 50" list:
+
+- every currently running task is pinned in the first section and refreshed
+  every five seconds;
+- queued and retry-wait tasks are shown separately with exact total counts and
+  an explicit notice when the bounded projection is truncated;
+- completed, failed, and cancelled rows are paged as terminal history and
+  cannot displace running work.
+
+Each task displays:
 
 - service version and uptime;
 - Vault status and current revision;
 - note/attachment counts;
 - FTS/index revision and coverage;
-- memory counts and candidate queue;
+- memory counts and exceptional automatic-memory diagnostics;
 - embedding coverage;
 - pending/failed jobs;
 - last successful backup;
@@ -443,6 +453,12 @@ Provider types:
 - OpenAI Responses API;
 - OpenAI-compatible chat/structured generation;
 - Anthropic Messages API;
+- DeepSeek;
+- Xiaomi MiMo;
+- Zhipu GLM;
+- Moonshot/Kimi;
+- Google Gemini through its official OpenAI-compatibility endpoint;
+- Alibaba Qwen/DashScope;
 - local OpenAI-compatible endpoint;
 - remote embedding endpoint;
 - local embedding runtime.
@@ -475,12 +491,62 @@ The UI supports:
 - record embedding dimension;
 - test a minimal non-sensitive request.
 
+Structured-generation model settings are typed and composable:
+
+- `openai_compatibility_preset`: `auto`, `generic`, `deepseek`,
+  `xiaomi_mimo`, `zhipu_glm`, `moonshot_kimi`, `google_gemini`, or
+  `alibaba_qwen`;
+- `openai_structured_output_mode`: `auto`, `strict_json_schema`,
+  `json_object`, or `prompt_only`;
+- `openai_token_limit_field`: `auto`, `max_tokens`, or
+  `max_completion_tokens`;
+- `openai_thinking_mode`: `auto`, `enabled`, or `disabled`;
+- `generation_token_limit`: optional one-call generated-token ceiling.
+
+The Chinese console first asks for the AI service type and fills the official
+API root where one stable global endpoint exists. Region/workspace-specific
+DashScope URLs remain operator input. Manual model registration shows the
+effective preset, structured-output mode, thinking policy, and token ceiling.
+Legacy empty model settings decode as `auto`; a legacy generic Provider is
+migrated only from an exact official API host, never from a model name served by
+an unrelated local/proxy runtime.
+
+Reasoning-first presets use a bounded 32,768-token default unless the operator
+or a lower model capability clamps it. This is a per-call bound, not a money
+balance or full-job quota; a full-Vault extraction normally performs one call
+per eligible Markdown note. Detailed vendor behavior and primary references
+are maintained in `provider-compatibility.md`.
+
 Do not assume a provider’s model-list endpoint is universally available or accurate.
+
+The implemented console therefore keeps two explicit paths: “发现/刷新模型”
+uses the configured adapter's model-list operation, while “手动登记模型”
+accepts the provider-specific model ID and its primary structured-generation,
+embedding, or reranking capability. A discovered model and a manually entered
+model use the same `ModelRecord` and can be selected by role; neither the
+provider display name nor Base URL is used as an implicit model name.
 
 Provider tests persist only redacted health state and model metadata. A test
 failure never exposes response bodies or secrets and does not make the Vault
 unready. Configuration updates use optimistic revisions; model bindings first
 check the Vault-specific override and then the global default.
+
+Each configured service also exposes “编辑 AI 服务” and “删除 AI 服务”. Editing
+supports display name, first-class service type, Base URL, enabled state,
+request/connect timeout, retry count, process-wide Provider concurrency,
+organization identifier, and the explicit private-network switch. The API-key
+replacement field is always empty on load: leaving it empty preserves the
+stored ciphertext, while entering a value rotates the secret and removes the
+superseded Provider-owned ciphertext. The form submits the displayed revision
+and reports a conflict instead of silently overwriting a newer Admin change.
+
+Deletion requires a confirmation naming the service and known model/binding
+impact. One State transaction removes all global and Vault-specific bindings
+to the service's models, rebuildable embedding/vector rows, model inventory,
+health/configuration, and Provider-owned encrypted secrets. The result reports
+redacted counts. Vault notes, committed memories, generated memory artifacts,
+jobs, and audit history remain intact; no operator should edit SQLite to remove
+a Provider.
 
 ### 11.4 Model roles
 
@@ -496,7 +562,14 @@ embedding_memory
 rerank
 ```
 
-Future Vault-specific overrides inherit from global defaults.
+`embedding_note` powers ordinary-note semantic/hybrid search and the
+`related_notes` portion of recall. Binding or changing it schedules only
+missing/stale current note chunks through durable `embedding.rebuild` jobs;
+lexical note recall remains available when it is unbound.
+
+The first-release console writes a current-Vault override and displays an
+effective global binding when one exists. Future multi-Vault administration can
+add global-default editing without changing binding resolution.
 
 Each role has:
 
@@ -531,6 +604,10 @@ Actions:
 - inspect notes assigned to a topic;
 - schedule re-embedding separately.
 
+Ordinary Markdown is indexed automatically and does not enter memory review.
+The page distinguishes FTS coverage from optional `embedding_note` coverage so
+an operator can tell lexical availability from semantic readiness.
+
 Rebuild actions must state which data is derived and which canonical data will not be touched.
 
 ## 13. Memory page
@@ -539,16 +616,78 @@ Defined in detail in `memory-system.md`.
 
 The UI includes:
 
-- active/candidate/stale/superseded/archived counts;
+- active/stale/superseded/archived counts;
 - full memory browser;
-- provenance/source links;
-- candidate review;
+- provenance/source metadata on demand;
+- Phase 1/Phase 2 readiness and durable job progress;
+- Stage 1 ready/no-output/pending counts and committed generation;
 - merge and supersession;
 - edit/archive/delete;
-- extraction policy;
+- automatic-memory settings;
 - recall simulator;
 - prompt/provider/pipeline metadata;
 - embedding coverage and failures.
+
+The page explains the distinction between automatically recallable ordinary
+notes and durable memory. Once automatic memory is enabled for the Vault,
+eligible ordinary Markdown changes may be sent to the configured model without
+requiring frontmatter, tags, special folders, or another authoring convention.
+Every ordinary note also remains available in search and `related_notes`
+recall. Legacy `explicit_only` and `all_notes` settings deserialize as aliases
+for the fixed `automatic` mode; the UI exposes no per-note source switch.
+
+Phase 1 asks the extraction model for semantic raw memory, a source summary,
+and bounded line ranges from a server-numbered source view. Local code verifies
+the current Vault/file/revision/range and derives excerpt hashes directly from
+the authoritative note; the model does not echo evidence text. Phase 2 uses the
+separately bound consolidation model to merge, deduplicate, resolve conflicts,
+forget obsolete input, and write final semantic memory. Neither model supplies
+a trust score, and there is no human review queue.
+
+The two-stage card is explicit about both model roles. Automatic memory is off
+by default. Once enabled, non-managed Markdown create, update, move, and
+restore events admit `memory.extract` durable jobs; successful Phase 1 work
+automatically admits the singleton `memory.consolidate` follow-up. This is
+event-driven, not a periodic LLM scan. Required fresh regeneration is admitted
+immediately after the final policy/model binding becomes ready; the periodic
+reconciliation loop is only a crash-recovery fallback. While regeneration is
+pending but both phases are ready, the manual start button remains enabled
+instead of creating a no-task/no-button dead zone. The card never presents “generate
+candidates” or per-result approval as a user goal. Actions are disabled while
+another memory pipeline job is active; repeated admission returns the active
+job instead of starting a duplicate full-Vault scan.
+
+The ordinary manual action is “处理新增或有变化的笔记”. A successful evaluation
+is remembered even when it produces zero memories, so unchanged notes under the
+same extraction profile skip the model. An off-by-default checkbox changes the
+action to “重新评估所有现有笔记”; its warning states that unchanged notes will call
+the model again, may produce different semantic raw memory/evidence anchors,
+and incur additional Token cost. This task option is separate from the
+persisted automatic-memory policy.
+
+The policy also owns a typed per-note Provider deadline from 30 through 1800
+seconds, defaulting to 300 seconds, and an evidence-anchor cap from 1 through
+10. These are advanced hard bounds; there are no model self-score threshold
+controls. They do not lengthen model discovery, provider health, consolidation,
+embedding, or unrelated requests.
+
+The one-time `memory.reset_pipeline` cutover task is admitted automatically by
+the service, not exposed as a routine destructive UI action. While the project
+is prerelease it discards every old memory and `memory.*` task, removes the old
+managed memory namespace through Vault Core, and starts a new current-generation
+Phase 1 job at note one. The card shows cutover and regeneration-pending state.
+Ordinary source notes, Vault history, existing backups, Provider settings,
+audit facts, and non-memory jobs remain available; old explicit memories are
+not converted.
+
+Each long-term-memory card exposes lifecycle actions backed by the Admin API.
+Active memories can be archived; archived, stale, or rejected memories can be
+restored; every memory can be permanently deleted after a destructive-action
+confirmation. Each request carries the displayed revision, refreshes on
+conflict, and records an Admin audit event. Permanent delete removes the
+current managed Markdown and projection; revision history and backups follow
+their independent retention policies and the UI does not present the action as
+an archive that can be restored.
 
 ### 13.1 Memory service and runtime boundary
 
@@ -562,24 +701,27 @@ revision, history, audit, and outbox guarantees as other Core-managed data.
 
 The reserved memory namespace is not an ordinary WebDAV or MCP file path and
 is excluded from note indexing and normal filesystem reconciliation. It remains
-portable Markdown, while SQLite memory rows, FTS, entities, relations,
-candidates, and embeddings are rebuildable operational projections.
+portable Markdown, while Stage 1/final-memory SQLite rows, prepared proposals,
+FTS, entities, relations, and embeddings are operational or rebuildable
+projections.
 
 Automatic extraction is admitted as a Vault-scoped durable job containing only
 file identity, path, revision, and pipeline references. The worker rechecks
-the source revision before promotion and treats provider output as an
-untrusted candidate. `memory.revalidate`, `memory.rebuild`, and
-`embedding.rebuild` are separate jobs; provider outages degrade recall to
-lexical/context retrieval and do not make canonical memory writes fail.
+the source revision before Stage 1 replacement. Phase 2 persists an untrusted
+prepared proposal, validates all source/base-revision references, and rechecks
+its snapshot before canonical writes and the atomic selection commit.
+`memory.rebuild` and `embedding.rebuild` remain separate jobs; Provider outages
+degrade new extraction/consolidation and semantic search but do not make
+existing lexical recall or canonical Vault writes fail.
 
 The runtime stores the following Vault-scoped settings through the typed
 configuration API rather than an unvalidated key/value editor:
 
-- extraction policy, candidate thresholds, and schema/prompt version;
+- automatic-memory enablement, per-note cap/deadline, and schema/prompt version;
 - recall weights, result/token budgets, and optional embedding role binding;
 - memory retention, source invalidation, and diagnostic policies.
 
-Changing thresholds, bindings, or worker concurrency is hot-reloadable when
+Changing hard bounds, bindings, or worker concurrency is hot-reloadable when
 the setting schema permits it. Changing an analyzer, embedding model, or
 taxonomy schedules a derived projection rebuild and never rewrites canonical
 memory Markdown implicitly. The WP-12 Admin API/UI exposes these operations;
@@ -596,6 +738,64 @@ Display:
 - sanitized last error;
 - dependency/dedup key;
 - start/completion times.
+
+Progress is a projection of measured work, not a fabricated counter. Completed
+jobs display 100% even when a short handler did not publish intermediate units;
+queued/running/failed jobs without a bounded ratio display “未报告”. Structured
+raw progress remains available for diagnostics. Full-Vault Phase 1 extraction
+publishes a redacted phase, current note path/ordinal, processed/total note
+units, last completed path, per-note elapsed time, model-evaluated count,
+unchanged/pre-Provider skips, raw-input and `no_output` counts, isolated
+generated-output failures, and source-ingestion failures. Each category keeps
+up to 20 bounded redacted note diagnostics. The UI labels source failures as
+“源文件无法处理（模型未调用）” and generated-output/evidence failures as
+“模型输出校验失败（模型已调用）”; it never merges them into “格式或读取跳过”.
+`already_evaluated_skipped` is displayed as “未变化且已处理，跳过模型”. Phase 2 publishes dirty raw-input count,
+created/updated/retired/discarded counts, committed generation, and whether a
+prepared proposal was reused. A mixed Phase 1 result is displayed as
+“完成但有失败” at 100%, with
+the latest failed path, stable Chinese error, and redacted schema category/path.
+It is not displayed as an all-job failure.
+The Jobs page, and the Memory page while extraction is active, refresh every
+five seconds and explain the current unit of work instead of showing only
+`0%`. A `last_error` shown while a
+new attempt is running is labelled as the previous attempt, not the current
+request. The Memory page consumes the same active-task projection as the Jobs
+page, so an older `memory.extract` cannot disappear behind high-volume
+index/outbox history or incorrectly re-enable the manual admission buttons.
+
+A full-Vault extraction continues after one malformed generated output. Three
+consecutive output-contract failures stop further calls with
+`memory_extract_output_failure_limit` to bound invalid billing. Configuration,
+authentication, endpoint, state, lease, and retryable transport failures remain
+job-level outcomes. Retrying a stopped `memory.extract` job retains its durable
+completed-note cursor instead of starting the paid backfill from note one.
+
+Provider response-body diagnostics distinguish a total read timeout
+(`provider_response_timeout`), an interrupted/truncated body
+(`provider_response_incomplete`), and an otherwise unclassified body-read
+failure (`provider_response_read_failed`). These errors are terminal until an
+operator explicitly retries because the provider already returned a successful
+HTTP status and may have charged for the request. Admin displays stable Chinese
+explanations; raw bodies and provider secrets are never persisted in job
+progress.
+
+For live diagnosis, the server also emits redacted structured job events to
+the configured process log. `job_started`, `job_progress`,
+`memory_extract_note_output_failed`, `job_completed`, `job_retry_scheduled`,
+`job_failed`, and `job_cancelled` show
+the task ID/type, Vault, phase, measured counters, elapsed time, and stable
+error code where applicable. A schema mismatch adds only its stable category
+and trusted schema path. Memory extraction paths are logged only as a one-way
+hash; note bodies, prompts, response values, provider responses, job payloads, and
+credentials are never logged. Use `docker compose logs -f mcp-vault` for the
+timeline and the Admin page for the latest durable progress snapshot.
+
+Structured-response diagnostics additionally distinguish a non-JSON HTTP
+body, missing final content, malformed structured JSON, provider token-limit
+truncation, content filtering, and repetition truncation. These categories are
+redacted and terminal: the UI explains the next operator action without
+storing the response body, reasoning text, prompt, or note content.
 
 Actions:
 
@@ -742,6 +942,13 @@ Accessibility requirements:
   reload, mutation after reload, expired-session fallback, and logout cleanup;
 - secret create/update never returns stored plaintext;
 - changing embedding model schedules re-embedding rather than mixing vectors;
+- provider models can be discovered or manually registered and bound to the
+  current Vault's model roles;
+- memory extraction defaults disabled, reports readiness blockers, admits
+  future note events only after enablement, and supports an explicit existing-
+  note backfill job;
+- completed jobs never render as 0%, unknown progress remains visibly unknown,
+  and index coverage uses current non-managed Markdown as its denominator;
 - provider outage is visible without breaking core readiness;
 - an invalid private/public provider URL is rejected or explicitly confirmed;
 - Vault-scoped settings cannot affect another fixture Vault;

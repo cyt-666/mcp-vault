@@ -119,6 +119,8 @@ pub struct ReadResult {
 /// use the explicit managed Core method so the reserved-namespace policy stays
 /// visible at the application boundary.
 pub struct ManagedReadResult {
+    /// Managed file identity and current optimistic revision.
+    pub file: FileRecord,
     /// Filesystem metadata captured when the stream was opened.
     pub metadata: FileMetadata,
     /// Streaming managed bytes.
@@ -457,6 +459,12 @@ impl VaultCore {
             .validate_managed_path(path)
             .map_err(VaultError::Domain)?;
         let _guards = self.acquire_locks(context, &[path]).await;
+        let file = self
+            .state
+            .files()
+            .get_active(context, path)
+            .await?
+            .ok_or(VaultError::NotFound)?;
         let reader = self
             .storage(context)
             .open_read_managed(path)
@@ -464,6 +472,7 @@ impl VaultCore {
             .map_err(map_storage)?;
         let metadata = reader.metadata().clone();
         Ok(ManagedReadResult {
+            file,
             metadata,
             reader,
             _operation: operation,
@@ -1820,6 +1829,11 @@ impl VaultCore {
             .await
             .map_err(VaultError::State)?;
         let current_active = current.as_ref().filter(|file| file.is_active());
+        let event_type = match current.as_ref() {
+            None => "FileCreated",
+            Some(file) if file.is_active() => "FileUpdated",
+            Some(_) => "FileRestored",
+        };
         let expected_revision = current_active.map(|file| file.current_revision);
         let file_id = current.as_ref().map_or_else(FileId::new, |file| file.id);
         let hash = content_hash.to_string();
@@ -1853,12 +1867,7 @@ impl VaultCore {
             SourcePlane::Reconciliation,
             None,
             "file.external_change",
-            self.event_for(
-                FileOperation::ExternalChange.as_str(),
-                file_id,
-                path,
-                FileOperation::ExternalChange,
-            ),
+            self.event_for(event_type, file_id, path, FileOperation::ExternalChange),
         );
         files
             .prepare_operation(
@@ -1990,12 +1999,7 @@ impl VaultCore {
             SourcePlane::Reconciliation,
             None,
             "file.external_delete",
-            self.event_for(
-                FileOperation::ExternalChange.as_str(),
-                file_id,
-                path,
-                FileOperation::ExternalChange,
-            ),
+            self.event_for("FileDeleted", file_id, path, FileOperation::ExternalChange),
         );
         files
             .prepare_operation(

@@ -9,21 +9,25 @@ use std::{
 
 use async_trait::async_trait;
 use mcp_vault_auth::{AuthService, SecretString};
-use mcp_vault_domain::{ModelId, ProviderId, Revision, VaultContext, WritePrecondition};
+use mcp_vault_domain::{
+    DomainError, ModelId, ProviderId, Revision, VaultContext, WritePrecondition,
+};
 use mcp_vault_state::{
-    EmbeddingCoverage, EmbeddingRecord, ModelRecord, ProviderHealthRecord, ProviderRecord,
-    StateStore,
+    EmbeddingCoverage, EmbeddingRecord, ModelRecord, ProviderDeletionSummary, ProviderHealthRecord,
+    ProviderRecord, StateError, StateStore,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio::sync::Mutex as AsyncMutex;
 use url::Url;
 
 use crate::{
     AnthropicMessagesAdapter, EmbeddingRequest, EmbeddingResult, EmbeddingSourceRef,
-    FastEmbedAdapter, HttpEmbeddingAdapter, ModelCapabilities, OpenAiCompatibleAdapter,
-    OpenAiResponsesAdapter, ProviderAdapter, ProviderError, ProviderKind, ProviderMode,
-    ProviderSettings, ProviderTransport, SqliteVectorIndex, StructuredGenerationRequest,
-    StructuredGenerationResult, VectorHit, VectorIndex, new_embedding_id,
+    FastEmbedAdapter, GenerationOptions, HttpEmbeddingAdapter, ModelCapabilities, ModelSettings,
+    OpenAiCompatibleAdapter, OpenAiResponsesAdapter, ProviderAdapter, ProviderError, ProviderKind,
+    ProviderMode, ProviderSettings, ProviderTransport, SqliteVectorIndex,
+    StructuredGenerationRequest, StructuredGenerationResult, VectorHit, VectorIndex,
+    new_embedding_id,
 };
 
 const PROVIDER_SECRET_PURPOSE: &str = "provider-api-key";
@@ -68,8 +72,8 @@ pub struct ModelInput {
     pub external_model_id: String,
     /// Capability metadata.
     pub capabilities: ModelCapabilities,
-    /// Model settings.
-    pub settings: Value,
+    /// Typed model settings.
+    pub settings: ModelSettings,
     /// Whether this model is enabled.
     pub enabled: bool,
 }
@@ -99,6 +103,10 @@ pub struct ProviderService {
     auth: AuthService,
     vector: Arc<dyn VectorIndex>,
     transports: Arc<Mutex<HashMap<ProviderId, CachedTransport>>>,
+    /// Provider configuration mutations are rare Admin operations. Holding
+    /// this process-wide lock across their state/secret I/O prevents a delete
+    /// from racing a secret-bearing update into an orphaned secret row.
+    lifecycle: Arc<AsyncMutex<()>>,
 }
 
 #[derive(Clone)]
@@ -117,6 +125,7 @@ impl ProviderService {
             auth,
             vector,
             transports: Arc::new(Mutex::new(HashMap::new())),
+            lifecycle: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -132,6 +141,7 @@ impl ProviderService {
             auth,
             vector,
             transports: Arc::new(Mutex::new(HashMap::new())),
+            lifecycle: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -196,6 +206,21 @@ impl ProviderService {
     ) -> Result<ProviderRecord, ProviderError> {
         input.settings.validate()?;
         validate_provider_url(&input.base_url)?;
+        let _lifecycle = self.lifecycle.lock().await;
+        let current = self
+            .state
+            .providers()
+            .get_provider(record.id)
+            .await?
+            .ok_or(ProviderError::NotFound)?;
+        if current.revision != record.revision {
+            return Err(StateError::InvalidDomain(DomainError::RevisionConflict {
+                expected: record.revision,
+                current: current.revision,
+            })
+            .into());
+        }
+        record = current;
         record.name = input.name;
         record.provider_type = input.kind.as_str().to_owned();
         record.base_url = input.base_url.to_string();
@@ -234,16 +259,25 @@ impl ProviderService {
             .ok_or(ProviderError::NotFound)
     }
 
-    /// Delete one provider through the application boundary.
-    pub async fn delete_provider(&self, provider_id: ProviderId) -> Result<(), ProviderError> {
-        self.state.providers().delete_provider(provider_id).await?;
+    /// Delete one provider and its dependent operational/derived state through
+    /// the application boundary.
+    pub async fn delete_provider(
+        &self,
+        provider_id: ProviderId,
+        expected_revision: Option<Revision>,
+    ) -> Result<ProviderDeletionSummary, ProviderError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        let summary = self
+            .state
+            .providers()
+            .delete_provider(provider_id, expected_revision)
+            .await?
+            .ok_or(ProviderError::NotFound)?;
         self.transports
             .lock()
-            .map_err(|_| {
-                ProviderError::InvalidConfiguration("provider transport cache is unavailable")
-            })?
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&provider_id);
-        Ok(())
+        Ok(summary)
     }
 
     /// List registered models for one provider or all providers.
@@ -273,6 +307,20 @@ impl ProviderService {
         if !provider.enabled {
             return Err(ProviderError::Disabled);
         }
+        input.capabilities.validate()?;
+        if input.settings.generation_token_limit.is_some() && !input.capabilities.structured_output
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "generation-token limit requires structured generation capability",
+            ));
+        }
+        let provider_kind = ProviderKind::try_from(provider.provider_type.as_str())?;
+        let provider_url = Url::parse(&provider.base_url)?;
+        input.settings.validate_for_model(
+            provider_kind,
+            provider_url.host_str(),
+            &input.external_model_id,
+        )?;
         let record = ModelRecord {
             id: ModelId::new(),
             provider_id: input.provider_id,
@@ -280,7 +328,8 @@ impl ProviderService {
             capabilities: serde_json::to_value(input.capabilities).map_err(|_| {
                 ProviderError::InvalidConfiguration("model capabilities are invalid")
             })?,
-            settings: input.settings,
+            settings: serde_json::to_value(input.settings)
+                .map_err(|_| ProviderError::InvalidConfiguration("model settings are invalid"))?,
             enabled: input.enabled,
             revision: Revision::new(1),
             created_at: now_millis(),
@@ -369,14 +418,28 @@ impl ProviderService {
         request: &StructuredGenerationRequest,
     ) -> Result<StructuredGenerationResult, ProviderError> {
         let runtime = self.runtime(context, model_id).await?;
+        if request.model != runtime.model.external_model_id {
+            return Err(ProviderError::InvalidConfiguration(
+                "request model does not match registered model",
+            ));
+        }
+        let generation_token_limit = runtime.model_settings.effective_generation_token_limit(
+            runtime.provider_kind,
+            runtime.base_url.host_str(),
+            &runtime.capabilities,
+            request.max_output_tokens,
+        );
         runtime
             .adapter
             .generate_structured(
                 &runtime.transport,
                 &runtime.base_url,
                 runtime.mode,
-                &runtime.settings,
-                runtime.secret.as_ref(),
+                GenerationOptions::new(
+                    &runtime.model_settings,
+                    generation_token_limit,
+                    runtime.secret.as_ref(),
+                ),
                 request,
             )
             .await
@@ -538,14 +601,20 @@ impl ProviderService {
         }
         let kind = ProviderKind::try_from(provider.provider_type.as_str())?;
         let settings = ProviderSettings::from_json(&provider.settings)?;
+        let capabilities = ModelCapabilities::from_json(&model.capabilities)?;
+        let model_settings = ModelSettings::from_json(&model.settings)?;
         let base_url = Url::parse(&provider.base_url)?;
+        model_settings.validate_for_model(kind, base_url.host_str(), &model.external_model_id)?;
         let mode = self.provider_mode(context).await?;
         let secret = self.read_secret(&provider).await?;
         let transport = self.transport_for(&provider, &settings)?;
         Ok(Runtime {
             model,
+            capabilities,
             base_url,
             settings,
+            model_settings,
+            provider_kind: kind,
             mode,
             secret,
             transport,
@@ -594,7 +663,7 @@ impl ProviderService {
             provider_id,
             external_model_id: discovered.id,
             capabilities: ModelCapabilities::from_json(&discovered.capabilities)?,
-            settings: json!({}),
+            settings: ModelSettings::default(),
             enabled: true,
         })
         .await
@@ -628,8 +697,11 @@ impl ProviderService {
 
 struct Runtime {
     model: ModelRecord,
+    capabilities: ModelCapabilities,
     base_url: Url,
     settings: ProviderSettings,
+    model_settings: ModelSettings,
+    provider_kind: ProviderKind,
     mode: ProviderMode,
     secret: Option<SecretString>,
     transport: ProviderTransport,
@@ -842,7 +914,13 @@ impl EmbeddingService {
 fn adapter_for(kind: ProviderKind) -> Box<dyn ProviderAdapter> {
     match kind {
         ProviderKind::OpenAiResponses => Box::new(OpenAiResponsesAdapter),
-        ProviderKind::OpenAiCompatible => Box::new(OpenAiCompatibleAdapter),
+        ProviderKind::OpenAiCompatible
+        | ProviderKind::DeepSeek
+        | ProviderKind::XiaomiMimo
+        | ProviderKind::ZhipuGlm
+        | ProviderKind::MoonshotKimi
+        | ProviderKind::GoogleGemini
+        | ProviderKind::AlibabaQwen => Box::new(OpenAiCompatibleAdapter::new(kind)),
         ProviderKind::AnthropicMessages => Box::new(AnthropicMessagesAdapter),
         ProviderKind::EmbeddingHttp => Box::new(HttpEmbeddingAdapter),
         ProviderKind::FastEmbedLocal => Box::new(FastEmbedAdapter),

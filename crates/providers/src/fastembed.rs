@@ -5,8 +5,9 @@ use mcp_vault_auth::SecretString;
 use url::Url;
 
 use crate::{
-    EmbeddingRequest, EmbeddingResult, ProviderAdapter, ProviderError, ProviderKind, ProviderMode,
-    ProviderSettings, ProviderTransport, StructuredGenerationRequest, StructuredGenerationResult,
+    EmbeddingRequest, EmbeddingResult, GenerationOptions, ProviderAdapter, ProviderError,
+    ProviderKind, ProviderMode, ProviderSettings, ProviderTransport, StructuredGenerationRequest,
+    StructuredGenerationResult,
 };
 
 /// Local FastEmbed adapter marker.
@@ -25,8 +26,7 @@ impl ProviderAdapter for FastEmbedAdapter {
         _transport: &ProviderTransport,
         _base_url: &Url,
         _mode: ProviderMode,
-        _settings: &ProviderSettings,
-        _secret: Option<&SecretString>,
+        _options: GenerationOptions<'_>,
         _request: &StructuredGenerationRequest,
     ) -> Result<StructuredGenerationResult, ProviderError> {
         Err(ProviderError::CapabilityUnavailable)
@@ -98,8 +98,7 @@ impl ProviderAdapter for FastEmbedAdapter {
         _transport: &ProviderTransport,
         _base_url: &Url,
         _mode: ProviderMode,
-        _settings: &ProviderSettings,
-        _secret: Option<&SecretString>,
+        _options: GenerationOptions<'_>,
         _request: &StructuredGenerationRequest,
     ) -> Result<StructuredGenerationResult, ProviderError> {
         Err(ProviderError::CapabilityUnavailable)

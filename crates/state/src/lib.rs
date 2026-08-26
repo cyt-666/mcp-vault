@@ -23,8 +23,8 @@ pub use auth::{
     McpTokenRecord, OAuthGrantRecord, OAuthIssuerRecord, WebDavCredentialRecord,
 };
 pub use background::{
-    JobRecord, JobRepository, JobStatus, OutboxEventRecord, OutboxRepository, ScanCheckpointRecord,
-    ScanCheckpointRepository, ScanStatus,
+    JobRecord, JobRepository, JobStatus, JobStatusCounts, OutboxEventRecord, OutboxRepository,
+    ScanCheckpointRecord, ScanCheckpointRepository, ScanStatus,
 };
 pub use backups::{BackupRecord, BackupRepository, BackupStatus};
 pub use error::{IntegrityReport, StateError};
@@ -35,18 +35,21 @@ pub use files::{
 };
 pub use index::{
     HeadingProjectionInput, IndexMembershipProjectionInput, IndexNodeProjectionInput,
-    IndexNodeRecord, IndexRepository, IndexStatusRecord, LinkProjectionInput, NoteLinkRecord,
-    NoteProjectionInput, NoteSearchRecord, TagProjectionInput,
+    IndexNodeRecord, IndexRepository, IndexStatusRecord, LinkProjectionInput,
+    NoteEmbeddingSourceRecord, NoteLinkRecord, NoteProjectionInput, NoteSearchRecord,
+    TagProjectionInput,
 };
 pub use memory::{
-    MemoryBundle, MemoryCandidateRecord, MemoryCounts, MemoryDiagnosticRecord, MemoryFilter,
-    MemoryIdempotencyRecord, MemoryRecord, MemoryRelationRecord, MemoryRepository, MemorySearchHit,
-    MemorySourceRecord,
+    MemoryBundle, MemoryCandidateRecord, MemoryConsolidationProposalRecord,
+    MemoryConsolidationStateRecord, MemoryCounts, MemoryDiagnosticRecord, MemoryFilter,
+    MemoryIdempotencyRecord, MemoryPipelinePurgeReport, MemoryRecord, MemoryRelationRecord,
+    MemoryRepository, MemorySearchHit, MemorySourceRecord, MemoryStage1Counts,
+    MemoryStage1OutputRecord,
 };
 pub use pool::{StateStore, StateTransaction};
 pub use providers::{
-    EmbeddingCoverage, EmbeddingRecord, ModelBindingRecord, ModelRecord, ProviderHealthRecord,
-    ProviderRecord, ProviderRepository, VectorCandidate,
+    EmbeddingCoverage, EmbeddingRecord, ModelBindingRecord, ModelRecord, ProviderDeletionSummary,
+    ProviderHealthRecord, ProviderRecord, ProviderRepository, VectorCandidate,
 };
 pub use settings::{SettingRecord, SettingsRepository};
 pub use vaults::{VaultRecord, VaultRepository, VaultStatus};

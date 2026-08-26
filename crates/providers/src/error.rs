@@ -43,8 +43,17 @@ pub enum ProviderError {
     #[error("provider response shape is invalid: {0}")]
     InvalidResponse(&'static str),
     /// Structured output failed the caller-supplied schema subset.
-    #[error("provider structured output failed schema validation")]
-    SchemaValidation,
+    ///
+    /// `issue` is a stable project-owned category and `path` is assembled only
+    /// from trusted schema property names plus array indexes. Neither field
+    /// contains response values or arbitrary Provider output.
+    #[error("provider structured output failed schema validation: {issue} at {path}")]
+    SchemaValidation {
+        /// Stable redacted mismatch category.
+        issue: &'static str,
+        /// JSON path within the caller-supplied schema.
+        path: String,
+    },
     /// The provider returned an unsupported embedding dimension.
     #[error("embedding dimension does not match the selected model")]
     DimensionMismatch,
@@ -77,7 +86,7 @@ impl ProviderError {
     }
 
     /// Stable redacted diagnostic code.
-    pub const fn code(&self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidConfiguration(_) => "provider_config_invalid",
             Self::NotFound => "provider_not_found",
@@ -93,14 +102,60 @@ impl ProviderError {
                 _ => "provider_http_error",
             },
             Self::ResponseTooLarge => "provider_response_too_large",
+            Self::InvalidResponse("provider content type is not JSON") => {
+                "provider_response_content_type_invalid"
+            }
+            Self::InvalidResponse("response is not JSON") => "provider_response_json_invalid",
+            Self::InvalidResponse("provider final content is missing") => {
+                "provider_final_content_missing"
+            }
+            Self::InvalidResponse("structured output is not JSON") => {
+                "provider_structured_json_invalid"
+            }
+            Self::InvalidResponse("provider output reached token limit") => {
+                "provider_output_truncated"
+            }
+            Self::InvalidResponse("provider output was filtered") => "provider_output_filtered",
+            Self::InvalidResponse("provider output repetition was truncated") => {
+                "provider_output_repetition_truncated"
+            }
+            Self::InvalidResponse("provider response was incomplete") => {
+                "provider_response_incomplete"
+            }
             Self::InvalidResponse(_) => "provider_response_invalid",
-            Self::SchemaValidation => "provider_schema_invalid",
+            Self::SchemaValidation { .. } => "provider_schema_invalid",
             Self::DimensionMismatch => "embedding_dimension_mismatch",
             Self::CapabilityUnavailable => "provider_capability_unavailable",
             Self::TemporarilyUnavailable => "provider_temporarily_unavailable",
             Self::State(_) => "provider_state_error",
             Self::Auth(_) => "provider_secret_unavailable",
             Self::Url(_) => "provider_url_invalid",
+        }
+    }
+
+    /// Return a redacted schema mismatch category and trusted schema path.
+    pub fn schema_diagnostic(&self) -> Option<(&'static str, &str)> {
+        match self {
+            Self::SchemaValidation { issue, path } => Some((*issue, path)),
+            _ => None,
+        }
+    }
+
+    /// Whether a structured-generation failure is isolated to one generated
+    /// output and may be skipped by a bounded batch without retrying the same
+    /// potentially billable request.
+    pub fn is_generation_output_failure(&self) -> bool {
+        match self {
+            Self::SchemaValidation { .. } | Self::ResponseTooLarge => true,
+            Self::InvalidResponse(reason) => matches!(
+                *reason,
+                "provider final content is missing"
+                    | "structured output is not JSON"
+                    | "provider output reached token limit"
+                    | "provider output was filtered"
+                    | "provider output repetition was truncated"
+            ),
+            _ => false,
         }
     }
 }
