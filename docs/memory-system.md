@@ -27,7 +27,8 @@ note revision / explicit remember
     ▼
 Phase 1: memory.extract
     memory_extraction model
-    semantic raw_memory + source_summary + evidence anchors
+    raw_memory + rollout_summary + rollout_slug
+    local whole-source revision/hash provenance
     │
     ▼
 memory_stage1_outputs
@@ -48,8 +49,8 @@ Vault-scoped memory projections and LLM-free recall
 
 Phase 1 never writes final `memories` or final memory FTS rows. Phase 2 never
 accepts arbitrary Provider output as state: local code validates every action,
-source reference, evidence index, memory ID, lifecycle transition, bound, and
-optimistic revision before applying it.
+source reference, memory ID, lifecycle transition, bound, semantic content
+snapshot, and optimistic action-target revision before applying it.
 
 ## 3. Phase 1: source distillation
 
@@ -64,27 +65,20 @@ The extraction model returns one strict object:
 
 ```json
 {
-  "source_summary": "Detailed evidence-aware summary",
-  "source_slug": "stable-source-slug",
   "raw_memory": "Concise consolidation-ready semantic information",
-  "evidence": [
-    {
-      "start_line": 10,
-      "end_line": 10
-    }
-  ]
+  "rollout_summary": "Detailed source-aware summary",
+  "rollout_slug": "stable-source-slug"
 }
 ```
 
-MCP Vault sends an untrusted view whose lines carry stable `L<number>:` labels.
-The model selects bounded start/end labels and never supplies the canonical
-quotation. MCP Vault validates the range against the current revision, derives
-the exact excerpt hash itself, and persists only file identity, path, revision,
-and line range. `source_summary` is an auxiliary Phase 2 context field. If a
-Provider omits only that field while returning a valid string `raw_memory`, MCP
-Vault copies that semantic text verbatim as the summary and reruns the full
-schema/evidence checks. This bounded repair never accepts an empty object or
-manufactures evidence.
+This is the upstream Codex Phase 1 wire shape. MCP Vault maps the rollout-named
+summary/slug into its note-source state. The model never returns quotations,
+line numbers, evidence IDs, or confidence bookkeeping. Local code binds every
+non-empty output to the exact source file ID, path, revision, and normalized
+whole-note hash. If a Provider omits only `rollout_summary` while returning a
+valid string `raw_memory`, MCP Vault copies that semantic text verbatim as the
+summary and reruns the complete three-field schema validation. This bounded
+repair never accepts an empty or ambiguous object.
 
 `raw_memory` is semantic model output and is allowed to differ from the source
 wording. It is not final global memory. If the note contains no durable input,
@@ -130,35 +124,43 @@ prevents unlimited invalid paid calls while preserving the completed cursor.
 
 Phase 2 receives a bounded set of dirty Stage 1 inputs, recent current raw
 inputs, the last compact memory summary, and current active global memories.
-The model proposes:
+The model proposes only semantic decisions:
 
-- `create`, `update`, `keep`, or `archive` actions;
+- `create`, `update`, or `archive` actions; unchanged memories need no action;
 - semantic content and memory type for writes;
-- Stage 1/evidence references for every written memory;
-- supersession targets;
-- one `used`, `discarded`, or `withdrawn` disposition for every dirty input;
+- request-local `input_index` values supporting every written memory;
+- request-local `memory_index` values for updates, archives, and supersession;
+- the dirty ready input indexes it explicitly discards;
 - a complete compact `memory_summary`.
 
-Local validation enforces:
+Local preparation and validation own the bookkeeping:
 
-- every dirty input is dispositioned exactly once;
-- a `used` input is referenced by a write action;
-- discarded/withdrawn inputs are not used as support;
-- note-derived writes reference locally validated evidence anchors;
+- durable Stage 1/current-memory UUIDs never enter the model request or response;
+- each input or memory index must resolve within the exact request snapshot and
+  have the lifecycle state required by that operation;
+- every create gets a fresh application-generated UUIDv7;
+- every referenced ready input inherits its application-derived source
+  revision/hash provenance, so Phase 2 never chooses evidence coordinates or
+  source IDs;
+- `used` is derived from create/update references, while `no_output` and
+  `withdrawn` dispositions are derived from Stage 1 status;
+- every dirty ready input is either referenced or explicitly discarded, never
+  both;
 - IDs and sources exist in the same Vault;
 - one generation does not target and supersede the same memory;
 - create/update content is bounded, non-empty, and secret-redacted;
-- prepared update/keep/archive actions retain the exact base revision observed
+- prepared update/archive actions retain the exact base revision observed
   before the Provider call.
 
-Only one non-terminal `memory.consolidate` job may exist per Vault. Provider
-I/O happens before the Vault apply lock. Before canonical writes, the service
-rechecks the generation, every raw output hash/status, and every current memory
-revision/content hash. Before a proposal is persisted, a changed snapshot
-causes a short retry with a new input hash. Once a proposal is prepared,
-memory mutations briefly return a retryable conflict until that exact proposal
-is applied or recovered, so its source/base revisions cannot drift underneath
-partial writes.
+Only one non-terminal `memory.consolidate` job may exist per Vault. Reconciliation
+does not admit Phase 2 while an unrelated Phase 1 extraction is active; a
+completing extraction admits its follow-up. A claimed Phase 2 job that finds an
+active extraction is deferred without spending a retry attempt. Provider I/O
+happens before the Vault apply lock. Before canonical writes, the service
+rechecks the generation and selected raw output hash/status. Current-memory
+status/content hash is the semantic snapshot identity; projection-only revision
+drift is normalized to the current action precondition, while a changed action
+target still conflicts.
 
 Prepared proposals are persisted before application. Retrying the same input
 reuses the validated proposal without another model call. Per-memory proposal
@@ -170,6 +172,13 @@ creating another Vault revision. One worker invocation drains successive
 bounded 256-input generations until no dirty Stage 1 input remains; startup
 and periodic reconciliation re-admit any durable input left by the narrow job-
 completion race.
+
+Prepared proposals from an older prompt contract are rejected before parsing or
+apply. This prevents a stale old-contract proposal from blocking Phase 1 or
+being retried indefinitely after an upgrade. A current-contract snapshot that
+changes before the first action is also rejected and regenerated on the next
+attempt; once any proposal marker exists, recovery retains the proposal and
+finishes its partial apply instead of abandoning written state.
 
 ## 5. Canonical artifacts
 
@@ -216,10 +225,10 @@ I decided that future services use Rust.
 ```
 
 `memory_sources` separately stores source type, file ID, path, note revision,
-line range, excerpt hash, and Vault ID. Detail operations return source
-metadata; normal recall omits sources by default to conserve context. Exact
-evidence can be verified against the retained note revision through Vault
-history permissions.
+whole-source or excerpt hash, optional heading/line range, and Vault ID. Detail
+operations return source metadata; normal recall omits sources by default to
+conserve context. Source evidence can be verified against the retained note
+revision through Vault history permissions.
 
 Memory types remain extensible text values:
 
@@ -318,8 +327,29 @@ Phase 1 progress reports note cursor/path, processed count, raw inputs staged,
 no-output count, unchanged skips, bounded per-note failures, elapsed time, and
 trusted schema diagnostics. Phase 2 reports raw inputs, created/updated/
 retired/discarded counts, proposal reuse, and committed generation. Logs expose
-the same redacted counts and error codes but never note bodies, raw/final memory
-text, prompts, Provider response text, credentials, or authorization headers.
+the same redacted counts and precise `memory_phase2_*` structural error codes but
+never note bodies, raw/final memory text, prompts, Provider response text,
+credentials, or authorization headers. A terminal generated-output failure does
+not loop through automatic paid retries; Admin may explicitly retry the same
+durable job after the contract or model configuration is corrected.
+
+For local Provider debugging, run `scripts/debug/phase2-replay.sh data`. The
+script creates a temporary SQLite/Vault/history/secret copy, rewrites the copied
+Vault root, clears only copied inode identities while preserving size and SHA-256
+checks, and executes exactly one consolidation without starting background
+workers. The command prints the temporary data directory and never mutates the
+source data directory. A successful full replay removes its temporary copy by
+default; failures preserve it for proposal reuse and inspection. Set
+`MCP_VAULT_PHASE2_REPLAY_PREPARE_ONLY=1` to create the copy without issuing a
+Provider request, or `MCP_VAULT_PHASE2_REPLAY_KEEP=1` to retain a successful
+copy explicitly.
+
+On a prepared isolated copy, replay one Phase 1 note with:
+
+```bash
+cargo run -p mcp-vault-server --example memory_phase1_replay -- \
+  <isolated-data-directory> '<vault-relative-note-path>'
+```
 
 Running consolidation and pipeline reset cannot be cancelled through Admin after
 their apply phase starts. Shutdown/interruption recovery uses the persisted

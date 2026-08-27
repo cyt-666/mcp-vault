@@ -169,7 +169,8 @@ pub struct ExtractionPolicy {
     pub enabled: bool,
     /// Serialized source-admission mode; legacy marker modes migrate to automatic.
     pub source_mode: ExtractionSourceMode,
-    /// Hard upper bound on exact evidence anchors retained from one note.
+    /// Legacy compatibility field retained for prerelease Admin payloads.
+    /// Phase 1 v3 derives whole-source provenance locally and ignores it.
     #[serde(alias = "max_candidates_per_note")]
     pub max_evidence_per_note: u32,
     /// Total deadline for one structured note-extraction request.

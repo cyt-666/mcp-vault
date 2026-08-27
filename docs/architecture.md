@@ -519,21 +519,27 @@ Normal recall is an index query and does not call an LLM. See `memory-system.md`
 
 The Memory application service uses the Codex-style boundary adopted by
 ADR-0016. `memory.extract` distills one ordinary note revision into semantic
-`raw_memory`, a detailed source summary, and exact evidence anchors. The exact
-evidence text is derived by MCP Vault from model-selected ranges in an
-explicitly line-numbered view of the current revision; the model never supplies
-the canonical quotation. Only file/revision/line/hash metadata is persisted. A valid zero-result is durable
-`no_output` coverage. Phase 1 does not create final memory or FTS rows.
+`raw_memory`, `rollout_summary`, and `rollout_slug`, matching the Codex Phase 1
+wire contract. The model never supplies source coordinates. MCP Vault locally
+binds a non-empty output to file identity, path, exact revision, and normalized
+whole-source hash. A valid zero-result is durable `no_output` coverage. Phase 1
+does not create final memory or FTS rows.
 
 `memory.consolidate` is a separate Vault-scoped persistent job using the
 `memory_consolidation` binding. It consumes dirty Stage 1 rows and current
-global memory, then proposes create/update/keep/archive, supersession, raw-input
-disposition, and compact-summary changes. Local code validates every reference,
-captures base revisions, persists the prepared proposal, rechecks the complete
-input snapshot, writes canonical artifacts through Vault Core, and atomically
+global memory, then proposes create/update/archive semantics, request-local
+integer references, explicit discards, supersession, and compact-summary
+changes. Durable UUIDs remain local. Application code maps each integer back to
+the captured Vault snapshot, allocates every create ID, attaches all
+application-derived Stage 1 provenance, derives used/no-output/withdrawn dispositions,
+validates every reference,
+captures action-target revisions, persists the prepared proposal, rechecks the
+selected semantic input snapshot, writes canonical artifacts through Vault Core, and atomically
 marks exact raw hashes selected. One active consolidation job is permitted per
-Vault. Before preparation, snapshot changes retry instead of overwriting
-concurrent Admin work. Once prepared, memory mutations yield a retryable
+Vault. Reconciliation waits for unrelated active extraction work. Projection
+rebuilds are record-path-only and idempotent; same-content revision drift is
+normalized instead of invalidating a proposal. Once prepared, targeted semantic
+memory mutations yield a retryable
 conflict until the persisted generation finishes; a restarted worker reuses
 that proposal, adopts byte-identical file-first writes, and drains successive
 bounded batches. Startup and periodic reconciliation re-admit any durable dirty

@@ -636,10 +636,10 @@ Every ordinary note also remains available in search and `related_notes`
 recall. Legacy `explicit_only` and `all_notes` settings deserialize as aliases
 for the fixed `automatic` mode; the UI exposes no per-note source switch.
 
-Phase 1 asks the extraction model for semantic raw memory, a source summary,
-and bounded line ranges from a server-numbered source view. Local code verifies
-the current Vault/file/revision/range and derives excerpt hashes directly from
-the authoritative note; the model does not echo evidence text. Phase 2 uses the
+Phase 1 asks the extraction model for the Codex three-field object:
+`raw_memory`, `rollout_summary`, and `rollout_slug`. Local code binds the result
+to the current Vault/file/path/revision and normalized whole-source hash; the
+model does not generate evidence text or coordinates. Phase 2 uses the
 separately bound consolidation model to merge, deduplicate, resolve conflicts,
 forget obsolete input, and write final semantic memory. Neither model supplies
 a trust score, and there is no human review queue.
@@ -661,15 +661,15 @@ The ordinary manual action is “处理新增或有变化的笔记”. A success
 is remembered even when it produces zero memories, so unchanged notes under the
 same extraction profile skip the model. An off-by-default checkbox changes the
 action to “重新评估所有现有笔记”; its warning states that unchanged notes will call
-the model again, may produce different semantic raw memory/evidence anchors,
+the model again, may produce different semantic raw memory/source summaries,
 and incur additional Token cost. This task option is separate from the
 persisted automatic-memory policy.
 
 The policy also owns a typed per-note Provider deadline from 30 through 1800
-seconds, defaulting to 300 seconds, and an evidence-anchor cap from 1 through
-10. These are advanced hard bounds; there are no model self-score threshold
-controls. They do not lengthen model discovery, provider health, consolidation,
-embedding, or unrelated requests.
+seconds, defaulting to 300 seconds. The former evidence-anchor limit is retained
+only as a prerelease API compatibility field and is not shown in the UI. There
+are no model self-score threshold controls. The deadline does not lengthen model
+discovery, provider health, consolidation, embedding, or unrelated requests.
 
 The one-time `memory.reset_pipeline` cutover task is admitted automatically by
 the service, not exposed as a routine destructive UI action. While the project

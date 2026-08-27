@@ -1305,6 +1305,25 @@ impl MemoryRepository {
         row.map(consolidation_proposal_from_row).transpose()
     }
 
+    /// Reject one obsolete prepared proposal before any current-contract apply.
+    pub async fn reject_prepared_consolidation_proposal(
+        &self,
+        context: &VaultContext,
+        proposal_id: MemoryConsolidationId,
+    ) -> Result<bool, StateError> {
+        self.ensure_vault_context(context).await?;
+        let result = sqlx::query(
+            "UPDATE memory_consolidation_proposals
+             SET status = 'rejected'
+             WHERE vault_id = ? AND id = ? AND status = 'prepared'",
+        )
+        .bind(context.id().to_string())
+        .bind(proposal_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     /// Persist one validated but still untrusted Phase 2 proposal before applying it.
     pub async fn insert_consolidation_proposal(
         &self,

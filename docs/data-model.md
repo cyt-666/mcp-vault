@@ -698,18 +698,20 @@ managed namespace through explicit Vault Core methods; its `file_entries` and
 `file_revisions` rows are hidden from ordinary protocol paths and excluded
 from reconciliation delete inference.
 
-The Vault-scoped extraction setting includes fixed `source_mode: "automatic"`,
-`max_evidence_per_note`, and a per-note timeout. Legacy `explicit_only`,
-`all_notes`, and `max_candidates_per_note` inputs deserialize as migration
-aliases. No author-facing note metadata or score threshold controls source
-admission.
+The Vault-scoped extraction setting includes fixed `source_mode: "automatic"`
+and a per-note timeout. `max_evidence_per_note` and
+`max_candidates_per_note` deserialize for prerelease compatibility but are not
+part of the Phase 1 v4 model contract. Legacy `explicit_only` and `all_notes`
+inputs remain source-mode aliases. No author-facing note metadata or score
+threshold controls source admission.
 
 Migration `0010_codex_two_phase_memory.sql` adds the Codex-style operational
 state:
 
 - `memory_stage1_outputs`: one current Vault/source row with source identity,
   optional note revision, extraction profile/prompt/pipeline, redacted semantic
-  raw memory and source summary, evidence metadata JSON, admission metadata,
+  raw memory and rollout-derived source summary, locally derived whole-source
+  provenance JSON, admission metadata,
   output hash, `ready|no_output|withdrawn`, and exact Phase 2 selection state;
 - `memory_consolidation_proposals`: one prepared/applied/rejected untrusted
   proposal per Vault/input hash, including model/Provider/prompt identity,

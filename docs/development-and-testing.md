@@ -435,11 +435,11 @@ Evaluate:
 
 Ranking changes require benchmark comparison and recorded rationale.
 
-Memory integration fixtures cover explicit `remember` staging, Phase 1
-semantic output distinct from exact evidence, local evidence/revision checks,
+Memory integration fixtures cover explicit `remember` staging, the exact Codex
+Phase 1 three-field output, local whole-source provenance/revision checks,
 durable `no_output` coverage, unchanged-note skip, forced re-extraction,
 source update/withdrawal, Phase 2 create/update/archive/discard decisions,
-snapshot conflicts, proposal reuse, canonical artifact rendering, lifecycle
+semantic snapshot conflicts, revision-only drift, proposal reuse, canonical artifact rendering, lifecycle
 filtering, FTS-only recall, optional vector degradation, recall budgets, MCP
 memory scopes/resources, and two-Vault isolation. Tests use local Provider
 fakes only; recall tests prove that no query-time LLM is required.

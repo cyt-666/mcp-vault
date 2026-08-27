@@ -589,6 +589,11 @@ describe('Admin 管理界面', () => {
     expect(jobErrorLabel('memory_extract_output_failure_limit')).toContain('连续 3 次');
     expect(jobErrorLabel('memory_source_too_large')).toContain('512 KiB');
     expect(jobErrorLabel('memory_phase1_evidence_anchor_invalid')).toContain('超出笔记范围');
+    expect(jobErrorLabel('memory_phase2_memory_index_invalid')).toContain('不存在的记忆序号');
+    expect(jobErrorLabel('memory_phase2_input_index_invalid')).toContain('原始记忆序号');
+    expect(jobErrorLabel('memory_phase2_input_undispositioned')).toContain('既未使用也未明确丢弃');
+    expect(jobErrorLabel('memory_phase2_prepared_invalid')).toContain('无法安全恢复');
+    expect(jobErrorLabel('memory_consolidation_waiting_for_phase1')).toContain('不会消耗重试次数');
   });
 
   it('两阶段记忆页面不暴露候选审核并显示可解释的持久化进度', async () => {
@@ -649,7 +654,7 @@ describe('Admin 管理界面', () => {
     expect(container.textContent).toContain('不存在“待审核候选”');
     expect(container.textContent).toContain('不需要添加特殊标记');
     expect(container.textContent).not.toContain('进入审核的最低置信度');
-    expect(container.textContent).toContain('每篇最多保留原文证据（1–10）');
+    expect(container.textContent).toContain('提取模型不负责返回证据行号');
     expect(container.textContent).toContain('尚未绑定阶段二“记忆整理”模型');
     expect(container.textContent).toContain('阶段一 · 提取模型');
     expect(container.textContent).toContain('阶段二 · 整理模型');

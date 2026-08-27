@@ -604,13 +604,12 @@ facts.
     startup/reconciliation, while the 300-second reconciliation remains only a
     recovery fallback. A pending fresh regeneration with ready configuration
     must not leave the Admin page with no task and both manual actions disabled.
-42. **Derive evidence from authoritative numbered source lines.** Stop asking a
-    Provider to both count unnumbered Markdown lines and echo exact source text.
-    Send a line-numbered untrusted view, require only bounded start/end line
-    selections, validate those bounds locally, and derive the excerpt hash from
-    the current Vault revision. Model text is never accepted as the source
-    quotation. This preserves transparent provenance while eliminating false
-    failures caused by line-count or character-copy drift.
+42. **Derive provenance locally without model coordinates.** Stop asking a
+    Provider to count lines, echo source text, or select evidence ranges. Match
+    the Codex `raw_memory`/`rollout_summary`/`rollout_slug` Phase 1 contract and
+    bind a non-empty output to file/path/revision plus a normalized whole-source
+    hash locally. Explicit/imported provenance may still carry caller-validated
+    line or heading anchors.
 
 ## Progress
 
@@ -1847,3 +1846,14 @@ state. Phase 1 no longer asks a model to echo exact source text: it sends stable
 line labels, accepts bounded ranges, and derives provenance from the canonical
 note revision. Generation 2 cleanly restarts the prerelease memory corpus under
 that contract.
+
+The 2026-08-27 Codex-alignment correction supersedes that automatic-note line-
+range contract. Live MiMo rejected otherwise valid notes on evidence range
+bounds, while upstream Codex Phase 1 uses only `raw_memory`,
+`rollout_summary`, and `rollout_slug`. Extraction pipeline 10 now uses that
+exact wire shape and derives whole-note file/path/revision/hash provenance
+locally. Phase 2 also stops treating projection-only revision churn as semantic
+snapshot change: rebuild admission is canonical-record-only, identical
+canonical revisions are no-ops, unrelated active extraction delays
+consolidation without consuming attempts, and old prompt-version proposals are
+rejected before reuse.

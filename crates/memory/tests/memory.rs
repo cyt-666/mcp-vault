@@ -7,8 +7,8 @@ use axum::{Json, Router, extract::State as AxumState, http::StatusCode, routing:
 use mcp_vault_auth::{AuthService, MasterKeyRing};
 use mcp_vault_core::VaultCore;
 use mcp_vault_domain::{
-    Actor, MemoryId, MemoryRawId, Revision, SourcePlane, VaultContext, VaultId, VaultPath,
-    VaultSlug, WritePrecondition,
+    Actor, MemoryConsolidationId, MemoryId, MemoryRawId, ModelId, ProviderId, Revision,
+    SourcePlane, VaultContext, VaultId, VaultPath, VaultSlug, WritePrecondition,
 };
 use mcp_vault_memory::{
     ExtractionPolicy, ExtractionSourceMode, MEMORY_PIPELINE_GENERATION, MemoryOrigin,
@@ -20,7 +20,8 @@ use mcp_vault_providers::{
     ProviderService, ProviderSettings,
 };
 use mcp_vault_state::{
-    MemoryBundle, MemoryFilter, MemoryRecord, MemoryStage1OutputRecord, StateStore, VaultStatus,
+    MemoryBundle, MemoryConsolidationProposalRecord, MemoryFilter, MemoryRecord,
+    MemoryStage1OutputRecord, StateStore, VaultStatus,
 };
 use mcp_vault_storage_fs::StorageOptions;
 use serde_json::json;
@@ -36,25 +37,24 @@ async fn fake_extraction(
     }
     let call = calls.fetch_add(1, Ordering::SeqCst);
     let schema = &request["response_format"]["json_schema"]["schema"];
-    let evidence_schema = &schema["properties"]["evidence"];
     if request["max_tokens"] != 8_192
         || request["response_format"]["type"] != "json_schema"
-        || !matches!(evidence_schema["maxItems"].as_u64(), Some(2) | Some(3))
         || schema["properties"]
             .as_object()
-            .is_none_or(|properties| properties.len() != 4)
+            .is_none_or(|properties| properties.len() != 3)
         || schema["required"]
             .as_array()
-            .is_none_or(|required| required.len() != 4)
-        || evidence_schema["items"]["properties"]
-            .get("quote")
-            .is_some()
+            .is_none_or(|required| required.len() != 3)
+        || schema["properties"].get("evidence").is_some()
         || !request["messages"][0]["content"]
             .as_str()
             .is_some_and(|prompt| prompt.contains("Phase 1 memory writing model"))
         || !request["messages"][1]["content"]
             .as_str()
-            .is_some_and(|content| content.contains("L1: A durable decision is documented here."))
+            .is_some_and(|content| {
+                content.contains("A durable decision is documented here.")
+                    && !content.contains("L1:")
+            })
     {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -62,9 +62,9 @@ async fn fake_extraction(
         );
     }
     let content = if call == 1 {
-        "{\"source_summary\":\"The note records a durable decision.\",\"source_slug\":\"durable-decision\",\"raw_memory\":\"The project has a documented durable decision.\"}"
+        "{\"rollout_summary\":\"The note records a durable decision.\",\"rollout_slug\":\"durable-decision\",\"raw_memory\":\"The project has a documented durable decision.\",\"evidence\":[]}"
     } else {
-        "{\"source_summary\":\"The note records a durable decision.\",\"source_slug\":\"durable-decision\",\"raw_memory\":\"The project has a documented durable decision.\",\"evidence\":[{\"start_line\":1,\"end_line\":1}]}"
+        "{\"rollout_summary\":\"The note records a durable decision.\",\"rollout_slug\":\"durable-decision\",\"raw_memory\":\"The project has a documented durable decision.\"}"
     };
     (
         StatusCode::OK,
@@ -120,76 +120,63 @@ fn fake_consolidation_response(
         .cloned()
         .unwrap_or_default();
     let mut actions = Vec::new();
-    let mut dispositions = Vec::new();
+    let discarded_input_indexes = Vec::<serde_json::Value>::new();
     for dirty_input in dirty {
-        let stage1_id = dirty_input["stage1_id"].as_str().unwrap();
+        let input_index = dirty_input["input_index"].as_u64().unwrap();
         match dirty_input["status"].as_str().unwrap_or_default() {
-            "no_output" => {
-                dispositions.push(json!({
-                    "stage1_id": stage1_id,
-                    "disposition": "discarded",
-                    "reason": "No durable raw memory was produced."
-                }));
-            }
+            "no_output" => {}
             "withdrawn" => {
                 for memory in &current {
-                    if memory["stage1_ids"]
+                    if memory["support_input_indexes"]
                         .as_array()
-                        .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(stage1_id)))
+                        .is_some_and(|indexes| {
+                            indexes
+                                .iter()
+                                .any(|index| index.as_u64() == Some(input_index))
+                        })
                     {
                         actions.push(json!({
                             "operation": "archive",
-                            "memory_id": memory["memory_id"],
+                            "memory_index": memory["memory_index"],
                             "content": null,
                             "memory_type": null,
-                            "source_refs": [],
-                            "supersedes": [],
-                            "reason": "Its source was withdrawn."
+                            "input_indexes": [],
+                            "supersedes_memory_indexes": []
                         }));
                     }
                 }
-                dispositions.push(json!({
-                    "stage1_id": stage1_id,
-                    "disposition": "withdrawn",
-                    "reason": "The source was withdrawn."
-                }));
             }
             "ready" => {
                 let raw = raw_memories
                     .iter()
-                    .find(|raw| raw["stage1_id"].as_str() == Some(stage1_id))
+                    .find(|raw| raw["input_index"].as_u64() == Some(input_index))
                     .unwrap();
-                let supersedes = raw["metadata"]["supersedes"]
-                    .as_str()
-                    .map_or_else(Vec::new, |id| vec![json!(id)]);
+                let supersedes = raw["metadata"]["requested_supersedes_memory_index"]
+                    .as_u64()
+                    .map_or_else(Vec::new, |index| vec![json!(index)]);
                 let existing = (supersedes.is_empty())
                     .then(|| {
                         current.iter().find(|memory| {
-                            memory["stage1_ids"].as_array().is_some_and(|ids| {
-                                ids.iter().any(|id| id.as_str() == Some(stage1_id))
-                            }) || memory["content"] == raw["raw_memory"]
+                            memory["support_input_indexes"]
+                                .as_array()
+                                .is_some_and(|indexes| {
+                                    indexes
+                                        .iter()
+                                        .any(|index| index.as_u64() == Some(input_index))
+                                })
+                                || memory["content"] == raw["raw_memory"]
                         })
                     })
                     .flatten();
-                let evidence_indexes = (0..raw["evidence"].as_array().map_or(0, Vec::len))
-                    .map(|index| json!(index))
-                    .collect::<Vec<_>>();
                 actions.push(json!({
                     "operation": if existing.is_some() { "update" } else { "create" },
-                    "memory_id": existing.map_or(serde_json::Value::Null, |memory| memory["memory_id"].clone()),
+                    "memory_index": existing.map_or(serde_json::Value::Null, |memory| {
+                        memory["memory_index"].clone()
+                    }),
                     "content": raw["raw_memory"],
                     "memory_type": raw["metadata"]["memory_type"].as_str().unwrap_or("decision"),
-                    "source_refs": [{
-                        "stage1_id": stage1_id,
-                        "evidence_indexes": evidence_indexes
-                    }],
-                    "supersedes": supersedes,
-                    "reason": "The raw input contains durable user knowledge."
-                }));
-                dispositions.push(json!({
-                    "stage1_id": stage1_id,
-                    "disposition": "used",
-                    "reason": "Used by one semantic memory."
+                    "input_indexes": [input_index],
+                    "supersedes_memory_indexes": supersedes
                 }));
             }
             _ => unreachable!(),
@@ -203,7 +190,7 @@ fn fake_consolidation_response(
     let content = json!({
         "memory_summary": summary,
         "actions": actions,
-        "raw_dispositions": dispositions,
+        "discarded_input_indexes": discarded_input_indexes,
     })
     .to_string();
     (
@@ -392,20 +379,20 @@ async fn extraction_policy_is_typed_and_vault_scoped() {
             .policy
             .enabled
     );
-    assert!(
-        service
-            .set_extraction_policy(
-                &first,
-                ExtractionPolicy {
-                    max_evidence_per_note: 11,
-                    ..ExtractionPolicy::default()
-                },
-                Some(Revision::new(1)),
-                None,
-            )
-            .await
-            .is_err()
-    );
+    let legacy_limit = service
+        .set_extraction_policy(
+            &first,
+            ExtractionPolicy {
+                enabled: true,
+                max_evidence_per_note: 11,
+                ..ExtractionPolicy::default()
+            },
+            Some(Revision::new(1)),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(legacy_limit.revision, Some(Revision::new(2)));
     assert!(
         service
             .set_extraction_policy(
@@ -414,7 +401,7 @@ async fn extraction_policy_is_typed_and_vault_scoped() {
                     request_timeout_seconds: 29,
                     ..ExtractionPolicy::default()
                 },
-                Some(Revision::new(1)),
+                Some(Revision::new(2)),
                 None,
             )
             .await
@@ -957,17 +944,23 @@ async fn explicit_newer_memory_supersedes_old_and_historical_recall_keeps_both()
             .any(|memory| memory.id == newer.memory.id)
     );
 
-    let report = service.rebuild(&context, &core).await.unwrap();
-    assert_eq!(report.quarantined, 0);
+    let old_revision = service.get(&context, old.memory.id).await.unwrap().revision;
+    let newer_revision = service
+        .get(&context, newer.memory.id)
+        .await
+        .unwrap()
+        .revision;
+    let first_rebuild = service.rebuild(&context, &core).await.unwrap();
+    let second_rebuild = service.rebuild(&context, &core).await.unwrap();
+    assert_eq!(first_rebuild.quarantined, 0);
+    assert_eq!(second_rebuild.quarantined, 0);
     assert_eq!(
-        service
-            .get(&context, newer.memory.id)
-            .await
-            .unwrap()
-            .relations
-            .len(),
-        1
+        service.get(&context, old.memory.id).await.unwrap().revision,
+        old_revision
     );
+    let after_rebuild = service.get(&context, newer.memory.id).await.unwrap();
+    assert_eq!(after_rebuild.revision, newer_revision);
+    assert_eq!(after_rebuild.relations.len(), 1);
 }
 
 #[tokio::test]
@@ -1289,7 +1282,18 @@ async fn ordinary_note_extraction_stages_then_consolidates_semantic_memory() {
         memories[0].content,
         "The project has a documented durable decision."
     );
-    assert_eq!(memories[0].sources[0].start_line, Some(1));
+    assert_eq!(memories[0].sources[0].start_line, None);
+    assert!(
+        state
+            .memory()
+            .get_bundle(&context, memories[0].id)
+            .await
+            .unwrap()
+            .unwrap()
+            .sources[0]
+            .excerpt_hash
+            .is_some()
+    );
     let canonical_path = memories[0].canonical_path.clone().unwrap();
     let mut canonical = core.read_managed(&context, &canonical_path).await.unwrap();
     let mut markdown = String::new();
@@ -1366,8 +1370,8 @@ async fn ordinary_note_extraction_stages_then_consolidates_semantic_memory() {
         .extract_note(&context, &core, &note.file.path)
         .await
         .unwrap();
-    assert!(changed_profile.source_admitted);
-    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert!(changed_profile.already_evaluated);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
 
     let changed_note = core
         .replace_bytes(
@@ -1386,7 +1390,7 @@ async fn ordinary_note_extraction_stages_then_consolidates_semantic_memory() {
         .await
         .unwrap();
     assert!(changed_revision.source_admitted);
-    assert_eq!(calls.load(Ordering::SeqCst), 5);
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
     assert_eq!(
         state.memory().pending_stage1_count(&context).await.unwrap(),
         1
@@ -1472,6 +1476,49 @@ async fn consolidation_reuses_prepared_proposal_after_partial_artifact_failure()
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn obsolete_prepared_contract_is_rejected_before_parsing_or_provider_use() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, service) = fixture(&state, &directory, "obsolete-proposal").await;
+    let input_hash = "sha256:obsolete-contract";
+    state
+        .memory()
+        .insert_consolidation_proposal(
+            &context,
+            &MemoryConsolidationProposalRecord {
+                id: MemoryConsolidationId::new(),
+                vault_id: context.id(),
+                input_hash: input_hash.to_owned(),
+                proposal: json!({"intentionally": "not a current typed proposal"}),
+                model_id: ModelId::new(),
+                provider_id: ProviderId::new(),
+                prompt_version: "memory-consolidation-v3".to_owned(),
+                status: "prepared".to_owned(),
+                created_at: 1,
+                applied_at: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    service.refresh_artifacts(&context, &core).await.unwrap();
+    let report = service.consolidate(&context, &core).await.unwrap();
+    assert_eq!(report.raw_inputs, 0);
+    assert_eq!(
+        state
+            .memory()
+            .get_consolidation_proposal_by_input(&context, input_hash)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "rejected"
     );
 }
 

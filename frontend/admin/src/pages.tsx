@@ -1356,9 +1356,7 @@ function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonOb
   const stage1 = asRecord(data.stage1);
   const consolidation = asRecord(data.consolidation);
   const blockers = Array.isArray(readiness.blockers) ? readiness.blockers.map(String) : [];
-  const configuredEvidenceLimit = numberValue(policy.max_evidence_per_note, numberValue(policy.max_candidates_per_note, 3));
   const [enabled, setEnabled] = useState(booleanValue(policy.enabled));
-  const [maxEvidencePerNote, setMaxEvidencePerNote] = useState(configuredEvidenceLimit);
   const [requestTimeoutSeconds, setRequestTimeoutSeconds] = useState(numberValue(policy.request_timeout_seconds, 300));
   const [busy, setBusy] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -1374,9 +1372,8 @@ function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonOb
   useEffect(() => {
     if (dirty) return;
     setEnabled(booleanValue(policy.enabled));
-    setMaxEvidencePerNote(configuredEvidenceLimit);
     setRequestTimeoutSeconds(numberValue(policy.request_timeout_seconds, 300));
-  }, [configuredEvidenceLimit, dirty, policy.enabled, policy.request_timeout_seconds]);
+  }, [dirty, policy.enabled, policy.request_timeout_seconds]);
 
   useEffect(() => {
     if (submittedJobId && jobs.some((job) => stringValue(job.id) === submittedJobId)) setSubmittedJob(null);
@@ -1390,7 +1387,6 @@ function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonOb
         body: {
           enabled,
           source_mode: 'automatic',
-          max_evidence_per_note: maxEvidencePerNote,
           request_timeout_seconds: requestTimeoutSeconds,
           expected_revision: typeof data.revision === 'number' ? data.revision : null,
         },
@@ -1440,7 +1436,7 @@ function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonOb
     <Panel
       title="两阶段长期记忆"
       eyebrow="先提取 · 再整理"
-      description="阶段一逐篇提炼带证据的原始记忆；阶段二在 Vault 范围内合并、去重、处理冲突，并写入最终语义记忆。"
+      description="阶段一逐篇提炼原始记忆，并由本地绑定笔记来源修订；阶段二在 Vault 范围内合并、去重、处理冲突，并写入最终语义记忆。"
       actions={<StatusBadge tone={pipelineReady ? 'success' : 'warning'}>{pipelineReady ? '可以运行' : configurationReady && regenerationPending ? '准备重新生成' : '尚未就绪'}</StatusBadge>}
     >
       <div className="compact-form">
@@ -1451,7 +1447,7 @@ function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonOb
           <button className="secondary-button" disabled={busy || !dirty} type="button" onClick={() => void save()}>{busy ? '正在保存…' : '保存设置'}</button>
         </div>
       </div>
-      <Notice tone="info">原文只作为可追溯证据，最终记忆是模型归纳后的简短语义。阶段二会自动决定保留、合并、更新或遗忘，不存在“待审核候选”，也不需要人工逐条确认。</Notice>
+      <Notice tone="info">提取模型不负责返回证据行号；服务会把原始记忆绑定到当前笔记及其修订。最终记忆是模型归纳后的简短语义，阶段二会自动决定保留、合并、更新或遗忘，不存在“待审核候选”，也不需要人工逐条确认。</Notice>
       {operationMessage ? <Notice tone={operationMessage.tone}>{operationMessage.text}</Notice> : null}
       <div className="summary-list">
         <SummaryRow label="阶段一 · 提取模型" value={stringValue(phase1Readiness.external_model_id, '未绑定')} mono />
@@ -1467,7 +1463,6 @@ function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonOb
       <details className="disclosure">
         <summary>高级设置</summary>
         <div className="form-grid">
-          <label>每篇最多保留原文证据（1–10）<input max="10" min="1" step="1" type="number" value={maxEvidencePerNote} onChange={(event) => { setMaxEvidencePerNote(Number(event.target.value)); setDirty(true); }} /></label>
           <label>单篇提取超时（秒，30–1800）<input max="1800" min="30" step="1" type="number" value={requestTimeoutSeconds} onChange={(event) => { setRequestTimeoutSeconds(Number(event.target.value)); setDirty(true); }} /></label>
         </div>
       </details>

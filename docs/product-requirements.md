@@ -105,13 +105,19 @@ It MUST provide:
 - provenance, confidence, importance, temporal validity, and lifecycle status;
 - Vault-level automatic memory generation from ordinary Markdown without
   requiring note authors to add service-specific markers, tags, or folders;
-- a bounded Phase 1 policy that permits `no_output` and caps exact evidence
-  anchors per note;
-- exact source evidence and current revision checks; model-generated
-  confidence/importance scores MUST NOT be used as trust evidence;
+- a bounded Phase 1 policy that permits `no_output`, uses the Codex three-field
+  semantic output, and derives source provenance locally;
+- exact source identity/revision/hash checks; model-generated source
+  coordinates or confidence/importance scores MUST NOT be used as trust
+  evidence;
+- optional line/heading anchors for explicit or imported provenance, without
+  requiring the automatic extraction model to generate them;
 - separate extraction and consolidation model roles, persisted raw-memory
   staging, schema validation, global deduplication, contradiction resolution,
   supersession, and forgetting;
+- application-owned final identifiers, evidence attachment, raw-input
+  dispositions, and optimistic revisions; the consolidation model MUST propose
+  semantic decisions rather than own this bookkeeping;
 - autonomous consolidation so ordinary operation never depends on a human
   review queue or candidate inbox;
 - user inspection, editing, merging, archival, restoration, and

@@ -114,12 +114,26 @@ enabled by default; the operator may explicitly disable it or change the
 per-call generation bound. Xiaomi's current structured-output guide explicitly
 states that JSON Object mode guarantees valid JSON syntax, not the requested
 field hierarchy, and recommends a complete structure template. MCP Vault
-therefore includes both the full JSON Schema and an exact Phase 1 root-object
-template in the prompt and still validates the result locally. If Phase 1
-returns valid `raw_memory` and evidence but omits only the auxiliary
-`source_summary`, MCP Vault copies `raw_memory` verbatim into that field and
-reruns the full validator. Missing core memory/evidence and unknown or empty
-objects still fail without issuing an automatic second paid request.
+therefore includes both the full JSON Schema and the exact Codex Phase 1
+three-field root template in the prompt and still validates the result locally.
+If Phase 1 returns valid `raw_memory` but omits only auxiliary
+`rollout_summary`, MCP Vault copies `raw_memory` verbatim into that field and
+reruns the full validator. Unknown or empty objects still fail without issuing
+an automatic second paid request. Source provenance is derived locally; MiMo is
+never asked for evidence line coordinates. This is `memory-stage1-v4`.
+
+Phase 2 likewise includes an exact compact root template, but does not ask MiMo
+to generate or copy durable identifiers, evidence indexes, or mechanically
+duplicated raw dispositions. The request labels raw inputs and current memories
+with small request-local integers. MiMo returns semantic actions, those bounded
+indexes, and explicit discard indexes. MCP Vault maps them back to the captured
+snapshot, allocates every create ID locally, expands ready inputs to validated
+evidence, and derives `used`, `no_output`, and `withdrawn` state. An out-of-range
+reference is reported as a redacted `memory_phase2_*_index_invalid` code; the
+Provider response body is never retained. This is the
+`memory-consolidation-v4` contract. Older prepared proposals are rejected before
+parsing, and revision-only projection drift does not invalidate unchanged
+semantic memory.
 
 ### 4.3 Zhipu GLM
 

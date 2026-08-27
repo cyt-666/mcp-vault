@@ -11,7 +11,8 @@ pub enum MemoryError {
     /// A source note could not be ingested before any Provider call.
     #[error("memory source ingestion failed: {0}")]
     SourceIngestion(&'static str),
-    /// A Provider result passed the wire contract but failed Phase 1 validation.
+    /// A Provider result passed the wire contract but failed memory-pipeline
+    /// validation. The stable code identifies a trusted local validation rule.
     #[error("memory generated output is invalid: {0}")]
     GeneratedOutput(&'static str),
     /// A memory, staged source, or Vault was not found.

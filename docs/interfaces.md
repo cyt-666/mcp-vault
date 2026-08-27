@@ -899,10 +899,11 @@ policies.
 
 The extraction policy returned by `GET /api/v1/memory/extraction` and accepted
 by `PUT` contains `enabled`, fixed `source_mode: "automatic"`,
-`max_evidence_per_note`, and `request_timeout_seconds`. Legacy
-`max_candidates_per_note`, `explicit_only`, and `all_notes` inputs are migration
-aliases. Source admission does not depend on note frontmatter, tags, paths, or
-folders, and there are no model-score threshold fields.
+and `request_timeout_seconds`. `max_evidence_per_note` and legacy
+`max_candidates_per_note` remain accepted/returned as prerelease compatibility
+fields but do not affect Phase 1 v4. `explicit_only` and `all_notes` are source-
+mode migration aliases. Source admission does not depend on note frontmatter,
+tags, paths, or folders, and there are no model-score threshold fields.
 
 The status response separates `phase1_readiness` and `phase2_readiness`, adds a
 combined `readiness`, Stage 1 `total|ready|no_output|withdrawn|pending` counts,
@@ -916,22 +917,19 @@ The Phase 1 Provider root is:
 
 ```json
 {
-  "source_summary": "...",
-  "source_slug": "...",
   "raw_memory": "...",
-  "evidence": [{"start_line": 1, "end_line": 1}]
+  "rollout_summary": "...",
+  "rollout_slug": "..."
 }
 ```
 
-The untrusted Markdown sent to Phase 1 carries stable `L<number>:` prefixes.
-An empty result uses empty semantic strings, `source_slug: null`, and an empty
-evidence array. Local validation checks selected ranges and derives exact
-excerpt hashes from the current revision, then persists only source/revision/
-line/hash metadata. Phase 1 does not write final memory. When a
-Provider returns every core field but omits only `source_summary`, the adapter
+An empty result uses empty semantic strings and `rollout_slug: null`. Local code
+derives the note file/path/revision and normalized whole-source hash; the model
+never returns evidence coordinates. Phase 1 does not write final memory. When a
+Provider returns valid `raw_memory` but omits only `rollout_summary`, the adapter
 may copy the already returned `raw_memory` string into that auxiliary field and
-then rerun the complete schema and evidence validation. It does not repair an
-empty object, invent a summary, or accept missing/invalid evidence.
+then rerun the complete three-field schema validation. It does not repair an
+empty object or invent source provenance.
 
 `POST /memory/extraction/run` accepts optional
 `{"include_evaluated": false}`. The default skips current successful Stage 1

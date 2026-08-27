@@ -256,11 +256,10 @@ a different semantic raw memory from the unchanged note and consume the same
 per-note model budget again. A failed forced evaluation leaves the note stale
 for the next default incremental run.
 
-Phase 1 returns a semantic `raw_memory`, a detailed source summary, and bounded
-line ranges selected from a server-numbered source view. MCP Vault validates
-the ranges, derives the exact excerpt hash from the current revision, and stages
-only source metadata; the Provider does not echo canonical evidence text and
-Phase 1 does not write final memory. A separate durable
+Phase 1 returns the Codex three-field `raw_memory`, `rollout_summary`, and
+`rollout_slug` object. MCP Vault derives file/path/revision and normalized
+whole-source hash locally; the Provider does not return canonical evidence
+coordinates and Phase 1 does not write final memory. A separate durable
 `memory.consolidate` job uses the `memory_consolidation` model to merge,
 deduplicate, supersede, archive, or discard staged inputs. Only a fully
 validated prepared proposal is materialized as canonical semantic memory.
@@ -291,7 +290,7 @@ This is not a periodic LLM sweep. Disabled extraction admits no new
 survives restart. The Memory page reports readiness blockers and recent
 extraction failures without exposing note bodies or provider responses.
 The Phase 1 policy returns either `no_output` or one bounded semantic raw input
-with up to the configured number of exact evidence anchors. Ordinary
+with application-derived source provenance. Ordinary
 article/reference and technical content always remains in the note retrieval
 index even when Phase 1 returns `no_output`. On upgrade, migration 0011 deletes
 all prerelease memory rows and `memory.*` jobs. The automatically admitted
@@ -328,10 +327,10 @@ the provider response body.
 one complete JSON value, but a required field, type, enum, array bound, or
 additional-property rule did not match. Current jobs show the redacted mismatch
 category and trusted schema path. Phase 1 requires exactly
-`source_summary`, nullable `source_slug`, `raw_memory`, and `evidence`; its
-zero-result form uses empty summary/raw strings, a null slug, and an empty
-evidence array. Phase 2 requires a summary, bounded memory actions, and one
-disposition for every dirty raw input. These are multi-field contracts, so the
+`raw_memory`, `rollout_summary`, and nullable `rollout_slug`; its zero-result
+form uses empty summary/raw strings and a null slug. Source provenance is local,
+not a model field. Phase 2 requires a summary, bounded memory actions, and a
+local disposition for every dirty raw input. These are multi-field contracts, so the
 generic single-array-envelope repair does not apply; missing or renamed fields
 remain visible contract failures rather than being guessed locally.
 
