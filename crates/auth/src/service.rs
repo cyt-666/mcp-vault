@@ -1124,10 +1124,18 @@ impl AuthService {
     }
 }
 
-/// Construct a secure Admin session cookie header value.
-pub fn session_cookie_header(token: &BearerToken, max_age: Duration) -> String {
+/// Construct an Admin session cookie header for one validated page origin.
+pub fn session_cookie_header(
+    token: &BearerToken,
+    max_age: Duration,
+    security: crate::origin::AdminCookieSecurity,
+) -> String {
+    let secure = match security {
+        crate::origin::AdminCookieSecurity::Secure => " Secure;",
+        crate::origin::AdminCookieSecurity::Insecure => "",
+    };
     format!(
-        "{SESSION_COOKIE_NAME}={}; Path=/; Max-Age={}; Secure; HttpOnly; SameSite=Strict",
+        "{SESSION_COOKIE_NAME}={}; Path=/; Max-Age={};{secure} HttpOnly; SameSite=Strict",
         token.expose_secret(),
         max_age.as_secs()
     )
@@ -1135,9 +1143,17 @@ pub fn session_cookie_header(token: &BearerToken, max_age: Duration) -> String {
 
 /// Construct the same-origin-readable CSRF cookie used to reconstruct the
 /// mutation header after a page reload. It is not an authentication bearer.
-pub fn csrf_cookie_header(token: &BearerToken, max_age: Duration) -> String {
+pub fn csrf_cookie_header(
+    token: &BearerToken,
+    max_age: Duration,
+    security: crate::origin::AdminCookieSecurity,
+) -> String {
+    let secure = match security {
+        crate::origin::AdminCookieSecurity::Secure => " Secure;",
+        crate::origin::AdminCookieSecurity::Insecure => "",
+    };
     format!(
-        "{CSRF_COOKIE_NAME}={}; Path=/; Max-Age={}; Secure; SameSite=Strict",
+        "{CSRF_COOKIE_NAME}={}; Path=/; Max-Age={};{secure} SameSite=Strict",
         token.expose_secret(),
         max_age.as_secs()
     )
@@ -1160,14 +1176,22 @@ pub fn parse_session_cookie(header: &str) -> Result<&str, AuthError> {
     found.ok_or(AuthError::InvalidCredential)
 }
 
-/// Construct a deletion cookie for logout.
-pub fn clear_session_cookie_header() -> &'static str {
-    "mcp_vault_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"
+/// Construct a deletion cookie matching the current Admin page transport.
+pub fn clear_session_cookie_header(security: crate::origin::AdminCookieSecurity) -> String {
+    let secure = match security {
+        crate::origin::AdminCookieSecurity::Secure => " Secure;",
+        crate::origin::AdminCookieSecurity::Insecure => "",
+    };
+    format!("mcp_vault_session=; Path=/; Max-Age=0;{secure} HttpOnly; SameSite=Strict")
 }
 
 /// Expire the frontend-readable CSRF cookie during logout.
-pub fn clear_csrf_cookie_header() -> &'static str {
-    "mcp_vault_csrf=; Path=/; Max-Age=0; Secure; SameSite=Strict"
+pub fn clear_csrf_cookie_header(security: crate::origin::AdminCookieSecurity) -> String {
+    let secure = match security {
+        crate::origin::AdminCookieSecurity::Secure => " Secure;",
+        crate::origin::AdminCookieSecurity::Insecure => "",
+    };
+    format!("mcp_vault_csrf=; Path=/; Max-Age=0;{secure} SameSite=Strict")
 }
 
 /// Basic authentication is acceptable only over TLS or a loopback transport.
@@ -1358,10 +1382,13 @@ mod tests {
     };
     use mcp_vault_state::{StateStore, VaultStatus};
 
-    use super::{AuthService, SessionPolicy, csrf_cookie_header, session_cookie_header};
+    use super::{
+        AuthService, SessionPolicy, clear_csrf_cookie_header, clear_session_cookie_header,
+        csrf_cookie_header, session_cookie_header,
+    };
     use crate::{
         AuthError,
-        origin::OriginPolicy,
+        origin::{AdminCookieSecurity, OriginPolicy},
         secret::{MasterKeyRing, SecretString},
     };
 
@@ -1507,13 +1534,37 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            session_cookie_header(&login.session_token, Duration::from_secs(60))
-                .contains("Secure; HttpOnly; SameSite=Strict")
+            session_cookie_header(
+                &login.session_token,
+                Duration::from_secs(60),
+                AdminCookieSecurity::Secure,
+            )
+            .contains("Secure; HttpOnly; SameSite=Strict")
         );
-        let csrf_cookie = csrf_cookie_header(&login.csrf_token, Duration::from_secs(60));
+        let csrf_cookie = csrf_cookie_header(
+            &login.csrf_token,
+            Duration::from_secs(60),
+            AdminCookieSecurity::Secure,
+        );
         assert!(csrf_cookie.contains("mcp_vault_csrf="));
         assert!(csrf_cookie.contains("Secure; SameSite=Strict"));
         assert!(!csrf_cookie.contains("HttpOnly"));
+        let local_http_session = session_cookie_header(
+            &login.session_token,
+            Duration::from_secs(60),
+            AdminCookieSecurity::Insecure,
+        );
+        let local_http_csrf = csrf_cookie_header(
+            &login.csrf_token,
+            Duration::from_secs(60),
+            AdminCookieSecurity::Insecure,
+        );
+        assert!(!local_http_session.contains("Secure"));
+        assert!(local_http_session.contains("HttpOnly; SameSite=Strict"));
+        assert!(!local_http_csrf.contains("Secure"));
+        assert!(local_http_csrf.contains("SameSite=Strict"));
+        assert!(!clear_session_cookie_header(AdminCookieSecurity::Insecure).contains("Secure"));
+        assert!(!clear_csrf_cookie_header(AdminCookieSecurity::Insecure).contains("Secure"));
         let origin = OriginPolicy::new(["http://localhost:8081"]).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert("origin", HeaderValue::from_static("http://localhost:8081"));

@@ -2,7 +2,7 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { App } from './App';
+import { App, isInsecureLanAdminLocation } from './App';
 import { AdminApiError, adminApi } from './api';
 import { Dashboard, ManagementPage } from './pages';
 import { formatRequestError, jobErrorLabel } from './view-model';
@@ -23,6 +23,12 @@ describe('Admin 管理界面', () => {
     vi.spyOn(adminApi, 'setupStatus').mockResolvedValue({ setup_available: false });
   });
 
+  it('仅在非回环 HTTP 管理地址显示明文传输风险', () => {
+    expect(isInsecureLanAdminLocation({ protocol: 'http:', hostname: '192.168.1.20' })).toBe(true);
+    expect(isInsecureLanAdminLocation({ protocol: 'http:', hostname: 'localhost' })).toBe(false);
+    expect(isInsecureLanAdminLocation({ protocol: 'https:', hostname: 'mcp-vault.cyt.cool' })).toBe(false);
+  });
+
   it('刷新后恢复有效管理会话而不显示登录页', async () => {
     vi.mocked(adminApi.restoreSession).mockResolvedValue({
       user_id: 'admin-1',
@@ -39,6 +45,8 @@ describe('Admin 管理界面', () => {
     expect(container.textContent).toContain('管理控制台');
     expect(container.textContent).toContain('总览');
     expect(container.textContent).not.toContain('欢迎回来');
+    expect(container.querySelector<HTMLImageElement>('img.sidebar-logo')?.getAttribute('src'))
+      .toBe('/mcp-vault-logo.png');
     expect(adminApi.setupStatus).not.toHaveBeenCalled();
 
     await act(async () => root.unmount());
@@ -108,6 +116,8 @@ describe('Admin 管理界面', () => {
     expect(container.textContent).toContain('WebDAV 密码和 MCP Token 是彼此独立的凭据');
     expect(container.textContent).not.toContain('首次初始化');
     expect(container.textContent).not.toContain('Control plane');
+    expect(container.querySelector<HTMLImageElement>('img.brand-mark')?.getAttribute('src'))
+      .toBe('/mcp-vault-logo.png');
 
     await act(async () => root.unmount());
   });

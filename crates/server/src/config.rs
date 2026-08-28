@@ -145,6 +145,7 @@ impl AppConfig {
         let master_key_file = optional_path(&lookup, "MCP_VAULT_MASTER_KEY_FILE")?;
         let admin_origins =
             parse_origins(&lookup, "MCP_VAULT_ADMIN_ORIGINS", DEFAULT_ADMIN_ORIGINS)?;
+        validate_admin_origin_transports(&admin_origins)?;
         let data_origins = parse_origins(&lookup, "MCP_VAULT_DATA_ORIGINS", DEFAULT_DATA_ORIGINS)?;
         let data_public_origin = parse_optional_origin(&lookup, "MCP_VAULT_DATA_PUBLIC_ORIGIN")?;
         let data_hosts = parse_data_hosts(&lookup, default_data_hosts(data_bind))?;
@@ -441,6 +442,46 @@ where
     })
 }
 
+fn validate_admin_origin_transports(policy: &OriginPolicy) -> Result<(), ConfigError> {
+    for origin in policy.allowed_origins() {
+        let parsed = url::Url::parse(origin).map_err(|_| ConfigError::InvalidValue {
+            key: "MCP_VAULT_ADMIN_ORIGINS",
+            message: "must contain valid exact Admin origins".to_owned(),
+        })?;
+        if parsed.scheme() != "http" {
+            continue;
+        }
+        let is_local = match parsed.host() {
+            Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(address)) => is_private_or_local_ip(IpAddr::V4(address)),
+            Some(url::Host::Ipv6(address)) => is_private_or_local_ip(IpAddr::V6(address)),
+            None => false,
+        };
+        if !is_local {
+            return Err(ConfigError::InvalidValue {
+                key: "MCP_VAULT_ADMIN_ORIGINS",
+                message: "cleartext HTTP is allowed only for localhost or a literal private, loopback, or link-local IP address".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_private_or_local_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            let octets = address.octets();
+            address.is_private()
+                || address.is_loopback()
+                || address.is_link_local()
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        }
+        IpAddr::V6(address) => {
+            address.is_loopback() || address.is_unique_local() || address.is_unicast_link_local()
+        }
+    }
+}
+
 fn parse_optional_origin<F>(lookup: &F, key: &'static str) -> Result<Option<String>, ConfigError>
 where
     F: Fn(&str) -> Option<String>,
@@ -703,6 +744,34 @@ mod tests {
             result.data_public_origin.as_deref(),
             Some("https://vault.example.test:8443")
         );
+    }
+
+    #[test]
+    fn permits_explicit_private_http_admin_origins_but_rejects_public_cleartext() {
+        let private = config(&[(
+            "MCP_VAULT_ADMIN_ORIGINS",
+            "https://admin.example.test,http://192.168.1.20:8081,http://[fd00::20]:8081",
+        )])
+        .unwrap();
+        assert_eq!(
+            private.admin_origins.allowed_origins().collect::<Vec<_>>(),
+            vec![
+                "http://192.168.1.20:8081",
+                "http://[fd00::20]:8081",
+                "https://admin.example.test",
+            ]
+        );
+
+        for origin in ["http://203.0.113.10:8081", "http://admin.example.test"] {
+            let error = config(&[("MCP_VAULT_ADMIN_ORIGINS", origin)]).unwrap_err();
+            assert!(matches!(
+                error,
+                ConfigError::InvalidValue {
+                    key: "MCP_VAULT_ADMIN_ORIGINS",
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]

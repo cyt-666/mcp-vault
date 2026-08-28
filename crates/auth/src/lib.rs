@@ -16,7 +16,7 @@ pub use error::AuthError;
 pub use oauth::{
     JsonWebKey, JsonWebKeySet, OAuthPrincipal, parse_scopes, token_identity, validate_access_token,
 };
-pub use origin::OriginPolicy;
+pub use origin::{AdminCookieSecurity, OriginPolicy};
 pub use password::{PasswordPolicy, PasswordVerification};
 pub use secret::{
     BearerToken, EncryptedSecretPayload, MasterKeyRing, SecretString, digest_bearer_token,

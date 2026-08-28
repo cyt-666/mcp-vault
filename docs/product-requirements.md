@@ -228,6 +228,14 @@ A valid Admin login MUST survive an ordinary page reload without copying or
 persisting the session bearer in JavaScript-accessible browser storage. The UI
 MUST confirm the server-side session before rendering authenticated content and
 MUST retain the session-bound CSRF protection required for later mutations.
+HTTPS Admin sessions MUST use Secure cookies. An explicitly configured
+loopback or literal private-IP HTTP Admin Origin MAY use host-only non-Secure
+cookies for trusted-LAN appliance compatibility, while retaining HttpOnly on
+the session, SameSite=Strict, exact Origin/Referer, CSRF, expiry, revocation,
+and a visible cleartext warning. Public cleartext origins MUST be rejected.
+
+The Admin login shell, authenticated navigation, and browser metadata SHOULD
+use the project Logo rather than a textual placeholder.
 
 Provider configuration MUST include an operable model inventory and explicit
 role bindings; a configured Base URL alone is not a selected model. The owner

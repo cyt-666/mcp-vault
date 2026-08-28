@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-19
-- Clarified: 2026-08-22
+- Clarified: 2026-08-28
 
 ## Context
 
@@ -28,7 +28,27 @@ uninitialized Admin listener is trusted to attempt ownership. Keep the default
 loopback bind, or an equivalently narrow deployment policy, until setup is
 complete.
 
-Admin still requires password authentication, secure session cookies, CSRF protection, Origin validation, and rate limiting because LAN devices are not inherently trusted.
+Admin still requires password authentication, transport-aware session cookies,
+CSRF protection, Origin validation, and rate limiting because LAN devices are
+not inherently trusted.
+
+### 2026-08-28 amendment: explicit private-LAN HTTP access
+
+HTTPS remains preferred and its Admin session/CSRF cookies always carry the
+`Secure` attribute. An operator may explicitly list a loopback or literal
+private/link-local IP HTTP Origin in `MCP_VAULT_ADMIN_ORIGINS`. For a mutation
+whose exact Origin or same-origin Referer matches that HTTP entry, MCP Vault
+omits only the cookie `Secure` attribute so direct LAN browsers can maintain a
+session. The session cookie remains HttpOnly; both cookies remain host-only,
+SameSite=Strict, session-bound, expiring, and protected by exact Origin/Referer
+plus CSRF validation.
+
+Cleartext DNS names and public IP origins are rejected during configuration.
+This opt-in does not add a public listener, interpret forwarded client IPs, or
+weaken the HTTPS cookie path. It accepts that credentials and session traffic
+are visible to a compromised LAN and must therefore be used only on an
+operator-controlled network; HTTPS or VPN remains required when that risk is
+unacceptable.
 
 ## Consequences
 
@@ -45,6 +65,8 @@ Costs:
 - source-IP allow lists and trusted-proxy behavior remain deployment concerns.
 - exposing Admin before initialization delegates first-owner selection to the
   admitted network because there is no separate bootstrap secret.
+- explicit LAN HTTP administration trades transport confidentiality for
+  appliance compatibility and is visually warned in the Admin login page.
 
 ## Rejected alternatives
 

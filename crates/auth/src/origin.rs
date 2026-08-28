@@ -7,6 +7,16 @@ use url::Url;
 
 use crate::error::AuthError;
 
+/// Whether browser cookies for one validated Admin mutation must carry the
+/// `Secure` attribute.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdminCookieSecurity {
+    /// The Admin page origin is HTTPS.
+    Secure,
+    /// The Admin page origin is explicitly configured cleartext HTTP.
+    Insecure,
+}
+
 /// Exact scheme/host/port allow-list for one listener.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OriginPolicy {
@@ -53,19 +63,32 @@ impl OriginPolicy {
         if is_safe_method(method) {
             return Ok(());
         }
-        if let Some(origin) = single_header(headers, "origin")? {
-            return self.validate_value(origin);
-        }
-        let referer = single_header(headers, "referer")?.ok_or(AuthError::OriginRejected)?;
-        let referer_origin = Url::parse(referer)
-            .ok()
-            .and_then(|url| canonical_origin_url(&url).ok())
-            .ok_or(AuthError::OriginRejected)?;
-        if self.allowed_origins.contains(&referer_origin) {
-            Ok(())
+        self.admin_cookie_security(headers).map(|_| ())
+    }
+
+    /// Derive cookie transport policy from an exact allowed Admin
+    /// Origin/Referer. Callers use this only for state-changing requests.
+    pub fn admin_cookie_security(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<AdminCookieSecurity, AuthError> {
+        let canonical = if let Some(origin) = single_header(headers, "origin")? {
+            canonical_origin(origin)?
         } else {
-            Err(AuthError::OriginRejected)
+            let referer = single_header(headers, "referer")?.ok_or(AuthError::OriginRejected)?;
+            Url::parse(referer)
+                .ok()
+                .and_then(|url| canonical_origin_url(&url).ok())
+                .ok_or(AuthError::OriginRejected)?
+        };
+        if !self.allowed_origins.contains(&canonical) {
+            return Err(AuthError::OriginRejected);
         }
+        Ok(if canonical.starts_with("https://") {
+            AdminCookieSecurity::Secure
+        } else {
+            AdminCookieSecurity::Insecure
+        })
     }
 
     fn validate_value(&self, value: &str) -> Result<(), AuthError> {
@@ -134,7 +157,7 @@ fn is_safe_method(method: &Method) -> bool {
 mod tests {
     use http::{HeaderMap, HeaderValue, Method};
 
-    use super::OriginPolicy;
+    use super::{AdminCookieSecurity, OriginPolicy};
 
     #[test]
     fn admin_mutations_require_exact_origin_or_referer() {
@@ -147,6 +170,10 @@ mod tests {
         policy
             .validate_admin_request(&headers, &Method::POST)
             .unwrap();
+        assert_eq!(
+            policy.admin_cookie_security(&headers).unwrap(),
+            AdminCookieSecurity::Secure
+        );
 
         headers.insert(
             "origin",
@@ -175,6 +202,10 @@ mod tests {
         policy
             .validate_admin_request(&headers, &Method::PATCH)
             .unwrap();
+        assert_eq!(
+            policy.admin_cookie_security(&headers).unwrap(),
+            AdminCookieSecurity::Insecure
+        );
 
         headers.insert("origin", HeaderValue::from_static("null"));
         assert!(

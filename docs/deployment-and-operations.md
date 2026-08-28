@@ -8,7 +8,9 @@ database/message broker. Operators choose listener publication, TLS
 termination, firewall/VPN policy, and any reverse proxy independently. The
 repository's base Compose file starts MCP Vault directly; the Nginx bundle
 under [`../deploy/nginx-https/`](../deploy/nginx-https/README.md) is only an
-optional example.
+optional example. A single-service variant for operators who already run
+Nginx is available under
+[`../deploy/existing-nginx/`](../deploy/existing-nginx/README.md).
 
 The application container includes:
 
@@ -88,6 +90,14 @@ The base Compose file exposes this choice through
 `MCP_VAULT_ADMIN_PUBLISH`, whose default is `127.0.0.1:8081`. For example,
 `MCP_VAULT_ADMIN_PUBLISH=192.168.1.20:8081` publishes Admin on that LAN
 address. The operator remains responsible for TLS and source-network policy.
+
+An appliance that cannot terminate local TLS may expose Admin directly at an
+exact LAN address and add that literal HTTP origin to
+`MCP_VAULT_ADMIN_ORIGINS`. MCP Vault then emits host-only non-Secure cookies
+only for that validated HTTP Origin. This sends the Admin password and session
+in cleartext across the LAN, so restrict the published port to a trusted
+network and prefer HTTPS or VPN whenever possible. Public IP HTTP origins and
+cleartext DNS names are rejected.
 
 ## 3. Reverse proxy
 

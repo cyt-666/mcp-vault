@@ -24,6 +24,11 @@ const pageEndpoints: Partial<Record<Page, string>> = {
   system: '/system',
 };
 
+export function isInsecureLanAdminLocation(location: Pick<Location, 'protocol' | 'hostname'>) {
+  return location.protocol === 'http:'
+    && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+}
+
 async function loadPage(page: Page): Promise<JsonObject> {
   if (page === 'webdav') {
     const [credentialData, connection] = await Promise.all([
@@ -206,9 +211,7 @@ export function App() {
     return (
       <main className="auth-shell">
         <section className="auth-brand" aria-labelledby="product-title">
-          <div className="brand-mark" aria-hidden="true">
-            MV
-          </div>
+          <img className="brand-mark" src="/mcp-vault-logo.png" alt="" aria-hidden="true" />
           <p className="eyebrow">MCP VAULT 管理端</p>
           <h1 id="product-title">你的知识库，始终由你掌控。</h1>
           <p className="lede">
@@ -243,9 +246,7 @@ export function App() {
     <main className="app-shell">
       <aside className="sidebar" aria-label="管理端导航">
         <div className="sidebar-brand">
-          <span className="sidebar-logo" aria-hidden="true">
-            MV
-          </span>
+          <img className="sidebar-logo" src="/mcp-vault-logo.png" alt="" aria-hidden="true" />
           <div>
             <strong>MCP Vault</strong>
             <span>管理控制台</span>
@@ -389,6 +390,11 @@ function AuthCard({
           ? '使用管理端账号登录。WebDAV 密码和 MCP Token 是彼此独立的凭据。'
           : '设置管理员账号和密码即可完成初始化。该账号将拥有 MCP Vault 的管理权限。'}
       </p>
+      {isInsecureLanAdminLocation(window.location) ? (
+        <p className="transport-warning" role="status">
+          当前通过局域网 HTTP 访问，管理员密码和会话不会经过传输加密。仅应在可信局域网内使用。
+        </p>
+      ) : null}
       {error ? <InlineAlert message={error} /> : null}
       <form onSubmit={submit} className="form-stack">
         <label>

@@ -207,9 +207,12 @@ release UI is revised without changing Admin API/Vault boundaries:
    rejected placeholder examples. A policy error repeats actionable guidance
    instead of asking the operator to guess.
 9. A valid Admin session survives page reload. The session bearer remains only
-   in the Secure/HttpOnly cookie; a separate Secure/SameSite CSRF cookie is
-   readable by the Admin frontend solely to reconstruct the required
+   in an HttpOnly/SameSite=Strict cookie; a separate SameSite=Strict CSRF
+   cookie is readable by the Admin frontend solely to reconstruct the required
    mutation header before `GET /session` confirms the server-side session.
+   HTTPS origins add `Secure`; the 2026-08-28 ADR-0004 amendment permits an
+   explicitly configured literal private/loopback HTTP Origin to omit only
+   that attribute while retaining the remaining controls.
 
 ### Password-only first-Admin initialization
 

@@ -118,11 +118,17 @@ win.
 Use an opaque high-entropy session token in a cookie:
 
 ```text
-Secure
 HttpOnly
 SameSite=Strict
 Path=/
 ```
+
+The cookie includes `Secure` whenever the validated Admin page Origin/Referer
+is HTTPS. If the operator explicitly configures an HTTP localhost or literal
+private/link-local IP Origin, the cookie omits only `Secure` for that request
+so a direct LAN browser can store it. Public cleartext origins and cleartext
+DNS names are rejected at startup. The Admin login page visibly warns on a
+non-loopback HTTP connection.
 
 Store only a digest in SQLite.
 
@@ -149,9 +155,10 @@ Every state-changing Admin request requires:
 - CSRF token bound to the session;
 - content type validation.
 
-Issue the session-bound CSRF value in a separate `Secure`,
-`SameSite=Strict`, non-`HttpOnly` cookie so the Admin frontend can reconstruct
-`X-CSRF-Token` after reload. This cookie is not an authentication
+Issue the session-bound CSRF value in a separate `SameSite=Strict`,
+non-`HttpOnly` cookie so the Admin frontend can reconstruct `X-CSRF-Token`
+after reload. It uses the same transport-specific `Secure` behavior as the
+session cookie. This cookie is not an authentication
 credential, and possession of it without the opaque HttpOnly session cookie
 must grant no access. Store only its digest in SQLite and expire it together
 with the session cookie on logout.
@@ -218,6 +225,17 @@ from `MCP_VAULT_DATA_HOSTS` and the actual `MCP_VAULT_DATA_BIND` port. Thus the
 default local card is `http://127.0.0.1:8080`, not port 80. This advertised
 origin does not grant Host/Origin access and remains separate from both
 allow-lists.
+
+`MCP_VAULT_ADMIN_ORIGINS` is a comma-separated exact scheme/host/port
+allow-list for Admin mutations and cookie transport policy. HTTPS entries use
+`Secure` cookies. HTTP entries are accepted only for `localhost` or literal
+private, loopback, CGNAT, or link-local IP addresses and receive non-Secure
+host-only cookies; they are an explicit trusted-LAN compatibility mode, not a
+replacement for HTTPS on an untrusted network. For example:
+
+```text
+https://mcp-vault.example:8444,http://192.168.1.20:8081
+```
 
 `MCP_VAULT_TRUSTED_PROXY_IPS` is a comma-separated list of exact socket-peer
 IP addresses. It is empty by default. WebDAV accepts

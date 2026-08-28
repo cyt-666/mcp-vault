@@ -124,9 +124,12 @@ should complete setup before broadening publication.
 - default minimum of 12 UTF-8 bytes, with exact placeholder/default rejection
   and visible UI guidance rather than hidden composition rules;
 - login rate limiting and progressive delay;
-- opaque session cookies that remain Secure, HttpOnly, and SameSite=Strict;
-- a separate Secure/SameSite=Strict CSRF cookie readable by the Admin frontend
-  solely to rebuild the mutation header after page reload;
+- opaque session cookies that remain HttpOnly and SameSite=Strict, carry
+  `Secure` for HTTPS, and omit only `Secure` for an explicitly configured
+  loopback/private-IP HTTP Admin Origin;
+- a separate SameSite=Strict CSRF cookie readable by the Admin frontend solely
+  to rebuild the mutation header after page reload, with the same
+  transport-specific `Secure` behavior;
 - a session-bound CSRF token for state changes, checked as an
   `X-CSRF-Token` header against its stored digest and useless without the
   HttpOnly session bearer;
@@ -135,6 +138,13 @@ should complete setup before broadening publication.
 - absolute and idle expiry;
 - revocation after password change;
 - audit success/failure without password content.
+
+Cleartext Admin origins are an explicit appliance/LAN compatibility mode.
+Configuration accepts HTTP only for localhost or literal private, loopback,
+CGNAT, or link-local IP addresses; public IPs and cleartext DNS names fail
+startup validation. The login UI warns that passwords and sessions are not
+transport-encrypted. Network publication, exact Origin/Referer, CSRF,
+SameSite=Strict, expiry, revocation, and rate limiting remain mandatory.
 
 A future MFA feature may be added, but LAN-only remains the default even with MFA.
 

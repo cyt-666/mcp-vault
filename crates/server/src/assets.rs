@@ -105,6 +105,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generated_logo_is_embedded_as_a_png_admin_asset() {
+        let response = Router::new()
+            .fallback(serve)
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp-vault-logo.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            response.headers().get(axum::http::header::CONTENT_TYPE),
+            Some(&axum::http::HeaderValue::from_static("image/png"))
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[tokio::test]
     async fn traversal_does_not_escape_embedded_assets() {
         let response = Router::new()
             .fallback(serve)

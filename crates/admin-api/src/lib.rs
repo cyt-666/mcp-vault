@@ -1081,6 +1081,10 @@ async fn login(
     if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
         return auth_error(error, request_id);
     }
+    let cookie_security = match state.origin_policy.admin_cookie_security(&headers) {
+        Ok(security) => security,
+        Err(error) => return auth_error(error, request_id),
+    };
     let source_ip = peer.0.map(|address| address.to_string());
     let user_agent = headers
         .get(header::USER_AGENT)
@@ -1140,12 +1144,15 @@ async fn login(
     if let Ok(value) = HeaderValue::from_str(&session_cookie_header(
         &login.session_token,
         SESSION_MAX_AGE,
+        cookie_security,
     )) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
-    if let Ok(value) =
-        HeaderValue::from_str(&csrf_cookie_header(&login.csrf_token, SESSION_MAX_AGE))
-    {
+    if let Ok(value) = HeaderValue::from_str(&csrf_cookie_header(
+        &login.csrf_token,
+        SESSION_MAX_AGE,
+        cookie_security,
+    )) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
     response
@@ -1175,6 +1182,10 @@ async fn logout(
     Extension(principal): Extension<AdminPrincipal>,
     Extension(request_id): Extension<RequestId>,
 ) -> Response {
+    let cookie_security = match state.origin_policy.admin_cookie_security(&headers) {
+        Ok(security) => security,
+        Err(error) => return auth_error(error, request_id.0),
+    };
     let token = headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())
@@ -1196,14 +1207,12 @@ async fn logout(
         )
         .await;
     let mut response = api_ok(StatusCode::OK, json!({"logged_out": true}), request_id.0);
-    response.headers_mut().append(
-        header::SET_COOKIE,
-        HeaderValue::from_static(clear_session_cookie_header()),
-    );
-    response.headers_mut().append(
-        header::SET_COOKIE,
-        HeaderValue::from_static(clear_csrf_cookie_header()),
-    );
+    if let Ok(value) = HeaderValue::from_str(&clear_session_cookie_header(cookie_security)) {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&clear_csrf_cookie_header(cookie_security)) {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
     response
 }
 
@@ -5343,7 +5352,9 @@ mod tests {
         }
     }
 
-    async fn fixture_with_state() -> (axum::Router, TempDir, MaintenanceGate, AdminApiState) {
+    async fn fixture_with_state_for_origin(
+        origin: &str,
+    ) -> (axum::Router, TempDir, MaintenanceGate, AdminApiState) {
         let root = tempfile::tempdir().unwrap();
         let state = StateStore::connect_and_migrate("sqlite::memory:")
             .await
@@ -5359,7 +5370,7 @@ mod tests {
             state,
             auth,
             AdminApiConfig {
-                origin_policy: OriginPolicy::new(["http://localhost:8081"]).unwrap(),
+                origin_policy: OriginPolicy::new([origin]).unwrap(),
                 data_hosts: ["localhost".to_owned()].into_iter().collect(),
                 data_origins: Vec::new(),
                 data_public_origin: None,
@@ -5378,6 +5389,10 @@ mod tests {
             },
         );
         (stateful_router(admin.clone()), root, maintenance, admin)
+    }
+
+    async fn fixture_with_state() -> (axum::Router, TempDir, MaintenanceGate, AdminApiState) {
+        fixture_with_state_for_origin("http://localhost:8081").await
     }
 
     async fn fixture() -> (axum::Router, TempDir, MaintenanceGate) {
@@ -5454,10 +5469,21 @@ mod tests {
         cookie: Option<&str>,
         csrf: Option<&str>,
     ) -> Request<Body> {
+        request_with_origin(method, uri, body, cookie, csrf, "http://localhost:8081")
+    }
+
+    fn request_with_origin(
+        method: &str,
+        uri: &str,
+        body: Value,
+        cookie: Option<&str>,
+        csrf: Option<&str>,
+        origin: &str,
+    ) -> Request<Body> {
         let mut request = Request::builder()
             .method(method)
             .uri(uri)
-            .header("origin", "http://localhost:8081")
+            .header("origin", origin)
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap();
@@ -5547,6 +5573,7 @@ mod tests {
                 value.starts_with("mcp_vault_csrf=") && !value.contains("HttpOnly")
             })
         );
+        assert!(set_cookies.iter().all(|value| !value.contains("Secure")));
         let cookie = login
             .headers()
             .get("set-cookie")
@@ -5561,6 +5588,54 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let csrf = body["data"]["csrf_token"].as_str().unwrap().to_owned();
         (router, root, maintenance, cookie, csrf, state)
+    }
+
+    #[tokio::test]
+    async fn https_admin_origin_keeps_secure_session_and_csrf_cookies() {
+        let origin = "https://admin.example.test:8444";
+        let (router, _root, _maintenance, _state) = fixture_with_state_for_origin(origin).await;
+        let setup = router
+            .clone()
+            .oneshot(request_with_origin(
+                "POST",
+                "/setup",
+                json!({
+                    "username": "owner",
+                    "password": "correct horse battery staple"
+                }),
+                None,
+                None,
+                origin,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(setup.status(), StatusCode::CREATED);
+
+        let login = router
+            .oneshot(request_with_origin(
+                "POST",
+                "/session",
+                json!({"username": "owner", "password": "correct horse battery staple"}),
+                None,
+                None,
+                origin,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+        let set_cookies = login
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(set_cookies.len(), 2);
+        assert!(set_cookies.iter().all(|value| value.contains("Secure")));
+        assert!(
+            set_cookies
+                .iter()
+                .all(|value| value.contains("SameSite=Strict"))
+        );
     }
 
     async fn authenticated_fixture() -> (axum::Router, TempDir, MaintenanceGate, String, String) {
@@ -6069,6 +6144,7 @@ mod tests {
                 value.starts_with("mcp_vault_csrf=") && value.contains("Max-Age=0")
             })
         );
+        assert!(set_cookies.iter().all(|value| !value.contains("Secure")));
     }
 
     #[tokio::test]
