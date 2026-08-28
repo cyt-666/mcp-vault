@@ -4,6 +4,7 @@
 //! the authoritative operational projection and rebuildable search metadata.
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 
 use mcp_vault_domain::{
@@ -1185,6 +1186,48 @@ impl MemoryRepository {
         .fetch_one(&self.pool)
         .await?;
         u64::try_from(count).map_err(|_| StateError::InvalidInput("raw memory count is invalid"))
+    }
+
+    /// Return a deterministic identity for the exact pending Phase 1 batch.
+    ///
+    /// The fingerprint excludes generated text while still changing whenever
+    /// a pending source is added, removed, or receives a different output.
+    pub async fn pending_stage1_fingerprint(
+        &self,
+        context: &VaultContext,
+    ) -> Result<Option<String>, StateError> {
+        self.ensure_vault_context(context).await?;
+        let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT source_type, source_key, output_hash, status
+             FROM memory_stage1_outputs
+             WHERE vault_id = ? AND selected_for_phase2 = 0
+             ORDER BY source_type ASC, source_key ASC",
+        )
+        .bind(context.id().to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+
+        let mut hasher = Sha256::new();
+        for (source_type, source_key, output_hash, status) in rows {
+            for value in [source_type, source_key, output_hash, status] {
+                let length = u64::try_from(value.len()).map_err(|_| {
+                    StateError::InvalidInput("raw memory fingerprint field is invalid")
+                })?;
+                hasher.update(length.to_be_bytes());
+                hasher.update(value.as_bytes());
+            }
+        }
+        let digest = hasher.finalize();
+        let mut fingerprint = String::with_capacity(71);
+        fingerprint.push_str("sha256:");
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(fingerprint, "{byte:02x}");
+        }
+        Ok(Some(fingerprint))
     }
 
     /// Return aggregate Phase 1 coverage without loading generated text.

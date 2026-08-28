@@ -2377,9 +2377,10 @@ pub(crate) async fn ensure_memory_consolidation_job(
     reason: &'static str,
     source_job_id: Option<JobId>,
 ) -> Result<(), mcp_vault_state::StateError> {
-    if state.memory().pending_stage1_count(context).await? == 0 {
+    let Some(pending_fingerprint) = state.memory().pending_stage1_fingerprint(context).await?
+    else {
         return Ok(());
-    }
+    };
     if let Some(active_extraction) = state
         .jobs()
         .find_active_by_type(context, "memory.extract")
@@ -2399,14 +2400,15 @@ pub(crate) async fn ensure_memory_consolidation_job(
             context,
             "memory.consolidate",
             &format!(
-                "vault:{}:memory-consolidate:{next_generation}",
-                context.id()
+                "vault:{}:memory-consolidate:{next_generation}:pending:{pending_fingerprint}",
+                context.id(),
             ),
             &json!({
                 "pipeline_generation": MEMORY_PIPELINE_GENERATION,
                 "reason": reason,
                 "source_job_id": source_job_id,
                 "generation": next_generation,
+                "pending_fingerprint": pending_fingerprint,
             }),
             3,
             5,
@@ -3632,6 +3634,115 @@ mod tests {
                 .await
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn new_pending_batch_is_not_shadowed_by_legacy_terminal_phase2_job() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("terminal-phase2-dedup").unwrap(),
+            directory.path().join("content"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Terminal Phase 2 dedup", VaultStatus::Active)
+            .await
+            .unwrap();
+        state
+            .memory()
+            .upsert_stage1_output(
+                &context,
+                &MemoryStage1OutputRecord {
+                    id: MemoryRawId::new(),
+                    vault_id: context.id(),
+                    source_type: "explicit_agent".to_owned(),
+                    source_key: "new-pending-batch".to_owned(),
+                    source_file_id: None,
+                    source_path: None,
+                    source_revision: None,
+                    profile_hash: "test-profile".to_owned(),
+                    pipeline_version: MEMORY_PIPELINE_GENERATION,
+                    prompt_version: "test".to_owned(),
+                    raw_memory: "A newly extracted pending input.".to_owned(),
+                    source_summary: "A newly extracted pending input.".to_owned(),
+                    source_slug: Some("new-pending-input".to_owned()),
+                    evidence: json!([]),
+                    metadata: json!({}),
+                    output_hash: "new-pending-output-hash".to_owned(),
+                    status: "ready".to_owned(),
+                    generated_at: 1,
+                    updated_at: 1,
+                    usage_count: 0,
+                    last_usage: None,
+                    selected_for_phase2: false,
+                    selected_for_phase2_hash: None,
+                    selected_for_phase2_at: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let legacy = state
+            .jobs()
+            .enqueue(
+                &context,
+                "memory.consolidate",
+                &format!("vault:{}:memory-consolidate:1", context.id()),
+                &json!({"generation": 1}),
+                3,
+                1,
+                now_millis(),
+            )
+            .await
+            .unwrap();
+        let mut claimed = state
+            .jobs()
+            .claim_batch(
+                "legacy-terminal-worker",
+                now_millis(),
+                now_millis() + 60_000,
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(claimed.remove(0).id, legacy.id);
+        state
+            .jobs()
+            .fail_permanently(legacy.id, "legacy-terminal-worker", "legacy_phase2_failed")
+            .await
+            .unwrap();
+
+        ensure_memory_consolidation_job(&state, &context, "phase1_completed", None)
+            .await
+            .unwrap();
+        let admitted = state
+            .jobs()
+            .find_active_by_type(&context, "memory.consolidate")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(admitted.id, legacy.id);
+        assert!(admitted.dedup_key.contains(":pending:sha256:"));
+
+        ensure_memory_consolidation_job(&state, &context, "periodic_recovery", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .jobs()
+                .find_active_by_type(&context, "memory.consolidate")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            admitted.id
         );
     }
 

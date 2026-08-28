@@ -290,6 +290,17 @@ async fn two_phase_memory_state_is_vault_scoped_and_commits_idempotently() {
 
     assert_eq!(repository.pending_stage1_count(&first).await.unwrap(), 1);
     assert_eq!(repository.pending_stage1_count(&second).await.unwrap(), 1);
+    let first_pending_fingerprint = repository
+        .pending_stage1_fingerprint(&first)
+        .await
+        .unwrap()
+        .unwrap();
+    let second_pending_fingerprint = repository
+        .pending_stage1_fingerprint(&second)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(first_pending_fingerprint, second_pending_fingerprint);
     assert_eq!(
         repository
             .get_stage1_output(&first, "explicit_agent", "same-client-key")
@@ -353,6 +364,17 @@ async fn two_phase_memory_state_is_vault_scoped_and_commits_idempotently() {
     assert_eq!(repeated.generation, 1);
     assert_eq!(repository.pending_stage1_count(&first).await.unwrap(), 0);
     assert_eq!(repository.pending_stage1_count(&second).await.unwrap(), 1);
+    assert_eq!(
+        repository.pending_stage1_fingerprint(&first).await.unwrap(),
+        None
+    );
+    assert_eq!(
+        repository
+            .pending_stage1_fingerprint(&second)
+            .await
+            .unwrap(),
+        Some(second_pending_fingerprint)
+    );
     assert!(
         repository
             .get_consolidation_state(&second)
