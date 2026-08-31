@@ -707,6 +707,9 @@ facts.
 - [x] 2026-08-31 — Split the legacy-redirect smoke stage into status, location,
   cache-control, Vary, Admin-isolation, and MCP-discovery checkpoints after
   the first remote rerun identified that broad stage as the remaining failure.
+- [x] 2026-08-31 — Make legacy redirect-header extraction portable across the
+  BSD and GNU toolchains used by local macOS and GitHub Ubuntu runners instead
+  of relying on a regex carriage-return escape.
 - [ ] Complete release-environment Litmus, named Obsidian plugin/client matrix, full-scale performance, clean-host restore, and signed-artifact verification; then review whether the full frozen MCP requirements report is applicable to the advertised capability set.
 
 ## Decisions
@@ -1083,6 +1086,11 @@ facts.
 - The second rerun exposed the failure only as the combined “legacy
   authorization redirect and MCP discovery” stage; the finer checkpoints now
   make the next hosted result actionable without logging sensitive responses.
+- The third rerun identified the exact `legacy authorization location`
+  checkpoint. The server's redirect contract was correct locally; the shell
+  assertion used a toolchain-sensitive regex. Header values are now normalized
+  with portable `sed`/`tr` extraction before exact comparison, and the local
+  smoke remains green.
 
 ## Validation
 
@@ -1733,6 +1741,9 @@ Validation recorded on 2026-08-31 for CI asset/action remediation:
   remaining protocol boundary.
 - The smoke stage was then split into individual legacy-header, public Admin,
   and discovery assertions; local HTTP smoke remains green after the split.
+- The legacy location/cache/Vary checks now parse and compare normalized
+  values, preserving the same exact redirect/no-store contract on GNU grep/sed
+  and BSD grep/sed.
 
 ## Rollback and recovery
 

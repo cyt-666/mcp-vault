@@ -103,11 +103,17 @@ legacy_authorize_status=$(curl --silent --show-error \
   "$mcp_origin/oauth/authorize?cache_probe=1")
 [[ "$legacy_authorize_status" == "307" ]]
 stage="legacy authorization location"
-grep -Eiq '^location: /oauth/v2/authorize\?cache_probe=1\r?$' "$legacy_authorize_headers"
+legacy_location=$(sed -n -E 's/^[Ll][Oo][Cc][Aa][Tt][Ii][Oo][Nn]:[[:space:]]*//p' \
+  "$legacy_authorize_headers" | tr -d '\r')
+[[ "$legacy_location" == "/oauth/v2/authorize?cache_probe=1" ]]
 stage="legacy authorization cache-control"
-grep -Eiq '^cache-control: .*no-store' "$legacy_authorize_headers"
+legacy_cache_control=$(sed -n -E 's/^[Cc][Aa][Cc][Hh][Ee]-[Cc][Oo][Nn][Tt][Rr][Oo][Ll]:[[:space:]]*//p' \
+  "$legacy_authorize_headers" | tr -d '\r')
+[[ "$legacy_cache_control" == *no-store* ]]
 stage="legacy authorization vary"
-grep -Eiq '^vary: \*\r?$' "$legacy_authorize_headers"
+legacy_vary=$(sed -n -E 's/^[Vv][Aa][Rr][Yy]:[[:space:]]*//p' \
+  "$legacy_authorize_headers" | tr -d '\r')
+[[ "$legacy_vary" == "*" ]]
 
 # The public/data listener must not expose control-plane routes.
 stage="public Admin isolation status"
