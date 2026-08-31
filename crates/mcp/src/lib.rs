@@ -3479,6 +3479,13 @@ mod tests {
             metadata["token_endpoint_auth_methods_supported"],
             json!(["none"])
         );
+        assert!(
+            metadata["scopes_supported"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|scope| scope == "offline_access")
+        );
 
         let rejected_metadata = router
             .clone()
@@ -3536,7 +3543,7 @@ mod tests {
             )
             .append_pair(
                 "scope",
-                "vault:discover vault:read vault:write vault:delete vault:history memory:read memory:write memory:manage",
+                "vault:discover vault:read vault:write vault:delete vault:history memory:read memory:write memory:manage offline_access",
             )
             .append_pair("state", "state-123")
             .append_pair("code_challenge", &challenge)
@@ -3622,6 +3629,7 @@ mod tests {
         assert!(login.contains("action=\"https://vault.example.test/oauth/v2/authorize\""));
         assert!(login.contains("autocomplete=\"username\""));
         assert!(login.contains("autocomplete=\"current-password\""));
+        assert!(login.contains("<code>offline_access</code>（保持长期连接）"));
         assert!(!login.contains("data-1p-ignore"));
 
         let invalid_authorization = router
@@ -3762,6 +3770,13 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .starts_with("mcpv_refresh_")
+        );
+        assert!(
+            token["scope"]
+                .as_str()
+                .unwrap()
+                .split_ascii_whitespace()
+                .any(|scope| scope == "offline_access")
         );
 
         let response = router

@@ -9,7 +9,7 @@ Unpack the deployment archive beside the image archive, then enter its
 directory:
 
 ```bash
-tar -xzf mcp-vault-nginx-https-0.1.12.tar.gz
+tar -xzf mcp-vault-nginx-https-0.1.14.tar.gz
 cd nginx-https
 ```
 
@@ -18,8 +18,8 @@ cd nginx-https
 Load the image archive from the parent directory:
 
 ```bash
-docker load --input ../mcp-vault-0.1.12-linux-amd64.tar
-docker image inspect mcp-vault:0.1.12 --format '{{.Os}}/{{.Architecture}} {{.Id}}'
+docker load --input ../mcp-vault-0.1.14-linux-amd64.tar
+docker image inspect mcp-vault:0.1.14 --format '{{.Os}}/{{.Architecture}} {{.Id}}'
 ```
 
 The result must report `linux/amd64`.
@@ -109,6 +109,9 @@ curl --fail \
 Create the independent Vault OAuth login in Admin, then add the displayed MCP
 endpoint in ChatGPT. The public Nginx virtual host already forwards the narrow
 `/oauth/` authorization routes; no external identity provider is required.
+After upgrading an existing connection, reconnect ChatGPT once so the new grant
+contains `offline_access`; active refresh rotation then renews its 180-day idle
+lifetime automatically.
 
 The public host must return `404` for `/api/v1/system`; its virtual host does
 not proxy Admin paths or Admin frontend assets.

@@ -33,10 +33,21 @@ const REFRESH_DIGEST_PURPOSE: &str = "local-oauth-refresh-digest";
 const AUTHORIZATION_REQUEST_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const AUTHORIZATION_CODE_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const ACCESS_TOKEN_LIFETIME: Duration = Duration::from_secs(60 * 60);
-const REFRESH_TOKEN_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const REFRESH_TOKEN_LIFETIME: Duration = Duration::from_secs(180 * 24 * 60 * 60);
+const REFRESH_TOKEN_REUSE_GRACE: Duration = Duration::from_secs(60);
 const OAUTH_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_ACTIVE_CLIENTS: u32 = 1024;
 const TOKEN_LOOKUP_PREFIX: usize = 20;
+
+/// OAuth protocol scope used by long-lived clients. It deliberately does not
+/// map to a Vault permission or appear in protected-resource metadata.
+pub const LOCAL_OAUTH_OFFLINE_ACCESS_SCOPE: &str = "offline_access";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LocalOAuthGrantedScopes {
+    application: ScopeSet,
+    offline_access: bool,
+}
 
 /// Redaction-safe local OAuth user metadata shown in Admin.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -92,6 +103,7 @@ pub struct LocalOAuthAuthorizationPrompt {
     pub client_name: String,
     pub resource: String,
     pub scopes: ScopeSet,
+    pub offline_access: bool,
     pub expires_at: i64,
 }
 
@@ -103,6 +115,7 @@ impl std::fmt::Debug for LocalOAuthAuthorizationPrompt {
             .field("client_name", &self.client_name)
             .field("resource", &self.resource)
             .field("scopes", &self.scopes)
+            .field("offline_access", &self.offline_access)
             .field("expires_at", &self.expires_at)
             .finish()
     }
@@ -139,6 +152,7 @@ pub struct LocalOAuthTokenIssue {
     pub refresh_token: BearerToken,
     pub expires_in: u64,
     pub scopes: ScopeSet,
+    pub offline_access: bool,
 }
 
 impl AuthService {
@@ -289,7 +303,8 @@ impl AuthService {
             .filter(|user| user.enabled)
             .ok_or(AuthError::OAuthConfiguration)?;
         let allowed = parse_scopes(&user.scopes_json)?;
-        let scopes = requested_scopes(input.scope.as_deref(), &allowed)?;
+        let granted_scopes = requested_authorization_scopes(input.scope.as_deref(), &allowed)?;
+        let granted_scopes_json = local_oauth_scopes_json(&granted_scopes)?;
         let handle = generate_bearer_token(REQUEST_LABEL);
         let digest = self
             .keys
@@ -305,7 +320,7 @@ impl AuthService {
                 client_id,
                 expected_resource,
                 &input.redirect_uri,
-                &scopes_json(&scopes)?,
+                &granted_scopes_json,
                 input.state.as_deref(),
                 &input.code_challenge,
                 now,
@@ -318,7 +333,8 @@ impl AuthService {
             request_handle: handle,
             client_name: client.client_name,
             resource: expected_resource.to_owned(),
-            scopes,
+            scopes: granted_scopes.application,
+            offline_access: granted_scopes.offline_access,
             expires_at,
         })
     }
@@ -419,11 +435,13 @@ impl AuthService {
             .await?
             .filter(|client| client.revoked_at.is_none())
             .ok_or(AuthError::InvalidCredential)?;
+        let granted_scopes = parse_local_oauth_scopes(&request.scopes_json)?;
         Ok(LocalOAuthAuthorizationPrompt {
             request_handle: BearerToken::new(request_handle.to_owned()),
             client_name: client.client_name,
             resource: request.resource,
-            scopes: parse_scopes(&request.scopes_json)?,
+            scopes: granted_scopes.application,
+            offline_access: granted_scopes.offline_access,
             expires_at: request.expires_at,
         })
     }
@@ -467,9 +485,12 @@ impl AuthService {
             .await?
             .filter(|user| user.enabled && user.id == code.user_id)
             .ok_or(AuthError::OAuthTokenInvalid)?;
-        let scopes = parse_scopes(&code.scopes_json)?;
-        ensure_scopes_allowed(&scopes, &parse_scopes(&user.scopes_json)?)?;
-        let issue = self.new_token_issue(&scopes, now)?;
+        let granted_scopes = parse_local_oauth_scopes(&code.scopes_json)?;
+        ensure_scopes_allowed(
+            &granted_scopes.application,
+            &parse_scopes(&user.scopes_json)?,
+        )?;
+        let issue = self.new_token_issue(&granted_scopes, now)?;
         let access_digest = self.keys.keyed_digest(
             ACCESS_DIGEST_PURPOSE,
             issue.access_token.expose_secret().as_bytes(),
@@ -515,12 +536,23 @@ impl AuthService {
         Ok(issue)
     }
 
-    /// Rotate a refresh token. Replay of a previously rotated token revokes
-    /// the complete family, including access tokens issued from that family.
+    /// Rotate a refresh token. A duplicate retry inside the bounded grace
+    /// window is rejected without destroying the concurrently issued pair;
+    /// delayed replay revokes the complete token family.
     pub async fn refresh_local_oauth_token(
         &self,
         context: &VaultContext,
         input: LocalOAuthRefreshExchange<'_>,
+    ) -> Result<LocalOAuthTokenIssue, AuthError> {
+        self.refresh_local_oauth_token_at(context, input, now_millis()?)
+            .await
+    }
+
+    async fn refresh_local_oauth_token_at(
+        &self,
+        context: &VaultContext,
+        input: LocalOAuthRefreshExchange<'_>,
+        now: i64,
     ) -> Result<LocalOAuthTokenIssue, AuthError> {
         self.ensure_persistent_master_key().await?;
         let client_id = OAuthClientId::parse(input.client_id)?;
@@ -528,18 +560,23 @@ impl AuthService {
             .find_refresh_token(context, input.refresh_token)
             .await?
             .ok_or(AuthError::OAuthTokenInvalid)?;
-        let now = now_millis()?;
-        if record.rotated_at.is_some() {
-            self.repository
-                .revoke_oauth_token_family(context, record.family_id, now)
-                .await?;
-            return Err(AuthError::OAuthTokenInvalid);
-        }
         if record.revoked_at.is_some()
-            || record.expires_at <= now
             || record.client_id != client_id
             || record.resource != input.resource
         {
+            return Err(AuthError::OAuthTokenInvalid);
+        }
+        if let Some(rotated_at) = record.rotated_at {
+            self.revoke_refresh_family_if_replay_is_late(
+                context,
+                record.family_id,
+                rotated_at,
+                now,
+            )
+            .await?;
+            return Err(AuthError::OAuthTokenInvalid);
+        }
+        if record.expires_at <= now {
             return Err(AuthError::OAuthTokenInvalid);
         }
         let client = self
@@ -555,11 +592,14 @@ impl AuthService {
             .await?
             .filter(|user| user.enabled && user.id == record.user_id)
             .ok_or(AuthError::OAuthTokenInvalid)?;
-        let original_scopes = parse_scopes(&record.scopes_json)?;
-        let scopes = requested_scopes(input.scope, &original_scopes)?;
-        ensure_scopes_allowed(&scopes, &parse_scopes(&user.scopes_json)?)?;
-        let narrowed_scopes_json = scopes_json(&scopes)?;
-        let issue = self.new_token_issue(&scopes, now)?;
+        let original_scopes = parse_local_oauth_scopes(&record.scopes_json)?;
+        let granted_scopes = requested_refresh_scopes(input.scope, &original_scopes)?;
+        ensure_scopes_allowed(
+            &granted_scopes.application,
+            &parse_scopes(&user.scopes_json)?,
+        )?;
+        let narrowed_scopes_json = local_oauth_scopes_json(&granted_scopes)?;
+        let issue = self.new_token_issue(&granted_scopes, now)?;
         let access_digest = self.keys.keyed_digest(
             ACCESS_DIGEST_PURPOSE,
             issue.access_token.expose_secret().as_bytes(),
@@ -590,7 +630,7 @@ impl AuthService {
                     token_digest: &refresh_digest,
                     digest_key_version: self.keys.current_version(),
                     created_at: now,
-                    expires_at: record.expires_at,
+                    expires_at: now.saturating_add(duration_millis(REFRESH_TOKEN_LIFETIME)?),
                     scopes_json: Some(&narrowed_scopes_json),
                 },
                 now,
@@ -599,14 +639,40 @@ impl AuthService {
         {
             Ok(()) => {}
             Err(StateError::InvalidInput(_)) => {
-                self.repository
-                    .revoke_oauth_token_family(context, record.family_id, now)
+                if let Some(latest) = self
+                    .find_refresh_token(context, input.refresh_token)
+                    .await?
+                    .filter(|latest| latest.family_id == record.family_id)
+                    && let Some(rotated_at) = latest.rotated_at
+                {
+                    self.revoke_refresh_family_if_replay_is_late(
+                        context,
+                        latest.family_id,
+                        rotated_at,
+                        now,
+                    )
                     .await?;
+                }
                 return Err(AuthError::OAuthTokenInvalid);
             }
             Err(error) => return Err(error.into()),
         }
         Ok(issue)
+    }
+
+    async fn revoke_refresh_family_if_replay_is_late(
+        &self,
+        context: &VaultContext,
+        family_id: OAuthTokenFamilyId,
+        rotated_at: i64,
+        now: i64,
+    ) -> Result<(), AuthError> {
+        if refresh_replay_is_outside_grace(rotated_at, now)? {
+            self.repository
+                .revoke_oauth_token_family(context, family_id, now)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Authenticate one locally issued opaque token at an exact Vault MCP
@@ -637,7 +703,9 @@ impl AuthService {
             .await?
             .filter(|user| user.enabled && user.id == record.user_id)
             .ok_or(AuthError::InvalidCredential)?;
-        let scopes = parse_scopes(&record.scopes_json).map_err(|_| AuthError::InvalidCredential)?;
+        let granted_scopes = parse_local_oauth_scopes(&record.scopes_json)
+            .map_err(|_| AuthError::InvalidCredential)?;
+        let scopes = granted_scopes.application;
         ensure_scopes_allowed(
             &scopes,
             &parse_scopes(&user.scopes_json).map_err(|_| AuthError::InvalidCredential)?,
@@ -756,14 +824,15 @@ impl AuthService {
 
     fn new_token_issue(
         &self,
-        scopes: &ScopeSet,
+        granted_scopes: &LocalOAuthGrantedScopes,
         _now: i64,
     ) -> Result<LocalOAuthTokenIssue, AuthError> {
         Ok(LocalOAuthTokenIssue {
             access_token: generate_bearer_token(ACCESS_LABEL),
             refresh_token: generate_bearer_token(REFRESH_LABEL),
             expires_in: ACCESS_TOKEN_LIFETIME.as_secs(),
-            scopes: scopes.clone(),
+            scopes: granted_scopes.application.clone(),
+            offline_access: granted_scopes.offline_access,
         })
     }
 }
@@ -894,22 +963,80 @@ fn validate_oauth_state(state: Option<&str>) -> Result<(), AuthError> {
     Ok(())
 }
 
-fn requested_scopes(value: Option<&str>, allowed: &ScopeSet) -> Result<ScopeSet, AuthError> {
+fn requested_authorization_scopes(
+    value: Option<&str>,
+    allowed: &ScopeSet,
+) -> Result<LocalOAuthGrantedScopes, AuthError> {
     let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
-        return Ok(allowed.clone());
+        return Ok(LocalOAuthGrantedScopes {
+            application: allowed.clone(),
+            offline_access: false,
+        });
     };
+    let requested = parse_requested_local_oauth_scopes(value)?;
+    ensure_scopes_allowed(&requested.application, allowed)?;
+    Ok(requested)
+}
+
+fn requested_refresh_scopes(
+    value: Option<&str>,
+    original: &LocalOAuthGrantedScopes,
+) -> Result<LocalOAuthGrantedScopes, AuthError> {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return Ok(original.clone());
+    };
+    let requested = parse_requested_local_oauth_scopes(value)?;
+    if requested.offline_access && !original.offline_access {
+        return Err(AuthError::ScopeDenied);
+    }
+    ensure_scopes_allowed(&requested.application, &original.application)?;
+    Ok(LocalOAuthGrantedScopes {
+        application: requested.application,
+        offline_access: original.offline_access,
+    })
+}
+
+fn parse_requested_local_oauth_scopes(value: &str) -> Result<LocalOAuthGrantedScopes, AuthError> {
     if value.len() > 1024 {
         return Err(AuthError::ScopeDenied);
     }
     let mut requested = ScopeSet::new();
-    for value in value.split_ascii_whitespace() {
-        requested.insert(Scope::from_str(value).map_err(|_| AuthError::ScopeDenied)?);
+    let mut offline_access = false;
+    for item in value.split_ascii_whitespace() {
+        if item == LOCAL_OAUTH_OFFLINE_ACCESS_SCOPE {
+            offline_access = true;
+        } else {
+            requested.insert(Scope::from_str(item).map_err(|_| AuthError::ScopeDenied)?);
+        }
     }
     if requested.iter().next().is_none() {
         return Err(AuthError::ScopeDenied);
     }
-    ensure_scopes_allowed(&requested, allowed)?;
-    Ok(requested)
+    Ok(LocalOAuthGrantedScopes {
+        application: requested,
+        offline_access,
+    })
+}
+
+fn parse_local_oauth_scopes(value: &str) -> Result<LocalOAuthGrantedScopes, AuthError> {
+    let values: Vec<String> =
+        serde_json::from_str(value).map_err(|_| AuthError::OAuthConfiguration)?;
+    let mut application = ScopeSet::new();
+    let mut offline_access = false;
+    for value in values {
+        if value == LOCAL_OAUTH_OFFLINE_ACCESS_SCOPE {
+            offline_access = true;
+        } else {
+            application.insert(Scope::from_str(&value).map_err(|_| AuthError::OAuthConfiguration)?);
+        }
+    }
+    if application.iter().next().is_none() {
+        return Err(AuthError::OAuthConfiguration);
+    }
+    Ok(LocalOAuthGrantedScopes {
+        application,
+        offline_access,
+    })
 }
 
 fn ensure_scopes_allowed(scopes: &ScopeSet, allowed: &ScopeSet) -> Result<(), AuthError> {
@@ -923,6 +1050,22 @@ fn ensure_scopes_allowed(scopes: &ScopeSet, allowed: &ScopeSet) -> Result<(), Au
 fn scopes_json(scopes: &ScopeSet) -> Result<String, AuthError> {
     serde_json::to_string(&scopes.iter().map(ToString::to_string).collect::<Vec<_>>())
         .map_err(|_| AuthError::InvalidInput)
+}
+
+fn local_oauth_scopes_json(scopes: &LocalOAuthGrantedScopes) -> Result<String, AuthError> {
+    let mut values = scopes
+        .application
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if scopes.offline_access {
+        values.push(LOCAL_OAUTH_OFFLINE_ACCESS_SCOPE.to_owned());
+    }
+    serde_json::to_string(&values).map_err(|_| AuthError::InvalidInput)
+}
+
+fn refresh_replay_is_outside_grace(rotated_at: i64, now: i64) -> Result<bool, AuthError> {
+    Ok(now.saturating_sub(rotated_at) > duration_millis(REFRESH_TOKEN_REUSE_GRACE)?)
 }
 
 fn valid_pkce_challenge(value: &str) -> bool {
@@ -948,14 +1091,17 @@ fn duration_millis(duration: Duration) -> Result<i64, AuthError> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Arc};
 
     use mcp_vault_domain::{Revision, Scope, ScopeSet, VaultContext, VaultId, VaultSlug};
     use mcp_vault_state::{StateStore, VaultStatus};
 
     use super::{
-        LocalOAuthAuthorizationInput, LocalOAuthClientRegistration, LocalOAuthCodeExchange,
-        LocalOAuthRefreshExchange, pkce_matches,
+        LOCAL_OAUTH_OFFLINE_ACCESS_SCOPE, LocalOAuthAuthorizationInput,
+        LocalOAuthClientRegistration, LocalOAuthClientRegistrationResult, LocalOAuthCodeExchange,
+        LocalOAuthRefreshExchange, LocalOAuthTokenIssue, REFRESH_TOKEN_LIFETIME,
+        REFRESH_TOKEN_REUSE_GRACE, duration_millis, parse_requested_local_oauth_scopes,
+        pkce_matches,
     };
     use crate::{AuthError, AuthService, MasterKeyRing, SecretString};
 
@@ -1011,6 +1157,77 @@ mod tests {
         URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
     }
 
+    async fn issue_grant(
+        service: &AuthService,
+        context: &VaultContext,
+        scope: &str,
+        source_ip: &str,
+    ) -> (
+        LocalOAuthClientRegistrationResult,
+        String,
+        LocalOAuthTokenIssue,
+    ) {
+        let client = service
+            .register_local_oauth_client(
+                LocalOAuthClientRegistration {
+                    client_name: Some("ChatGPT".to_owned()),
+                    redirect_uris: vec![
+                        "https://chatgpt.com/connector_platform_oauth_redirect".to_owned(),
+                    ],
+                    grant_types: None,
+                    response_types: None,
+                    token_endpoint_auth_method: None,
+                },
+                Some(source_ip),
+            )
+            .await
+            .unwrap();
+        let resource = "https://vault.example.test/mcp/v1/vaults/work".to_owned();
+        let verifier = "g".repeat(64);
+        let prompt = service
+            .begin_local_oauth_authorization(
+                context,
+                &resource,
+                LocalOAuthAuthorizationInput {
+                    response_type: "code".to_owned(),
+                    client_id: client.client_id.to_string(),
+                    redirect_uri: client.redirect_uris[0].clone(),
+                    scope: Some(scope.to_owned()),
+                    state: None,
+                    code_challenge: challenge(&verifier),
+                    code_challenge_method: "S256".to_owned(),
+                    resource: resource.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        let authorization = service
+            .complete_local_oauth_authorization(
+                context,
+                prompt.request_handle.expose_secret(),
+                "chatgpt",
+                &SecretString::new("correct horse battery staple"),
+                Some(source_ip),
+                "https://vault.example.test",
+            )
+            .await
+            .unwrap();
+        let issue = service
+            .exchange_local_oauth_code(
+                context,
+                LocalOAuthCodeExchange {
+                    code: authorization.code.expose_secret(),
+                    client_id: &client.client_id.to_string(),
+                    redirect_uri: &client.redirect_uris[0],
+                    code_verifier: &verifier,
+                    resource: &resource,
+                },
+            )
+            .await
+            .unwrap();
+        (client, resource, issue)
+    }
+
     #[tokio::test]
     async fn local_oauth_code_pkce_refresh_and_replay_are_vault_bound() {
         let (service, context, other) = setup().await;
@@ -1039,7 +1256,7 @@ mod tests {
                     response_type: "code".to_owned(),
                     client_id: client.client_id.to_string(),
                     redirect_uri: client.redirect_uris[0].clone(),
-                    scope: Some("vault:discover vault:read memory:read".to_owned()),
+                    scope: Some("vault:discover vault:read memory:read offline_access".to_owned()),
                     state: Some("opaque-state".to_owned()),
                     code_challenge: challenge(&verifier),
                     code_challenge_method: "S256".to_owned(),
@@ -1048,6 +1265,8 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(prompt.offline_access);
+        assert_eq!(prompt.scopes.iter().count(), 3);
         assert!(
             prompt
                 .request_handle
@@ -1101,6 +1320,7 @@ mod tests {
                 .starts_with("mcpv_oauth_")
         );
         assert!(!issue.access_token.expose_secret().contains('.'));
+        assert!(issue.offline_access);
         service
             .authenticate_local_oauth(
                 &context,
@@ -1140,8 +1360,18 @@ mod tests {
         );
 
         let old_refresh = issue.refresh_token.expose_secret().to_owned();
+        let initial_refresh = service
+            .find_refresh_token(&context, &old_refresh)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            initial_refresh.expires_at - initial_refresh.created_at,
+            duration_millis(REFRESH_TOKEN_LIFETIME).unwrap()
+        );
+        let rotation_time = initial_refresh.created_at.saturating_add(1);
         let rotated = service
-            .refresh_local_oauth_token(
+            .refresh_local_oauth_token_at(
                 &context,
                 LocalOAuthRefreshExchange {
                     refresh_token: &old_refresh,
@@ -1149,13 +1379,25 @@ mod tests {
                     resource,
                     scope: Some("vault:discover vault:read"),
                 },
+                rotation_time,
             )
             .await
             .unwrap();
         assert!(!rotated.scopes.contains(Scope::MemoryRead));
+        assert!(rotated.offline_access);
+        let rotated_refresh = service
+            .find_refresh_token(&context, rotated.refresh_token.expose_secret())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            rotated_refresh.expires_at,
+            rotation_time + duration_millis(REFRESH_TOKEN_LIFETIME).unwrap()
+        );
+        let grace_boundary = rotation_time + duration_millis(REFRESH_TOKEN_REUSE_GRACE).unwrap();
         assert!(
             service
-                .refresh_local_oauth_token(
+                .refresh_local_oauth_token_at(
                     &context,
                     LocalOAuthRefreshExchange {
                         refresh_token: &old_refresh,
@@ -1163,6 +1405,32 @@ mod tests {
                         resource,
                         scope: None,
                     },
+                    grace_boundary,
+                )
+                .await
+                .is_err()
+        );
+        service
+            .authenticate_local_oauth(
+                &context,
+                rotated.access_token.expose_secret(),
+                resource,
+                &[],
+                Some(grace_boundary),
+            )
+            .await
+            .unwrap();
+        assert!(
+            service
+                .refresh_local_oauth_token_at(
+                    &context,
+                    LocalOAuthRefreshExchange {
+                        refresh_token: &old_refresh,
+                        client_id: &client.client_id.to_string(),
+                        resource,
+                        scope: None,
+                    },
+                    grace_boundary.saturating_add(1),
                 )
                 .await
                 .is_err()
@@ -1174,12 +1442,126 @@ mod tests {
                     rotated.access_token.expose_secret(),
                     resource,
                     &[],
-                    None,
+                    Some(grace_boundary.saturating_add(1)),
                 )
                 .await
                 .is_err(),
-            "refresh replay must revoke access tokens in the family"
+            "refresh replay outside the grace window must revoke the token family"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_refresh_rejects_one_request_without_revoking_the_winner() {
+        let (service, context, _other) = setup().await;
+        let (client, resource, issue) =
+            issue_grant(&service, &context, "vault:read offline_access", "127.0.0.3").await;
+        let refresh_token = issue.refresh_token.expose_secret().to_owned();
+        let client_id = client.client_id.to_string();
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let first_barrier = Arc::clone(&barrier);
+        let second_barrier = Arc::clone(&barrier);
+        let first = async {
+            first_barrier.wait().await;
+            service
+                .refresh_local_oauth_token(
+                    &context,
+                    LocalOAuthRefreshExchange {
+                        refresh_token: &refresh_token,
+                        client_id: &client_id,
+                        resource: &resource,
+                        scope: None,
+                    },
+                )
+                .await
+        };
+        let second = async {
+            second_barrier.wait().await;
+            service
+                .refresh_local_oauth_token(
+                    &context,
+                    LocalOAuthRefreshExchange {
+                        refresh_token: &refresh_token,
+                        client_id: &client_id,
+                        resource: &resource,
+                        scope: None,
+                    },
+                )
+                .await
+        };
+        let (_, first, second) = tokio::join!(barrier.wait(), first, second);
+        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+        assert!(
+            [first.as_ref(), second.as_ref()]
+                .into_iter()
+                .filter_map(|result| result.err())
+                .all(|error| matches!(error, AuthError::OAuthTokenInvalid))
+        );
+        let winner = first.or(second).unwrap();
+        assert!(winner.offline_access);
+        service
+            .authenticate_local_oauth(
+                &context,
+                winner.access_token.expose_secret(),
+                &resource,
+                &[Scope::VaultRead],
+                None,
+            )
+            .await
+            .unwrap();
+        service
+            .find_refresh_token(&context, winner.refresh_token.expose_secret())
+            .await
+            .unwrap()
+            .expect("the successful rotated refresh token must remain usable");
+    }
+
+    #[tokio::test]
+    async fn legacy_grant_refreshes_but_cannot_add_offline_access() {
+        let (service, context, _other) = setup().await;
+        let (client, resource, issue) =
+            issue_grant(&service, &context, "vault:read", "127.0.0.4").await;
+        assert!(!issue.offline_access);
+        let refresh_token = issue.refresh_token.expose_secret().to_owned();
+        let client_id = client.client_id.to_string();
+        let expanded = service
+            .refresh_local_oauth_token(
+                &context,
+                LocalOAuthRefreshExchange {
+                    refresh_token: &refresh_token,
+                    client_id: &client_id,
+                    resource: &resource,
+                    scope: Some("vault:read offline_access"),
+                },
+            )
+            .await;
+        assert!(matches!(expanded, Err(AuthError::ScopeDenied)));
+
+        let rotated = service
+            .refresh_local_oauth_token(
+                &context,
+                LocalOAuthRefreshExchange {
+                    refresh_token: &refresh_token,
+                    client_id: &client_id,
+                    resource: &resource,
+                    scope: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!rotated.offline_access);
+        assert_eq!(rotated.scopes, ScopeSet::from_iter([Scope::VaultRead]));
+    }
+
+    #[test]
+    fn local_oauth_scope_parser_rejects_unknown_or_permissionless_requests() {
+        assert!(matches!(
+            parse_requested_local_oauth_scopes("vault:read unknown:scope"),
+            Err(AuthError::ScopeDenied)
+        ));
+        assert!(matches!(
+            parse_requested_local_oauth_scopes(LOCAL_OAUTH_OFFLINE_ACCESS_SCOPE),
+            Err(AuthError::ScopeDenied)
+        ));
     }
 
     #[tokio::test]

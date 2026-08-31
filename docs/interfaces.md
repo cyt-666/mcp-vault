@@ -770,7 +770,10 @@ the data listener implements:
 - authorization code with mandatory PKCE `S256`;
 - exact registered redirect URIs, RFC 8707 `resource`, and RFC 9207 `iss`;
 - short-lived request handles, single-use authorization codes, and opaque access tokens;
-- rotating refresh tokens with replay-family revocation;
+- one-hour access tokens and rotating refresh tokens with a 180-day sliding
+  idle lifetime, bounded retry grace, and replay-family revocation;
+- `offline_access` for long-lived client connections without granting another
+  Vault permission;
 - Vault-bound MCP scopes and immediate local revocation.
 
 For a path-based Vault resource, the canonical metadata endpoint is:
@@ -785,6 +788,11 @@ Metadata is public by design and returns only the exact resource identifier,
 enabled authorization-server issuer URLs, supported scopes, header bearer
 method, and protocol metadata. It never returns cached JWKS, subjects, grants,
 tokens, or secrets.
+
+Protected-resource `scopes_supported` contains only the eight Vault/memory
+permission scopes. Authorization-server metadata additionally advertises
+`offline_access`; this protocol scope is persisted with the grant but never
+maps to an MCP permission or tool.
 
 An unauthenticated or invalid request returns a same-origin challenge shaped
 like:
@@ -832,6 +840,14 @@ an application Origin or `Origin: null`; none of those values is OAuth client
 authentication. The endpoint accepts no Admin/session cookie authority and
 instead requires the exact public client, redirect URI, resource, single-use
 code plus PKCE verifier, or a rotating refresh token.
+
+Successful refresh gives the successor refresh token a new 180-day idle
+lifetime. A duplicate use of the old token at or within 60 seconds returns
+`invalid_grant` without invalidating the already-issued pair; reuse after that
+grace revokes the complete family. Refresh `scope` may narrow Vault/memory
+permissions but cannot add `offline_access`; an already granted offline
+capability is inherited when the field is omitted or lists a business-scope
+subset.
 
 The browser-facing authorization form POST is Host-validated but is not gated
 by the MCP data-plane Origin allow-list. System OAuth browsers and sandboxed

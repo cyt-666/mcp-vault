@@ -11,7 +11,7 @@ identified in the release artifact.
 |---|---|---|---|---|
 | Official MCP conformance | Streamable HTTP, MCP `2026-07-28` | `scripts/conformance/mcp.sh`; fixed conformance commit; stateless, list, headers, DNS, caching scenarios | Full requirements suite review for every release | Core gate passes with the narrow baseline in `tests/conformance/expected-failures.yml` |
 | MCP Vault project client path | MCP `2026-07-28` | `scripts/interop/http-smoke.sh`; MCP crate tests; Vault-bound PAT and Origin checks | None required for the wire smoke | Verified automatically |
-| ChatGPT plugin OAuth | OAuth 2.1 authorization code + PKCE `S256`; RFC 7591/7636/8414/8707/9207/9728 | Auth/MCP tests and `scripts/interop/http-smoke.sh` cover DCR, built-in login, duplicate browser/edge form submission with a fresh single-use code, code exchange, resource, refresh rotation/replay, deterministic full-scope `tools/list`, every tool handler under a built-in OAuth principal, a real-HTTP OAuth `create_note`, Vault isolation, challenge metadata, and optional external RS256 JWT | Named ChatGPT surface plus DNS/TLS and one successful login/tool call | Complete built-in wire flow and OAuth tool surface verified automatically; live ChatGPT UI/account path remains manual until recorded |
+| ChatGPT plugin OAuth | OAuth 2.1 authorization code + PKCE `S256`; RFC 7591/7636/8414/8707/9207/9728 | Auth/MCP tests and `scripts/interop/http-smoke.sh` cover DCR, built-in login, `offline_access`, duplicate browser/edge form submission with a fresh single-use code, code exchange, resource, 180-day sliding refresh rotation, concurrent retry grace and delayed replay revocation, deterministic full-scope `tools/list`, every tool handler under a built-in OAuth principal, a real-HTTP OAuth `create_note`, Vault isolation, challenge metadata, and optional external RS256 JWT | Named ChatGPT surface plus DNS/TLS and one successful login/tool call after reconnecting for an offline grant | Complete built-in wire flow and OAuth tool surface verified automatically; live ChatGPT UI/account path remains manual until recorded |
 | Hēsperus Sync Engine | WebDAV over HTTP(S), RFC 4918 semantics | `scripts/interop/http-smoke.sh`; `scripts/interop/webdav-litmus.sh`; DAV method/precondition tests | Run the exact plugin version against a release deployment | Protocol shape covered; plugin version remains release-manual |
 | Remotely Save | WebDAV over HTTP(S) | Same DAV fixture and Litmus entry point | Run the exact plugin version against a release deployment | Protocol shape covered; plugin version remains release-manual |
 | Obsidian Desktop | Vault folder via the selected WebDAV plugin | DAV request fixtures and server tests | Sync, conflict, rename, attachment, reconnect, and large-file checklist | Not claimed until a named desktop/plugin version is recorded |
@@ -27,8 +27,9 @@ The real HTTP smoke covers the minimum release path:
 - `If-Match` stale-write rejection;
 - public listener/Admin route separation;
 - readiness and MCP discovery on the same deployment;
-- built-in OAuth metadata, DCR, login/consent, authorization code + PKCE,
-  access-token MCP use, refresh rotation, and replay-family revocation.
+- built-in OAuth metadata, DCR, login/consent, `offline_access`, authorization
+  code + PKCE, access-token MCP use, 180-day sliding refresh rotation,
+  duplicate-refresh grace, and delayed replay-family revocation.
 
 The in-process WebDAV tests additionally cover PROPFIND, MKCOL, COPY/MOVE,
 DELETE, LOCK/UNLOCK, ranges, path attacks, expiration/revocation, and

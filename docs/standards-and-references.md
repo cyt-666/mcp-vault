@@ -144,7 +144,10 @@ Relevant standards referenced by the MCP authorization specification:
 The default standalone mode implements both the authorization-server and
 resource-server roles for public clients: DCR, authorization code, PKCE
 `S256`, resource indicators, issuer identification, opaque tokens, and refresh
-rotation. A configured external authorization server remains optional.
+rotation. Authorization-server metadata also advertises `offline_access` for
+long-lived ChatGPT connections. That protocol scope is separated from MCP
+resource permissions; active refresh rotation renews a bounded 180-day idle
+lifetime. A configured external authorization server remains optional.
 
 ChatGPT plugin interoperability is also checked against the official OpenAI
 Plugins authentication guide:

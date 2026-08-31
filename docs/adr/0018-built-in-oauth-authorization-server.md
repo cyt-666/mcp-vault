@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-29
+- Last amended: 2026-08-31
 
 ## Context
 
@@ -34,6 +35,24 @@ tokens are stored only as installation-keyed, versioned digests. OAuth
 consumption and rotation use State-owned SQLite transactions. Public protocol
 handlers contain no SQL or authorization policy.
 
+The authorization server advertises and accepts `offline_access` for clients
+that need a durable connection. It is OAuth protocol state, not a Vault scope:
+it never maps to a domain permission, never expands an MCP tool grant, and does
+not appear in protected-resource metadata. Existing grants without it remain
+valid, while a refresh request cannot add it to an older grant.
+
+Access tokens expire after one hour. A successfully used refresh token rotates
+once and gives its successor a new 180-day idle lifetime. This sliding lifetime
+keeps an actively used ChatGPT connection viable without creating a permanent
+unrotated bearer. A client idle for more than 180 days must authorize again.
+
+A rotated refresh token submitted again always fails. Reuse at or within 60
+seconds of the successful rotation is treated as a likely concurrent retry: it
+does not receive another token and does not revoke the winner's new pair. Reuse
+after that bounded grace is treated as replay and revokes the complete token
+family. A compare-and-set loser re-reads the durable old row before applying
+this policy, so a stale concurrent read cannot revoke a successful rotation.
+
 Authorization request handles are short-lived but tolerate a correctly
 authenticated duplicate browser/proxy form submission while they remain valid.
 Each successful submission creates a different short-lived, strictly
@@ -58,7 +77,8 @@ ChatGPT connection.
   tests; these become release-critical security surfaces.
 - Credential planes remain separate and Vault isolation stays explicit.
 - Public clients have no client secret. PKCE, exact redirects, short expiry,
-  single-use codes, authenticated request retries, refresh rotation, and local
+  single-use codes, authenticated request retries, refresh rotation, bounded
+  duplicate-refresh grace, delayed replay-family revocation, and local
   revocation provide the applicable protections.
 - Operators with an existing IdP may continue using external JWT validation,
   but that setup is optional and disclosed as advanced configuration.
@@ -80,3 +100,16 @@ plane and couples Admin password/session policy to third-party OAuth clients.
 
 Rejected because it omits client binding, redirect validation, PKCE, resource
 indicators, expiry, refresh rotation, and standard discovery.
+
+### Keep a fixed refresh-token expiry across rotation
+
+Rejected because a connection that refreshes correctly would still fail at the
+original absolute deadline. A 180-day idle lifetime retains a bounded dormant
+credential while allowing active clients to rotate continuously.
+
+### Revoke the family on every duplicate refresh immediately
+
+Rejected because concurrent client retries can race after the first rotation
+has committed and destroy the valid pair they are trying to obtain. The
+60-second rejection-only interval is bounded; replay after it still revokes the
+family.

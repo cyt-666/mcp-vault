@@ -1000,7 +1000,7 @@ async fn insert_refresh_from_refresh(
           client_id, user_id, vault_id, resource, scopes_json,
           created_at, expires_at)
          SELECT ?, family_id, ?, ?, ?, client_id, user_id, vault_id, resource,
-                COALESCE(?, scopes_json), ?, expires_at
+                COALESCE(?, scopes_json), ?, ?
          FROM oauth_refresh_tokens WHERE id = ? AND vault_id = ? AND family_id = ?",
     )
     .bind(token.id.to_string())
@@ -1009,6 +1009,7 @@ async fn insert_refresh_from_refresh(
     .bind(i64::from(token.digest_key_version))
     .bind(token.scopes_json)
     .bind(token.created_at)
+    .bind(token.expires_at)
     .bind(old_id.to_string())
     .bind(context.id().to_string())
     .bind(token.family_id.to_string())

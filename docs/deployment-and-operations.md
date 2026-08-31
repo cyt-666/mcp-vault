@@ -155,17 +155,21 @@ external identity service. Before adding it as a ChatGPT plugin:
    `resource` must exactly equal the copied MCP endpoint, and its first
    `authorization_servers` entry must be the configured public origin. The
    authorization metadata must advertise DCR, `code`, PKCE `S256`, token auth
-   `none`, and the same issuer.
+   `none`, `offline_access`, and the same issuer. Protected-resource metadata
+   continues to list only Vault/memory permission scopes.
 5. In ChatGPT, add the copied MCP endpoint. Do not manually invent a callback,
    client ID, secret, or token: ChatGPT performs DCR and opens MCP Vault's own
    login page.
-6. Sign in with the Vault OAuth credential, review the requested scopes, and
-   verify one bounded read tool call. Use Admin to rotate/disable the OAuth
-   login if the connection must be revoked.
+6. Sign in with the Vault OAuth credential, review the requested scopes and
+   “保持长期连接” capability, and verify one bounded read tool call. After an
+   upgrade that first adds `offline_access`, reconnect the existing ChatGPT
+   connection once. Access tokens then renew automatically through rotating
+   refresh tokens with a 180-day sliding idle lifetime. Use Admin to
+   rotate/disable the OAuth login if the connection must be revoked.
 
 `scripts/interop/http-smoke.sh` proves the complete real-HTTP DCR, login,
-authorization-code + PKCE, access-token MCP, refresh rotation, and replay
-revocation path. A successful live ChatGPT result still depends on the
+authorization-code + PKCE, `offline_access`, access-token MCP, refresh rotation,
+duplicate-refresh grace, and delayed replay-revocation policy. A successful live ChatGPT result still depends on the
 operator's DNS/TLS and ChatGPT account/UI state and must be recorded separately.
 
 Operators that already run an IdP may instead expand “外部 OAuth/OIDC 兼容”,

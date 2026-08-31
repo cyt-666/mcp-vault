@@ -17,8 +17,10 @@ and, for container checks, the image digest.
 - [ ] OAuth project-specific tests prove RFC 9728 metadata, same-origin
       `resource_metadata` challenges, RFC 8414 metadata, DCR, exact redirects,
       authorization code + PKCE `S256`, RFC 8707 resource propagation, RFC
-      9207 `iss`, single use/expiry, access-token MCP use, refresh rotation and
-      replay-family revocation, token exchange with absent/application/null
+      9207 `iss`, protocol-only `offline_access`, single use/expiry,
+      access-token MCP use, 180-day sliding refresh rotation, concurrent
+      retry grace and delayed replay-family revocation, legacy-grant
+      compatibility, token exchange with absent/application/null
       Origin values, Chromium-compatible native authorization form submission,
       Vault/scope isolation, local-user rotation, and optional external RS256
       validation; a named ChatGPT deployment completes login and one bounded

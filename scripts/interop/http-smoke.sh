@@ -61,6 +61,7 @@ printf '%s' "$oauth_metadata" | jq -e --arg resource "$mcp_url" --arg issuer "$m
   and (.authorization_servers == [$issuer, "https://issuer.example.test"])
   and (.bearer_methods_supported == ["header"])
   and (.scopes_supported | index("vault:read"))
+  and ((.scopes_supported | index("offline_access")) == null)
   and (has("jwks_cache_json") | not)
   and (has("subjects") | not)
 ' >/dev/null
@@ -74,6 +75,7 @@ printf '%s' "$authorization_metadata" | jq -e --arg issuer "$mcp_origin" '
   and .registration_endpoint == ($issuer + "/oauth/register")
   and (.code_challenge_methods_supported == ["S256"])
   and (.token_endpoint_auth_methods_supported == ["none"])
+  and (.scopes_supported | index("offline_access"))
   and .authorization_response_iss_parameter_supported == true
 ' >/dev/null
 
@@ -108,8 +110,8 @@ printf '%s' "$discovery" | jq -e '
 ' >/dev/null
 
 # Exercise the complete standalone ChatGPT-style OAuth flow over the real data
-# listener: DCR, login/consent, code + PKCE, MCP bearer use, refresh rotation,
-# and replay-family revocation. Secrets remain inside this temporary 0600
+# listener: DCR, login/consent, code + PKCE, MCP bearer use, offline access,
+# refresh rotation, retry grace, and replay-family protection. Secrets remain inside this temporary 0600
 # fixture directory and are never printed.
 oauth_redirect_uri='https://chatgpt.com/connector_platform_oauth_redirect'
 registration_payload=$(jq -nc --arg redirect "$oauth_redirect_uri" '{
@@ -139,12 +141,13 @@ curl --fail --silent --show-error -D "$oauth_login_headers" --get "$oauth_author
   --data-urlencode 'response_type=code' \
   --data-urlencode "client_id=$oauth_client_id" \
   --data-urlencode "redirect_uri=$oauth_redirect_uri" \
-  --data-urlencode 'scope=vault:discover vault:read vault:write vault:delete vault:history memory:read memory:write memory:manage' \
+  --data-urlencode 'scope=vault:discover vault:read vault:write vault:delete vault:history memory:read memory:write memory:manage offline_access' \
   --data-urlencode 'state=http-smoke-state' \
   --data-urlencode "code_challenge=$pkce_challenge" \
   --data-urlencode 'code_challenge_method=S256' \
   --data-urlencode "resource=$mcp_url" >"$oauth_login_html"
 grep -F '授权 ChatGPT 访问 MCP Vault' "$oauth_login_html" >/dev/null
+grep -F '<code>offline_access</code>（保持长期连接）' "$oauth_login_html" >/dev/null
 grep -F "action=\"$oauth_authorization_endpoint\"" "$oauth_login_html" >/dev/null
 grep -Eiq "^content-security-policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'" "$oauth_login_headers"
 if grep -Eiq '^content-security-policy: .*form-action' "$oauth_login_headers"; then
@@ -208,6 +211,7 @@ printf '%s' "$token_response" | jq -e --arg resource "$mcp_url" '
   and .resource == $resource
   and (.scope | contains("vault:read"))
   and (.scope | contains("vault:write"))
+  and (.scope | contains("offline_access"))
 ' >/dev/null
 
 oauth_discovery=$(curl --fail --silent --show-error -X POST "$mcp_url" \
@@ -263,6 +267,10 @@ refresh_response=$(curl --fail --silent --show-error -X POST "$mcp_origin/oauth/
   --data-urlencode 'scope=vault:discover vault:read' \
   --data-urlencode "resource=$mcp_url")
 rotated_access_token=$(printf '%s' "$refresh_response" | jq -er '.access_token')
+printf '%s' "$refresh_response" | jq -e '
+  (.scope | contains("vault:read"))
+  and (.scope | contains("offline_access"))
+' >/dev/null
 curl --fail --silent --show-error -o /dev/null -X POST "$mcp_url" \
   -H "Authorization: Bearer $rotated_access_token" \
   -H "Origin: $mcp_origin" \
@@ -281,7 +289,7 @@ replay_status=$(curl --silent --show-error -o "$work_dir/oauth-replay.json" -w '
   --data-urlencode "resource=$mcp_url")
 [[ "$replay_status" == "400" ]]
 jq -e '.error == "invalid_grant"' "$work_dir/oauth-replay.json" >/dev/null
-revoked_family_status=$(curl --silent --show-error -o /dev/null -w '%{http_code}' \
+retry_winner_status=$(curl --silent --show-error -o /dev/null -w '%{http_code}' \
   -X POST "$mcp_url" \
   -H "Authorization: Bearer $rotated_access_token" \
   -H "Origin: $mcp_origin" \
@@ -290,7 +298,7 @@ revoked_family_status=$(curl --silent --show-error -o /dev/null -w '%{http_code}
   -H 'MCP-Protocol-Version: 2026-07-28' \
   -H 'MCP-Method: server/discover' \
   --data "$discovery_body")
-[[ "$revoked_family_status" == "401" ]]
+[[ "$retry_winner_status" == "200" ]]
 
 # Origin policy is checked before the RMCP handler and must reject an
 # untrusted browser origin even though the fixture injects its test PAT.
@@ -369,4 +377,4 @@ for index in $(seq 0 $((parallel_put_count - 1))); do
   grep -Fx "parallel HTTP payload $index" "$parallel_status_dir/$index.get" >/dev/null
 done
 
-echo "HTTP fixture smoke passed: built-in OAuth code/PKCE/refresh flow, browser-compatible authorization CSP, token Origin compatibility, legacy authorization redirect, duplicate authorization retry, OAuth metadata, MCP discovery, Origin rejection, 50 concurrent WebDAV PUTs, revision precondition, and Admin plane separation"
+echo "HTTP fixture smoke passed: built-in OAuth code/PKCE/offline refresh flow, duplicate-refresh grace, browser-compatible authorization CSP, token Origin compatibility, legacy authorization redirect, duplicate authorization retry, OAuth metadata, MCP discovery, Origin rejection, 50 concurrent WebDAV PUTs, revision precondition, and Admin plane separation"

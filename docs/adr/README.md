@@ -16,7 +16,10 @@ versioned fresh jobs instead of compatibility conversion.
 
 ADR-0018 adds a complete built-in OAuth 2.1 authorization server as the default
 self-hosted ChatGPT path while preserving external issuer validation as an
-optional compatibility mode.
+optional compatibility mode. Its 2026-08-31 amendment separates protocol-only
+`offline_access`, uses a 180-day sliding refresh idle lifetime, and protects a
+successful rotation with a bounded duplicate-request grace before replay-family
+revocation.
 
 ADR-0019 removes the WebDAV proxy socket-peer allow-list and moves protection
 of the plaintext data listener entirely to deployment networking while

@@ -199,7 +199,8 @@ When enabled, follow the current MCP authorization specification:
 - keep Admin credentials off the public authorization form;
 - store local OAuth passwords with Argon2id and every high-entropy OAuth value
   only as a versioned installation-keyed digest;
-- rotate refresh tokens and revoke the full token family on replay;
+- rotate refresh tokens, reject bounded concurrent retries without harming the
+  winner, and revoke the full token family on delayed replay;
 - set no-store, framing denial, CSP, and referrer controls on public OAuth
   responses;
 - rate-limit interactive password failures and bound public DCR state;
@@ -216,7 +217,10 @@ required except for explicit loopback development. Authorization request
 handles are short-lived. A correctly authenticated duplicate submission may
 issue a fresh code for the same still-valid request, while every authorization
 code remains short-lived and strictly single-use. Access tokens are opaque and
-short-lived; refresh tokens rotate without extending their original absolute lifetime.
+expire after one hour. Refresh tokens have a 180-day idle lifetime that restarts
+after each successful rotation. Authorization-server metadata advertises
+`offline_access` as protocol state; it never maps to a Vault permission or
+appears in protected-resource scopes.
 Replacing or disabling the Vault OAuth user atomically deletes outstanding
 authorization requests and consumes/revokes all issued state. Public handlers translate protocol DTOs only;
 Auth owns validation and State owns SQL transactions.
@@ -253,7 +257,11 @@ correctly authenticated POSTs create distinct single-use codes so a browser or
 edge retry cannot replace a successful redirect with an expiry page.
 The token POST requires the exact public client, redirect, resource, and PKCE
 verifier for a single-use code, or a rotating refresh token. Origin therefore
-adds no authentication or CSRF boundary to either request.
+adds no authentication or CSRF boundary to either request. A duplicate refresh
+at or within 60 seconds of rotation is rejected without family revocation so a
+concurrent client retry cannot invalidate the committed winner. Reuse after the
+grace revokes the family. The loser of a concurrent State compare-and-set
+re-reads the durable rotation timestamp before applying this decision.
 The routes are advertised only for HTTPS or explicit loopback HTTP. The reverse
 proxy exposes these narrow routes but never Admin.
 

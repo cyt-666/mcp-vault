@@ -33,9 +33,10 @@ use crate::{
 mod local_oauth;
 
 pub use local_oauth::{
-    LocalOAuthAuthorizationInput, LocalOAuthAuthorizationPrompt, LocalOAuthAuthorizationResult,
-    LocalOAuthClientRegistration, LocalOAuthClientRegistrationResult, LocalOAuthCodeExchange,
-    LocalOAuthRefreshExchange, LocalOAuthTokenIssue, LocalOAuthUser,
+    LOCAL_OAUTH_OFFLINE_ACCESS_SCOPE, LocalOAuthAuthorizationInput, LocalOAuthAuthorizationPrompt,
+    LocalOAuthAuthorizationResult, LocalOAuthClientRegistration,
+    LocalOAuthClientRegistrationResult, LocalOAuthCodeExchange, LocalOAuthRefreshExchange,
+    LocalOAuthTokenIssue, LocalOAuthUser,
 };
 
 const PAT_LABEL: &str = "mcpv_pat_";

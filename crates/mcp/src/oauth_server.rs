@@ -13,9 +13,9 @@ use axum::{
     routing::{get, post},
 };
 use mcp_vault_auth::{
-    AuthError, LocalOAuthAuthorizationInput, LocalOAuthAuthorizationPrompt,
-    LocalOAuthClientRegistration, LocalOAuthCodeExchange, LocalOAuthRefreshExchange,
-    LocalOAuthTokenIssue, SecretString,
+    AuthError, LOCAL_OAUTH_OFFLINE_ACCESS_SCOPE, LocalOAuthAuthorizationInput,
+    LocalOAuthAuthorizationPrompt, LocalOAuthClientRegistration, LocalOAuthCodeExchange,
+    LocalOAuthRefreshExchange, LocalOAuthTokenIssue, SecretString,
 };
 use mcp_vault_domain::{Scope, ScopeSet, VaultContext};
 use serde::Deserialize;
@@ -79,6 +79,8 @@ async fn authorization_server_metadata(State(service): State<McpService>) -> Res
         }
     }
     let issuer = issuer.trim_end_matches('/');
+    let mut scopes_supported = Scope::ALL.map(|scope| scope.to_string()).to_vec();
+    scopes_supported.push(LOCAL_OAUTH_OFFLINE_ACCESS_SCOPE.to_owned());
     oauth_json(
         StatusCode::OK,
         json!({
@@ -90,7 +92,7 @@ async fn authorization_server_metadata(State(service): State<McpService>) -> Res
             "grant_types_supported": ["authorization_code", "refresh_token"],
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
-            "scopes_supported": Scope::ALL.map(|scope| scope.to_string()),
+            "scopes_supported": scopes_supported,
             "authorization_response_iss_parameter_supported": true,
             "service_documentation": format!("{issuer}/.well-known/oauth-authorization-server"),
         }),
@@ -601,11 +603,14 @@ fn authorization_page(
     status: StatusCode,
     issuer: &str,
 ) -> Response {
-    let scope_items = prompt
+    let mut scope_items = prompt
         .scopes
         .iter()
         .map(|scope| format!("<li><code>{}</code></li>", escape_html(&scope.to_string())))
         .collect::<String>();
+    if prompt.offline_access {
+        scope_items.push_str("<li><code>offline_access</code>（保持长期连接）</li>");
+    }
     let error = error
         .map(|message| {
             format!(
@@ -667,18 +672,18 @@ fn token_response(issue: LocalOAuthTokenIssue, resource: &str) -> Response {
             "token_type": "Bearer",
             "expires_in": issue.expires_in,
             "refresh_token": issue.refresh_token.expose_secret(),
-            "scope": scope_string(&issue.scopes),
+            "scope": scope_string(&issue.scopes, issue.offline_access),
             "resource": resource,
         }),
     )
 }
 
-fn scope_string(scopes: &ScopeSet) -> String {
-    scopes
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(" ")
+fn scope_string(scopes: &ScopeSet, offline_access: bool) -> String {
+    let mut values = scopes.iter().map(ToString::to_string).collect::<Vec<_>>();
+    if offline_access {
+        values.push(LOCAL_OAUTH_OFFLINE_ACCESS_SCOPE.to_owned());
+    }
+    values.join(" ")
 }
 
 fn oauth_json(status: StatusCode, value: serde_json::Value) -> Response {

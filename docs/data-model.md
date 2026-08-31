@@ -266,13 +266,23 @@ row contains a Vault predicate and exact resource. Client rows are global
 public registrations because DCR occurs before resource authorization, but
 they cannot grant a Vault by themselves.
 
+The existing `scopes_json` arrays on local authorization requests, codes, and
+tokens may also contain `offline_access`. Auth parses it separately from domain
+Vault/memory scopes, so it never contributes a permission. Older arrays without
+that value remain valid and require no migration.
+
 Authorization completion atomically records the first successful completion
 time and inserts one code. A correctly authenticated retry of the same
 still-valid request inserts another distinct code; password rotation/disable
 deletes all outstanding request rows. Code exchange atomically consumes that
 code and inserts one access/refresh
 family. Refresh atomically rotates the presented row and inserts the next pair;
-replay revokes both access and refresh rows in the family. Replacing/disabling
+the inserted refresh row binds its newly calculated 180-day idle expiry rather
+than copying the predecessor's deadline. A duplicate rotation at or within 60
+seconds is rejected without revoking the committed successor; later replay
+revokes both access and refresh rows in the family. `rotated_at` is the durable
+decision timestamp, including when a concurrent compare-and-set loser re-reads
+the row. Replacing/disabling
 the one local user for a Vault consumes/revokes every outstanding local row in
 one transaction. Expired/consumed rows are removed by bounded opportunistic
 cleanup after a retention window.

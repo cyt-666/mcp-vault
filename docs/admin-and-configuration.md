@@ -441,12 +441,22 @@ to enter only the MCP endpoint; ChatGPT discovers the remaining endpoints,
 registers a public client, and opens MCP Vault's login/consent page. No external
 service, JWKS, Subject grant, client secret, or copied access token is needed.
 
+The configured maximum scopes remain only Vault/memory permissions.
+`offline_access` is advertised and granted by the public OAuth protocol when a
+client requests a long-lived connection; the consent page labels it “保持长期连接”,
+but Admin does not present it as a permission checkbox. It cannot expose
+another tool or broaden the configured maximum scopes.
+
 The UI labels the password as a Vault OAuth credential and explicitly states
 that it is not the Admin password. Every save is a security rotation: it
 replaces the hash/scopes and revokes all existing local authorization requests,
 codes, access tokens, and refresh tokens. Disable performs the same revocation.
 Common read-only/editor/full-management scope presets are shown before granular
 advanced choices.
+After an upgrade that first adds `offline_access`, an existing ChatGPT
+connection should be reconnected once to obtain a new grant. Thereafter the
+one-hour access token is renewed through rotating refresh tokens whose 180-day
+idle lifetime restarts on successful use.
 
 ### 10.4 Optional external OAuth resource server
 
