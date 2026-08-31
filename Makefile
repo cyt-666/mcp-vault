@@ -13,7 +13,7 @@ fmt-check:
 lint:
 	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 
-test:
+test: frontend-build
 	$(CARGO) test --workspace --all-features
 
 frontend-install:

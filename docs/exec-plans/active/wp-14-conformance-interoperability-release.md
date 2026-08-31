@@ -3,7 +3,7 @@
 Status: In progress
 Owner: Codex
 Created: 2026-08-21
-Last updated: 2026-08-26
+Last updated: 2026-08-31
 
 > Memory redesign notice (2026-08-26): all candidate-first, exact-quote-as-final,
 > direct-promotion, marker, and candidate-review material below is retained only
@@ -693,6 +693,14 @@ facts.
   300-second reconciliation interval.
 - [x] 2026-08-26 — Replace model-echoed evidence quotes with server-derived
   evidence from model-selected, explicitly numbered source-line ranges.
+- [x] 2026-08-31 — Repair CI/release asset prerequisites and the Trivy action
+  reference: each Rust gate builds the ignored embedded Admin frontend before
+  compiling/tests, `make test` has the same prerequisite, and both image scans
+  use the published `aquasecurity/trivy-action@v0.36.0` tag.
+- [x] 2026-08-31 — Extend the real HTTP fixture readiness window to five
+  minutes after measuring a clean Cargo target at just over two minutes; the
+  historical GitHub smoke jobs ended at the previous 30/120-second boundary
+  before the fixture could publish its manifest.
 - [ ] Complete release-environment Litmus, named Obsidian plugin/client matrix, full-scale performance, clean-host restore, and signed-artifact verification; then review whether the full frozen MCP requirements report is applicable to the advertised capability set.
 
 ## Decisions
@@ -1046,6 +1054,21 @@ facts.
   drift produced `memory_phase1_evidence_mismatch`. Requiring the model to
   reproduce authoritative source text was the wrong boundary. Numbered range
   selection keeps provenance while removing that brittle comparison.
+- The 2026-08-31 GitHub run exposed two independent CI boundary defects. The
+  Rust job ran on a clean runner before building the ignored
+  `frontend/admin/dist`, so `rust-embed` served the fallback HTML and the two
+  Admin asset tests failed; the separate frontend job cannot share files with
+  it. The container setup failed before execution because the workflow used the
+  removed unprefixed `aquasecurity/trivy-action@0.28.0` tag. Current local
+  public HTTP smoke passes with the real fixture, including the OAuth refresh
+  and 50 concurrent WebDAV PUT checks; the historical GitHub smoke exit-1 has
+  no downloadable log for this account and remains pending a rerun after the
+  workflow changes.
+- Comparing the public job timestamps showed the smoke failures consistently
+  ended at about 47–122 seconds, matching the script's old 30/120-second
+  manifest wait. A clean local Cargo target took 121 seconds before passing
+  the rest of the smoke, so the readiness window is now 300 seconds rather
+  than treating a cold compile as a protocol failure.
 
 ## Validation
 
@@ -1670,6 +1693,25 @@ server-derived evidence:
 - `bash scripts/check-docs.sh`, every `SHA256SUMS` entry, and
   `git diff --check` pass. No paid Provider was called and no Docker image was
   built.
+
+Validation recorded on 2026-08-31 for CI asset/action remediation:
+
+- The clean-runner Rust asset failure is reproduced by compiling without the
+  ignored `frontend/admin/dist`: the fallback HTML has `text/html`, so both
+  embedded Admin asset assertions fail. Building the frontend first restores
+  the PNG and Chinese Admin title; the full workspace test then passes.
+- `make test` now declares `frontend-build` as a prerequisite, and both CI and
+  release gates install/build the frontend before Rust compilation. The
+  frontend job remains an independent lint/test/build check.
+- The image scans now reference the published `aquasecurity/trivy-action`
+  `v0.36.0` tag; the former unprefixed `0.28.0` reference cannot be resolved.
+- `cargo fmt --all --check`, workspace Clippy with `-D warnings`,
+  `cargo test --workspace --all-features`, frontend lint/test/build, and the
+  escalated cold-target real HTTP smoke all pass locally. The latest GitHub run at the
+  prior revision failed Rust only on missing embedded assets and failed the
+  smoke step with no downloadable log available to this account; a rerun of
+  the workflow revision containing this fix remains required for remote
+  acceptance.
 
 ## Rollback and recovery
 

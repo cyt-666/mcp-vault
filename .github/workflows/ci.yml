@@ -14,6 +14,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # AdminAssets is compiled into the server from frontend/admin/dist.
+      # The frontend job runs on a different runner, so build the ignored
+      # artifact in this job before compiling and testing Rust.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+          cache-dependency-path: frontend/admin/pnpm-lock.yaml
+      - name: Build Admin assets for Rust embedding
+        run: |
+          CI=true pnpm --dir frontend/admin install --frozen-lockfile
+          CI=true pnpm --dir frontend/admin build
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.94.0
@@ -119,7 +134,7 @@ jobs:
           format: spdx-json
           output-file: sbom-mcp-vault.json
       - name: Scan image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: mcp-vault:ci
           format: table

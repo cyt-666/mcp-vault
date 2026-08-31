@@ -100,6 +100,13 @@ crates/
 
 Use `cargo metadata` or a dependency-graph check in CI to prevent forbidden edges.
 
+The server embeds the compiled Admin frontend from
+`frontend/admin/dist/` with `rust-embed`. That directory is intentionally
+ignored by Git, so any Rust build or test that exercises Admin assets must run
+the frontend build first. The repository `make test` target and the CI/release
+Rust gates perform this prerequisite explicitly; the separate frontend job
+does not share its generated files with the Rust job.
+
 ## 5. Rust style
 
 ### Errors

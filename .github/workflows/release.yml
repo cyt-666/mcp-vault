@@ -20,19 +20,25 @@ jobs:
           toolchain: 1.94.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24.18.0
       - uses: pnpm/action-setup@v4
         with:
           version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+          cache-dependency-path: frontend/admin/pnpm-lock.yaml
+      # Build before cargo test because server Admin assets are embedded at
+      # compile time from the ignored frontend/admin/dist directory.
+      - name: Build Admin assets for Rust embedding
+        run: |
+          CI=true pnpm --dir frontend/admin install --frozen-lockfile
+          CI=true pnpm --dir frontend/admin build
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
-      - run: CI=true pnpm --dir frontend/admin install --frozen-lockfile
       - run: CI=true pnpm --dir frontend/admin lint
       - run: CI=true pnpm --dir frontend/admin test
-      - run: CI=true pnpm --dir frontend/admin build
       - run: bash scripts/check-docs.sh
       - run: bash scripts/interop/http-smoke.sh
       - name: Official MCP conformance
@@ -76,7 +82,7 @@ jobs:
           format: spdx-json
           output-file: sbom-mcp-vault-release.json
       - name: Scan release image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: mcp-vault:release
           format: table

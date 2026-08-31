@@ -23,7 +23,10 @@ MCP_VAULT_FIXTURE_MANIFEST="$manifest" \
   >"$work_dir/fixture.log" 2>&1 &
 fixture_pid=$!
 
-for _ in $(seq 1 480); do
+# A clean GitHub runner may need roughly two minutes to compile the real
+# fixture binary before it can publish its manifest. Keep the readiness window
+# comfortably above that cold-start cost while still failing a wedged fixture.
+for _ in $(seq 1 1200); do
   if [[ -s "$manifest" ]]; then
     break
   fi
