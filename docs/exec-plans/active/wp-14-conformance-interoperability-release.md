@@ -704,6 +704,9 @@ facts.
 - [x] 2026-08-31 — Add credential-free stage reporting to the smoke script's
   error path so a failed GitHub assertion remains diagnosable even when the
   hosted log viewer truncates the middle of a long cold-build step.
+- [x] 2026-08-31 — Split the legacy-redirect smoke stage into status, location,
+  cache-control, Vary, Admin-isolation, and MCP-discovery checkpoints after
+  the first remote rerun identified that broad stage as the remaining failure.
 - [ ] Complete release-environment Litmus, named Obsidian plugin/client matrix, full-scale performance, clean-host restore, and signed-artifact verification; then review whether the full frozen MCP requirements report is applicable to the advertised capability set.
 
 ## Decisions
@@ -1077,6 +1080,9 @@ facts.
   only `Process completed with exit code 1`, so stage-only error reporting is
   added before attempting another protocol change; it never prints command
   lines, credentials, tokens, response bodies, or note content.
+- The second rerun exposed the failure only as the combined “legacy
+  authorization redirect and MCP discovery” stage; the finer checkpoints now
+  make the next hosted result actionable without logging sensitive responses.
 
 ## Validation
 
@@ -1725,6 +1731,8 @@ Validation recorded on 2026-08-31 for CI asset/action remediation:
   assertion. The script now reports a broad failing stage without exposing
   sensitive command arguments, so the next remote run can distinguish the
   remaining protocol boundary.
+- The smoke stage was then split into individual legacy-header, public Admin,
+  and discovery assertions; local HTTP smoke remains green after the split.
 
 ## Rollback and recovery
 

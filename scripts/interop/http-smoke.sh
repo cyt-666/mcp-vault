@@ -97,20 +97,26 @@ stage="legacy authorization redirect and MCP discovery"
 # A client with cached pre-v2 metadata must be moved to the current endpoint
 # without serving another cacheable authorization transaction from the alias.
 legacy_authorize_headers="$work_dir/oauth-legacy-redirect.headers"
+stage="legacy authorization status"
 legacy_authorize_status=$(curl --silent --show-error \
   -D "$legacy_authorize_headers" -o /dev/null -w '%{http_code}' \
   "$mcp_origin/oauth/authorize?cache_probe=1")
 [[ "$legacy_authorize_status" == "307" ]]
+stage="legacy authorization location"
 grep -Eiq '^location: /oauth/v2/authorize\?cache_probe=1\r?$' "$legacy_authorize_headers"
+stage="legacy authorization cache-control"
 grep -Eiq '^cache-control: .*no-store' "$legacy_authorize_headers"
+stage="legacy authorization vary"
 grep -Eiq '^vary: \*\r?$' "$legacy_authorize_headers"
 
 # The public/data listener must not expose control-plane routes.
+stage="public Admin isolation status"
 data_base=${mcp_url%%/mcp/*}
 public_admin_status=$(curl --silent --show-error -o /dev/null -w '%{http_code}' \
   "$data_base/api/v1/system")
 [[ "$public_admin_status" == "404" ]]
 
+stage="MCP discovery"
 discovery_body='{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"http-smoke","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}'
 discovery=$(curl --fail --silent --show-error -X POST "$mcp_url" \
   -H "Origin: $mcp_origin" \
