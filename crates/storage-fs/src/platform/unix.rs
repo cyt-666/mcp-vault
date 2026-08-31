@@ -241,25 +241,103 @@ pub(crate) fn commit_temp(
     policy: DestinationPolicy,
     durability: DurabilityPolicy,
 ) -> Result<(), StorageError> {
-    validate_destination(parent, target, policy)?;
-    let result = match policy {
-        DestinationPolicy::MustNotExist => fs::renameat_with(
+    commit_temp_with_noreplace_attempt(parent, temp_name, target, policy, durability, || {
+        fs::renameat_with(
             &parent.file,
             temp_name,
             &parent.file,
             target,
             fs::RenameFlags::NOREPLACE,
-        ),
+        )
+    })
+}
+
+fn commit_temp_with_noreplace_attempt<F>(
+    parent: &ParentDir,
+    temp_name: &str,
+    target: &str,
+    policy: DestinationPolicy,
+    durability: DurabilityPolicy,
+    rename_noreplace: F,
+) -> Result<(), StorageError>
+where
+    F: FnOnce() -> Result<(), Errno>,
+{
+    if let Err(error) = validate_destination(parent, target, policy) {
+        cleanup_temp(parent, temp_name);
+        return Err(error);
+    }
+    let result = match policy {
+        DestinationPolicy::MustNotExist => {
+            commit_temp_noreplace(parent, temp_name, target, rename_noreplace())
+        }
         DestinationPolicy::ReplaceExisting => {
             fs::renameat(&parent.file, temp_name, &parent.file, target)
+                .map_err(|error| errno("atomically rename file", error))
         }
-    }
-    .map_err(|error| errno("atomically rename file", error));
+    };
     if result.is_err() {
         cleanup_temp(parent, temp_name);
         return result;
     }
     sync_parent(parent, durability)
+}
+
+fn commit_temp_noreplace(
+    parent: &ParentDir,
+    temp_name: &str,
+    target: &str,
+    rename_result: Result<(), Errno>,
+) -> Result<(), StorageError> {
+    match rename_result {
+        Ok(()) => return Ok(()),
+        Err(error) if error == Errno::EXIST => return Err(StorageError::DestinationExists),
+        Err(error) if !rename_noreplace_unsupported(error) => {
+            return Err(errno("atomically rename file", error));
+        }
+        Err(_) => {}
+    }
+
+    match fs::linkat(
+        &parent.file,
+        temp_name,
+        &parent.file,
+        target,
+        AtFlags::empty(),
+    ) {
+        Ok(()) => {}
+        Err(error) => return Err(map_atomic_link_error(error)),
+    }
+
+    match fs::unlinkat(&parent.file, temp_name, AtFlags::empty()) {
+        Ok(()) => Ok(()),
+        // Another cleanup path may have removed the private temporary name
+        // after the canonical hard link became visible. The target remains a
+        // complete link to the already-synced inode.
+        Err(error) if error == Errno::NOENT => Ok(()),
+        Err(error) => Err(errno("remove linked temporary file", error)),
+    }
+}
+
+fn rename_noreplace_unsupported(error: Errno) -> bool {
+    error == Errno::INVAL
+        || error == Errno::NOSYS
+        || error == Errno::OPNOTSUPP
+        || error == Errno::NOTSUP
+}
+
+fn map_atomic_link_error(error: Errno) -> StorageError {
+    if error == Errno::EXIST {
+        StorageError::DestinationExists
+    } else if error == Errno::NOSYS
+        || error == Errno::OPNOTSUPP
+        || error == Errno::NOTSUP
+        || error == Errno::PERM
+    {
+        StorageError::AtomicCreateUnsupported
+    } else {
+        errno("atomically link file", error)
+    }
 }
 
 pub(crate) fn commit_temp_between(
@@ -396,4 +474,136 @@ fn errno(operation: &'static str, error: Errno) -> StorageError {
 
 fn errno_std(operation: &'static str, error: std::io::Error) -> StorageError {
     StorageError::io(operation, error.kind())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs as std_fs, io::Write};
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn write_temp(parent: &ParentDir, name: &str, bytes: &[u8]) {
+        let mut file = prepare_temp(parent, name).unwrap();
+        file.write_all(bytes).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    #[test]
+    fn unsupported_exclusive_rename_falls_back_to_atomic_link_install() {
+        let directory = tempdir().unwrap();
+        let parent = open_directory(directory.path()).unwrap();
+        write_temp(&parent, "temporary", b"complete payload");
+
+        commit_temp_with_noreplace_attempt(
+            &parent,
+            "temporary",
+            "target.md",
+            DestinationPolicy::MustNotExist,
+            DurabilityPolicy::None,
+            || Err(Errno::INVAL),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std_fs::read(directory.path().join("target.md")).unwrap(),
+            b"complete payload"
+        );
+        assert!(!directory.path().join("temporary").exists());
+    }
+
+    #[test]
+    fn link_fallback_preserves_a_destination_created_after_validation() {
+        let directory = tempdir().unwrap();
+        let parent = open_directory(directory.path()).unwrap();
+        write_temp(&parent, "temporary", b"our payload");
+        let raced_target = directory.path().join("target.md");
+
+        let error = commit_temp_with_noreplace_attempt(
+            &parent,
+            "temporary",
+            "target.md",
+            DestinationPolicy::MustNotExist,
+            DurabilityPolicy::None,
+            || {
+                std_fs::write(&raced_target, b"external payload").unwrap();
+                Err(Errno::INVAL)
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, StorageError::DestinationExists));
+        assert_eq!(std_fs::read(raced_target).unwrap(), b"external payload");
+        assert!(!directory.path().join("temporary").exists());
+    }
+
+    #[test]
+    fn existing_destination_is_preserved_and_temp_is_cleaned_before_rename() {
+        let directory = tempdir().unwrap();
+        let parent = open_directory(directory.path()).unwrap();
+        write_temp(&parent, "temporary", b"our payload");
+        std_fs::write(directory.path().join("target.md"), b"existing payload").unwrap();
+
+        let error = commit_temp_with_noreplace_attempt(
+            &parent,
+            "temporary",
+            "target.md",
+            DestinationPolicy::MustNotExist,
+            DurabilityPolicy::None,
+            || panic!("exclusive rename must not run after validation fails"),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, StorageError::DestinationExists));
+        assert_eq!(
+            std_fs::read(directory.path().join("target.md")).unwrap(),
+            b"existing payload"
+        );
+        assert!(!directory.path().join("temporary").exists());
+    }
+
+    #[test]
+    fn unrelated_rename_failure_does_not_enter_link_fallback() {
+        let directory = tempdir().unwrap();
+        let parent = open_directory(directory.path()).unwrap();
+        write_temp(&parent, "temporary", b"our payload");
+
+        let error = commit_temp_with_noreplace_attempt(
+            &parent,
+            "temporary",
+            "target.md",
+            DestinationPolicy::MustNotExist,
+            DurabilityPolicy::None,
+            || Err(Errno::ACCESS),
+        )
+        .unwrap_err();
+
+        match error {
+            StorageError::Io { operation, kind } => {
+                assert_eq!(operation, "atomically rename file");
+                assert_eq!(kind, ErrorKind::PermissionDenied);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(!directory.path().join("target.md").exists());
+        assert!(!directory.path().join("temporary").exists());
+    }
+
+    #[test]
+    fn capability_errors_are_narrow_and_hard_link_denial_is_explicit() {
+        assert!(rename_noreplace_unsupported(Errno::INVAL));
+        assert!(rename_noreplace_unsupported(Errno::NOSYS));
+        assert!(rename_noreplace_unsupported(Errno::OPNOTSUPP));
+        assert!(rename_noreplace_unsupported(Errno::NOTSUP));
+        assert!(!rename_noreplace_unsupported(Errno::ACCESS));
+        assert!(matches!(
+            map_atomic_link_error(Errno::OPNOTSUPP),
+            StorageError::AtomicCreateUnsupported
+        ));
+        assert!(matches!(
+            map_atomic_link_error(Errno::PERM),
+            StorageError::AtomicCreateUnsupported
+        ));
+    }
 }

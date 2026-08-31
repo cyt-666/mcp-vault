@@ -14,15 +14,33 @@ and, for container checks, the image digest.
       fixed target `2026-07-28`; only reviewed, narrow expected failures remain.
 - [ ] MCP project-specific tests prove Vault binding, Origin/header validation,
       deterministic tools, structured output, and stateless requests.
+- [ ] OAuth project-specific tests prove RFC 9728 metadata, same-origin
+      `resource_metadata` challenges, RFC 8414 metadata, DCR, exact redirects,
+      authorization code + PKCE `S256`, RFC 8707 resource propagation, RFC
+      9207 `iss`, single use/expiry, access-token MCP use, refresh rotation and
+      replay-family revocation, token exchange with absent/application/null
+      Origin values, Chromium-compatible native authorization form submission,
+      Vault/scope isolation, local-user rotation, and optional external RS256
+      validation; a named ChatGPT deployment completes login and one bounded
+      read tool call.
 - [ ] WebDAV Litmus runs against a real HTTP deployment; its raw output is
       retained separately from sanitized release evidence.
 - [ ] The exact supported Hēsperus Sync Engine and/or Remotely Save versions
       pass the manual matrix in `docs/compatibility-matrix.md`.
 - [ ] Public HTTP E2E proves MCP discovery/search/read/mutation, WebDAV
       preconditions, provider degradation, and Admin unreachability through
-      the reference public proxy.
+      the reference public proxy; the same proxy exposes only the intended
+      OAuth protected-resource/authorization-server metadata and `/oauth/`
+      paths without exposing any Admin route. Its WebDAV location preserves
+      `Authorization`, asserts forwarded HTTPS, and the plaintext data listener
+      is unreachable from outside the proxy network.
 - [ ] A prior prerelease database fixture upgrades through all migrations and
       passes integrity/foreign-key checks.
+- [ ] The target persistent Vault mount passes new-file atomic commit,
+      concurrent same-name no-clobber, exact-revision replacement, and restart
+      reconciliation. A mount without `RENAME_NOREPLACE` must pass the safe
+      regular-file link fallback; lack of both primitives is a documented hard
+      failure, not an overwrite-capable downgrade.
 - [ ] A clean temporary deployment restores a verified backup, authenticates
       with restored/controlled credentials, reads/writes through DAV and MCP,
       and rebuilds derived projections.

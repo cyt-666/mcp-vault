@@ -226,7 +226,58 @@ The token is shown once. Store a keyed HMAC digest or equivalent lookup-safe
 keyed digest, not plaintext. A master-key version allows retained old keys to
 validate existing tokens during rotation.
 
-### 7.2 OAuth issuers and subject grants
+### 7.2 Built-in OAuth authorization state
+
+Migration `0012_builtin_oauth_authorization_server.sql` adds six operational
+tables:
+
+```text
+oauth_local_users
+    id, vault_id (unique), username, password_hash, scopes_json,
+    enabled, password_changed_at, created_at, updated_at
+
+oauth_clients
+    id, client_name, redirect_uris_json, grant_types_json,
+    response_types_json, token_endpoint_auth_method, timestamps/revocation
+
+oauth_authorization_requests
+    id, request_digest, digest_key_version, client_id, vault_id, resource,
+    redirect_uri, scopes_json, state, code_challenge, expiry/consumption
+
+oauth_authorization_codes
+    id, code_digest, digest_key_version, client_id, user_id, vault_id,
+    resource, redirect_uri, scopes_json, code_challenge, expiry/consumption
+
+oauth_access_tokens
+    id, family_id, token_prefix, token_digest, digest_key_version,
+    client_id, user_id, vault_id, resource, scopes_json,
+    creation/expiry/last-use/revocation
+
+oauth_refresh_tokens
+    id, family_id, token_prefix, token_digest, digest_key_version,
+    client_id, user_id, vault_id, resource, scopes_json,
+    creation/expiry/rotation/revocation
+```
+
+`password_hash` is an Argon2id PHC string. Request, code, access-token, and
+refresh-token plaintext never enters SQLite; only 32-byte installation-keyed
+digests and safe access/refresh lookup prefixes are stored. Every grant-bearing
+row contains a Vault predicate and exact resource. Client rows are global
+public registrations because DCR occurs before resource authorization, but
+they cannot grant a Vault by themselves.
+
+Authorization completion atomically records the first successful completion
+time and inserts one code. A correctly authenticated retry of the same
+still-valid request inserts another distinct code; password rotation/disable
+deletes all outstanding request rows. Code exchange atomically consumes that
+code and inserts one access/refresh
+family. Refresh atomically rotates the presented row and inserts the next pair;
+replay revokes both access and refresh rows in the family. Replacing/disabling
+the one local user for a Vault consumes/revokes every outstanding local row in
+one transaction. Expired/consumed rows are removed by bounded opportunistic
+cleanup after a retention window.
+
+### 7.3 Optional external OAuth issuers and subject grants
 
 ```sql
 CREATE TABLE oauth_issuers (
@@ -265,7 +316,13 @@ key fields and is never returned in an Admin response or default log. Migration
 contain plaintext symmetric key material; the operator must re-save a public
 RSA set through Admin.
 
-### 7.3 Installation-key identity
+`resource` is the exact canonical MCP endpoint identifier. A validated access
+token may carry that resource indicator in `aud` (the normal RFC 8707 shape) or
+in an explicit `resource` claim. The separately configured `audience` check
+still applies, so setting audience and resource to the same MCP endpoint is the
+recommended interoperable default.
+
+### 7.4 Installation-key identity
 
 ```sql
 CREATE TABLE installation_key_checks (

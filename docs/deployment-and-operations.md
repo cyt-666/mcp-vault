@@ -62,8 +62,6 @@ services:
       MCP_VAULT_ADMIN_ORIGINS: https://admin.example.com
       MCP_VAULT_BACKUP_DIR: /data/backups
       MCP_VAULT_METRICS_ENABLED: "false"
-      # Exact reverse-proxy socket peers, not a broad CIDR.
-      MCP_VAULT_TRUSTED_PROXY_IPS: 172.20.0.10
     read_only: true
     tmpfs:
       - /tmp
@@ -121,12 +119,60 @@ Proxy requirements:
 - allow request-scoped SSE streaming;
 - disable buffering for MCP streams and large DAV uploads/downloads;
 - preserve conditional headers;
+- proxy `/.well-known/oauth-protected-resource`, the exact
+  `/.well-known/oauth-authorization-server` path, and `/oauth/` to the data
+  listener without requiring a bearer token; do not proxy unrelated well-known
+  or Admin paths;
+- bypass caching for those OAuth routes at every reverse-proxy and CDN layer;
+  application no-store headers are mandatory but cannot override an operator
+  rule that force-caches dynamic authorization pages;
 - set appropriate body/time limits;
-- forward original scheme/host only from a trusted proxy;
-- configure `MCP_VAULT_TRUSTED_PROXY_IPS` with the exact proxy socket IPs so
-  WebDAV can accept `X-Forwarded-Proto: https` without trusting arbitrary
-  client headers;
+- preserve WebDAV `Authorization` and set `X-Forwarded-Proto: https` in the
+  effective `/dav/` location;
+- restrict the plaintext data listener by container publication and firewall
+  rules so only the intended proxy can reach it. MCP Vault does not authenticate
+  the source of the forwarded scheme;
 - never route `/api`, `/setup`, or Admin assets from port 8081.
+
+### ChatGPT plugin OAuth checklist
+
+MCP Vault's built-in authorization server is the default and requires no
+external identity service. Before adding it as a ChatGPT plugin:
+
+1. Serve the data origin with publicly trusted HTTPS and set
+   `MCP_VAULT_DATA_PUBLIC_ORIGIN` to that exact origin.
+2. Proxy `/mcp/`, `/oauth/`, `/.well-known/oauth-protected-resource`, and the
+   exact `/.well-known/oauth-authorization-server` path to the data listener.
+   These OAuth routes are intentionally public; never proxy `/api/` or Admin
+   assets from the control listener. Configure every CDN/edge rule to bypass
+   cache for them. After upgrading from an image that served a login page from
+   `/oauth/authorize`, purge that legacy URL before reconnecting ChatGPT.
+3. Open the LAN-only Admin MCP page. Under “ChatGPT OAuth”, create a Vault
+   OAuth username/password and choose the maximum scopes. This credential is
+   independent from the Admin password. Saving again rotates it and revokes all
+   prior local codes/tokens.
+4. Fetch both copied metadata URLs without credentials. The protected-resource
+   `resource` must exactly equal the copied MCP endpoint, and its first
+   `authorization_servers` entry must be the configured public origin. The
+   authorization metadata must advertise DCR, `code`, PKCE `S256`, token auth
+   `none`, and the same issuer.
+5. In ChatGPT, add the copied MCP endpoint. Do not manually invent a callback,
+   client ID, secret, or token: ChatGPT performs DCR and opens MCP Vault's own
+   login page.
+6. Sign in with the Vault OAuth credential, review the requested scopes, and
+   verify one bounded read tool call. Use Admin to rotate/disable the OAuth
+   login if the connection must be revoked.
+
+`scripts/interop/http-smoke.sh` proves the complete real-HTTP DCR, login,
+authorization-code + PKCE, access-token MCP, refresh rotation, and replay
+revocation path. A successful live ChatGPT result still depends on the
+operator's DNS/TLS and ChatGPT account/UI state and must be recorded separately.
+
+Operators that already run an IdP may instead expand “外部 OAuth/OIDC 兼容”,
+save normalized RS256 public JWKS, and create an exact Subject-to-Vault grant.
+That external issuer must support authorization code + PKCE `S256`, ChatGPT
+CIMD/DCR or pre-registration, and MCP resource propagation. Never paste a
+client secret, private key, access token, or refresh token into MCP Vault.
 
 The WebDAV mount is versioned and Vault-scoped:
 
@@ -166,6 +212,9 @@ Preferred:
 - direct TLS support may be added but is not required when the proxy path is documented and tested.
 
 WebDAV Basic Authentication must not cross plaintext public transport.
+Because MCP Vault accepts the proxy's `X-Forwarded-Proto: https` assertion
+without an application-level peer allow-list, port 8080 must not be reachable
+from untrusted clients.
 
 Local HTTP to a loopback/private local-model provider is permitted only under explicit provider policy.
 
@@ -201,6 +250,28 @@ local model download disables only that provider path; it must not fail core
 readiness or prevent WebDAV, canonical writes, or lexical search.
 
 Backups may include `/data/models` to avoid downloads but it is not canonical.
+
+The filesystem containing each Vault content root must support atomic regular
+file installation. MCP Vault prefers Linux `RENAME_NOREPLACE` for new files.
+When that flag is unavailable, it uses a constrained same-directory hard-link
+commit for already-synced temporary regular files. Therefore a deployment
+whose mount rejects both exclusive rename and hard-link creation cannot safely
+host a writable Vault; MCP Vault reports
+`filesystem does not support safe atomic no-replace file creation` instead of
+falling back to an overwrite race. Directory moves still require native atomic
+rename support.
+
+For an appliance or NAS deployment, check the actual Vault root rather than
+only `/data` because a nested bind/mount can use a different filesystem:
+
+```bash
+docker exec mcp-vault stat -f -c '%T' /data/vaults/<vault>/content
+findmnt -T /host/path/to/vault -o TARGET,SOURCE,FSTYPE,OPTIONS
+```
+
+The release acceptance smoke must create a new file, reject a concurrent
+same-name create without changing its bytes, replace an existing file under an
+exact revision, and restart/reconcile on the production mount type.
 
 The default master key is generated automatically under
 `MCP_VAULT_SECRETS_DIR`. An explicit `MCP_VAULT_MASTER_KEY_FILE` may instead

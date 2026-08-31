@@ -499,6 +499,12 @@ pub fn stateful_router(state: AdminApiState) -> Router {
         )
         .route("/mcp/tokens", get(list_mcp_tokens).post(issue_mcp_token))
         .route("/mcp/tokens/{id}", delete(revoke_mcp_token))
+        .route(
+            "/mcp/oauth/local",
+            get(get_local_oauth)
+                .put(put_local_oauth)
+                .delete(disable_local_oauth),
+        )
         .route("/mcp/oauth", get(get_oauth).put(put_oauth))
         .route(
             "/mcp/oauth/grants",
@@ -2266,6 +2272,153 @@ async fn revoke_mcp_token(
 }
 
 #[derive(Debug, Deserialize)]
+struct LocalOAuthRequest {
+    username: String,
+    password: String,
+    scopes: Vec<String>,
+}
+
+fn local_oauth_json(user: &mcp_vault_auth::LocalOAuthUser) -> Value {
+    json!({
+        "id": user.id.to_string(),
+        "vault_id": user.vault_id.to_string(),
+        "username": user.username,
+        "scopes": user.scopes.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "enabled": user.enabled,
+        "password_changed_at": user.password_changed_at,
+        "created_at": user.created_at,
+        "updated_at": user.updated_at,
+    })
+}
+
+async fn get_local_oauth(
+    State(state): State<AdminApiState>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    let vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    let context = match vault.context() {
+        Ok(context) => context,
+        Err(_) => {
+            return state_error(
+                StateError::InvalidInput("Vault context is invalid"),
+                request_id.0,
+            );
+        }
+    };
+    match state.auth.local_oauth_user(&context).await {
+        Ok(user) => api_ok(
+            StatusCode::OK,
+            json!({
+                "vault_id": context.id().to_string(),
+                "configured": user.is_some(),
+                "user": user.as_ref().map(local_oauth_json),
+            }),
+            request_id.0,
+        ),
+        Err(error) => auth_error(error, request_id.0),
+    }
+}
+
+async fn put_local_oauth(
+    State(state): State<AdminApiState>,
+    headers: HeaderMap,
+    Extension(principal): Extension<AdminPrincipal>,
+    Extension(request_id): Extension<RequestId>,
+    Json(input): Json<LocalOAuthRequest>,
+) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::PUT) {
+        return auth_error(error, request_id.0);
+    }
+    let scopes = match mcp_scopes(&input.scopes) {
+        Ok(scopes) => scopes,
+        Err(response) => return response,
+    };
+    let vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    let context = match vault.context() {
+        Ok(context) => context,
+        Err(_) => {
+            return state_error(
+                StateError::InvalidInput("Vault context is invalid"),
+                request_id.0,
+            );
+        }
+    };
+    match state
+        .auth
+        .configure_local_oauth_user(
+            &context,
+            &input.username,
+            &SecretString::new(input.password),
+            scopes,
+        )
+        .await
+    {
+        Ok(user) => {
+            state
+                .append_admin_audit(
+                    Some(&context),
+                    &request_id.0,
+                    &principal.actor,
+                    "admin.local_oauth_user.rotated",
+                    Some("local_oauth_user"),
+                    Some(&user.id.to_string()),
+                    json!({"enabled": user.enabled, "all_existing_local_tokens_revoked": true}),
+                )
+                .await;
+            api_ok(StatusCode::OK, local_oauth_json(&user), request_id.0)
+        }
+        Err(error) => auth_error(error, request_id.0),
+    }
+}
+
+async fn disable_local_oauth(
+    State(state): State<AdminApiState>,
+    headers: HeaderMap,
+    Extension(principal): Extension<AdminPrincipal>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::DELETE) {
+        return auth_error(error, request_id.0);
+    }
+    let vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    let context = match vault.context() {
+        Ok(context) => context,
+        Err(_) => {
+            return state_error(
+                StateError::InvalidInput("Vault context is invalid"),
+                request_id.0,
+            );
+        }
+    };
+    match state.auth.disable_local_oauth_user(&context).await {
+        Ok(disabled) => {
+            state
+                .append_admin_audit(
+                    Some(&context),
+                    &request_id.0,
+                    &principal.actor,
+                    "admin.local_oauth_user.disabled",
+                    Some("local_oauth_user"),
+                    None,
+                    json!({"disabled": disabled, "all_existing_local_tokens_revoked": true}),
+                )
+                .await;
+            api_ok(StatusCode::OK, json!({"disabled": disabled}), request_id.0)
+        }
+        Err(error) => auth_error(error, request_id.0),
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct OAuthRequest {
     name: String,
     issuer_url: String,
@@ -2538,9 +2691,16 @@ async fn connection_info(
             "vault_id": vault.id.to_string(),
             "vault_slug": vault.slug.to_string(),
             "mcp_endpoint": format!("{origin}/mcp/v1/vaults/{}", vault.slug),
+            "oauth_protected_resource_metadata_url": format!(
+                "{origin}/.well-known/oauth-protected-resource/mcp/v1/vaults/{}",
+                vault.slug
+            ),
+            "oauth_authorization_server_metadata_url": format!(
+                "{origin}/.well-known/oauth-authorization-server"
+            ),
             "webdav_endpoint": format!("{origin}/dav/v1/vaults/{}/", vault.slug),
             "supported_mcp_revisions": ["2026-07-28"],
-            "authorization_modes": ["pat", "oauth_resource_server"],
+            "authorization_modes": ["oauth_builtin", "pat", "oauth_external"],
             "instructions": "Use recall proactively for durable context; verify exact source material with search_notes/read_note.",
         }),
         request_id.0,
@@ -6258,6 +6418,95 @@ mod tests {
             connection["data"]["mcp_endpoint"],
             "http://localhost:8080/mcp/v1/vaults/default"
         );
+        assert_eq!(
+            connection["data"]["oauth_protected_resource_metadata_url"],
+            "http://localhost:8080/.well-known/oauth-protected-resource/mcp/v1/vaults/default"
+        );
+        assert_eq!(
+            connection["data"]["oauth_authorization_server_metadata_url"],
+            "http://localhost:8080/.well-known/oauth-authorization-server"
+        );
+        assert_eq!(
+            connection["data"]["authorization_modes"],
+            json!(["oauth_builtin", "pat", "oauth_external"])
+        );
+
+        let (status, local_before) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    "/mcp/oauth/local",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(local_before["data"]["configured"], false);
+
+        let oauth_password = "separate vault oauth password";
+        let (status, local_created) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "PUT",
+                    "/mcp/oauth/local",
+                    json!({
+                        "username": "chatgpt",
+                        "password": oauth_password,
+                        "scopes": ["vault:discover", "vault:read", "memory:read"]
+                    }),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(local_created["data"]["username"], "chatgpt");
+        assert_eq!(local_created["data"]["enabled"], true);
+        assert!(!local_created.to_string().contains(oauth_password));
+
+        let (status, local_configured) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    "/mcp/oauth/local",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(local_configured["data"]["configured"], true);
+        assert_eq!(local_configured["data"]["user"]["username"], "chatgpt");
+        assert!(!local_configured.to_string().contains(oauth_password));
+
+        let (status, disabled) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "DELETE",
+                    "/mcp/oauth/local",
+                    json!({}),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(disabled["data"]["disabled"], true);
 
         let (status, webdav_body) = json_response(
             router

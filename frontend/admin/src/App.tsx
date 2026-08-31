@@ -39,11 +39,12 @@ async function loadPage(page: Page): Promise<JsonObject> {
   }
 
   if (page === 'mcp') {
-    const [connection, tokenData] = await Promise.all([
+    const [connection, tokenData, localOAuth] = await Promise.all([
       adminApi.request<JsonObject>('/mcp/connection-info'),
       adminApi.request<{ tokens: unknown[] }>('/mcp/tokens?limit=50'),
+      adminApi.request<JsonObject>('/mcp/oauth/local'),
     ]);
-    return { ...connection, tokens: tokenData.tokens };
+    return { ...connection, tokens: tokenData.tokens, local_oauth: localOAuth };
   }
 
   if (page === 'providers') {

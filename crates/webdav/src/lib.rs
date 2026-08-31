@@ -6,11 +6,9 @@
 //! Core.
 
 use std::{
-    collections::BTreeSet,
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     path::PathBuf,
     str::FromStr,
-    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -93,7 +91,6 @@ pub struct WebDavService {
     history_root: PathBuf,
     storage_options: StorageOptions,
     core_runtime: VaultCoreRuntime,
-    trusted_proxy_ips: Arc<BTreeSet<IpAddr>>,
     maintenance: MaintenanceGate,
     handler: DavHandler<DavCredentials>,
 }
@@ -106,7 +103,6 @@ impl WebDavService {
         history_root: PathBuf,
         storage_options: StorageOptions,
         core_runtime: VaultCoreRuntime,
-        trusted_proxy_ips: BTreeSet<IpAddr>,
     ) -> Self {
         let maintenance = core_runtime.maintenance();
         let handler = DavHandler::builder()
@@ -120,7 +116,6 @@ impl WebDavService {
             history_root,
             storage_options,
             core_runtime,
-            trusted_proxy_ips: Arc::new(trusted_proxy_ips),
             maintenance,
             handler,
         }
@@ -156,14 +151,11 @@ impl WebDavService {
             Err(_) => return public_error(StatusCode::UNAUTHORIZED, true),
         };
         let peer_is_loopback = peer.is_some_and(|value| value.0.0.ip().is_loopback());
-        let forwarded_tls = peer.is_some_and(|value| {
-            self.trusted_proxy_ips.contains(&value.0.0.ip())
-                && request
-                    .headers()
-                    .get("x-forwarded-proto")
-                    .and_then(|value| value.to_str().ok())
-                    .is_some_and(|value| value.eq_ignore_ascii_case("https"))
-        });
+        let forwarded_tls = request
+            .headers()
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("https"));
         if require_secure_basic_auth(forwarded_tls, peer_is_loopback).is_err() {
             return public_error(StatusCode::UNAUTHORIZED, true);
         }
@@ -801,7 +793,9 @@ fn map_storage_error(error: StorageError) -> FsError {
             std::io::ErrorKind::PermissionDenied => FsError::Forbidden,
             _ => FsError::GeneralFailure,
         },
-        StorageError::RootNotDirectory | StorageError::TaskCancelled => FsError::GeneralFailure,
+        StorageError::AtomicCreateUnsupported
+        | StorageError::RootNotDirectory
+        | StorageError::TaskCancelled => FsError::GeneralFailure,
     }
 }
 
@@ -889,7 +883,7 @@ fn public_error(status: StatusCode, challenge: bool) -> Response<AxumBody> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, net::SocketAddr, path::PathBuf, sync::Arc};
+    use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
     use super::{WebDavService, router, unconfigured_router};
     use axum::{
@@ -959,7 +953,6 @@ mod tests {
                 ..StorageOptions::default()
             },
             Default::default(),
-            BTreeSet::new(),
         );
         let credentials = STANDARD.encode("desktop:dav-password-123");
         (directory, state, service, credentials, issued.credential_id)
@@ -1626,33 +1619,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn basic_auth_requires_loopback_or_an_exact_trusted_https_proxy() {
-        let (directory, state, service, credentials, _) = setup().await;
+    async fn forwarded_https_allows_non_loopback_basic_auth() {
+        let (_, _, service, credentials, _) = setup().await;
         let peer = SocketAddr::from(([192, 0, 2, 44], 49_182));
         let public_app = client_router_with_peer(service, peer);
-        let mut forwarded = request("GET", "/work/no-auth.md", &credentials, Body::empty());
-        forwarded
-            .headers_mut()
-            .insert("x-forwarded-proto", "https".parse().unwrap());
-        let response = public_app.oneshot(forwarded).await.unwrap();
+        let response = public_app
+            .clone()
+            .oneshot(request(
+                "GET",
+                "/work/no-forwarded-scheme.md",
+                &credentials,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-        let trusted_service = WebDavService::new(
-            state.clone(),
-            AuthService::new(
-                state.auth(),
-                MasterKeyRing::from_bytes(1, &[7_u8; 32]).unwrap(),
-            ),
-            directory.path().join("history"),
-            StorageOptions {
-                minimum_free_bytes: 0,
-                durability: mcp_vault_storage_fs::DurabilityPolicy::None,
-                ..StorageOptions::default()
-            },
-            Default::default(),
-            BTreeSet::from([peer.ip()]),
+        let mut insecure_forwarded = request(
+            "GET",
+            "/work/insecure-forwarded-scheme.md",
+            &credentials,
+            Body::empty(),
         );
-        let trusted_app = client_router_with_peer(trusted_service, peer);
+        insecure_forwarded
+            .headers_mut()
+            .insert("x-forwarded-proto", "http".parse().unwrap());
+        let response = public_app
+            .clone()
+            .oneshot(insecure_forwarded)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
         let mut put = request(
             "PUT",
             "/work/proxy.md",
@@ -1661,7 +1659,7 @@ mod tests {
         );
         put.headers_mut()
             .insert("x-forwarded-proto", "https".parse().unwrap());
-        let response = trusted_app.oneshot(put).await.unwrap();
+        let response = public_app.oneshot(put).await.unwrap();
         assert!(matches!(
             response.status(),
             StatusCode::CREATED | StatusCode::NO_CONTENT

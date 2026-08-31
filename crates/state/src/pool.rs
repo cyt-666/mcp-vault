@@ -510,6 +510,12 @@ mod tests {
             "mcp_tokens",
             "oauth_issuers",
             "oauth_subject_grants",
+            "oauth_local_users",
+            "oauth_clients",
+            "oauth_authorization_requests",
+            "oauth_authorization_codes",
+            "oauth_access_tokens",
+            "oauth_refresh_tokens",
             "file_entries",
             "file_revisions",
             "operation_journal",
@@ -550,7 +556,7 @@ mod tests {
         let report = store.integrity_check().await.unwrap();
         assert!(report.integrity_ok);
         assert_eq!(report.foreign_key_violations, 0);
-        assert_eq!(report.migration_version, 11);
+        assert_eq!(report.migration_version, 12);
         assert!(store.foreign_keys_enabled().await.unwrap());
     }
 
@@ -672,7 +678,7 @@ mod tests {
         }
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 11);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 12);
     }
 
     #[tokio::test]
@@ -714,7 +720,7 @@ mod tests {
         assert!(jwks.is_none());
         assert_eq!(enabled, 0);
         assert!(store.has_table("installation_key_checks").await.unwrap());
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 11);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 12);
     }
 
     #[tokio::test]
@@ -765,7 +771,7 @@ mod tests {
         assert_eq!(store.integrity_check().await.unwrap().migration_version, 10);
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 11);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 12);
     }
 
     #[tokio::test]
@@ -921,7 +927,69 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(pipeline_column, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 11);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 12);
+    }
+
+    #[tokio::test]
+    async fn migration_0012_adds_builtin_oauth_without_changing_existing_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = StateStore::connect(&database_url(directory.path()))
+            .await
+            .unwrap();
+        let mut pre_builtin_oauth = sqlx::migrate::Migrator::DEFAULT;
+        pre_builtin_oauth.migrations = std::borrow::Cow::Owned(
+            crate::migrations::MIGRATOR
+                .iter()
+                .filter(|migration| migration.version <= 11)
+                .cloned()
+                .collect(),
+        );
+        pre_builtin_oauth.run(&store.pool).await.unwrap();
+        let vault = VaultId::new();
+        insert_vault(&store, vault, "oauth-cutover").await;
+        sqlx::query(
+            "INSERT INTO mcp_tokens
+             (id, vault_id, name, token_prefix, token_digest,
+              digest_key_version, scopes_json, created_at)
+             VALUES (?, ?, 'existing PAT', 'mcpv_pat_existing', ?, 1,
+                     '[\"vault:read\"]', 1)",
+        )
+        .bind(VaultId::new().to_string())
+        .bind(vault.to_string())
+        .bind(vec![7_u8; 32])
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        for table in [
+            "oauth_local_users",
+            "oauth_clients",
+            "oauth_authorization_requests",
+            "oauth_authorization_codes",
+            "oauth_access_tokens",
+            "oauth_refresh_tokens",
+        ] {
+            assert!(!store.has_table(table).await.unwrap(), "{table}");
+        }
+
+        store.migrate().await.unwrap();
+
+        for table in [
+            "oauth_local_users",
+            "oauth_clients",
+            "oauth_authorization_requests",
+            "oauth_authorization_codes",
+            "oauth_access_tokens",
+            "oauth_refresh_tokens",
+        ] {
+            assert!(store.has_table(table).await.unwrap(), "{table}");
+        }
+        let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mcp_tokens")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(retained, 1);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 12);
     }
 
     #[tokio::test]

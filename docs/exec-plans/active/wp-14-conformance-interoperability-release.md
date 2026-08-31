@@ -701,7 +701,14 @@ facts.
 - A test fixture may inject only a generated test credential at the loopback boundary; it must not add an unauthenticated production mode or let protocol clients choose `vault_id`.
 - External GUI/plugin compatibility is represented as a versioned matrix with reproducible manual steps and evidence links; unavailable clients are marked unverified rather than inferred from HTTP tests.
 - Release signing is verification-first in this repository. Private signing material belongs to CI/release infrastructure, never source control or local fixtures.
-- The Nginx deployment fixture uses a fixed private Compose subnet so `MCP_VAULT_TRUSTED_PROXY_IPS` can name the exact proxy peer. Public port 443 proxies only `/mcp/`, `/dav/`, and public health routes. Admin is a separate HTTPS listener bound to one configured LAN address, restricted by a Nginx source CIDR, and still authenticated/CSRF-protected by the control-plane application.
+- The Nginx deployment fixture uses a private Compose subnet and exposes the
+  plaintext data listener only to its intended proxy. Public port 443 proxies
+  only `/mcp/`, `/dav/`, public OAuth routes, and public health routes. Its
+  effective `/dav/` location preserves `Authorization` and asserts
+  `X-Forwarded-Proto: https`; MCP Vault does not maintain a proxy-peer
+  allow-list. Admin is a separate HTTPS listener bound to one configured LAN
+  address, restricted by a Nginx source CIDR, and still
+  authenticated/CSRF-protected by the control-plane application.
 - Deployment archives use the image tag `mcp-vault:0.1.0` and include the architecture in each filename. A Docker `save` archive is preferred over an OCI-only archive so ordinary `docker load` works on the target host.
 - SQLite's one-writer constraint is handled inside the state boundary: WebDAV
   credential touches and file-journal/metadata writes share one fair admission

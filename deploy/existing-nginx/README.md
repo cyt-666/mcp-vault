@@ -12,11 +12,9 @@ Admin:      https://mcp-vault.cyt.cool:8444
 LAN Admin:  http://<NAS-IP>:8081
 ```
 
-Before deployment, edit `compose.yaml` and replace both examples:
+Before deployment, edit `compose.yaml` and replace these examples:
 
 - `/path/on/nas/mcp-vault` with the absolute persistent directory on the NAS;
-- `MCP_VAULT_TRUSTED_PROXY_IPS` with the exact source IP that MCP Vault will
-  see for the existing Nginx.
 - `192.168.1.20` in `MCP_VAULT_ADMIN_ORIGINS` with the NAS address used by
   local browsers.
 
@@ -34,15 +32,25 @@ Data plane upstream: http://<NAS-IP>:8080
 Admin upstream:      http://<NAS-IP>:8081
 ```
 
-The public virtual host must proxy only MCP, WebDAV, and public health routes
-to the data listener. The `8444` Admin virtual host proxies to the Admin
-listener and remains restricted to the intended LAN/VPN sources. Preserve the
-original `Host`, set `X-Forwarded-Proto: https`, and set the external forwarded
-port to `443` for data or `8444` for Admin.
+The public virtual host must proxy only MCP, WebDAV, public health,
+`/.well-known/oauth-protected-resource`, the exact
+`/.well-known/oauth-authorization-server` path, and `/oauth/` to the data
+listener. OAuth discovery, registration, login, and token routes are public by
+design; do not route unrelated well-known paths or any Admin route through this
+rule. The `8444` Admin virtual
+host proxies to the Admin listener and remains restricted to the intended
+LAN/VPN sources. Preserve the original `Host` and WebDAV `Authorization`, set
+`X-Forwarded-Proto: https`, and set the external forwarded port to `443` for
+data or `8444` for Admin.
+Disable caching for every OAuth route at both Nginx and any upstream CDN. When
+upgrading from an image that served `/oauth/authorize` directly, purge that
+legacy URL so a cached transaction page cannot survive the deployment.
 
-Restrict both published backend ports at the Docker host firewall so only the
-existing Nginx can reach them. `MCP_VAULT_TRUSTED_PROXY_IPS` must be the exact
-socket-peer IP observed by MCP Vault, not a CIDR or the browser's address.
+Restrict published backend port 8080 at the Docker host firewall so only the
+existing Nginx can reach it. MCP Vault trusts the forwarded HTTPS scheme
+without authenticating the proxy peer, so direct untrusted access to this
+plaintext listener would make that assertion forgeable. Keep port 8081 limited
+to the intended LAN/VPN Admin clients.
 
 The direct `http://<NAS-IP>:8081` Admin URL is an explicit trusted-LAN mode.
 The login page warns that credentials and sessions are not encrypted on that

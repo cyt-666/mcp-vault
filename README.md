@@ -60,6 +60,22 @@ Localhost / LAN / VPN only
 
 The data plane must be protected by TLS when it leaves the host. The admin listener is separate and is not routed publicly.
 
+## ChatGPT plugin authentication
+
+MCP Vault includes its own OAuth 2.1 authorization server. For ChatGPT, set the
+public HTTPS origin, open the Admin MCP page, create a separate Vault OAuth
+login, and add the displayed MCP endpoint in ChatGPT. MCP Vault provides RFC
+9728/8414 discovery, Dynamic Client Registration, authorization code + PKCE
+`S256`, resource indicators, opaque access tokens, rotating refresh tokens,
+and Vault-bound scopes; no external identity service is required.
+
+The public reverse proxy must expose `/mcp/`, `/oauth/`,
+`/.well-known/oauth-protected-resource`, and the exact
+`/.well-known/oauth-authorization-server` route. It must not expose the Admin
+plane. Existing external OAuth/OIDC issuers remain an optional advanced mode.
+See [`docs/deployment-and-operations.md`](docs/deployment-and-operations.md) for
+the exact setup and verification checklist.
+
 ## Technology direction
 
 - Rust stable, Tokio, Axum

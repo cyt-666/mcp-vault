@@ -93,6 +93,16 @@ typed_uuid_id!(CredentialId, "credential ID");
 typed_uuid_id!(SecretId, "secret ID");
 typed_uuid_id!(OAuthIssuerId, "OAuth issuer ID");
 typed_uuid_id!(OAuthGrantId, "OAuth grant ID");
+typed_uuid_id!(OAuthLocalUserId, "local OAuth user ID");
+typed_uuid_id!(OAuthClientId, "OAuth client ID");
+typed_uuid_id!(
+    OAuthAuthorizationRequestId,
+    "OAuth authorization request ID"
+);
+typed_uuid_id!(OAuthAuthorizationCodeId, "OAuth authorization code ID");
+typed_uuid_id!(OAuthAccessTokenId, "OAuth access token ID");
+typed_uuid_id!(OAuthRefreshTokenId, "OAuth refresh token ID");
+typed_uuid_id!(OAuthTokenFamilyId, "OAuth token family ID");
 typed_uuid_id!(ScanId, "scan ID");
 typed_uuid_id!(JobId, "job ID");
 typed_uuid_id!(OperationId, "operation ID");

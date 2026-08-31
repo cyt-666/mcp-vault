@@ -9,7 +9,7 @@ Unpack the deployment archive beside the image archive, then enter its
 directory:
 
 ```bash
-tar -xzf mcp-vault-nginx-https-0.1.0.tar.gz
+tar -xzf mcp-vault-nginx-https-0.1.12.tar.gz
 cd nginx-https
 ```
 
@@ -18,8 +18,8 @@ cd nginx-https
 Load the image archive from the parent directory:
 
 ```bash
-docker load --input ../mcp-vault-0.1.0-linux-amd64.tar
-docker image inspect mcp-vault:0.1.0 --format '{{.Os}}/{{.Architecture}} {{.Id}}'
+docker load --input ../mcp-vault-0.1.12-linux-amd64.tar
+docker image inspect mcp-vault:0.1.12 --format '{{.Os}}/{{.Architecture}} {{.Id}}'
 ```
 
 The result must report `linux/amd64`.
@@ -95,6 +95,21 @@ curl --fail https://vault.example.com/health/live
 curl --fail https://vault.example.com/health/ready
 ```
 
+When OAuth is configured, also verify the exact metadata URL copied from the
+Admin MCP page. It is public by design and must return JSON without a bearer
+token:
+
+```bash
+curl --fail \
+  https://vault.example.com/.well-known/oauth-protected-resource/mcp/v1/vaults/default
+curl --fail \
+  https://vault.example.com/.well-known/oauth-authorization-server
+```
+
+Create the independent Vault OAuth login in Admin, then add the displayed MCP
+endpoint in ChatGPT. The public Nginx virtual host already forwards the narrow
+`/oauth/` authorization routes; no external identity provider is required.
+
 The public host must return `404` for `/api/v1/system`; its virtual host does
 not proxy Admin paths or Admin frontend assets.
 
@@ -126,6 +141,8 @@ credentials. Their shape is:
 
 ```text
 https://vault.example.com/mcp/v1/vaults/<vault-slug>
+https://vault.example.com/.well-known/oauth-protected-resource/mcp/v1/vaults/<vault-slug>
+https://vault.example.com/.well-known/oauth-authorization-server
 https://vault.example.com/dav/v1/vaults/<vault-slug>/
 ```
 

@@ -195,7 +195,6 @@ MCP_VAULT_DATA_HOSTS
 MCP_VAULT_DATA_ORIGINS
 MCP_VAULT_DATA_PUBLIC_ORIGIN
 MCP_VAULT_ADMIN_ORIGINS
-MCP_VAULT_TRUSTED_PROXY_IPS
 MCP_VAULT_RECONCILIATION_INTERVAL_SECONDS
 MCP_VAULT_BACKUP_DIR
 MCP_VAULT_BACKUP_MAX_ENTRY_BYTES
@@ -212,9 +211,10 @@ RUST_LOG
 authorities accepted by the MCP transport. Values are host names or IP
 authorities, optionally including a port; they must not contain a scheme,
 path, query, fragment, whitespace, or userinfo. It defaults to local
-development authorities and must be set to the public hostname when a
-reverse proxy or LAN hostname is used. This Host policy is independent from
-the `MCP_VAULT_DATA_ORIGINS` browser-Origin policy.
+development authorities in both bare and actual-listener-port forms, such as
+`127.0.0.1` and `127.0.0.1:8080`. It must be set to the public hostname when a
+reverse proxy or LAN hostname is used. This Host policy is independent from the
+`MCP_VAULT_DATA_ORIGINS` browser-Origin policy.
 
 `MCP_VAULT_DATA_PUBLIC_ORIGIN` is the single canonical `http(s)` origin shown
 in generated WebDAV/MCP connection cards. Set it to the external reverse-proxy
@@ -237,12 +237,12 @@ replacement for HTTPS on an untrusted network. For example:
 https://mcp-vault.example:8444,http://192.168.1.20:8081
 ```
 
-`MCP_VAULT_TRUSTED_PROXY_IPS` is a comma-separated list of exact socket-peer
-IP addresses. It is empty by default. WebDAV accepts
-`X-Forwarded-Proto: https` only when the direct peer is in this list; the
-header alone never makes plaintext Basic Authentication secure. Loopback
-clients may use Basic Authentication over local HTTP. This setting does not
-trust forwarded client addresses or grant any Vault permission.
+WebDAV accepts Basic Authentication on a non-loopback request only when the
+effective proxy location supplies `X-Forwarded-Proto: https`. MCP Vault does
+not maintain a proxy-IP allow-list. Restrict the plaintext data listener with
+container publication and firewall rules so only the intended reverse proxy
+can reach it; otherwise a direct client could forge the forwarded scheme.
+Loopback clients may continue to use Basic Authentication over local HTTP.
 
 `MCP_VAULT_SECRETS_DIR` defaults to `<MCP_VAULT_DATA_DIR>/secrets` and owns the
 automatically generated `master-key` file. Ordinary MCP Vault backups exclude
@@ -425,9 +425,32 @@ Allow:
 
 The UI warns when granting delete/history/manage scopes.
 
-### 10.3 OAuth resource server
+### 10.3 Built-in ChatGPT OAuth
 
-Allow configuring:
+The primary MCP page configures one independent Vault OAuth login:
+
+- normalized username;
+- password following the same visible Argon2id password policy as other human
+  credentials;
+- maximum Vault/memory scopes;
+- enabled status and last password-change time.
+
+The page shows the MCP endpoint, RFC 9728 protected-resource metadata URL, and
+RFC 8414 authorization-server metadata URL. The normal ChatGPT instruction is
+to enter only the MCP endpoint; ChatGPT discovers the remaining endpoints,
+registers a public client, and opens MCP Vault's login/consent page. No external
+service, JWKS, Subject grant, client secret, or copied access token is needed.
+
+The UI labels the password as a Vault OAuth credential and explicitly states
+that it is not the Admin password. Every save is a security rotation: it
+replaces the hash/scopes and revokes all existing local authorization requests,
+codes, access tokens, and refresh tokens. Disable performs the same revocation.
+Common read-only/editor/full-management scope presets are shown before granular
+advanced choices.
+
+### 10.4 Optional external OAuth resource server
+
+An advanced disclosure retains external-issuer compatibility and allows:
 
 - issuer URL;
 - protected resource URL/audience;
@@ -438,6 +461,19 @@ Allow configuring:
 - test token validation through a local diagnostic that never logs the token.
 
 Protected-resource metadata preview must be available.
+
+The MCP page shows and copies both the canonical MCP resource URL and its RFC
+9728 metadata URL. The resource field defaults to the MCP endpoint and is not
+derived from browser/request headers. Audience also defaults to that endpoint,
+which matches authorization servers that represent the RFC 8707 resource
+indicator in `aud`; an operator changes it only when the external issuer has a
+documented distinct audience while still emitting the resource indicator.
+
+Operator guidance states that the external authorization server owns user
+login/consent and must provide OAuth/OIDC discovery, authorization code + PKCE
+`S256`, CIMD/DCR or a pre-registered ChatGPT client, and resource propagation.
+The form never asks for an OAuth client secret, access token, refresh token,
+private signing key, or symmetric JWK.
 
 The implemented control-plane surface lists, creates/updates, and revokes
 subject grants for the current Vault. It accepts normalized `RS256` RSA public

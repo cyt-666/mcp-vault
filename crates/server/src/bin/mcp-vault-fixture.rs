@@ -24,7 +24,7 @@ use axum::{
     response::Response,
 };
 use mcp_vault_admin_api::AdminApiConfig;
-use mcp_vault_auth::{AuthService, MasterKeyRing, OriginPolicy, SecretString};
+use mcp_vault_auth::{AuthService, MasterKeyRing, OAuthIssuerInput, OriginPolicy, SecretString};
 use mcp_vault_domain::{MaintenanceGate, Permission, PermissionSet, Revision, Scope, ScopeSet};
 use mcp_vault_server::{
     control_router_with_admin, data_router_with_webdav_and_mcp_and_metrics, health::Readiness,
@@ -38,11 +38,16 @@ use tokio::{net::TcpListener, sync::Notify};
 const VAULT_SLUG: &str = "interop";
 const WEB_DAV_USERNAME: &str = "interop-desktop";
 const WEB_DAV_PASSWORD: &str = "interop-dav-password-123";
+const OAUTH_USERNAME: &str = "interop-chatgpt";
+const OAUTH_PASSWORD: &str = "interop-oauth-password-123";
+const OAUTH_PUBLIC_JWKS: &str = r#"{"keys":[{"kty":"RSA","kid":"interop-public-only","alg":"RS256","use":"sig","n":"rvRF0B3CF0_FypRtFCjW_NpDmCaEzdXOWb5DkmvXuHpQdQtv8LT0LiZdd7hMQfubRGZriEiYqQLQWohLX2Anj55fquNGA_Eh3MjCUAQ31yviH8CL-UxDI68vKqFjR7SIZnoVg0LthD_urj0f9YqF86PgkF_omb-wEGJALYtPj8L0KcCF_S_mA3APYO5ZnI_a_o22LMXFmPqiL-thZ9WJZQkN2XIbMmNHKy-7vTxn-OA0Hauef6NvyCFAZqprJDSz4XJujAckLlI_xjp2d0r5r0kIt8lh1o6nMaUM1i-tRqCL5lZHlh2cEScmSVlfoixIprnb3JADVrHjAm68-TsLjQ","e":"AQAB"}]}"#;
 
 #[derive(Debug, Serialize)]
 struct FixtureManifest {
     schema_version: u32,
     mcp_url: String,
+    oauth_metadata_url: String,
+    oauth_authorization_server_metadata_url: String,
     webdav_url: String,
     health_url: String,
     admin_url: String,
@@ -55,6 +60,9 @@ struct FixtureManifest {
     /// The manifest is created with mode 0600 on Unix and deleted with the
     /// fixture's temporary directory.
     webdav_password: &'static str,
+    /// Dedicated built-in OAuth login for this disposable fixture only.
+    oauth_username: &'static str,
+    oauth_password: &'static str,
 }
 
 #[tokio::main]
@@ -100,6 +108,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         None,
     )
     .await?;
+    auth.configure_local_oauth_user(
+        &context,
+        OAUTH_USERNAME,
+        &SecretString::new(OAUTH_PASSWORD),
+        Scope::ALL.into_iter().collect(),
+    )
+    .await?;
     let maintenance = MaintenanceGate::new();
     let core_runtime = mcp_vault_core::VaultCoreRuntime::new(maintenance.clone());
 
@@ -123,6 +138,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let control_listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let data_bind = data_listener.local_addr()?;
     let admin_bind = control_listener.local_addr()?;
+    let oauth_resource = format!("http://{data_bind}/mcp/v1/vaults/{VAULT_SLUG}");
+    // This fixture owns only a generated public test key. Its private key does
+    // not exist in the repository, so the record can exercise ready metadata
+    // without becoming a usable external issuer or a live OAuth claim.
+    auth.configure_oauth_issuer(OAuthIssuerInput {
+        name: "Interop metadata-only issuer".to_owned(),
+        issuer_url: "https://issuer.example.test".to_owned(),
+        discovery_url: None,
+        audience: oauth_resource.clone(),
+        resource: oauth_resource.clone(),
+        jwks_cache_json: OAUTH_PUBLIC_JWKS.to_owned(),
+        enabled: true,
+    })
+    .await?;
     let storage_options = StorageOptions {
         durability: DurabilityPolicy::None,
         minimum_free_bytes: 0,
@@ -131,8 +160,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let readiness = Readiness::new();
     let data_hosts = BTreeSet::from([
         "localhost".to_owned(),
+        format!("localhost:{}", data_bind.port()),
         "127.0.0.1".to_owned(),
+        data_bind.to_string(),
         "::1".to_owned(),
+        format!("[::1]:{}", data_bind.port()),
     ]);
     let data_origins = OriginPolicy::new([format!("http://{data_bind}")])?;
     let webdav_service = WebDavService::new(
@@ -141,7 +173,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         history_root.clone(),
         storage_options,
         core_runtime.clone(),
-        BTreeSet::new(),
     );
     let provider_service = mcp_vault_providers::ProviderService::new(state.clone(), auth.clone());
     let memory_service = mcp_vault_memory::MemoryService::with_provider_service(
@@ -161,6 +192,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         data_hosts.iter().cloned().collect(),
         data_origins.clone(),
     )
+    .with_public_origin(Some(format!("http://{data_bind}")))
     .with_application_services(index_service, memory_service.clone());
     let data_router = data_router_with_webdav_and_mcp_and_metrics(
         readiness.clone(),
@@ -208,8 +240,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     readiness.mark_ready();
 
     let manifest = FixtureManifest {
-        schema_version: 1,
-        mcp_url: format!("http://{data_bind}/mcp/v1/vaults/{VAULT_SLUG}"),
+        schema_version: 2,
+        mcp_url: oauth_resource,
+        oauth_metadata_url: format!(
+            "http://{data_bind}/.well-known/oauth-protected-resource/mcp/v1/vaults/{VAULT_SLUG}"
+        ),
+        oauth_authorization_server_metadata_url: format!(
+            "http://{data_bind}/.well-known/oauth-authorization-server"
+        ),
         webdav_url: format!("http://{data_bind}/dav/v1/vaults/{VAULT_SLUG}/"),
         health_url: format!("http://{data_bind}/health/ready"),
         admin_url: format!("http://{admin_bind}/api/v1/system"),
@@ -217,6 +255,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         mcp_token: pat.token.expose_secret().to_owned(),
         webdav_username: WEB_DAV_USERNAME,
         webdav_password: WEB_DAV_PASSWORD,
+        oauth_username: OAUTH_USERNAME,
+        oauth_password: OAUTH_PASSWORD,
     };
     let manifest_path = std::env::var_os("MCP_VAULT_FIXTURE_MANIFEST")
         .map(PathBuf::from)
@@ -224,6 +264,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     write_manifest(&manifest_path, &manifest).await?;
     println!("MCP_VAULT_FIXTURE_MANIFEST={}", manifest_path.display());
     println!("MCP_VAULT_FIXTURE_MCP_URL={}", manifest.mcp_url);
+    println!(
+        "MCP_VAULT_FIXTURE_OAUTH_METADATA_URL={}",
+        manifest.oauth_metadata_url
+    );
     println!("MCP_VAULT_FIXTURE_WEBDAV_URL={}", manifest.webdav_url);
     println!("MCP_VAULT_FIXTURE_HEALTH_URL={}", manifest.health_url);
     println!("MCP_VAULT_FIXTURE_ADMIN_URL={}", manifest.admin_url);
@@ -252,7 +296,9 @@ async fn test_mcp_auth(
     mut request: Request,
     next: Next,
 ) -> Response {
-    if request.uri().path().starts_with("/mcp/") {
+    if request.uri().path().starts_with("/mcp/")
+        && !request.headers().contains_key(header::AUTHORIZATION)
+    {
         request
             .headers_mut()
             .insert(header::AUTHORIZATION, state.authorization);

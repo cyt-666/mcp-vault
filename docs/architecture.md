@@ -96,7 +96,8 @@ Stored in SQLite and operational directories:
 
 - admin users and sessions;
 - WebDAV credentials;
-- MCP PAT digests and OAuth issuer configuration;
+- MCP PAT digests, built-in OAuth users/clients/grants/token state, and
+  optional external OAuth issuer configuration;
 - provider configuration and encrypted secrets;
 - Vault registry;
 - stable file identity and revision counters;
@@ -193,6 +194,16 @@ The filesystem implementation owns low-level I/O:
 - optional trash/history blob storage.
 
 It does not know about MCP tools, DAV methods, memory extraction, or UI concepts.
+
+For a regular-file create whose destination must remain absent, Unix storage
+prefers `renameat2(..., RENAME_NOREPLACE)`. If the kernel or mounted filesystem
+explicitly reports that exclusive rename is unsupported, storage may
+atomically create the destination as a hard link to MCP Vault's already-synced
+same-directory temporary regular file and then remove the temporary name.
+This is an internal commit primitive, not a user hard-link feature. An existing
+destination still wins with a conflict, and ordinary overwrite-capable rename
+is never used as a no-replace fallback. Directory moves and cross-filesystem
+commits do not use the hard-link path.
 
 ### 4.5 State repositories
 
@@ -312,7 +323,8 @@ For a canonical mutation:
 4. write a `prepared` operation-journal record in SQLite;
 5. stream/write new content to a temporary file and compute its hash;
 6. fsync the temporary file according to durability policy;
-7. atomically rename into place and fsync the parent directory where supported;
+7. atomically install into place without violating the mutation's replacement
+   policy, then fsync the parent directory where supported;
 8. in one SQLite transaction:
    - update file identity/path/revision;
    - add revision-history metadata;
@@ -333,6 +345,10 @@ Using journal state, current file hash, temporary files, and recorded prior revi
 - finalizes the metadata transaction;
 - safely rolls back an uncommitted temporary file;
 - marks the item for operator review when intent cannot be inferred.
+
+If the no-replace link fallback was interrupted after canonical installation,
+recovery first proves the canonical new hash, removes the journal-owned second
+temporary name for that inode, and then finalizes metadata.
 
 A full scanner also detects out-of-band edits made directly to the mounted volume and imports them as external changes.
 

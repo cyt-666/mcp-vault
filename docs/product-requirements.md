@@ -197,7 +197,8 @@ The service MUST provide a browser-based administration console for:
 - first-run setup and admin password creation;
 - Vault status and storage location;
 - WebDAV credentials;
-- MCP access credentials and OAuth resource-server settings;
+- MCP access credentials, built-in OAuth login, and optional external
+  resource-server settings;
 - permissions and revocation;
 - LLM, embedding, and model-role configuration;
 - index status and rebuild;
@@ -273,7 +274,14 @@ The service MUST keep three independent security domains:
 
 The service MUST support high-entropy, Vault-bound personal access tokens for trusted clients.
 
-It MUST also support standards-aligned MCP authorization as an OAuth 2.1 resource server using configured authorization-server metadata, protected-resource metadata, resource indicators, issuer/audience validation, and scopes.
+It MUST also support standards-aligned MCP authorization without requiring an
+external identity provider. The built-in authorization server MUST provide
+authorization-server and protected-resource metadata, DCR for public clients,
+authorization code + PKCE `S256`, resource indicators, exact redirects,
+Vault-bound scopes, short-lived access tokens, rotating refresh tokens, and
+local revocation. A separate Vault OAuth credential MUST be used instead of an
+Admin credential. Optional external resource-server mode MUST retain issuer,
+audience, signature, resource, Subject-grant, and scope validation.
 
 MCP tools MUST derive the Vault from the authenticated endpoint and credential. Tools MUST NOT accept an arbitrary Vault identifier.
 

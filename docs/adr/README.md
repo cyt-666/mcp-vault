@@ -2,7 +2,7 @@
 
 Accepted ADRs are binding unless superseded by a later ADR.
 
-The current sequence includes ADR-0017. ADR-0013 keeps ADR-0007 durable memories
+The current sequence includes ADR-0019. ADR-0013 keeps ADR-0007 durable memories
 canonical and provenanced while allowing `recall` to return separately typed,
 rebuildable ordinary-note cues. ADR-0014 replaced model self-score/routine
 review defaults with exact evidence and autonomous promotion. ADR-0015 retains
@@ -13,6 +13,14 @@ separate global consolidation; evidence remains exact and independent from
 final semantic content. ADR-0017 retains that architecture but changes
 prerelease upgrades to discard every replaced memory generation and require
 versioned fresh jobs instead of compatibility conversion.
+
+ADR-0018 adds a complete built-in OAuth 2.1 authorization server as the default
+self-hosted ChatGPT path while preserving external issuer validation as an
+optional compatibility mode.
+
+ADR-0019 removes the WebDAV proxy socket-peer allow-list and moves protection
+of the plaintext data listener entirely to deployment networking while
+retaining the forwarded-HTTPS requirement.
 
 Status values:
 

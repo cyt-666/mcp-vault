@@ -163,6 +163,58 @@ describe('Admin 管理界面', () => {
     await act(async () => root.unmount());
   });
 
+  it('MCP 页面默认提供内置 ChatGPT OAuth，并把外部 IdP 放在高级区', async () => {
+    vi.spyOn(adminApi, 'request').mockImplementation(async (path) => {
+      if (path === '/mcp/oauth') return { issuers: [] };
+      if (path === '/mcp/oauth/grants') return { grants: [] };
+      return {};
+    });
+    const mcpEndpoint = 'https://vault.example.test/mcp/v1/vaults/default';
+    const metadataUrl = 'https://vault.example.test/.well-known/oauth-protected-resource/mcp/v1/vaults/default';
+    const authorizationMetadataUrl = 'https://vault.example.test/.well-known/oauth-authorization-server';
+    const container = document.createElement('div');
+    const root = createRoot(container);
+
+    await act(async () =>
+      root.render(
+        <ManagementPage
+          page="mcp"
+          data={{
+            tokens: [],
+            mcp_endpoint: mcpEndpoint,
+            oauth_protected_resource_metadata_url: metadataUrl,
+            oauth_authorization_server_metadata_url: authorizationMetadataUrl,
+            local_oauth: { configured: false, user: null },
+            supported_mcp_revisions: ['2026-07-28'],
+          }}
+          onRefresh={() => undefined}
+        />,
+      ),
+    );
+
+    expect(container.textContent).toContain('OAuth 资源元数据');
+    expect(container.textContent).toContain('内置 OAuth 服务元数据');
+    expect(container.textContent).toContain('直接使用 MCP Vault 登录，不需要部署外部 OAuth 服务');
+    expect(container.textContent).toContain('启用内置 OAuth');
+    expect(container.textContent).toContain('不是 Admin 密码');
+    expect(container.textContent).toContain('高级：外部 OAuth/OIDC 兼容');
+    const advanced = container.querySelector<HTMLDetailsElement>('details.advanced-section');
+    await act(async () => {
+      if (advanced) advanced.open = true;
+      advanced?.dispatchEvent(new Event('toggle', { bubbles: true }));
+    });
+
+    expect(container.textContent).toContain('外部授权服务器执行授权码 + PKCE（S256）');
+    expect(container.textContent).toContain('ChatGPT 发现地址');
+    const resourceInput = container.querySelector<HTMLInputElement>('input[readonly][type="url"]');
+    expect(resourceInput?.value).toBe(mcpEndpoint);
+    const audienceInput = Array.from(container.querySelectorAll<HTMLInputElement>('input'))
+      .find((input) => input.parentElement?.textContent?.includes('Audience'));
+    expect(audienceInput?.value).toBe(mcpEndpoint);
+
+    await act(async () => root.unmount());
+  });
+
   it('密码策略错误会返回可执行的具体说明', () => {
     const message = formatRequestError(
       new AdminApiError(422, 'password_policy', 'password does not satisfy policy'),

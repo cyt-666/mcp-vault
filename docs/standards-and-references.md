@@ -133,9 +133,30 @@ Relevant standards referenced by the MCP authorization specification:
   https://www.rfc-editor.org/rfc/rfc8707
 - RFC 8414 — OAuth 2.0 Authorization Server Metadata
   https://www.rfc-editor.org/rfc/rfc8414
+- RFC 7591 — OAuth 2.0 Dynamic Client Registration
+  https://www.rfc-editor.org/rfc/rfc7591
+- RFC 7636 — Proof Key for Code Exchange (PKCE)
+  https://www.rfc-editor.org/rfc/rfc7636
+- RFC 9207 — OAuth 2.0 Authorization Server Issuer Identification
+  https://www.rfc-editor.org/rfc/rfc9207
 - OAuth 2.1 work and security best practices as incorporated by the current MCP specification.
 
-The service acts as an OAuth resource server when standards mode is enabled. It may rely on a configured external authorization server.
+The default standalone mode implements both the authorization-server and
+resource-server roles for public clients: DCR, authorization code, PKCE
+`S256`, resource indicators, issuer identification, opaque tokens, and refresh
+rotation. A configured external authorization server remains optional.
+
+ChatGPT plugin interoperability is also checked against the official OpenAI
+Plugins authentication guide:
+
+- https://developers.openai.com/plugins/build/auth
+
+The guide requires protected-resource and authorization-server metadata,
+authorization code + PKCE `S256`, `resource` propagation, CIMD/DCR or a
+predefined client, and issuer/audience/expiry/scope validation. MCP Vault's
+built-in flow uses DCR and owns authorization, token, login, and consent
+surfaces; the external issuer mode remains a separately tested compatibility
+path.
 
 ## 8. SQLite and vector search
 

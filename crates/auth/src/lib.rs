@@ -23,7 +23,10 @@ pub use secret::{
     generate_bearer_token, load_or_create_master_key, mask_hint, token_prefix,
 };
 pub use service::{
-    AdminLogin, AdminPrincipal, AuthPrincipal, AuthService, OAuthIssuerInput, PatIssue,
+    AdminLogin, AdminPrincipal, AuthPrincipal, AuthService, LocalOAuthAuthorizationInput,
+    LocalOAuthAuthorizationPrompt, LocalOAuthAuthorizationResult, LocalOAuthClientRegistration,
+    LocalOAuthClientRegistrationResult, LocalOAuthCodeExchange, LocalOAuthRefreshExchange,
+    LocalOAuthTokenIssue, LocalOAuthUser, OAuthIssuerInput, OAuthResourceServer, PatIssue,
     PreparedAdminSetup, SecretMetadata, SessionPolicy, WebDavCredentialIssue,
     clear_csrf_cookie_header, clear_session_cookie_header, csrf_cookie_header,
     parse_session_cookie, require_secure_basic_auth, session_cookie_header,

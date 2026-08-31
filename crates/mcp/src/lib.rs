@@ -4,18 +4,18 @@ use std::{path::PathBuf, sync::Arc};
 
 use axum::{
     Router,
-    extract::Request,
-    http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
+    extract::{Path, Request, State},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header, request::Parts},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::any,
+    routing::{any, get},
 };
-use mcp_vault_auth::{AuthError, AuthPrincipal, AuthService, OriginPolicy};
+use mcp_vault_auth::{AuthError, AuthPrincipal, AuthService, OAuthResourceServer, OriginPolicy};
 use mcp_vault_core::{
     MutationResult, ReadResult, RevisionReadResult, VaultCore, VaultCoreRuntime, VaultError,
 };
 use mcp_vault_domain::{
-    MaintenanceGate, MemoryId, Permission, Revision, SourcePlane, VaultContext, VaultPath,
+    MaintenanceGate, MemoryId, Permission, Revision, Scope, SourcePlane, VaultContext, VaultPath,
     VaultPathPolicy, VaultSlug,
 };
 use mcp_vault_indexer::{
@@ -50,6 +50,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::io::AsyncReadExt;
 use url::Url;
+
+mod oauth_server;
 
 const SERVER_NAME: &str = "mcp-vault";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -90,6 +92,81 @@ pub fn stateful_router(service: McpService) -> Router {
         async move { authenticate_request_with_state(state, request, next).await }
     });
     Router::new().fallback_service(rmcp).layer(auth_layer)
+}
+
+/// Public RFC 9728 protected-resource metadata routes.
+///
+/// These routes deliberately sit outside MCP bearer middleware so an OAuth
+/// client can discover the configured authorization server before it has a
+/// token. The data-plane composition root mounts them at the origin root.
+pub fn oauth_metadata_router(service: McpService) -> Router {
+    let allowed_hosts = Arc::new(service.allowed_hosts.clone());
+    let origin_policy = service.auth_state.origin_policy.clone();
+    let public_origin = service.auth_state.public_origin.clone();
+    let guard = middleware::from_fn(move |request: Request, next: Next| {
+        let allowed_hosts = Arc::clone(&allowed_hosts);
+        let origin_policy = origin_policy.clone();
+        let public_origin = public_origin.clone();
+        async move {
+            // OAuth browser and token POSTs do not use ambient browser
+            // authority. Authorization forms carry an opaque request handle
+            // bound to the client, redirect, state, resource, scopes, and PKCE
+            // challenge. Token requests repeat the exact client, redirect,
+            // resource, and verifier while consuming a single-use code or a
+            // rotating refresh token. System browsers and OpenAI hosts may
+            // serialize either request with `Origin: null` or the invoking
+            // application's Origin, so the MCP data-plane Origin allow-list is
+            // not a security boundary for these two protocol requests. Keep
+            // the configured Host check for every route and retain Origin
+            // checks for metadata and DCR.
+            let is_origin_independent_oauth_post = request.method() == Method::POST
+                && matches!(
+                    request.uri().path(),
+                    oauth_server::AUTHORIZATION_PATH
+                        | oauth_server::VERSIONED_V1_AUTHORIZATION_PATH
+                        | oauth_server::LEGACY_AUTHORIZATION_PATH
+                        | oauth_server::TOKEN_PATH
+                );
+            let host_allowed = request
+                .headers()
+                .get(header::HOST)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|host| {
+                    allowed_hosts
+                        .iter()
+                        .any(|allowed| allowed.eq_ignore_ascii_case(host))
+                });
+            let configured_origin_allowed =
+                origin_policy.validate_optional(request.headers()).is_ok();
+            let mut supplied_origins = request.headers().get_all(header::ORIGIN).iter();
+            let supplied_origin = supplied_origins.next();
+            let public_origin_allowed = supplied_origins.next().is_none()
+                && supplied_origin
+                    .and_then(|value| value.to_str().ok())
+                    .zip(public_origin.as_deref())
+                    .is_some_and(|(supplied, configured)| supplied == configured);
+            if !host_allowed
+                || (!is_origin_independent_oauth_post
+                    && !configured_origin_allowed
+                    && !public_origin_allowed)
+            {
+                return public_error(StatusCode::FORBIDDEN, false);
+            }
+            next.run(request).await
+        }
+    });
+    Router::new()
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(root_protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp/v1/vaults/{vault_slug}",
+            get(vault_protected_resource_metadata),
+        )
+        .merge(oauth_server::routes())
+        .with_state(service)
+        .layer(guard)
 }
 
 async fn not_implemented() -> Response {
@@ -133,9 +210,20 @@ impl McpService {
                 core_runtime,
                 origin_policy,
                 maintenance,
+                public_origin: None,
             },
             allowed_hosts,
         }
+    }
+
+    /// Set the canonical externally advertised data-plane origin.
+    ///
+    /// Configuration validation owns URL parsing. The OAuth adapter still
+    /// compares the resulting resource identifier exactly with persisted
+    /// issuer configuration before publishing metadata.
+    pub fn with_public_origin(mut self, public_origin: Option<String>) -> Self {
+        self.auth_state.public_origin = public_origin;
+        self
     }
 
     /// Inject the process-shared memory/provider boundary assembled by the
@@ -164,6 +252,156 @@ struct McpAuthState {
     core_runtime: VaultCoreRuntime,
     origin_policy: OriginPolicy,
     maintenance: MaintenanceGate,
+    public_origin: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct ProtectedResourceMetadata {
+    resource: String,
+    authorization_servers: Vec<String>,
+    scopes_supported: Vec<String>,
+    bearer_methods_supported: Vec<&'static str>,
+}
+
+async fn vault_protected_resource_metadata(
+    State(service): State<McpService>,
+    Path(vault_slug): Path<String>,
+) -> Response {
+    let slug = match VaultSlug::new(&vault_slug) {
+        Ok(slug) => slug,
+        Err(_) => return public_error(StatusCode::NOT_FOUND, false),
+    };
+    match protected_resource_for_slug(&service, &slug).await {
+        Ok(Some(metadata)) => metadata_response(metadata),
+        Ok(None) => public_error(StatusCode::NOT_FOUND, false),
+        Err(()) => public_error(StatusCode::INTERNAL_SERVER_ERROR, false),
+    }
+}
+
+async fn root_protected_resource_metadata(State(service): State<McpService>) -> Response {
+    let vaults = match service.auth_state.state.vaults().list().await {
+        Ok(vaults) => vaults,
+        Err(_) => return public_error(StatusCode::INTERNAL_SERVER_ERROR, false),
+    };
+    let mut candidates = Vec::new();
+    for vault in vaults {
+        if vault.status != mcp_vault_state::VaultStatus::Active {
+            continue;
+        }
+        match protected_resource_for_slug(&service, &vault.slug).await {
+            Ok(Some(metadata)) => candidates.push(metadata),
+            Ok(None) => {}
+            Err(()) => return public_error(StatusCode::INTERNAL_SERVER_ERROR, false),
+        }
+    }
+    candidates.sort_by(|left, right| left.resource.cmp(&right.resource));
+    candidates.dedup_by(|left, right| left.resource == right.resource);
+    if candidates.len() == 1 {
+        metadata_response(candidates.remove(0))
+    } else {
+        public_error(StatusCode::NOT_FOUND, false)
+    }
+}
+
+async fn protected_resource_for_slug(
+    service: &McpService,
+    slug: &VaultSlug,
+) -> Result<Option<ProtectedResourceMetadata>, ()> {
+    let vault = service
+        .auth_state
+        .state
+        .vaults()
+        .find_by_slug(slug)
+        .await
+        .map_err(|_| ())?;
+    let Some(vault) = vault.filter(|vault| vault.status == mcp_vault_state::VaultStatus::Active)
+    else {
+        return Ok(None);
+    };
+    let context = vault.context().map_err(|_| ())?;
+    let resources = service
+        .auth_state
+        .auth
+        .oauth_resource_servers()
+        .await
+        .map_err(|_| ())?;
+    let selected =
+        select_oauth_resource(resources, service.auth_state.public_origin.as_deref(), slug);
+    let local = match oauth_server::issuer_origin(service) {
+        Some(origin)
+            if service
+                .auth_state
+                .auth
+                .local_oauth_enabled(&context)
+                .await
+                .map_err(|_| ())? =>
+        {
+            let issuer = origin.trim_end_matches('/').to_owned();
+            Some(OAuthResourceServer {
+                resource: format!("{issuer}/mcp/v1/vaults/{slug}"),
+                authorization_servers: vec![issuer],
+            })
+        }
+        _ => None,
+    };
+    let resource = local
+        .as_ref()
+        .map(|local| local.resource.clone())
+        .or_else(|| selected.as_ref().map(|selected| selected.resource.clone()));
+    let Some(resource) = resource else {
+        return Ok(None);
+    };
+    let mut authorization_servers = local
+        .map(|local| local.authorization_servers)
+        .unwrap_or_default();
+    if let Some(external) = selected {
+        authorization_servers.extend(external.authorization_servers);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    authorization_servers.retain(|issuer| seen.insert(issuer.clone()));
+    Ok(Some(ProtectedResourceMetadata {
+        resource,
+        authorization_servers,
+        scopes_supported: Scope::ALL.map(|scope| scope.to_string()).to_vec(),
+        bearer_methods_supported: vec!["header"],
+    }))
+}
+
+fn select_oauth_resource(
+    resources: Vec<OAuthResourceServer>,
+    public_origin: Option<&str>,
+    slug: &VaultSlug,
+) -> Option<OAuthResourceServer> {
+    let resource_path = format!("/mcp/v1/vaults/{slug}");
+    if let Some(origin) = public_origin {
+        let expected = format!("{}{resource_path}", origin.trim_end_matches('/'));
+        return resources
+            .into_iter()
+            .find(|resource| resource.resource == expected);
+    }
+
+    let mut candidates = resources
+        .into_iter()
+        .filter(|resource| {
+            Url::parse(&resource.resource)
+                .ok()
+                .is_some_and(|url| url.path() == resource_path && url.query().is_none())
+        })
+        .collect::<Vec<_>>();
+    if candidates.len() == 1 {
+        candidates.pop()
+    } else {
+        None
+    }
+}
+
+fn metadata_response(metadata: ProtectedResourceMetadata) -> Response {
+    let mut response = axum::Json(metadata).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+    response
 }
 
 /// Request-scoped Vault binding passed from Axum into RMCP.
@@ -207,7 +445,15 @@ async fn authenticate_request_with_state(
     };
     let token = match bearer_token(request.headers()).map(str::to_owned) {
         Ok(token) => token,
-        Err(_) => return public_error(StatusCode::UNAUTHORIZED, true),
+        Err(_) => {
+            return oauth_public_error(
+                StatusCode::UNAUTHORIZED,
+                &slug,
+                state.public_origin.as_deref(),
+                "invalid_request",
+                "A bearer access token is required",
+            );
+        }
     };
     match authenticate_request_context(&state, slug, token).await {
         Ok(context) => {
@@ -244,6 +490,21 @@ async fn authenticate_request_context(
             .auth
             .authenticate_pat(&context, &token, &[], None)
             .await
+    } else if token.starts_with("mcpv_oauth_") {
+        match state
+            .public_origin
+            .as_deref()
+            .filter(|origin| oauth_issuer_origin_is_secure(origin))
+        {
+            Some(origin) => {
+                let resource = format!("{}/mcp/v1/vaults/{slug}", origin.trim_end_matches('/'));
+                state
+                    .auth
+                    .authenticate_local_oauth(&context, &token, &resource, &[], None)
+                    .await
+            }
+            None => Err(AuthError::OAuthConfiguration),
+        }
     } else {
         state
             .auth
@@ -252,10 +513,22 @@ async fn authenticate_request_context(
     };
     let principal = principal_result.map_err(|error| match error {
         AuthError::State(_) => public_error(StatusCode::INTERNAL_SERVER_ERROR, false),
-        _ => public_error(StatusCode::UNAUTHORIZED, true),
+        _ => oauth_public_error(
+            StatusCode::UNAUTHORIZED,
+            &slug,
+            state.public_origin.as_deref(),
+            "invalid_token",
+            "The bearer access token is invalid or expired",
+        ),
     })?;
     if principal.vault_id != Some(context.id()) {
-        return Err(public_error(StatusCode::UNAUTHORIZED, true));
+        return Err(oauth_public_error(
+            StatusCode::UNAUTHORIZED,
+            &slug,
+            state.public_origin.as_deref(),
+            "invalid_token",
+            "The bearer access token is invalid for this resource",
+        ));
     }
     let policy = VaultPathPolicy::new(vault.reserved_root.clone(), Default::default())
         .map_err(|_| public_error(StatusCode::INTERNAL_SERVER_ERROR, false))?;
@@ -275,6 +548,24 @@ async fn authenticate_request_context(
         memory: state.memory.clone(),
         maintenance: state.maintenance.clone(),
     })
+}
+
+fn oauth_issuer_origin_is_secure(origin: &str) -> bool {
+    let Ok(url) = Url::parse(origin) else {
+        return false;
+    };
+    if url.scheme() == "https" {
+        return true;
+    }
+    if url.scheme() != "http" {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
 }
 
 fn mounted_slug(path: &str) -> Result<VaultSlug, ()> {
@@ -324,6 +615,29 @@ fn public_error(status: StatusCode, challenge: bool) -> Response {
             header::WWW_AUTHENTICATE,
             HeaderValue::from_static("Bearer realm=\"mcp-vault\""),
         );
+    }
+    response
+}
+
+fn oauth_public_error(
+    status: StatusCode,
+    slug: &VaultSlug,
+    public_origin: Option<&str>,
+    error: &'static str,
+    description: &'static str,
+) -> Response {
+    let mut response = public_error(status, false);
+    let metadata_path = format!("/.well-known/oauth-protected-resource/mcp/v1/vaults/{slug}");
+    let metadata_url = public_origin
+        .map(|origin| format!("{}{metadata_path}", origin.trim_end_matches('/')))
+        .unwrap_or(metadata_path);
+    let challenge = format!(
+        "Bearer realm=\"mcp-vault\", resource_metadata=\"{metadata_url}\", error=\"{error}\", error_description=\"{description}\""
+    );
+    if let Ok(value) = HeaderValue::from_str(&challenge) {
+        response
+            .headers_mut()
+            .insert(header::WWW_AUTHENTICATE, value);
     }
     response
 }
@@ -2620,33 +2934,64 @@ fn vault_error(error: VaultError) -> ToolErrorBody {
             "the idempotency key was reused for another operation",
             false,
         ),
-        VaultError::State(_)
-        | VaultError::Storage(_)
-        | VaultError::VaultNotRegistered
-        | VaultError::ContextMismatch
-        | VaultError::InjectedFailure(_) => {
+        VaultError::State(_) => ToolErrorBody::new(
+            "internal_error",
+            "the Vault operational state transaction failed",
+            true,
+        )
+        .with_details(json!({"component": "state"})),
+        VaultError::Storage(error) => ToolErrorBody::new(
+            "internal_error",
+            "the Vault filesystem operation failed",
+            true,
+        )
+        .with_details(json!({
+            "component": "storage",
+            "diagnostic": error.to_string(),
+        })),
+        VaultError::VaultNotRegistered => ToolErrorBody::new(
+            "internal_error",
+            "the Vault is not registered for this operation",
+            false,
+        )
+        .with_details(json!({"component": "vault_registry", "reason": "not_registered"})),
+        VaultError::ContextMismatch => ToolErrorBody::new(
+            "internal_error",
+            "the Vault context does not match registered state",
+            false,
+        )
+        .with_details(json!({"component": "vault_registry", "reason": "context_mismatch"})),
+        VaultError::InjectedFailure(_) => {
             ToolErrorBody::new("internal_error", "the Vault operation failed", true)
+                .with_details(json!({"component": "core"}))
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{io::ErrorKind, path::PathBuf};
 
-    use super::{McpService, bearer_token, mounted_slug, router, stateful_router};
-    use axum::{body::Body, http::Request};
+    use super::{
+        McpService, bearer_token, mounted_slug, oauth_metadata_router, router, stateful_router,
+        vault_error,
+    };
+    use axum::{Router, body::Body, http::Request};
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use http_body_util::BodyExt;
-    use mcp_vault_auth::{AuthService, MasterKeyRing, OAuthIssuerInput, OriginPolicy};
-    use mcp_vault_core::VaultCore;
+    use mcp_vault_auth::{
+        AuthService, MasterKeyRing, OAuthIssuerInput, OAuthResourceServer, OriginPolicy,
+        SecretString,
+    };
+    use mcp_vault_core::{VaultCore, VaultError};
     use mcp_vault_domain::{
-        Actor, Revision, Scope, ScopeSet, VaultContext, VaultId, VaultPathPolicy, VaultSlug,
+        Actor, MemoryId, Revision, Scope, ScopeSet, VaultContext, VaultId, VaultPath,
+        VaultPathPolicy, VaultSlug,
     };
     use mcp_vault_indexer::IndexService;
-    use mcp_vault_memory::MEMORY_PIPELINE_GENERATION;
-    use mcp_vault_state::{StateStore, VaultStatus};
-    use mcp_vault_storage_fs::StorageOptions;
+    use mcp_vault_memory::{MEMORY_PIPELINE_GENERATION, MemoryOrigin, MemoryStatus, MemoryType};
+    use mcp_vault_state::{MemoryBundle, MemoryRecord, StateStore, VaultStatus};
+    use mcp_vault_storage_fs::{StorageError, StorageOptions};
     use rand::rngs::OsRng;
     use rsa::{
         RsaPrivateKey, RsaPublicKey,
@@ -2654,9 +2999,11 @@ mod tests {
         signature::{SignatureEncoding, Signer},
         traits::PublicKeyParts,
     };
-    use sha2::Sha256;
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
     use tempfile::tempdir;
     use tower::ServiceExt;
+    use url::Url;
 
     #[test]
     fn endpoint_slug_is_taken_from_the_mount() {
@@ -2670,6 +3017,20 @@ mod tests {
     }
 
     #[test]
+    fn storage_internal_errors_keep_only_redacted_component_diagnostics() {
+        let error = vault_error(VaultError::Storage(StorageError::Io {
+            operation: "create_parent",
+            kind: ErrorKind::PermissionDenied,
+        }));
+        assert_eq!(error.code, "internal_error");
+        assert_eq!(error.details.as_ref().unwrap()["component"], "storage");
+        assert_eq!(
+            error.details.as_ref().unwrap()["diagnostic"],
+            "filesystem operation create_parent failed (PermissionDenied)"
+        );
+    }
+
+    #[test]
     fn bearer_parser_rejects_malformed_headers() {
         let mut headers = axum::http::HeaderMap::new();
         assert!(bearer_token(&headers).is_err());
@@ -2679,6 +3040,37 @@ mod tests {
         assert!(bearer_token(&headers).is_err());
         headers.insert("authorization", "Bearer mcpv_pat_example".parse().unwrap());
         assert_eq!(bearer_token(&headers).unwrap(), "mcpv_pat_example");
+    }
+
+    #[test]
+    fn oauth_resource_selection_is_exact_and_ambiguous_fallback_fails_closed() {
+        let slug = VaultSlug::new("work").unwrap();
+        let resources = vec![
+            OAuthResourceServer {
+                resource: "https://one.example.test/mcp/v1/vaults/work".to_owned(),
+                authorization_servers: vec!["https://issuer-one.example.test".to_owned()],
+            },
+            OAuthResourceServer {
+                resource: "https://two.example.test/mcp/v1/vaults/work".to_owned(),
+                authorization_servers: vec!["https://issuer-two.example.test".to_owned()],
+            },
+        ];
+
+        assert!(super::select_oauth_resource(resources.clone(), None, &slug).is_none());
+        assert!(
+            super::select_oauth_resource(
+                resources.clone(),
+                Some("https://missing.example.test"),
+                &slug,
+            )
+            .is_none()
+        );
+        assert_eq!(
+            super::select_oauth_resource(resources, Some("https://two.example.test/"), &slug)
+                .unwrap()
+                .authorization_servers,
+            vec!["https://issuer-two.example.test"]
+        );
     }
 
     #[tokio::test]
@@ -2701,6 +3093,12 @@ mod tests {
         ]
         .into_iter()
         .collect()
+    }
+
+    fn mounted_service_router(service: McpService) -> Router {
+        Router::new()
+            .merge(oauth_metadata_router(service.clone()))
+            .nest("/mcp/v1/vaults", stateful_router(service))
     }
 
     async fn configured_router() -> (axum::Router, String, tempfile::TempDir) {
@@ -2779,7 +3177,7 @@ mod tests {
             OriginPolicy::new(std::iter::empty::<&str>()).unwrap(),
         );
         (
-            stateful_router(service),
+            mounted_service_router(service),
             pat.token.expose_secret().to_owned(),
             root,
         )
@@ -2856,7 +3254,7 @@ mod tests {
             OriginPolicy::new(std::iter::empty::<&str>()).unwrap(),
         );
         (
-            stateful_router(service),
+            mounted_service_router(service),
             pat.token.expose_secret().to_owned(),
             root,
         )
@@ -2883,7 +3281,7 @@ mod tests {
             state.auth(),
             MasterKeyRing::from_bytes(1, &[8_u8; 32]).unwrap(),
         );
-        let resource = "https://vault.example.test/mcp";
+        let resource = "https://vault.example.test/mcp/v1/vaults/work";
         let issuer_url = "https://issuer.example.test";
         let private = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
         let public = RsaPublicKey::from(&private);
@@ -2894,7 +3292,7 @@ mod tests {
                 name: "test issuer".to_owned(),
                 issuer_url: issuer_url.to_owned(),
                 discovery_url: None,
-                audience: "mcp-vault".to_owned(),
+                audience: resource.to_owned(),
                 resource: resource.to_owned(),
                 jwks_cache_json: format!(
                     r#"{{"keys":[{{"kty":"RSA","kid":"test","alg":"RS256","use":"sig","n":"{modulus}","e":"{exponent}"}}]}}"#
@@ -2915,7 +3313,7 @@ mod tests {
         .unwrap();
         let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256","kid":"test"}"#);
         let payload = URL_SAFE_NO_PAD.encode(format!(
-            r#"{{"iss":"{issuer_url}","sub":"agent","aud":"mcp-vault","resource":"{resource}","exp":4102444800,"scope":"vault:discover vault:read"}}"#
+            r#"{{"iss":"{issuer_url}","sub":"agent","aud":"{resource}","exp":4102444800,"scope":"vault:discover vault:read"}}"#
         ));
         let signing = format!("{header}.{payload}");
         let signature = SigningKey::<Sha256>::new(private).sign(signing.as_bytes());
@@ -2928,8 +3326,110 @@ mod tests {
             Default::default(),
             vec!["localhost".to_owned()],
             OriginPolicy::new(std::iter::empty::<&str>()).unwrap(),
+        )
+        .with_public_origin(Some("https://vault.example.test".to_owned()));
+        (mounted_service_router(service), token, root)
+    }
+
+    async fn configured_builtin_oauth_router() -> (axum::Router, tempfile::TempDir, MemoryId) {
+        let root = tempdir().unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("work").unwrap(),
+            PathBuf::from(root.path()),
+            Revision::new(1),
+        )
+        .unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Work", VaultStatus::Active)
+            .await
+            .unwrap();
+        state
+            .memory()
+            .set_pipeline_generation_state(&context, MEMORY_PIPELINE_GENERATION, false)
+            .await
+            .unwrap();
+        let core = VaultCore::new(
+            state.clone(),
+            root.path().join("history"),
+            VaultPathPolicy::default(),
+            StorageOptions::default(),
+            Default::default(),
         );
-        (stateful_router(service), token, root)
+        let memory_id = MemoryId::new();
+        let canonical_path = core
+            .managed_root()
+            .join(&VaultPath::parse(&format!("memory/records/2026/08/{memory_id}.md")).unwrap())
+            .unwrap();
+        state
+            .memory()
+            .replace_bundle(
+                &context,
+                &MemoryBundle {
+                    memory: MemoryRecord {
+                        id: memory_id,
+                        vault_id: context.id(),
+                        memory_type: MemoryType::Decision.as_str().to_owned(),
+                        status: MemoryStatus::Active.as_str().to_owned(),
+                        content: "OAuth memory operations are available.".to_owned(),
+                        normalized_content: "oauth memory operations are available.".to_owned(),
+                        content_hash: "oauth-all-tools-fixture".to_owned(),
+                        importance: 0.9,
+                        confidence: 1.0,
+                        origin: MemoryOrigin::ExplicitAdmin.as_str().to_owned(),
+                        revision: Revision::new(1),
+                        canonical_file_id: None,
+                        canonical_path: Some(canonical_path),
+                        canonical_revision: None,
+                        valid_from: None,
+                        valid_to: None,
+                        extraction: json!({"fixture": "oauth_all_tools"}),
+                        created_at: 1_777_593_600_000,
+                        updated_at: 1_777_593_600_000,
+                        last_recalled_at: None,
+                        recall_count: 0,
+                    },
+                    sources: Vec::new(),
+                    entities: Vec::new(),
+                    tags: vec!["oauth".to_owned()],
+                    relations: Vec::new(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        core.reconcile(&context, Actor::system()).await.unwrap();
+        IndexService::new(state.clone())
+            .rebuild_vault(&core, &context)
+            .await
+            .unwrap();
+        let auth = AuthService::new(
+            state.auth(),
+            MasterKeyRing::from_bytes(1, &[19_u8; 32]).unwrap(),
+        );
+        auth.configure_local_oauth_user(
+            &context,
+            "chatgpt",
+            &SecretString::new("correct horse battery staple"),
+            Scope::ALL.into_iter().collect(),
+        )
+        .await
+        .unwrap();
+        let service = McpService::new(
+            state,
+            auth,
+            root.path().join("history"),
+            StorageOptions::default(),
+            Default::default(),
+            vec!["localhost".to_owned()],
+            OriginPolicy::new(std::iter::empty::<&str>()).unwrap(),
+        )
+        .with_public_origin(Some("https://vault.example.test".to_owned()));
+        (mounted_service_router(service), root, memory_id)
     }
 
     fn discover_request(token: &str) -> Request<Body> {
@@ -2946,6 +3446,536 @@ mod tests {
                 r#"{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
             ))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn built_in_oauth_http_flow_exposes_and_routes_every_tool() {
+        let (router, _root, memory_id) = configured_builtin_oauth_router().await;
+        let metadata = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/oauth-authorization-server")
+                    .header("host", "localhost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metadata.status(), axum::http::StatusCode::OK);
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&metadata.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(metadata["issuer"], "https://vault.example.test");
+        assert_eq!(
+            metadata["authorization_endpoint"],
+            "https://vault.example.test/oauth/v2/authorize"
+        );
+        assert_eq!(
+            metadata["code_challenge_methods_supported"],
+            json!(["S256"])
+        );
+        assert_eq!(
+            metadata["token_endpoint_auth_methods_supported"],
+            json!(["none"])
+        );
+
+        let rejected_metadata = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/oauth-authorization-server")
+                    .header("host", "localhost")
+                    .header("origin", "null")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rejected_metadata.status(),
+            axum::http::StatusCode::FORBIDDEN
+        );
+
+        let registration = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/register")
+                    .extension(axum::extract::ConnectInfo(
+                        "127.0.0.1:54321".parse::<std::net::SocketAddr>().unwrap(),
+                    ))
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"client_name":"ChatGPT","redirect_uris":["https://chatgpt.com/connector_platform_oauth_redirect"],"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"token_endpoint_auth_method":"none"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(registration.status(), axum::http::StatusCode::CREATED);
+        let registration: serde_json::Value =
+            serde_json::from_slice(&registration.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let client_id = registration["client_id"].as_str().unwrap().to_owned();
+        assert!(registration.get("client_secret").is_none());
+
+        let verifier = "p".repeat(64);
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        let resource = "https://vault.example.test/mcp/v1/vaults/work";
+        let mut authorize = Url::parse("https://vault.example.test/oauth/v2/authorize").unwrap();
+        authorize
+            .query_pairs_mut()
+            .append_pair("response_type", "code")
+            .append_pair("client_id", &client_id)
+            .append_pair(
+                "redirect_uri",
+                "https://chatgpt.com/connector_platform_oauth_redirect",
+            )
+            .append_pair(
+                "scope",
+                "vault:discover vault:read vault:write vault:delete vault:history memory:read memory:write memory:manage",
+            )
+            .append_pair("state", "state-123")
+            .append_pair("code_challenge", &challenge)
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("resource", resource);
+        let authorize_path = format!(
+            "{}?{}",
+            authorize.path(),
+            authorize.query().expect("authorization query exists")
+        );
+        let legacy_authorize_path =
+            authorize_path.replacen("/oauth/v2/authorize", "/oauth/authorize", 1);
+        let legacy_redirect = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&legacy_authorize_path)
+                    .header("host", "localhost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            legacy_redirect.status(),
+            axum::http::StatusCode::TEMPORARY_REDIRECT
+        );
+        assert_eq!(
+            legacy_redirect.headers().get("location").unwrap(),
+            authorize_path.as_str()
+        );
+        assert_eq!(legacy_redirect.headers().get("vary").unwrap(), "*");
+        assert_eq!(
+            legacy_redirect.headers().get("cdn-cache-control").unwrap(),
+            "no-store"
+        );
+
+        let login = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(authorize_path)
+                    .header("host", "localhost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            login.headers().get("cache-control").unwrap(),
+            "private, no-cache, no-store, max-age=0, must-revalidate"
+        );
+        assert_eq!(
+            login.headers().get("cdn-cache-control").unwrap(),
+            "no-store"
+        );
+        assert_eq!(
+            login.headers().get("surrogate-control").unwrap(),
+            "no-store"
+        );
+        assert_eq!(login.headers().get("vary").unwrap(), "*");
+        assert_eq!(login.headers().get("x-frame-options").unwrap(), "DENY");
+        assert_eq!(
+            login.headers().get("content-security-policy").unwrap(),
+            "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
+        );
+        let login = String::from_utf8(
+            login
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        let marker = "name=\"request_handle\" value=\"";
+        let start = login.find(marker).unwrap() + marker.len();
+        let end = login[start..].find('"').unwrap() + start;
+        let request_handle = &login[start..end];
+        assert!(request_handle.starts_with("mcpv_oauth_req_"));
+        assert!(login.contains("action=\"https://vault.example.test/oauth/v2/authorize\""));
+        assert!(login.contains("autocomplete=\"username\""));
+        assert!(login.contains("autocomplete=\"current-password\""));
+        assert!(!login.contains("data-1p-ignore"));
+
+        let invalid_authorization = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/oauth/v2/authorize")
+                    .header("host", "localhost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            invalid_authorization.status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            invalid_authorization
+                .headers()
+                .get("content-security-policy")
+                .unwrap(),
+            "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+        );
+
+        let authorize_form = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("request_handle", request_handle)
+            .append_pair("resource", resource)
+            .append_pair("username", "chatgpt")
+            .append_pair("password", "correct horse battery staple")
+            .finish();
+        let redirect = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/authorize")
+                    .header("host", "localhost")
+                    // System OAuth browsers can submit an opaque Origin. The
+                    // authorization transaction, not Origin, binds this form.
+                    .header("origin", "null")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(authorize_form.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(redirect.status(), axum::http::StatusCode::FOUND);
+        let location = redirect
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let location = Url::parse(location).unwrap();
+        let parameters = location
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+        let first_code = parameters.get("code").unwrap().to_string();
+        assert_eq!(parameters.get("state").unwrap(), "state-123");
+        assert_eq!(parameters.get("iss").unwrap(), "https://vault.example.test");
+
+        // Browser engines, password managers, and edge proxies can replay a
+        // form POST after the first response commits. A valid retry must get a
+        // fresh code instead of replacing the browser navigation with the
+        // misleading "authorization request expired" page.
+        let retried_redirect = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/v2/authorize")
+                    .header("host", "localhost")
+                    .header("origin", "null")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(authorize_form))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retried_redirect.status(), axum::http::StatusCode::FOUND);
+        let retried_location = Url::parse(
+            retried_redirect
+                .headers()
+                .get("location")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let retried_parameters = retried_location
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+        let code = retried_parameters.get("code").unwrap().to_string();
+        assert_ne!(code, first_code);
+        assert_eq!(retried_parameters.get("state").unwrap(), "state-123");
+        assert_eq!(
+            retried_parameters.get("iss").unwrap(),
+            "https://vault.example.test"
+        );
+
+        let token_form = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("grant_type", "authorization_code")
+            .append_pair("code", &code)
+            .append_pair("client_id", &client_id)
+            .append_pair(
+                "redirect_uri",
+                "https://chatgpt.com/connector_platform_oauth_redirect",
+            )
+            .append_pair("code_verifier", &verifier)
+            .append_pair("resource", resource)
+            .finish();
+        let token = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header("host", "localhost")
+                    .header("origin", "https://chatgpt.com")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(token_form))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(token.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            token.headers().get("cache-control").unwrap(),
+            "private, no-cache, no-store, max-age=0, must-revalidate"
+        );
+        let token: serde_json::Value =
+            serde_json::from_slice(&token.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let access_token = token["access_token"].as_str().unwrap();
+        assert!(access_token.starts_with("mcpv_oauth_"));
+        assert!(
+            token["refresh_token"]
+                .as_str()
+                .unwrap()
+                .starts_with("mcpv_refresh_")
+        );
+
+        let response = router
+            .clone()
+            .oneshot(discover_request(access_token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let tools = router
+            .clone()
+            .oneshot(list_tools_request(access_token))
+            .await
+            .unwrap();
+        let tools_status = tools.status();
+        let tools_body = tools.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            tools_status,
+            axum::http::StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&tools_body)
+        );
+        let tools_body: serde_json::Value = serde_json::from_slice(&tools_body).unwrap();
+        let tool_names = tools_body["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tool_names,
+            vec![
+                "vault_overview",
+                "browse_index",
+                "recent_changes",
+                "search_notes",
+                "read_note",
+                "recall",
+                "get_memory",
+                "list_memories",
+                "create_note",
+                "edit_note",
+                "move_note",
+                "delete_note",
+                "note_history",
+                "restore_note_revision",
+                "remember",
+                "update_memory",
+                "forget_memory",
+            ]
+        );
+
+        let create = call_tool_json(
+            &router,
+            access_token,
+            10,
+            "create_note",
+            json!({
+                "path": "notes/oauth-created.md",
+                "content": "# Created through built-in OAuth\n"
+            }),
+        )
+        .await;
+        assert_tool_ok(&create, "create_note");
+        assert_eq!(mutation_revision(&create), 1);
+
+        for (id, name, arguments) in [
+            (11, "vault_overview", json!({})),
+            (12, "browse_index", json!({})),
+            (13, "recent_changes", json!({})),
+            (
+                14,
+                "search_notes",
+                json!({"query": "OAuth", "mode": "lexical"}),
+            ),
+            (15, "read_note", json!({"path": "notes/oauth-created.md"})),
+            (
+                16,
+                "recall",
+                json!({"query": "OAuth", "max_results": 5, "max_tokens": 500}),
+            ),
+            (17, "list_memories", json!({})),
+        ] {
+            let body = call_tool_json(&router, access_token, id, name, arguments).await;
+            assert_tool_ok(&body, name);
+        }
+
+        let edit = call_tool_json(
+            &router,
+            access_token,
+            18,
+            "edit_note",
+            json!({
+                "path": "notes/oauth-created.md",
+                "expected_revision": 1,
+                "operation": {"kind": "append", "content": "OAuth edit\n"}
+            }),
+        )
+        .await;
+        assert_tool_ok(&edit, "edit_note");
+        assert_eq!(mutation_revision(&edit), 2);
+
+        let history = call_tool_json(
+            &router,
+            access_token,
+            19,
+            "note_history",
+            json!({"path": "notes/oauth-created.md"}),
+        )
+        .await;
+        assert_tool_ok(&history, "note_history");
+
+        let restore = call_tool_json(
+            &router,
+            access_token,
+            20,
+            "restore_note_revision",
+            json!({
+                "path": "notes/oauth-created.md",
+                "revision": 1,
+                "expected_current_revision": 2
+            }),
+        )
+        .await;
+        assert_tool_ok(&restore, "restore_note_revision");
+        assert_eq!(mutation_revision(&restore), 3);
+
+        let moved = call_tool_json(
+            &router,
+            access_token,
+            21,
+            "move_note",
+            json!({
+                "source": "notes/oauth-created.md",
+                "destination": "notes/oauth-moved.md",
+                "expected_revision": 3
+            }),
+        )
+        .await;
+        assert_tool_ok(&moved, "move_note");
+        assert_eq!(mutation_revision(&moved), 4);
+
+        let deleted = call_tool_json(
+            &router,
+            access_token,
+            22,
+            "delete_note",
+            json!({"path": "notes/oauth-moved.md", "expected_revision": 4}),
+        )
+        .await;
+        assert_tool_ok(&deleted, "delete_note");
+        assert_eq!(mutation_revision(&deleted), 5);
+
+        let get_memory = call_tool_json(
+            &router,
+            access_token,
+            23,
+            "get_memory",
+            json!({"id": memory_id}),
+        )
+        .await;
+        assert_tool_ok(&get_memory, "get_memory");
+
+        let remember = call_tool_json(
+            &router,
+            access_token,
+            24,
+            "remember",
+            json!({
+                "content": "Built-in OAuth can invoke every MCP Vault tool.",
+                "memory_type": "decision",
+                "importance": 0.9,
+                "confidence": 0.99,
+                "idempotency_key": "oauth-all-tools-memory"
+            }),
+        )
+        .await;
+        assert_tool_ok(&remember, "remember");
+        assert_eq!(
+            remember["result"]["structuredContent"]["data"]["outcome"],
+            "staged"
+        );
+
+        let update_memory = call_tool_json(
+            &router,
+            access_token,
+            25,
+            "update_memory",
+            json!({
+                "id": memory_id,
+                "expected_revision": 1,
+                "content": "OAuth memory operations remain available."
+            }),
+        )
+        .await;
+        assert_tool_ok(&update_memory, "update_memory");
+        assert_eq!(
+            update_memory["result"]["structuredContent"]["data"]["revision"],
+            2
+        );
+
+        let forget_memory = call_tool_json(
+            &router,
+            access_token,
+            26,
+            "forget_memory",
+            json!({"id": memory_id, "expected_revision": 2}),
+        )
+        .await;
+        assert_tool_ok(&forget_memory, "forget_memory");
+        assert_eq!(
+            forget_memory["result"]["structuredContent"]["data"]["status"],
+            "archived"
+        );
     }
 
     fn tool_request(
@@ -2979,6 +4009,43 @@ mod tests {
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
             .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn call_tool_json(
+        router: &Router,
+        token: &str,
+        id: u64,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        let response = router
+            .clone()
+            .oneshot(tool_request(token, id, name, arguments))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "{name}: {}",
+            String::from_utf8_lossy(&body)
+        );
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    fn assert_tool_ok(body: &serde_json::Value, name: &str) {
+        assert_eq!(body["result"]["isError"], false, "{name}: {body}");
+        assert_eq!(
+            body["result"]["structuredContent"]["ok"], true,
+            "{name}: {body}"
+        );
+    }
+
+    fn mutation_revision(body: &serde_json::Value) -> u64 {
+        body["result"]["structuredContent"]["data"]["revision"]["revision"]
+            .as_u64()
             .unwrap()
     }
 
@@ -3078,6 +4145,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oauth_metadata_is_public_vault_specific_and_redaction_safe() {
+        let (router, _token, _root) = configured_oauth_router().await;
+        for path in [
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp/v1/vaults/work",
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(path)
+                        .header("host", "localhost")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            assert_eq!(
+                response.headers().get("cache-control").unwrap(),
+                "no-store, max-age=0"
+            );
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                body["resource"],
+                "https://vault.example.test/mcp/v1/vaults/work"
+            );
+            assert_eq!(
+                body["authorization_servers"],
+                serde_json::json!(["https://issuer.example.test"])
+            );
+            assert_eq!(
+                body["bearer_methods_supported"],
+                serde_json::json!(["header"])
+            );
+            assert_eq!(body["scopes_supported"].as_array().unwrap().len(), 8);
+            assert!(body.get("jwks_cache_json").is_none());
+            assert!(body.get("subjects").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_public_origin_produces_an_absolute_oauth_challenge() {
+        let (router, _token, _root) = configured_oauth_router().await;
+        let mut request = discover_request("unused");
+        request.headers_mut().remove("authorization");
+        let response = router.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let challenge = response
+            .headers()
+            .get("www-authenticate")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(challenge.contains(
+            "resource_metadata=\"https://vault.example.test/.well-known/oauth-protected-resource/mcp/v1/vaults/work\""
+        ));
+    }
+
+    #[tokio::test]
     async fn pat_cannot_use_the_other_vault_endpoint() {
         let (router, token, _root) = configured_router().await;
         let mut request = discover_request(&token);
@@ -3093,10 +4223,17 @@ mod tests {
         request.headers_mut().remove("authorization");
         let response = router.oneshot(request).await.unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            response.headers().get("www-authenticate").unwrap(),
-            "Bearer realm=\"mcp-vault\""
-        );
+        let challenge = response
+            .headers()
+            .get("www-authenticate")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(challenge.contains("Bearer realm=\"mcp-vault\""));
+        assert!(challenge.contains(
+            "resource_metadata=\"/.well-known/oauth-protected-resource/mcp/v1/vaults/work\""
+        ));
+        assert!(challenge.contains("error=\"invalid_request\""));
     }
 
     #[tokio::test]

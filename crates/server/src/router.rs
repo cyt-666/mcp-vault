@@ -44,8 +44,10 @@ pub fn data_router_with_webdav_and_mcp_and_metrics(
     mcp: mcp_vault_mcp::McpService,
     metrics: crate::metrics::Metrics,
 ) -> Router {
+    let oauth_metadata = mcp_vault_mcp::oauth_metadata_router(mcp.clone());
     Router::new()
         .merge(crate::health::router(readiness))
+        .merge(oauth_metadata)
         .route("/metrics", get(crate::metrics::endpoint))
         .nest("/dav/v1/vaults", mcp_vault_webdav::router(webdav))
         .nest("/mcp/v1/vaults", mcp_vault_mcp::stateful_router(mcp))

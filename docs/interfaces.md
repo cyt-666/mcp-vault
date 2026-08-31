@@ -720,6 +720,12 @@ temporarily_unavailable
 internal_error
 ```
 
+An internal_error remains redaction-safe but includes a bounded
+details.component value (state, storage, vault_registry, or core). Storage
+failures may also include the storage boundary's redacted
+operation/error-kind diagnostic; absolute paths and raw operating-system error
+strings are never returned.
+
 Example:
 
 ```json
@@ -752,21 +758,122 @@ Authorization: Bearer <high-entropy-token>
 
 PATs are Vault-bound and scope-bound. They are a pragmatic direct-token mode, not a substitute for standards-based OAuth discovery where a client expects it.
 
-### 9.2 OAuth resource-server mode
+### 9.2 Built-in OAuth authorization server
 
-When enabled, the MCP endpoint implements:
+The default ChatGPT path is self-contained. When a Vault OAuth user is enabled,
+the data listener implements:
 
 - RFC 9728 protected resource metadata;
 - `WWW-Authenticate` with `resource_metadata` on 401;
-- configured authorization-server discovery;
-- issuer, signature, expiry, not-before, audience, and resource validation;
-- resource indicators;
-- subject-to-Vault grants;
-- MCP scopes.
+- RFC 8414 authorization-server metadata;
+- bounded RFC 7591 Dynamic Client Registration for public clients;
+- authorization code with mandatory PKCE `S256`;
+- exact registered redirect URIs, RFC 8707 `resource`, and RFC 9207 `iss`;
+- short-lived request handles, single-use authorization codes, and opaque access tokens;
+- rotating refresh tokens with replay-family revocation;
+- Vault-bound MCP scopes and immediate local revocation.
+
+For a path-based Vault resource, the canonical metadata endpoint is:
+
+```text
+GET /.well-known/oauth-protected-resource/mcp/v1/vaults/{vault_slug}
+```
+
+The origin-root `/.well-known/oauth-protected-resource` endpoint is an alias
+only when exactly one active Vault has one unambiguous configured resource.
+Metadata is public by design and returns only the exact resource identifier,
+enabled authorization-server issuer URLs, supported scopes, header bearer
+method, and protocol metadata. It never returns cached JWKS, subjects, grants,
+tokens, or secrets.
+
+An unauthenticated or invalid request returns a same-origin challenge shaped
+like:
+
+```http
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer realm="mcp-vault", resource_metadata="https://vault.example.com/.well-known/oauth-protected-resource/mcp/v1/vaults/default", error="invalid_token", error_description="The bearer access token is invalid or expired"
+```
+
+Production OAuth requires `MCP_VAULT_DATA_PUBLIC_ORIGIN`, which makes the
+challenge URL absolute without trusting the request `Host`. A direct local
+development listener without that setting uses the equivalent same-origin
+relative protected-resource path, but the built-in authorization server is not
+advertised unless the configured origin is HTTPS or explicit loopback HTTP.
+
+Public built-in endpoints are:
+
+```text
+GET  /.well-known/oauth-authorization-server
+POST /oauth/register
+GET  /oauth/v2/authorize
+POST /oauth/v2/authorize
+POST /oauth/token
+```
+
+`/oauth/v1/authorize` and `/oauth/authorize` remain compatibility aliases.
+Their GET handlers issue a query-preserving, non-cacheable 307 redirect to the
+current versioned endpoint instead of creating an authorization transaction at
+an obsolete path. Their POST handlers remain available for already-rendered
+legacy forms. Fresh metadata and the browser form use the current versioned
+path. Reference proxies expose the `/oauth/` prefix rather than an exact leaf
+path.
+
+Registration accepts only public clients with token endpoint authentication
+method `none`, response type `code`, and `authorization_code` plus optional
+`refresh_token` grants. Redirect URIs are exact and must use HTTPS, except for
+explicit loopback HTTP development callbacks. Authorization preserves the
+client's opaque `state`, requires the exact MCP `resource`, and includes the
+canonical issuer as `iss` in the redirect. Token requests are form encoded and
+must repeat the same client, redirect, verifier, and resource.
+
+The token endpoint is Host-validated but is not gated by the MCP data-plane
+Origin allow-list. OpenAI hosts may exchange a code from a backend or may send
+an application Origin or `Origin: null`; none of those values is OAuth client
+authentication. The endpoint accepts no Admin/session cookie authority and
+instead requires the exact public client, redirect URI, resource, single-use
+code plus PKCE verifier, or a rotating refresh token.
+
+The browser-facing authorization form POST is Host-validated but is not gated
+by the MCP data-plane Origin allow-list. System OAuth browsers and sandboxed
+webviews may send `Origin: null` or the invoking application's origin. The form
+instead requires the opaque, short-lived request handle created by the
+validated authorization request; that handle remains bound to the exact client,
+redirect URI, state, resource, scopes, and PKCE challenge. A correctly
+authenticated retry of the same still-valid browser form receives a fresh
+single-use authorization code. This makes duplicate browser/proxy POSTs safe
+without making any authorization code replayable.
+
+The login form accepts only the independent Vault OAuth username/password
+configured on the Admin listener. It never accepts an Admin session or Admin
+password. Passwords are Argon2id hashes; request handles, codes, access tokens,
+and refresh tokens are stored only as versioned installation-keyed digests.
+The form action is the absolute authorization endpoint derived from the
+configured canonical public Origin. Interactive authorization HTML omits the
+CSP `form-action` navigation directive for Chromium compatibility; error-only
+HTML still uses `form-action 'none'`. This does not admit a request-derived
+Host or wildcard action: the rendered action remains a fixed server-generated
+URL, and the authorization POST must present the opaque transaction handle
+bound to the exact client, redirect URI, state, resource, scopes, and PKCE
+challenge. The rest of the policy remains deny-by-default.
+The login form uses standard `username` and `current-password` autocomplete
+semantics so browser password managers can fill it normally. OAuth responses
+also send `Vary: *` in addition to explicit browser, CDN, and surrogate
+no-store controls, preventing a shared cache from reusing a transaction page.
+All OAuth HTML/JSON responses carry browser and intermediary no-store controls,
+login pages deny framing and external content, and secrets are not logged.
 
 The service does not pass MCP access tokens to LLM providers or any upstream API.
 
-The first complete release may use a configured external OAuth/OIDC authorization server rather than implementing an authorization server itself.
+### 9.3 Optional external issuer compatibility
+
+An operator that already runs an OAuth/OIDC provider may configure external
+RS256 JWT validation and explicit Subject-to-Vault grants. The external server
+must publish discovery metadata, support authorization code + PKCE `S256`,
+support CIMD, DCR, or predefined client registration, and preserve `resource`.
+MCP Vault accepts the exact resource indicator from `aud` or an explicit
+`resource` claim while still checking issuer, signature, time, configured
+audience, Subject grant, Vault, and scopes. External client secrets, access
+tokens, refresh tokens, and private keys are never stored by MCP Vault.
 
 ## 10. Admin API
 
@@ -838,6 +945,9 @@ DELETE /api/v1/webdav/credentials/{id}
 GET    /api/v1/mcp/tokens
 POST   /api/v1/mcp/tokens
 DELETE /api/v1/mcp/tokens/{id}
+GET    /api/v1/mcp/oauth/local
+PUT    /api/v1/mcp/oauth/local
+DELETE /api/v1/mcp/oauth/local
 GET    /api/v1/mcp/oauth
 PUT    /api/v1/mcp/oauth
 GET    /api/v1/mcp/oauth/grants
@@ -890,6 +1000,11 @@ POST   /api/v1/restore/validate
 POST   /api/v1/restore
 POST   /api/v1/maintenance/recover
 ```
+
+`GET /api/v1/mcp/connection-info` returns `mcp_endpoint`, the exact
+`oauth_protected_resource_metadata_url`, and the built-in
+`oauth_authorization_server_metadata_url` derived from the configured public
+data origin; no value is derived from an untrusted request `Host` header.
 
 Memory archive and restore accept
 `{"expected_revision": <current revision>}`. Permanent deletion uses the

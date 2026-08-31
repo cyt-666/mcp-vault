@@ -265,7 +265,10 @@ Test application services with real temporary filesystem + SQLite:
 - embedding dimension/model/Vault partition and re-embedding job references;
 - deterministic bounded note chunks, missing/stale vector scheduling, semantic
   paraphrase retrieval, lexical fallback, and two-Vault note-cue isolation;
-- memory materialization.
+- memory materialization;
+- forced Unix `RENAME_NOREPLACE` capability failure followed by a complete
+  same-directory link commit, destination-race preservation, temporary cleanup,
+  and explicit failure when safe atomic creation is unavailable.
 
 ### 8.5 Protocol tests
 
@@ -349,7 +352,7 @@ cargo test -p mcp-vault-server --all-features
 The WebDAV integration fixture exercises the public adapter boundary with
 Basic challenge, ETags and ranges, streamed binary PUT, PROPFIND, MKCOL,
 COPY/MOVE/DELETE, LOCK/UNLOCK, overwrite behavior, directory trees, path
-attacks, expiry/revocation, trusted-proxy transport, and two-Vault isolation.
+attacks, expiry/revocation, forwarded-HTTPS transport, and two-Vault isolation.
 Run Litmus and the sanitized Sync Engine/Remotely Save fixtures against a
 real HTTP server before release; the in-process fixture is not a substitute
 for those client checks.

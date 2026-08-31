@@ -20,7 +20,10 @@ mod vaults;
 pub use audit::{AuditRecord, AuditRepository};
 pub use auth::{
     AdminSessionRecord, AdminUserRecord, AuthStateRepository, EncryptedSecretRecord,
-    McpTokenRecord, OAuthGrantRecord, OAuthIssuerRecord, WebDavCredentialRecord,
+    McpTokenRecord, NewOAuthAccessToken, NewOAuthAuthorizationCode, NewOAuthRefreshToken,
+    OAuthAccessTokenRecord, OAuthAuthorizationCodeRecord, OAuthAuthorizationRequestRecord,
+    OAuthClientRecord, OAuthGrantRecord, OAuthIssuerRecord, OAuthLocalUserRecord,
+    OAuthRefreshTokenRecord, WebDavCredentialRecord,
 };
 pub use background::{
     JobRecord, JobRepository, JobStatus, JobStatusCounts, OutboxEventRecord, OutboxRepository,

@@ -2081,8 +2081,8 @@ impl VaultCore {
             .recovery_state(storage, &journal, &payload, true)
             .await?;
         if old && !new {
-            if let Some(temp) = journal.temp_path {
-                let temp = TemporaryPath::parse(temp).map_err(VaultError::Storage)?;
+            if let Some(temp) = journal.temp_path.as_ref() {
+                let temp = TemporaryPath::parse(temp.clone()).map_err(VaultError::Storage)?;
                 storage.remove_temporary(&temp).await.map_err(map_storage)?;
             }
             files
@@ -2096,6 +2096,16 @@ impl VaultCore {
             return Ok(RecoveryOutcome::RolledBack);
         }
         if new {
+            // A no-replace compatibility commit may have linked the complete
+            // temporary inode at the canonical name immediately before a
+            // crash. Once the expected canonical hash proves the new state,
+            // the journal-owned temporary name is safe to remove before
+            // finalizing metadata. Ordinary rename commits reach the same
+            // path with an already-absent temporary name.
+            if let Some(temp) = journal.temp_path.as_ref() {
+                let temp = TemporaryPath::parse(temp.clone()).map_err(VaultError::Storage)?;
+                storage.remove_temporary(&temp).await.map_err(map_storage)?;
+            }
             if journal.state == JournalState::Prepared {
                 files
                     .mark_file_committed(context, journal.id, payload.content_hash.as_deref())

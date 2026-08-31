@@ -18,6 +18,14 @@ use tokio::sync::Semaphore;
 
 use crate::{StateError, now_millis};
 
+mod local_oauth;
+
+pub use local_oauth::{
+    NewOAuthAccessToken, NewOAuthAuthorizationCode, NewOAuthRefreshToken, OAuthAccessTokenRecord,
+    OAuthAuthorizationCodeRecord, OAuthAuthorizationRequestRecord, OAuthClientRecord,
+    OAuthLocalUserRecord, OAuthRefreshTokenRecord,
+};
+
 /// Persisted authenticated-encryption record. The plaintext is never present
 /// in this type or in SQLite.
 #[derive(Clone, Eq, PartialEq)]
@@ -420,7 +428,11 @@ impl AuthStateRepository {
         Ok(sqlx::query_scalar::<_, i64>(
             "SELECT
                  (SELECT COUNT(*) FROM encrypted_secrets) +
-                 (SELECT COUNT(*) FROM mcp_tokens)",
+                 (SELECT COUNT(*) FROM mcp_tokens) +
+                 (SELECT COUNT(*) FROM oauth_authorization_requests) +
+                 (SELECT COUNT(*) FROM oauth_authorization_codes) +
+                 (SELECT COUNT(*) FROM oauth_access_tokens) +
+                 (SELECT COUNT(*) FROM oauth_refresh_tokens)",
         )
         .fetch_one(&self.pool)
         .await? as u64)

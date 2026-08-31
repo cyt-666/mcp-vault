@@ -32,6 +32,10 @@ pub enum StorageError {
     /// The requested target already exists under a no-replace operation.
     #[error("destination already exists")]
     DestinationExists,
+    /// The filesystem cannot provide an atomic no-replace file commit using
+    /// either exclusive rename or the safe same-filesystem link fallback.
+    #[error("filesystem does not support safe atomic no-replace file creation")]
+    AtomicCreateUnsupported,
     /// The source or history blob was not found.
     #[error("source does not exist")]
     SourceNotFound,

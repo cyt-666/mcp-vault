@@ -897,6 +897,57 @@ async fn injected_phases_recover_to_old_or_new_atomic_state() {
 }
 
 #[tokio::test]
+async fn recovery_removes_a_linked_temporary_name_after_canonical_install() {
+    let (directory, state, context, core) = setup().await;
+    let failing = core.with_failure_injector(Arc::new(FailAt::new(CommitPhase::RenameCommitted)));
+    let note = path("linked-recovery.md");
+    let error = failing
+        .create_bytes(
+            &context,
+            &note,
+            b"complete linked payload",
+            system_actor(),
+            SourcePlane::Mcp,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, VaultError::InjectedFailure(_)));
+
+    let journals = state.files().list_incomplete(&context).await.unwrap();
+    assert_eq!(journals.len(), 1);
+    let temporary = journals[0].temp_path.as_ref().unwrap();
+    let target_path = context.content_root().join(note.as_str());
+    let temporary_path = context.content_root().join(temporary.as_str());
+
+    // Model a crash after the fallback link is installed but before its
+    // private temporary name is removed. Both names reference the same
+    // already-complete inode.
+    std::fs::hard_link(&target_path, &temporary_path).unwrap();
+    assert!(temporary_path.exists());
+
+    let recovery_core = VaultCore::new(
+        state,
+        directory.path().join("history"),
+        VaultPathPolicy::default(),
+        StorageOptions {
+            durability: DurabilityPolicy::None,
+            minimum_free_bytes: 0,
+            ..StorageOptions::default()
+        },
+        Default::default(),
+    );
+    let report = recovery_core.recover(&context).await.unwrap();
+    assert_eq!(report.finalized, 1);
+    assert_eq!(report.needs_review, 0);
+    assert!(!temporary_path.exists());
+    assert_eq!(
+        read_bytes(&recovery_core, &context, &note).await,
+        b"complete linked payload"
+    );
+}
+
+#[tokio::test]
 async fn managed_memory_writes_are_atomic_hidden_and_reconciliation_safe() {
     let (directory, state, context, core) = setup().await;
     let managed = path("_mcp-vault/memory/records/2026/08/00000000-0000-7000-8000-000000000001.md");

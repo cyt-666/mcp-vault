@@ -1,6 +1,6 @@
 services:
   mcp-vault:
-    image: mcp-vault:0.1.0
+    image: mcp-vault:0.1.12
     platform: linux/amd64
     pull_policy: never
     # GUI-managed NAS bind mounts are commonly owned by a host-only UID.
@@ -26,8 +26,6 @@ services:
       MCP_VAULT_DATA_PUBLIC_ORIGIN: https://mcp-vault.cyt.cool
       # Replace the example NAS LAN IP with the address used by local browsers.
       MCP_VAULT_ADMIN_ORIGINS: "https://mcp-vault.cyt.cool:8444,http://192.168.1.20:8081"
-      # Replace this example with the exact source IP MCP Vault sees for Nginx.
-      MCP_VAULT_TRUSTED_PROXY_IPS: 192.168.1.10
       MCP_VAULT_BACKUP_DIR: /data/backups
       MCP_VAULT_METRICS_ENABLED: "false"
       MCP_VAULT_LOG_FORMAT: json

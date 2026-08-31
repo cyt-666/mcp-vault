@@ -1,6 +1,6 @@
 services:
   mcp-vault:
-    image: "${MCP_VAULT_IMAGE:-mcp-vault:0.1.0}"
+    image: "${MCP_VAULT_IMAGE:-mcp-vault:0.1.12}"
     platform: linux/amd64
     pull_policy: never
     restart: unless-stopped
@@ -20,7 +20,6 @@ services:
       MCP_VAULT_DATA_ORIGINS: "https://${MCP_VAULT_PUBLIC_HOST:?set MCP_VAULT_PUBLIC_HOST in .env}"
       MCP_VAULT_DATA_PUBLIC_ORIGIN: "https://${MCP_VAULT_PUBLIC_HOST:?set MCP_VAULT_PUBLIC_HOST in .env}"
       MCP_VAULT_ADMIN_ORIGINS: "https://${MCP_VAULT_ADMIN_HOST:?set MCP_VAULT_ADMIN_HOST in .env}:${MCP_VAULT_ADMIN_HTTPS_PORT:-8444}"
-      MCP_VAULT_TRUSTED_PROXY_IPS: "${MCP_VAULT_PROXY_IP:-172.30.30.10}"
       MCP_VAULT_BACKUP_DIR: /data/backups
       MCP_VAULT_METRICS_ENABLED: "false"
       MCP_VAULT_LOG_FORMAT: json

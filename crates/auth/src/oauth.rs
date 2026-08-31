@@ -258,14 +258,16 @@ pub fn validate_access_token(
     {
         return Err(AuthError::OAuthTokenInvalid);
     }
-    let resource = claims
+    let expected_resource = issuer
+        .resource
+        .as_deref()
+        .ok_or(AuthError::OAuthConfiguration)?;
+    let resource_matches_audience = claims.aud.values().any(|value| value == expected_resource);
+    let resource_matches_claim = claims
         .resource
         .as_ref()
-        .ok_or(AuthError::OAuthTokenInvalid)?;
-    if !resource
-        .values()
-        .any(|value| Some(value) == issuer.resource.as_deref())
-    {
+        .is_some_and(|resource| resource.values().any(|value| value == expected_resource));
+    if !resource_matches_audience && !resource_matches_claim {
         return Err(AuthError::OAuthTokenInvalid);
     }
 
@@ -502,5 +504,60 @@ mod tests {
                 .permissions
                 .contains(mcp_vault_domain::Permission::WriteVault)
         );
+    }
+
+    #[test]
+    fn accepts_resource_indicator_in_audience_without_custom_resource_claim() {
+        let context = context();
+        let private = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+        let public = RsaPublicKey::from(&private);
+        let modulus = URL_SAFE_NO_PAD.encode(public.n().to_bytes_be());
+        let exponent = URL_SAFE_NO_PAD.encode(public.e().to_bytes_be());
+        let resource = "https://vault.example.test/mcp/v1/vaults/work";
+        let issuer = OAuthIssuerRecord {
+            id: mcp_vault_domain::OAuthIssuerId::new(),
+            name: "test".to_owned(),
+            issuer_url: "https://issuer.example.test".to_owned(),
+            discovery_url: None,
+            audience: resource.to_owned(),
+            resource: Some(resource.to_owned()),
+            jwks_cache_json: Some(format!(
+                r#"{{"keys":[{{"kty":"RSA","kid":"rsa-test","alg":"RS256","use":"sig","n":"{modulus}","e":"{exponent}"}}]}}"#
+            )),
+            jwks_cached_at: Some(1),
+            enabled: true,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let grant = OAuthGrantRecord {
+            id: mcp_vault_domain::OAuthGrantId::new(),
+            issuer_id: issuer.id,
+            subject: "agent".to_owned(),
+            vault_id: context.id(),
+            scopes_json: r#"["vault:read"]"#.to_owned(),
+            created_at: 1,
+            updated_at: 1,
+            revoked_at: None,
+        };
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256","kid":"rsa-test"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(format!(
+            r#"{{"iss":"https://issuer.example.test","sub":"agent","aud":"{resource}","exp":4102444800,"scope":"vault:read"}}"#
+        ));
+        let signing_input = format!("{header}.{payload}");
+        let signature = SigningKey::<Sha256>::new(private).sign(signing_input.as_bytes());
+        let token = format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signature.to_bytes())
+        );
+
+        validate_access_token(
+            &token,
+            &issuer,
+            &grant,
+            &context,
+            &[Scope::VaultRead],
+            1_700_000_000,
+        )
+        .unwrap();
     }
 }

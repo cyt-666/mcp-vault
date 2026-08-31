@@ -1,7 +1,7 @@
 //! Application-level authentication and authorization services.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -28,6 +28,14 @@ use crate::{
         BearerToken, MasterKeyRing, SecretString, digest_bearer_token, generate_bearer_token,
         token_prefix,
     },
+};
+
+mod local_oauth;
+
+pub use local_oauth::{
+    LocalOAuthAuthorizationInput, LocalOAuthAuthorizationPrompt, LocalOAuthAuthorizationResult,
+    LocalOAuthClientRegistration, LocalOAuthClientRegistrationResult, LocalOAuthCodeExchange,
+    LocalOAuthRefreshExchange, LocalOAuthTokenIssue, LocalOAuthUser,
 };
 
 const PAT_LABEL: &str = "mcpv_pat_";
@@ -169,6 +177,15 @@ pub struct OAuthIssuerInput {
     pub jwks_cache_json: String,
     /// Whether the issuer is enabled.
     pub enabled: bool,
+}
+
+/// Public, redaction-safe OAuth resource-server discovery configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OAuthResourceServer {
+    /// Exact protected resource identifier carried through OAuth.
+    pub resource: String,
+    /// Enabled authorization-server issuer identifiers for this resource.
+    pub authorization_servers: Vec<String>,
 }
 
 impl std::fmt::Debug for OAuthIssuerInput {
@@ -1001,6 +1018,34 @@ impl AuthService {
                 .await
                 .map_err(AuthError::from)
         }
+    }
+
+    /// Return enabled OAuth resources grouped by exact resource identifier.
+    ///
+    /// Cached signing keys and all subject/grant data remain inside the Auth
+    /// boundary; this projection contains only fields intended for RFC 9728
+    /// public discovery metadata.
+    pub async fn oauth_resource_servers(&self) -> Result<Vec<OAuthResourceServer>, AuthError> {
+        let issuers = self.repository.list_oauth_issuers(1000).await?;
+        let mut grouped = BTreeMap::<String, BTreeSet<String>>::new();
+        for issuer in issuers {
+            let Some(resource) = issuer.resource.filter(|resource| !resource.is_empty()) else {
+                continue;
+            };
+            if issuer.enabled && issuer.jwks_cache_json.is_some() {
+                grouped
+                    .entry(resource)
+                    .or_default()
+                    .insert(issuer.issuer_url);
+            }
+        }
+        Ok(grouped
+            .into_iter()
+            .map(|(resource, authorization_servers)| OAuthResourceServer {
+                resource,
+                authorization_servers: authorization_servers.into_iter().collect(),
+            })
+            .collect())
     }
 
     /// Grant an OAuth subject a bounded scope set for one Vault.

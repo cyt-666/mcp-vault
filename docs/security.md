@@ -157,10 +157,12 @@ Use dedicated app credentials.
 - Permissions are explicit.
 - Expiry and revocation are supported.
 - Basic Auth is accepted only over secure transport outside localhost.
-- The application accepts a forwarded HTTPS assertion only from an exact
-  configured socket-peer allow list (`MCP_VAULT_TRUSTED_PROXY_IPS`).
-- A forwarded header from any other peer is ignored and public plaintext Basic
-  Authentication is rejected.
+- A reverse proxy must preserve `Authorization` and set
+  `X-Forwarded-Proto: https` in the effective WebDAV location.
+- The application does not authenticate the peer that supplies this forwarded
+  scheme. The plaintext data listener must therefore be reachable only from
+  the intended proxy; an untrusted direct client could otherwise forge the
+  header and send Basic credentials without transport encryption.
 - Authentication headers are never logged.
 - DAV responses must not reveal whether another Vault/user exists beyond necessary status behavior.
 
@@ -186,16 +188,83 @@ Do not store plaintext or use a slow password hash as the only lookup mechanism 
 When enabled, follow the current MCP authorization specification:
 
 - expose RFC 9728 protected-resource metadata;
-- identify one or more authorization servers;
-- validate access tokens for this resource;
-- require issuer, signature, time, audience, and resource;
-- bind subject to explicit Vault grant and scopes;
+- expose RFC 8414 authorization-server metadata for the built-in mode;
+- use public-client DCR, authorization code, and mandatory PKCE `S256`;
+- require exact redirects, client ID, RFC 8707 resource, scope, expiry,
+  authenticated request completion, and single-use authorization codes;
+- bind every local user, code, access token, refresh token, and principal to
+  one Vault and exact MCP resource;
 - reject token passthrough;
 - keep upstream provider credentials separate;
+- keep Admin credentials off the public authorization form;
+- store local OAuth passwords with Argon2id and every high-entropy OAuth value
+  only as a versioned installation-keyed digest;
+- rotate refresh tokens and revoke the full token family on replay;
+- set no-store, framing denial, CSP, and referrer controls on public OAuth
+  responses;
+- rate-limit interactive password failures and bound public DCR state;
+- optionally validate external access tokens by issuer, RS256 signature, time,
+  audience/resource, Subject grant, Vault, and scopes;
 - accept only normalized RSA public JWKS for `RS256`; symmetric/private key
   material is rejected and never persisted;
 - fail safely on validation errors and require an Admin cache update when the
   issuer rotates keys.
+
+The built-in authorization server is the default standalone path. Its public
+client receives no client secret. Registered redirect URIs are exact; HTTPS is
+required except for explicit loopback development. Authorization request
+handles are short-lived. A correctly authenticated duplicate submission may
+issue a fresh code for the same still-valid request, while every authorization
+code remains short-lived and strictly single-use. Access tokens are opaque and
+short-lived; refresh tokens rotate without extending their original absolute lifetime.
+Replacing or disabling the Vault OAuth user atomically deletes outstanding
+authorization requests and consumes/revokes all issued state. Public handlers translate protocol DTOs only;
+Auth owns validation and State owns SQL transactions.
+
+The Vault OAuth password is deliberately distinct from the Admin password.
+The Admin listener creates/rotates/disables it under session, Origin, and CSRF
+checks. The public data listener never accepts Admin cookies or credentials.
+OAuth pages contain no third-party assets, do not expose the original redirect
+or state in hidden fields, and return generic login failures.
+Authorization forms use the configured canonical public Origin for an absolute,
+server-generated action URL. Interactive authorization HTML deliberately omits
+the CSP `form-action` navigation directive because Chromium can block or
+misreport native OAuth form submission even when the directive names the exact
+destination. Error-only HTML keeps `form-action 'none'`; broad scheme sources,
+wildcards, and request-Host-derived actions remain forbidden. The POST still
+requires the opaque request handle and its exact client, redirect, resource,
+scope, state, and PKCE bindings.
+
+Protected-resource metadata is deliberately unauthenticated. It publishes only
+the exact resource, authorization-server URLs, supported scopes, and header
+bearer method. Canonical URLs come from the configured public origin plus Vault
+endpoint; request `Host` and forwarded headers cannot redefine them. The
+origin-root alias fails closed when more than one resource is eligible.
+
+Built-in authorization-server/DCR/login/token routes validate the configured
+Host. Metadata and DCR retain the optional data-plane Origin policy. The
+browser-facing authorization POST and `/oauth/token` deliberately do not
+depend on an Origin header because system OAuth browsers and OpenAI hosts may
+serialize it as `null`, omit it, or send the invoking application's Origin.
+Neither endpoint accepts ambient cookie authority: the authorization POST
+requires an opaque, short-lived request handle already bound to the exact
+registered redirect URI, state, resource, scopes, and PKCE challenge. Repeated
+correctly authenticated POSTs create distinct single-use codes so a browser or
+edge retry cannot replace a successful redirect with an expiry page.
+The token POST requires the exact public client, redirect, resource, and PKCE
+verifier for a single-use code, or a rotating refresh token. Origin therefore
+adds no authentication or CSRF boundary to either request.
+The routes are advertised only for HTTPS or explicit loopback HTTP. The reverse
+proxy exposes these narrow routes but never Admin.
+
+MCP tool failures do not expose SQL, absolute paths, note bodies, or raw
+operating-system errors. A generic internal_error may carry only a bounded
+component category. Filesystem failures may additionally carry the storage
+boundary's already-redacted operation and ErrorKind diagnostic so operators can
+distinguish permissions, read-only mounts, disk pressure, and transient I/O
+without receiving host paths.
+
+#### Optional external issuer mode
 
 The current release uses an explicitly Admin-supplied public JWKS cache. It
 does not impose a 24-hour expiry without an automatic refresh worker, because
@@ -204,7 +273,10 @@ audited Admin update. A future discovery/refresh worker must use a bounded
 short cache lifetime, SSRF-safe HTTPS fetching, and retain the last validated
 public set only according to an explicit stale-key policy.
 
-The server acts as a resource server. A configured external OAuth/OIDC server may provide authorization. Do not invent an incomplete OAuth implementation.
+The external authorization server must support authorization code + PKCE
+`S256`, MCP resource indicators, and ChatGPT client identification through
+CIMD, DCR, or an explicitly pre-registered client. MCP Vault does not receive
+or store the external OAuth client secret.
 
 ### 7.3 Vault binding
 
@@ -316,6 +388,16 @@ Default policy:
 - reject hardlink behaviors that could alias outside managed identity;
 - use descriptor-relative/no-follow APIs where available.
 
+The only internal hard-link exception is a Unix compatibility commit for one
+MCP Vault-created, already-synced, same-directory temporary regular file when
+the mounted filesystem rejects `RENAME_NOREPLACE` as unsupported. The target
+link is created atomically and refuses an existing name; the private temporary
+name is then removed before success. No protocol accepts a hard-link source,
+the operation cannot cross a directory descriptor or Vault root, and the
+fallback is never used for directories or replacement writes. If the mount
+cannot provide either exclusive rename or this constrained link operation,
+the write fails explicitly instead of using a racy check-then-rename.
+
 If symlinks are supported later, they require an explicit safe policy and tests.
 
 ### 9.3 Archive restore
@@ -338,6 +420,8 @@ installation master-key material.
 Security includes protection from accidental Agent data loss.
 
 - Atomic temporary-file commit.
+- Atomic no-replace creation on filesystems without exclusive-rename support,
+  or an explicit unsupported-filesystem failure without silent overwrite.
 - Expected revisions and DAV preconditions.
 - Stable content hashes.
 - History retention.
@@ -606,7 +690,8 @@ Required tests:
 - public listener has no Admin routes/assets;
 - loopback Admin default, obsolete application-CIDR rejection, and documented
   deployment-owned source policy;
-- data-plane trusted-proxy behavior;
+- WebDAV forwarded-scheme behavior and deployment-owned data-listener
+  isolation;
 - CSRF/Origin/session controls, including reload restoration, mutation after
   reload, expired-session fallback, and dual-cookie logout cleanup;
 - password/token/secret redaction;

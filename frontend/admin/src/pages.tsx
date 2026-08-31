@@ -440,7 +440,10 @@ function McpPage({
   onRefresh: () => void;
 }) {
   const tokens = arrayRecords(data?.tokens);
-  const [oauthOpen, setOauthOpen] = useState(false);
+  const [externalOauthOpen, setExternalOauthOpen] = useState(false);
+  const localOAuth = asRecord(data?.local_oauth);
+  const localOAuthUser = asRecord(localOAuth.user);
+  const localOAuthConfigured = booleanValue(localOAuth.configured) && booleanValue(localOAuthUser.enabled);
 
   async function revoke(token: JsonObject) {
     const name = stringValue(token.name, '此 Token');
@@ -459,9 +462,35 @@ function McpPage({
       <Panel title="连接信息" eyebrow="MCP 接入地址" description="在 Agent 客户端中填写下面的地址和凭据。">
         <div className="copy-stack">
           <CopyField label="MCP 地址" value={stringValue(data?.mcp_endpoint)} />
+          <CopyField label="OAuth 资源元数据" value={stringValue(data?.oauth_protected_resource_metadata_url)} />
+          <CopyField label="内置 OAuth 服务元数据" value={stringValue(data?.oauth_authorization_server_metadata_url)} />
           <CopyField label="WebDAV 地址" value={stringValue(data?.webdav_endpoint)} />
         </div>
         <p className="muted compact-text">支持协议版本：{Array.isArray(data?.supported_mcp_revisions) ? data.supported_mcp_revisions.join('、') : '—'}</p>
+      </Panel>
+
+      <Panel
+        title="ChatGPT OAuth"
+        eyebrow="内置授权服务器"
+        description="直接使用 MCP Vault 登录，不需要部署外部 OAuth 服务。"
+        actions={<StatusBadge tone={localOAuthConfigured ? 'success' : 'warning'}>{localOAuthConfigured ? '已启用' : '待配置'}</StatusBadge>}
+      >
+        <Notice tone="info">
+          在 ChatGPT 中添加远程 MCP 时只填写上面的 MCP 地址。ChatGPT 会自动发现本站 OAuth、注册公开客户端并跳转到 MCP Vault 登录页。
+        </Notice>
+        {localOAuthConfigured ? (
+          <div className="summary-list">
+            <SummaryRow label="OAuth 用户名" value={stringValue(localOAuthUser.username)} mono />
+            <SummaryRow label="授权范围" value={Array.isArray(localOAuthUser.scopes) ? localOAuthUser.scopes.join(' · ') : '—'} />
+            <SummaryRow label="密码更新时间" value={formatTime(localOAuthUser.password_changed_at)} />
+          </div>
+        ) : (
+          <EmptyState title="还没有内置 OAuth 登录" detail="创建一个与 Admin 完全独立的 Vault OAuth 用户后，即可连接 ChatGPT。" />
+        )}
+        <details className="disclosure" open={!localOAuthConfigured}>
+          <summary>{localOAuthConfigured ? '轮换 OAuth 登录与权限' : '创建 Vault OAuth 登录'}</summary>
+          <LocalOAuthForm configured={localOAuthConfigured} notify={notify} onRefresh={onRefresh} />
+        </details>
       </Panel>
 
       <Panel title="个人访问 Token" eyebrow="PAT" description="每个 Agent 使用独立 Token，并只授予所需权限。">
@@ -493,14 +522,109 @@ function McpPage({
         </details>
       </Panel>
 
-      <details className="advanced-section" onToggle={(event) => setOauthOpen(event.currentTarget.open)}>
+      <details className="advanced-section" onToggle={(event) => setExternalOauthOpen(event.currentTarget.open)}>
         <summary>
-          <span>高级：OAuth 资源服务器</span>
-          <small>仅在你已有外部 OAuth/OIDC 服务时配置</small>
+          <span>高级：外部 OAuth/OIDC 兼容</span>
+          <small>仅供已有身份提供商的部署使用</small>
         </summary>
-        {oauthOpen ? <OAuthForms notify={notify} /> : null}
+        {externalOauthOpen ? (
+          <OAuthForms
+            mcpEndpoint={stringValue(data?.mcp_endpoint)}
+            metadataUrl={stringValue(data?.oauth_protected_resource_metadata_url)}
+            notify={notify}
+          />
+        ) : null}
       </details>
     </div>
+  );
+}
+
+function LocalOAuthForm({ configured, notify, onRefresh }: { configured: boolean; notify: Notify; onRefresh: () => void }) {
+  const [username, setUsername] = useState('chatgpt');
+  const [password, setPassword] = useState('');
+  const [scopes, setScopes] = useState(['vault:discover', 'vault:read', 'memory:read']);
+  const [busy, setBusy] = useState(false);
+
+  function toggleScope(scope: string) {
+    setScopes((current) => (current.includes(scope) ? current.filter((value) => value !== scope) : [...current, scope]));
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (scopes.length === 0) {
+      notify('请至少选择一个 OAuth 权限。', 'warning');
+      return;
+    }
+    setBusy(true);
+    try {
+      await adminApi.request('/mcp/oauth/local', {
+        method: 'PUT',
+        body: { username, password, scopes },
+      });
+      setPassword('');
+      notify(configured ? 'OAuth 登录已轮换，旧授权和令牌已全部撤销。' : '内置 OAuth 已启用，可以连接 ChatGPT。');
+      onRefresh();
+    } catch (error: unknown) {
+      notify(formatRequestError(error), 'danger');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disable() {
+    if (!window.confirm('确定停用内置 OAuth 吗？所有 ChatGPT OAuth 授权会立即失效。')) return;
+    setBusy(true);
+    try {
+      await adminApi.request('/mcp/oauth/local', { method: 'DELETE' });
+      notify('内置 OAuth 已停用，已有授权和令牌已撤销。');
+      onRefresh();
+    } catch (error: unknown) {
+      notify(formatRequestError(error), 'danger');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="compact-form" onSubmit={submit}>
+      <div className="form-grid">
+        <label>
+          Vault OAuth 用户名
+          <input required autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} />
+        </label>
+        <label>
+          独立 OAuth 密码
+          <input required type="password" autoComplete="new-password" aria-describedby="oauth-password-policy" value={password} onChange={(event) => setPassword(event.target.value)} />
+        </label>
+      </div>
+      <PasswordPolicyHelp id="oauth-password-policy" />
+      <fieldset className="preset-group">
+        <legend>选择授权模板</legend>
+        {patPresets.map((preset) => {
+          const selected = sameValues(scopes, preset.scopes);
+          return (
+            <button className={`preset-card${selected ? ' preset-card--selected' : ''}`} key={preset.id} type="button" aria-pressed={selected} onClick={() => setScopes([...preset.scopes])}>
+              <span>{preset.label}{preset.recommended ? <small>推荐</small> : null}</span>
+              <p>{preset.detail}</p>
+            </button>
+          );
+        })}
+      </fieldset>
+      <details className="disclosure permission-disclosure">
+        <summary>自定义权限（已选 {scopes.length} 项）</summary>
+        <fieldset className="choice-group choice-group--two-columns">
+          <legend className="visually-hidden">逐项选择 OAuth Scope</legend>
+          {patScopeOptions.map((option) => (
+            <Choice key={option.value} checked={scopes.includes(option.value)} label={option.label} detail={option.detail} technical={option.value} onChange={() => toggleScope(option.value)} />
+          ))}
+        </fieldset>
+      </details>
+      <Notice tone="warning">此密码只用于公网 OAuth 登录，不是 Admin 密码。每次保存都会撤销旧授权，适合安全轮换。</Notice>
+      <div className="button-row">
+        <button className="primary-button" disabled={busy} type="submit">{busy ? '正在保存…' : configured ? '轮换登录并撤销旧令牌' : '启用内置 OAuth'}</button>
+        {configured ? <button className="danger-link" disabled={busy} type="button" onClick={() => void disable()}>停用内置 OAuth</button> : null}
+      </div>
+    </form>
   );
 }
 
@@ -578,8 +702,22 @@ function McpTokenForm({ notify, onSecret, onRefresh }: { notify: Notify; onSecre
   );
 }
 
-function OAuthForms({ notify }: { notify: Notify }) {
-  const [issuerValues, setIssuerValues] = useState({ name: '', issuer_url: '', audience: 'mcp-vault', resource: '', jwks_cache_json: '' });
+function OAuthForms({
+  mcpEndpoint,
+  metadataUrl,
+  notify,
+}: {
+  mcpEndpoint: string;
+  metadataUrl: string;
+  notify: Notify;
+}) {
+  const [issuerValues, setIssuerValues] = useState({
+    name: '',
+    issuer_url: '',
+    audience: mcpEndpoint,
+    resource: mcpEndpoint,
+    jwks_cache_json: '',
+  });
   const [grantValues, setGrantValues] = useState({ issuer_id: '', subject: '', scopes: 'vault:discover,vault:read' });
   const [issuers, setIssuers] = useState<JsonObject[]>([]);
   const [grants, setGrants] = useState<JsonObject[]>([]);
@@ -603,7 +741,11 @@ function OAuthForms({ notify }: { notify: Notify }) {
 
   return (
     <div className="advanced-content">
-      <Notice tone="warning">只接受 RS256 的 RSA 公钥 JWKS。不要粘贴私钥、客户端密钥或对称密钥。</Notice>
+      <Notice tone="info">
+        仅在已有外部身份提供商时使用。ChatGPT 会先读取资源元数据，再到该外部授权服务器执行授权码 + PKCE（S256）；外部服务必须支持 CIMD、DCR 或预注册客户端，并把下面的 MCP 地址写入访问令牌的 <code>aud</code>（或 <code>resource</code> claim）。
+      </Notice>
+      <CopyField label="ChatGPT 发现地址" value={metadataUrl} />
+      <Notice tone="warning">只接受 RS256 的 RSA 公钥 JWKS。不要粘贴私钥、客户端密钥、访问令牌或对称密钥。</Notice>
       <form className="compact-form" onSubmit={async (event) => {
         event.preventDefault();
         setBusy(true);
@@ -620,9 +762,10 @@ function OAuthForms({ notify }: { notify: Notify }) {
           <label>名称<input required value={issuerValues.name} onChange={(event) => setIssuerValues({ ...issuerValues, name: event.target.value })} /></label>
           <label>Issuer URL<input required type="url" value={issuerValues.issuer_url} onChange={(event) => setIssuerValues({ ...issuerValues, issuer_url: event.target.value })} /></label>
           <label>Audience<input required value={issuerValues.audience} onChange={(event) => setIssuerValues({ ...issuerValues, audience: event.target.value })} /></label>
-          <label>资源 URL<input required type="url" value={issuerValues.resource} onChange={(event) => setIssuerValues({ ...issuerValues, resource: event.target.value })} /></label>
+          <label>资源 URL<input readOnly required type="url" value={issuerValues.resource} /></label>
           <label className="form-span">RSA 公钥 JWKS<textarea required rows={6} value={issuerValues.jwks_cache_json} onChange={(event) => setIssuerValues({ ...issuerValues, jwks_cache_json: event.target.value })} placeholder='{"keys":[{"kty":"RSA","kid":"…","alg":"RS256","n":"…","e":"AQAB"}]}' /></label>
         </div>
+        <p className="muted compact-text">通常将授权服务器的 API Audience 也设置为资源 URL；只有外部 IdP 明确使用另一 Audience 时才修改。</p>
         <button className="secondary-button" disabled={busy} type="submit">{busy ? '正在保存…' : '保存发行方'}</button>
       </form>
 

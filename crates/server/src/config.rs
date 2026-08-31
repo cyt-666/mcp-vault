@@ -63,8 +63,6 @@ pub struct AppConfig {
     pub shutdown_timeout: Duration,
     /// Delay between authoritative full Vault reconciliation passes.
     pub reconciliation_interval: Duration,
-    /// Exact proxy peers allowed to assert an HTTPS forwarded scheme.
-    pub trusted_proxy_ips: BTreeSet<IpAddr>,
     /// Service-owned backup artifact root.
     pub backup_root: PathBuf,
     /// Archive and retention limits.
@@ -95,7 +93,6 @@ impl Default for AppConfig {
             log_format: LogFormat::Json,
             shutdown_timeout: Duration::from_secs(DEFAULT_SHUTDOWN_TIMEOUT_SECONDS),
             reconciliation_interval: Duration::from_secs(DEFAULT_RECONCILIATION_INTERVAL_SECONDS),
-            trusted_proxy_ips: BTreeSet::new(),
             backup_root: PathBuf::from("./data/backups"),
             backup_limits: BackupLimits::default(),
             metrics_enabled: false,
@@ -152,7 +149,6 @@ impl AppConfig {
         let log_format = parse_log_format(&lookup)?;
         let shutdown_timeout = parse_shutdown_timeout(&lookup)?;
         let reconciliation_interval = parse_reconciliation_interval(&lookup)?;
-        let trusted_proxy_ips = parse_trusted_proxy_ips(&lookup)?;
         let backup_root = parse_path(&lookup, "MCP_VAULT_BACKUP_DIR", data_dir.join("backups"))?;
         let backup_limits = parse_backup_limits(&lookup)?;
         let metrics_enabled = parse_bool(&lookup, "MCP_VAULT_METRICS_ENABLED", false)?;
@@ -172,7 +168,6 @@ impl AppConfig {
             log_format,
             shutdown_timeout,
             reconciliation_interval,
-            trusted_proxy_ips,
             backup_root,
             backup_limits,
             metrics_enabled,
@@ -257,13 +252,22 @@ fn default_database_url(data_dir: &Path) -> String {
 }
 
 fn default_data_hosts(bind: SocketAddr) -> BTreeSet<String> {
+    let port = bind.port();
     let mut hosts = BTreeSet::from([
         "localhost".to_owned(),
+        format!("localhost:{port}"),
         "127.0.0.1".to_owned(),
+        format!("127.0.0.1:{port}"),
         "::1".to_owned(),
+        "[::1]".to_owned(),
+        format!("[::1]:{port}"),
     ]);
     if !bind.ip().is_unspecified() {
         hosts.insert(bind.ip().to_string());
+        hosts.insert(match bind.ip() {
+            IpAddr::V4(address) => format!("{address}:{port}"),
+            IpAddr::V6(address) => format!("[{address}]:{port}"),
+        });
     }
     hosts
 }
@@ -560,26 +564,6 @@ where
     Ok(Duration::from_secs(seconds))
 }
 
-fn parse_trusted_proxy_ips<F>(lookup: &F) -> Result<BTreeSet<IpAddr>, ConfigError>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    let value = lookup("MCP_VAULT_TRUSTED_PROXY_IPS").unwrap_or_default();
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            value
-                .parse::<IpAddr>()
-                .map_err(|error| ConfigError::InvalidValue {
-                    key: "MCP_VAULT_TRUSTED_PROXY_IPS",
-                    message: format!("invalid IP address: {error}"),
-                })
-        })
-        .collect()
-}
-
 fn parse_data_hosts<F>(
     lookup: &F,
     defaults: BTreeSet<String>,
@@ -658,6 +642,26 @@ mod tests {
         );
         assert_eq!(result.data_origins.allowed_origins().count(), 0);
         assert!(result.data_public_origin.is_none());
+        for authority in [
+            "localhost",
+            "localhost:8080",
+            "127.0.0.1",
+            "127.0.0.1:8080",
+            "::1",
+            "[::1]",
+            "[::1]:8080",
+        ] {
+            assert!(result.data_hosts.contains(authority), "missing {authority}");
+        }
+    }
+
+    #[test]
+    fn loopback_host_defaults_follow_an_overridden_data_port() {
+        let result = config(&[("MCP_VAULT_DATA_BIND", "127.0.0.1:18080")]).unwrap();
+
+        for authority in ["localhost:18080", "127.0.0.1:18080", "[::1]:18080"] {
+            assert!(result.data_hosts.contains(authority), "missing {authority}");
+        }
     }
 
     #[test]
@@ -695,7 +699,6 @@ mod tests {
                 "MCP_VAULT_OTEL_ENDPOINT",
                 "http://otel-collector:4318/v1/traces",
             ),
-            ("MCP_VAULT_TRUSTED_PROXY_IPS", "127.0.0.2,::1"),
             (
                 "MCP_VAULT_DATA_HOSTS",
                 "vault.example.test,vault.example.test:8443",
@@ -724,12 +727,6 @@ mod tests {
             result.otlp_endpoint.as_deref(),
             Some("http://otel-collector:4318/v1/traces")
         );
-        assert!(
-            result
-                .trusted_proxy_ips
-                .contains(&"127.0.0.2".parse().unwrap())
-        );
-        assert!(result.trusted_proxy_ips.contains(&"::1".parse().unwrap()));
         assert!(result.data_hosts.contains("vault.example.test"));
         assert!(result.data_hosts.contains("vault.example.test:8443"));
         assert_eq!(
@@ -813,15 +810,6 @@ mod tests {
             error,
             ConfigError::InvalidValue {
                 key: "MCP_VAULT_RECONCILIATION_INTERVAL_SECONDS",
-                ..
-            }
-        ));
-
-        let error = config(&[("MCP_VAULT_TRUSTED_PROXY_IPS", "not-an-ip")]).unwrap_err();
-        assert!(matches!(
-            error,
-            ConfigError::InvalidValue {
-                key: "MCP_VAULT_TRUSTED_PROXY_IPS",
                 ..
             }
         ));

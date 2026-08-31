@@ -206,7 +206,6 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         history_root.clone(),
         mcp_vault_storage_fs::StorageOptions::default(),
         core_runtime.clone(),
-        config.trusted_proxy_ips.clone(),
     );
     let mcp_service = mcp_vault_mcp::McpService::new(
         state.clone(),
@@ -217,6 +216,7 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         config.data_hosts.iter().cloned().collect(),
         config.data_origins.clone(),
     )
+    .with_public_origin(config.data_public_origin.clone())
     .with_application_services(index_service.clone(), memory_service.clone());
     let readiness = health::Readiness::new();
     let metrics = metrics::Metrics::new(config.metrics_enabled);
