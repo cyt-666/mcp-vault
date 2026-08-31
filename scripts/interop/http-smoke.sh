@@ -8,6 +8,15 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/mcp-vault-http-smoke.XXXXXX")
 manifest="$work_dir/fixture-manifest.json"
 fixture_pid=""
+stage="initializing fixture"
+
+report_failure() {
+  local status=$?
+  printf 'HTTP smoke failed during stage: %s\n' "$stage" >&2
+  exit "$status"
+}
+
+trap report_failure ERR
 
 cleanup() {
   if [[ -n "$fixture_pid" ]] && kill -0 "$fixture_pid" 2>/dev/null; then
@@ -23,6 +32,7 @@ MCP_VAULT_FIXTURE_MANIFEST="$manifest" \
   >"$work_dir/fixture.log" 2>&1 &
 fixture_pid=$!
 
+stage="waiting for fixture readiness"
 # A clean GitHub runner may need roughly two minutes to compile the real
 # fixture binary before it can publish its manifest. Keep the readiness window
 # comfortably above that cold-start cost while still failing a wedged fixture.
@@ -54,6 +64,7 @@ webdav_user=$(jq -er '.webdav_username' "$manifest")
 webdav_password=$(jq -er '.webdav_password' "$manifest")
 mcp_origin=$(printf '%s' "$mcp_url" | sed -E 's#(/mcp/.*)$##')
 
+stage="health and OAuth metadata"
 curl --fail --silent --show-error "$health_url" | jq -e '.status == "ready"' >/dev/null
 
 # OAuth discovery is public and must bind the exact MCP resource without
@@ -82,6 +93,7 @@ printf '%s' "$authorization_metadata" | jq -e --arg issuer "$mcp_origin" '
   and .authorization_response_iss_parameter_supported == true
 ' >/dev/null
 
+stage="legacy authorization redirect and MCP discovery"
 # A client with cached pre-v2 metadata must be moved to the current endpoint
 # without serving another cacheable authorization transaction from the alias.
 legacy_authorize_headers="$work_dir/oauth-legacy-redirect.headers"
@@ -112,6 +124,7 @@ printf '%s' "$discovery" | jq -e '
   .result.supportedVersions | index("2026-07-28")
 ' >/dev/null
 
+stage="OAuth registration and authorization"
 # Exercise the complete standalone ChatGPT-style OAuth flow over the real data
 # listener: DCR, login/consent, code + PKCE, MCP bearer use, offline access,
 # refresh rotation, retry grace, and replay-family protection. Secrets remain inside this temporary 0600
@@ -179,6 +192,7 @@ oauth_iss=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.parse_qs(ur
 [[ "$oauth_state" == "http-smoke-state" ]]
 [[ "$oauth_iss" == "$mcp_origin" ]]
 
+stage="OAuth retry, token exchange, and MCP access"
 # A browser/edge retry of the same authenticated form must produce another
 # valid code instead of replacing the successful navigation with an expiry
 # page. Each code remains independently single-use.
@@ -217,6 +231,7 @@ printf '%s' "$token_response" | jq -e --arg resource "$mcp_url" '
   and (.scope | contains("offline_access"))
 ' >/dev/null
 
+stage="OAuth refresh rotation and replay grace"
 oauth_discovery=$(curl --fail --silent --show-error -X POST "$mcp_url" \
   -H "Authorization: Bearer $oauth_access_token" \
   -H "Origin: $mcp_origin" \
@@ -303,6 +318,7 @@ retry_winner_status=$(curl --silent --show-error -o /dev/null -w '%{http_code}' 
   --data "$discovery_body")
 [[ "$retry_winner_status" == "200" ]]
 
+stage="Origin rejection and WebDAV basic operations"
 # Origin policy is checked before the RMCP handler and must reject an
 # untrusted browser origin even though the fixture injects its test PAT.
 bad_origin_status=$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "$mcp_url" \
@@ -335,6 +351,7 @@ stale_status=$(curl --silent --show-error -o /dev/null -w '%{http_code}' \
 curl --fail --silent --show-error -u "$webdav_user:$webdav_password" \
   -X DELETE "$note_url" >/dev/null
 
+stage="concurrent WebDAV writes"
 # Sync clients issue many independent PUTs at once during an initial mirror.
 # Exercise that public HTTP path against file-backed, multi-connection SQLite;
 # route-only tests and `sqlite::memory:` cannot reproduce writer contention.
@@ -380,4 +397,5 @@ for index in $(seq 0 $((parallel_put_count - 1))); do
   grep -Fx "parallel HTTP payload $index" "$parallel_status_dir/$index.get" >/dev/null
 done
 
+stage="completed"
 echo "HTTP fixture smoke passed: built-in OAuth code/PKCE/offline refresh flow, duplicate-refresh grace, browser-compatible authorization CSP, token Origin compatibility, legacy authorization redirect, duplicate authorization retry, OAuth metadata, MCP discovery, Origin rejection, 50 concurrent WebDAV PUTs, revision precondition, and Admin plane separation"

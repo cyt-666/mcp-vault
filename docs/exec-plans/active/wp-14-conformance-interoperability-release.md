@@ -701,6 +701,9 @@ facts.
   minutes after measuring a clean Cargo target at just over two minutes; the
   historical GitHub smoke jobs ended at the previous 30/120-second boundary
   before the fixture could publish its manifest.
+- [x] 2026-08-31 — Add credential-free stage reporting to the smoke script's
+  error path so a failed GitHub assertion remains diagnosable even when the
+  hosted log viewer truncates the middle of a long cold-build step.
 - [ ] Complete release-environment Litmus, named Obsidian plugin/client matrix, full-scale performance, clean-host restore, and signed-artifact verification; then review whether the full frozen MCP requirements report is applicable to the advertised capability set.
 
 ## Decisions
@@ -1069,6 +1072,11 @@ facts.
   manifest wait. A clean local Cargo target took 121 seconds before passing
   the rest of the smoke, so the readiness window is now 300 seconds rather
   than treating a cold compile as a protocol failure.
+- The first rerun with the five-minute window still failed after 1m41s while
+  Rust, frontend, and image jobs passed. GitHub's public check view exposed
+  only `Process completed with exit code 1`, so stage-only error reporting is
+  added before attempting another protocol change; it never prints command
+  lines, credentials, tokens, response bodies, or note content.
 
 ## Validation
 
@@ -1712,6 +1720,11 @@ Validation recorded on 2026-08-31 for CI asset/action remediation:
   smoke step with no downloadable log available to this account; a rerun of
   the workflow revision containing this fix remains required for remote
   acceptance.
+- The first remote rerun of this fix passed Rust, frontend, and container
+  hardening but still failed only in smoke; its hosted log exposed no failing
+  assertion. The script now reports a broad failing stage without exposing
+  sensitive command arguments, so the next remote run can distinguish the
+  remaining protocol boundary.
 
 ## Rollback and recovery
 
