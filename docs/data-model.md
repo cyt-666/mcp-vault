@@ -88,7 +88,27 @@ disabled
 error
 ```
 
-Even when only one Vault may be configured, all dependent rows use `vault_id`.
+All dependent rows use `vault_id`. New managed Vaults retain the existing
+registry schema and derive their root as `<data-dir>/vaults/<slug>`.
+
+The typed global system setting `vault.legacy_default_id` stores a JSON Vault
+ID for compatibility with historical unscoped Admin routes. On upgrade it is
+initialized from the `default` slug, otherwise from the sole registered Vault;
+it never changes merely because another Vault sorts earlier.
+
+Managed admission inserts the registry row and one queued
+`vault.initialize` job in the same SQLite transaction. Its dedup key is
+`vault:<vault-id>:initialize`. Effective availability is derived as follows:
+
+```text
+non-active registry status   -> maintenance / disabled / error
+active + queued/running job  -> initializing
+active + failed job          -> error
+active + completed/no job    -> ready
+```
+
+The no-job case preserves pre-feature single-Vault databases. Job
+`vault_id`, not payload content, is authoritative.
 
 ## 4. Configuration and secrets
 
@@ -554,6 +574,10 @@ global jobs. Vault jobs are deduplicated by `(vault_id, dedup_key)`; global
 jobs use the partial unique index above. Claims increment `attempts` and set a
 conditional lease. Progress is bounded JSON, cancellation is durable, and
 expired leases are reclaimable by another worker.
+
+At equal priority, eligible claims are interleaved by `vault_id` using a
+per-Vault row rank before age ordering. Global jobs form their own explicit
+partition. Cancelling one Vault selects only rows with that `vault_id`.
 
 ## 10.1 Scan checkpoints
 

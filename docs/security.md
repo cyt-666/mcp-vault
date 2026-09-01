@@ -587,6 +587,22 @@ Required controls:
 - resources/tools cannot switch Vault;
 - tests use two Vaults for every repository class.
 
+Admin selects a Vault only through `/api/v1/vaults/{vault_slug}/...`; request
+bodies do not carry a Vault selector. Historical unscoped Admin routes resolve
+one persisted legacy-default ID rather than the first registry row.
+
+Managed creation derives the root below the service data directory, rejects a
+symlink or non-empty unregistered target, and commits the registry row together
+with its Vault-scoped initialization job. MCP and WebDAV return unavailable
+until that job completes. A job handler reconstructs context from the durable
+job row's `vault_id` and never trusts a payload-supplied Vault identity.
+
+Startup recovery, Worker admission, index/vector rebuilds, and memory
+reset/consolidation isolate failures by Vault. An initializing, disabled, or
+error Vault cannot grant access to another Vault or stop a healthy Vault;
+installation-global backup/restore remains the documented exception because it
+deliberately coordinates every root and SQLite together.
+
 Any cross-Vault bug is a critical security issue.
 
 ## 16. Logging, audit, and telemetry

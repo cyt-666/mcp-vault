@@ -25,7 +25,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{delete, get, patch, post, put},
+    routing::{any, delete, get, patch, post, put},
 };
 use mcp_vault_auth::{
     AdminPrincipal, AuthError, AuthService, OAuthIssuerInput, OriginPolicy, SecretString,
@@ -33,7 +33,7 @@ use mcp_vault_auth::{
     parse_session_cookie, session_cookie_header,
 };
 use mcp_vault_backup::{BackupError, BackupLimits, BackupService};
-use mcp_vault_core::{VaultCore, VaultCoreRuntime};
+use mcp_vault_core::{ManagedVaultService, VaultCore, VaultCoreRuntime, VaultError};
 use mcp_vault_domain::{
     Actor, ActorId, ActorType, BackupId, DomainError, MaintenanceGate, MaintenanceMode, MemoryId,
     Permission, PermissionSet, Revision, Scope, ScopeSet, SourcePlane, VaultContext, VaultId,
@@ -56,6 +56,7 @@ use mcp_vault_state::{
 use mcp_vault_storage_fs::StorageOptions;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tower::ServiceExt as _;
 use url::Url;
 
 const SESSION_MAX_AGE: Duration = Duration::from_secs(12 * 60 * 60);
@@ -77,6 +78,8 @@ pub struct AdminApiState {
     history_root: PathBuf,
     storage_options: StorageOptions,
     core_runtime: VaultCoreRuntime,
+    managed_vaults: ManagedVaultService,
+    selected_vault: Option<VaultId>,
     providers: ProviderService,
     memory: MemoryService,
     backup: BackupService,
@@ -124,6 +127,11 @@ pub struct AdminApiConfig {
 impl AdminApiState {
     /// Build an Admin state boundary from already initialized services.
     pub fn new(state: StateStore, auth: AuthService, config: AdminApiConfig) -> Self {
+        let managed_vaults = ManagedVaultService::new(
+            state.clone(),
+            config.data_dir.clone(),
+            config.storage_options,
+        );
         let providers = ProviderService::new(state.clone(), auth.clone());
         let memory = MemoryService::with_provider_service(state.clone(), providers.clone());
         let backup = BackupService::new(
@@ -153,6 +161,8 @@ impl AdminApiState {
             history_root: config.history_root,
             storage_options: config.storage_options,
             core_runtime: config.core_runtime,
+            managed_vaults,
+            selected_vault: None,
             providers,
             memory,
             backup,
@@ -171,6 +181,12 @@ impl AdminApiState {
 
     fn providers(&self) -> ProviderService {
         self.providers.clone()
+    }
+
+    fn with_selected_vault(&self, vault_id: VaultId) -> Self {
+        let mut selected = self.clone();
+        selected.selected_vault = Some(vault_id);
+        selected
     }
 
     /// Inject process-shared provider and memory services from the composition
@@ -207,6 +223,14 @@ impl AdminApiState {
     // SQL pool and therefore cannot accidentally grow protocol-owned queries.
     async fn list_vaults(&self) -> Result<Vec<VaultRecord>, StateError> {
         self.state.vaults().list().await
+    }
+
+    async fn create_managed_vault(
+        &self,
+        slug: VaultSlug,
+        name: &str,
+    ) -> Result<mcp_vault_core::ManagedVaultCreation, VaultError> {
+        self.managed_vaults.create(slug, name).await
     }
 
     async fn register_vault(
@@ -369,12 +393,27 @@ impl AdminApiState {
         self.state.jobs().request_retry(context, id).await
     }
 
+    async fn restart_terminal_job_for(
+        &self,
+        context: &VaultContext,
+        id: mcp_vault_domain::JobId,
+    ) -> Result<(), StateError> {
+        self.state
+            .jobs()
+            .request_restart_terminal(context, id)
+            .await
+    }
+
     async fn cancel_job_for(
         &self,
         context: &VaultContext,
         id: mcp_vault_domain::JobId,
     ) -> Result<(), StateError> {
         self.state.jobs().request_cancel(context, id).await
+    }
+
+    async fn cancel_jobs_for_vault(&self, context: &VaultContext) -> Result<u64, StateError> {
+        self.state.jobs().request_cancel_all(context).await
     }
 
     async fn enqueue_vault_job(
@@ -483,12 +522,57 @@ pub fn stateful_router(state: AdminApiState) -> Router {
     let protected = Router::new()
         .route("/session", get(current_session).delete(logout))
         .route("/session/password", post(change_password))
-        .route("/dashboard", get(dashboard))
         .route("/system", get(system))
         .route("/health/details", get(health_details))
         .route("/diagnostics", get(diagnostics))
+        .route("/vaults", get(list_vault_registry).post(create_vault))
+        .route("/vaults/{*scoped_path}", any(scoped_vault_dispatch))
+        .route(
+            "/providers/{id}",
+            get(get_provider)
+                .patch(update_provider)
+                .delete(delete_provider),
+        )
+        .route("/providers/{id}/test", post(test_provider))
+        .route(
+            "/providers/{id}/models",
+            get(list_provider_models).post(register_provider_model),
+        )
+        .route("/providers/{id}/models/refresh", post(refresh_models))
+        .route("/backups", get(list_backups).post(create_backup))
+        .route("/backups/{id}/verify", post(verify_backup))
+        .route("/restore/validate", post(validate_restore))
+        .route("/restore", post(restore))
+        .route("/maintenance/recover", post(recover_maintenance))
+        .merge(vault_admin_routes())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            authenticate_session,
+        ));
+
+    Router::new()
+        .merge(public)
+        .merge(protected)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            enforce_maintenance,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            capture_peer_address,
+        ))
+        .with_state(state)
+}
+
+fn vault_admin_routes() -> Router<AdminApiState> {
+    Router::new()
+        .route("/dashboard", get(dashboard))
         .route("/vault", get(get_vault).patch(patch_vault))
         .route("/vault/rescan", post(rescan_vault))
+        .route(
+            "/vault/initialization/retry",
+            post(retry_vault_initialization),
+        )
         .route(
             "/webdav/credentials",
             get(list_webdav_credentials).post(issue_webdav_credential),
@@ -517,18 +601,6 @@ pub fn stateful_router(state: AdminApiState) -> Router {
             get(get_provider_mode).put(put_provider_mode),
         )
         .route("/providers", get(list_providers).post(create_provider))
-        .route(
-            "/providers/{id}",
-            get(get_provider)
-                .patch(update_provider)
-                .delete(delete_provider),
-        )
-        .route("/providers/{id}/test", post(test_provider))
-        .route(
-            "/providers/{id}/models",
-            get(list_provider_models).post(register_provider_model),
-        )
-        .route("/providers/{id}/models/refresh", post(refresh_models))
         .route("/model-bindings", get(list_model_bindings))
         .route("/model-bindings/{role}", put(update_model_binding))
         .route("/index/status", get(index_status))
@@ -557,28 +629,78 @@ pub fn stateful_router(state: AdminApiState) -> Router {
         .route("/jobs/{id}/retry", post(retry_job))
         .route("/jobs/{id}/cancel", post(cancel_job))
         .route("/audit", get(list_audit))
-        .route("/backups", get(list_backups).post(create_backup))
-        .route("/backups/{id}/verify", post(verify_backup))
-        .route("/restore/validate", post(validate_restore))
-        .route("/restore", post(restore))
-        .route("/maintenance/recover", post(recover_maintenance))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            authenticate_session,
-        ));
+}
 
-    Router::new()
-        .merge(public)
-        .merge(protected)
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            enforce_maintenance,
-        ))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            capture_peer_address,
-        ))
-        .with_state(state)
+async fn scoped_vault_dispatch(
+    State(state): State<AdminApiState>,
+    Path(scoped_path): Path<String>,
+    request: Request<Body>,
+) -> Response {
+    let scoped_path = scoped_path.trim_start_matches('/');
+    let (slug_value, relative) = scoped_path
+        .split_once('/')
+        .map_or((scoped_path, ""), |(slug, relative)| (slug, relative));
+    let slug = match VaultSlug::new(slug_value) {
+        Ok(slug) => slug,
+        Err(_) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "vault_not_found",
+                "The selected Vault was not found.",
+                None,
+                request_id(request.headers()),
+            );
+        }
+    };
+    let vault = match state.state.vaults().find_by_slug(&slug).await {
+        Ok(Some(vault)) => vault,
+        Ok(None) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "vault_not_found",
+                "The selected Vault was not found.",
+                None,
+                request_id(request.headers()),
+            );
+        }
+        Err(error) => return state_error(error, request_id(request.headers())),
+    };
+
+    let query = request
+        .uri()
+        .query()
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
+    let inner_path = match relative {
+        "" => "/vault".to_owned(),
+        "rescan" => "/vault/rescan".to_owned(),
+        "initialization/retry" => "/vault/initialization/retry".to_owned(),
+        relative => format!("/{relative}"),
+    };
+    let principal = request.extensions().get::<AdminPrincipal>().cloned();
+    let request_id_extension = request.extensions().get::<RequestId>().cloned();
+    let method = request.method().clone();
+    let version = request.version();
+    let (parts, body) = request.into_parts();
+    let mut inner = Request::builder()
+        .method(method)
+        .version(version)
+        .uri(format!("{inner_path}{query}"))
+        .body(body)
+        .expect("scoped Admin URI is valid");
+    *inner.headers_mut() = parts.headers;
+    if let Some(principal) = principal {
+        inner.extensions_mut().insert(principal);
+    }
+    if let Some(request_id) = request_id_extension {
+        inner.extensions_mut().insert(request_id);
+    }
+
+    vault_admin_routes()
+        .with_state(state.with_selected_vault(vault.id))
+        .oneshot(inner)
+        .await
+        .expect("scoped Admin router is infallible")
 }
 
 async fn not_configured() -> Response {
@@ -924,6 +1046,7 @@ struct VaultSummary {
     content_root: String,
     reserved_root: String,
     status: String,
+    availability: String,
     settings_revision: i64,
 }
 
@@ -1029,6 +1152,21 @@ async fn setup(
             );
         }
     };
+    if state
+        .state
+        .vaults()
+        .ensure_legacy_default(&context)
+        .await
+        .is_err()
+    {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "vault_setup_failed",
+            "The default Vault compatibility binding could not be initialized.",
+            None,
+            request_id,
+        );
+    }
     if state
         .state
         .memory()
@@ -1256,23 +1394,38 @@ async fn change_password(
 }
 
 async fn current_vault(state: &AdminApiState, request_id: &str) -> Result<VaultRecord, Response> {
-    match state.list_vaults().await {
-        Ok(vaults) => vaults.into_iter().next().ok_or_else(|| {
-            api_error(
+    if let Some(vault_id) = state.selected_vault {
+        return match state.state.vaults().find_by_id(vault_id).await {
+            Ok(Some(vault)) => Ok(vault),
+            Ok(None) => Err(api_error(
                 StatusCode::NOT_FOUND,
-                "vault_not_configured",
-                "No Vault has been configured yet.",
+                "vault_not_found",
+                "The selected Vault was not found.",
                 None,
                 request_id.to_owned(),
-            )
-        }),
-        Err(_) => Err(api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "state_unavailable",
-            "Operational state is temporarily unavailable.",
+            )),
+            Err(error) => Err(state_error(error, request_id.to_owned())),
+        };
+    }
+    match state.state.vaults().legacy_default().await {
+        Ok(Some(vault)) => Ok(vault),
+        Ok(None) => Err(api_error(
+            StatusCode::CONFLICT,
+            "vault_selection_required",
+            "A Vault must be selected explicitly.",
             None,
             request_id.to_owned(),
         )),
+        Err(error) => {
+            tracing::warn!(%error, "failed to resolve legacy default Vault");
+            Err(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "state_unavailable",
+                "Operational state is temporarily unavailable.",
+                None,
+                request_id.to_owned(),
+            ))
+        }
     }
 }
 
@@ -1284,8 +1437,35 @@ fn vault_summary(vault: &VaultRecord) -> VaultSummary {
         content_root: vault.content_root.display().to_string(),
         reserved_root: vault.reserved_root.to_string(),
         status: vault.status.to_string(),
+        availability: match vault.status {
+            VaultStatus::Active => "ready",
+            VaultStatus::Maintenance => "maintenance",
+            VaultStatus::Disabled => "disabled",
+            VaultStatus::Error => "error",
+        }
+        .to_owned(),
         settings_revision: vault.settings_revision.value() as i64,
     }
+}
+
+async fn vault_summary_for(
+    state: &AdminApiState,
+    vault: &VaultRecord,
+) -> Result<VaultSummary, StateError> {
+    let mut summary = vault_summary(vault);
+    summary.availability = state.state.vaults().availability(vault).await?.to_string();
+    Ok(summary)
+}
+
+async fn vault_summaries_for(
+    state: &AdminApiState,
+    vaults: &[VaultRecord],
+) -> Result<Vec<VaultSummary>, StateError> {
+    let mut summaries = Vec::with_capacity(vaults.len());
+    for vault in vaults {
+        summaries.push(vault_summary_for(state, vault).await?);
+    }
+    Ok(summaries)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1295,12 +1475,128 @@ struct VaultPatchRequest {
     expected_settings_revision: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VaultCreateRequest {
+    slug: String,
+    name: String,
+}
+
+async fn list_vault_registry(
+    State(state): State<AdminApiState>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    let vaults = match state.list_vaults().await {
+        Ok(vaults) => vaults,
+        Err(error) => return state_error(error, request_id.0),
+    };
+    let summaries = match vault_summaries_for(&state, &vaults).await {
+        Ok(summaries) => summaries,
+        Err(error) => return state_error(error, request_id.0),
+    };
+    api_ok(StatusCode::OK, json!({"vaults": summaries}), request_id.0)
+}
+
+async fn create_vault(
+    State(state): State<AdminApiState>,
+    headers: HeaderMap,
+    Extension(principal): Extension<AdminPrincipal>,
+    Extension(request_id): Extension<RequestId>,
+    Json(input): Json<VaultCreateRequest>,
+) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
+        return auth_error(error, request_id.0);
+    }
+    let slug = match VaultSlug::new(&input.slug) {
+        Ok(slug) => slug,
+        Err(_) => {
+            return api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_failed",
+                "The Vault slug is invalid.",
+                Some(json!({
+                    "slug": "use lowercase ASCII letters, digits, and hyphens"
+                })),
+                request_id.0,
+            );
+        }
+    };
+    match state.create_managed_vault(slug, &input.name).await {
+        Ok(created) => {
+            let context = match created.vault.context() {
+                Ok(context) => context,
+                Err(error) => return state_error(error, request_id.0),
+            };
+            let vault_id = created.vault.id.to_string();
+            let job_id = created.initialization_job.id.to_string();
+            state
+                .append_admin_audit(
+                    Some(&context),
+                    &request_id.0,
+                    &principal.actor,
+                    "admin.vault.created",
+                    Some("vault"),
+                    Some(&vault_id),
+                    json!({
+                        "slug": created.vault.slug.as_str(),
+                        "job_id": job_id,
+                    }),
+                )
+                .await;
+            let summary = match vault_summary_for(&state, &created.vault).await {
+                Ok(summary) => summary,
+                Err(error) => return state_error(error, request_id.0),
+            };
+            api_ok(
+                StatusCode::ACCEPTED,
+                json!({
+                    "vault": summary,
+                    "initialization_job": job_summary(&created.initialization_job),
+                }),
+                request_id.0,
+            )
+        }
+        Err(VaultError::AlreadyExists) => api_error(
+            StatusCode::CONFLICT,
+            "vault_already_exists",
+            "A Vault with this slug already exists.",
+            Some(json!({"slug": "already exists"})),
+            request_id.0,
+        ),
+        Err(VaultError::Storage(_)) => api_error(
+            StatusCode::CONFLICT,
+            "vault_root_unavailable",
+            "The managed Vault directory cannot be safely claimed.",
+            None,
+            request_id.0,
+        ),
+        Err(VaultError::Domain(_)) => api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "validation_failed",
+            "The Vault configuration is invalid.",
+            None,
+            request_id.0,
+        ),
+        Err(VaultError::State(error)) => state_error(error, request_id.0),
+        Err(_) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "vault_create_failed",
+            "The Vault could not be created.",
+            None,
+            request_id.0,
+        ),
+    }
+}
+
 async fn get_vault(
     State(state): State<AdminApiState>,
     Extension(request_id): Extension<RequestId>,
 ) -> Response {
     match current_vault(&state, &request_id.0).await {
-        Ok(vault) => api_ok(StatusCode::OK, vault_summary(&vault), request_id.0),
+        Ok(vault) => match vault_summary_for(&state, &vault).await {
+            Ok(summary) => api_ok(StatusCode::OK, summary, request_id.0),
+            Err(error) => state_error(error, request_id.0),
+        },
         Err(response) => response,
     }
 }
@@ -1358,6 +1654,30 @@ async fn patch_vault(
         if let Err(error) = state.update_vault_status(&context, status).await {
             return state_error(error, request_id.0);
         }
+        if status == VaultStatus::Disabled {
+            if let Err(error) = state.cancel_jobs_for_vault(&context).await {
+                tracing::warn!(%error, vault_id = %context.id(), "failed to cancel disabled Vault jobs");
+            }
+        } else if status == VaultStatus::Active && vault.status != VaultStatus::Active {
+            let dedup = format!(
+                "vault:{}:reactivated:{}",
+                context.id(),
+                mcp_vault_domain::EventId::new()
+            );
+            if let Err(error) = state
+                .enqueue_vault_job(
+                    &context,
+                    "vault.reconcile",
+                    &dedup,
+                    &json!({"reason": "vault_reactivated"}),
+                    10,
+                    10,
+                )
+                .await
+            {
+                tracing::warn!(%error, vault_id = %context.id(), "failed to enqueue reactivated Vault reconciliation");
+            }
+        }
     }
     vault = match current_vault(&state, &request_id.0).await {
         Ok(vault) => vault,
@@ -1375,7 +1695,10 @@ async fn patch_vault(
             json!({"name_changed": changed_name, "status_changed": changed_status}),
         )
         .await;
-    api_ok(StatusCode::OK, vault_summary(&vault), request_id.0)
+    match vault_summary_for(&state, &vault).await {
+        Ok(summary) => api_ok(StatusCode::OK, summary, request_id.0),
+        Err(error) => state_error(error, request_id.0),
+    }
 }
 
 async fn rescan_vault(
@@ -1432,6 +1755,136 @@ async fn rescan_vault(
         }
         Err(error) => state_error(error, request_id.0),
     }
+}
+
+async fn retry_vault_initialization(
+    State(state): State<AdminApiState>,
+    headers: HeaderMap,
+    Extension(principal): Extension<AdminPrincipal>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
+        return auth_error(error, request_id.0);
+    }
+    let mut vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    if vault.status == VaultStatus::Disabled {
+        return api_error(
+            StatusCode::CONFLICT,
+            "vault_disabled",
+            "Enable the Vault before retrying initialization.",
+            None,
+            request_id.0,
+        );
+    }
+    let context = match vault.context() {
+        Ok(context) => context,
+        Err(error) => return state_error(error, request_id.0),
+    };
+    if vault.status != VaultStatus::Active {
+        if let Err(error) = state
+            .update_vault_status(&context, VaultStatus::Active)
+            .await
+        {
+            return state_error(error, request_id.0);
+        }
+        vault = match state.state.vaults().find_by_id(context.id()).await {
+            Ok(Some(vault)) => vault,
+            Ok(None) => {
+                return api_error(
+                    StatusCode::NOT_FOUND,
+                    "vault_not_found",
+                    "The selected Vault was not found.",
+                    None,
+                    request_id.0,
+                );
+            }
+            Err(error) => return state_error(error, request_id.0),
+        };
+    }
+    let current_context = match vault.context() {
+        Ok(context) => context,
+        Err(error) => return state_error(error, request_id.0),
+    };
+    let dedup_key = format!("vault:{}:initialize", current_context.id());
+    let existing = match state
+        .state
+        .jobs()
+        .find_by_dedup(&current_context, &dedup_key)
+        .await
+    {
+        Ok(existing) => existing,
+        Err(error) => return state_error(error, request_id.0),
+    };
+    let job = match existing {
+        Some(job) if matches!(job.status, JobStatus::Failed | JobStatus::Cancelled) => {
+            if let Err(error) = state
+                .restart_terminal_job_for(&current_context, job.id)
+                .await
+            {
+                return state_error(error, request_id.0);
+            }
+            match state.get_job_for(&current_context, job.id).await {
+                Ok(Some(job)) => job,
+                Ok(None) => {
+                    return api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "job_unavailable",
+                        "The initialization job is unavailable.",
+                        None,
+                        request_id.0,
+                    );
+                }
+                Err(error) => return state_error(error, request_id.0),
+            }
+        }
+        Some(job)
+            if matches!(
+                job.status,
+                JobStatus::Queued | JobStatus::Running | JobStatus::RetryWait
+            ) =>
+        {
+            job
+        }
+        Some(job) => {
+            return api_error(
+                StatusCode::CONFLICT,
+                "vault_already_initialized",
+                "The Vault initialization has already completed.",
+                Some(json!({"job_id": job.id.to_string()})),
+                request_id.0,
+            );
+        }
+        None => match state
+            .enqueue_vault_job(
+                &current_context,
+                "vault.initialize",
+                &dedup_key,
+                &json!({"reason": "admin_retry"}),
+                20,
+                10,
+            )
+            .await
+        {
+            Ok(job) => job,
+            Err(error) => return state_error(error, request_id.0),
+        },
+    };
+    let job_id = job.id.to_string();
+    state
+        .append_admin_audit(
+            Some(&current_context),
+            &request_id.0,
+            &principal.actor,
+            "admin.vault.initialization_retried",
+            Some("job"),
+            Some(&job_id),
+            json!({"job_type": "vault.initialize"}),
+        )
+        .await;
+    api_ok(StatusCode::ACCEPTED, job_summary(&job), request_id.0)
 }
 
 async fn dashboard(
@@ -1496,12 +1949,16 @@ async fn dashboard(
         Ok(providers) => providers,
         Err(error) => return state_error(error, request_id.0),
     };
+    let vault_summary = match vault_summary_for(&state, &vault).await {
+        Ok(summary) => summary,
+        Err(error) => return state_error(error, request_id.0),
+    };
     api_ok(
         StatusCode::OK,
         json!({
             "version": state.version,
             "ready": state.readiness.load(Ordering::Acquire),
-            "vault": vault_summary(&vault),
+            "vault": vault_summary,
             "files": {"notes": note_count, "attachments": attachment_count, "entries": visible_entries.len()},
             "index": index_status.map(|status| index_status_json(status, total_notes)),
             "memory": memory_counts_json(&memory_counts, stage1_counts.pending),
@@ -1570,6 +2027,10 @@ async fn health_details(
         .await
         .ok()
         .and_then(|mut records| records.pop());
+    let vault_summaries = match vault_summaries_for(&state, &vaults).await {
+        Ok(summaries) => summaries,
+        Err(error) => return state_error(error, request_id.0),
+    };
     api_ok(
         StatusCode::OK,
         json!({
@@ -1579,7 +2040,7 @@ async fn health_details(
                 "integrity_ok": integrity.integrity_ok,
                 "foreign_key_violations": integrity.foreign_key_violations,
             },
-            "vaults": vaults.iter().map(vault_summary).collect::<Vec<_>>(),
+            "vaults": vault_summaries,
             "outbox": {"pending": outbox_pending},
             "jobs": {"pending": jobs_pending},
             "backup": latest_backup.as_ref().map(backup_json),
@@ -1606,6 +2067,10 @@ async fn diagnostics(
         Err(error) => return state_error(error, request_id.0),
     };
     let backups = state.backup.list(20, 0).await.unwrap_or_default();
+    let vault_summaries = match vault_summaries_for(&state, &vaults).await {
+        Ok(summaries) => summaries,
+        Err(error) => return state_error(error, request_id.0),
+    };
     api_ok(
         StatusCode::OK,
         json!({
@@ -1626,7 +2091,7 @@ async fn diagnostics(
                 "data": state.data_bind.to_string(),
                 "admin": state.admin_bind.to_string(),
             },
-            "vaults": vaults.iter().map(vault_summary).collect::<Vec<_>>(),
+            "vaults": vault_summaries,
             "queues": {"outbox_pending": pending.0, "jobs_pending": pending.1},
             "backups": backups.iter().map(backup_json).collect::<Vec<_>>(),
             "redaction": {
@@ -5483,7 +5948,7 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use http_body_util::BodyExt;
     use mcp_vault_auth::{AuthService, MasterKeyRing, OriginPolicy};
-    use mcp_vault_domain::{Actor, MemoryId, Revision, SourcePlane, VaultPath};
+    use mcp_vault_domain::{Actor, MemoryId, Revision, SourcePlane, VaultPath, VaultSlug};
     use mcp_vault_memory::ExtractionPolicy;
     use mcp_vault_providers::{
         ModelCapabilities, ModelInput, ModelSettings, ProviderInput, ProviderKind, ProviderMode,
@@ -5802,6 +6267,281 @@ mod tests {
         let (router, root, maintenance, cookie, csrf, _state) =
             authenticated_fixture_with_state().await;
         (router, root, maintenance, cookie, csrf)
+    }
+
+    #[tokio::test]
+    async fn admin_creates_lists_and_preserves_the_legacy_default_vault() {
+        let (router, root, _maintenance, cookie, csrf, state) =
+            authenticated_fixture_with_state().await;
+
+        let (status, created) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/vaults",
+                    json!({"slug": "work", "name": "工作资料"}),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{created}");
+        assert_eq!(created["data"]["vault"]["slug"], "work");
+        assert_eq!(created["data"]["vault"]["availability"], "initializing");
+        assert_eq!(
+            created["data"]["vault"]["content_root"],
+            root.path().join("vaults/work").display().to_string()
+        );
+        assert_eq!(
+            created["data"]["initialization_job"]["job_type"],
+            "vault.initialize"
+        );
+
+        let (status, selected) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    "/vaults/work",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{selected}");
+        assert_eq!(selected["data"]["slug"], "work");
+
+        let (status, connection) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    "/vaults/work/mcp/connection-info",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{connection}");
+        assert_eq!(
+            connection["data"]["webdav_endpoint"],
+            "http://localhost:8080/dav/v1/vaults/work/"
+        );
+        assert_eq!(
+            connection["data"]["mcp_endpoint"],
+            "http://localhost:8080/mcp/v1/vaults/work"
+        );
+
+        let (status, issued) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/vaults/work/mcp/tokens",
+                    json!({"name": "Work agent", "scopes": ["vault:read"]}),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{issued}");
+
+        let (status, work_tokens) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    "/vaults/work/mcp/tokens",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{work_tokens}");
+        assert_eq!(work_tokens["data"]["tokens"].as_array().unwrap().len(), 1);
+
+        let (status, default_tokens) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    "/mcp/tokens",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{default_tokens}");
+        assert!(
+            default_tokens["data"]["tokens"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        let (status, listed) = json_response(
+            router
+                .clone()
+                .oneshot(request("GET", "/vaults", json!({}), Some(&cookie), None))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        assert_eq!(listed["data"]["vaults"].as_array().unwrap().len(), 2);
+
+        let (status, legacy) = json_response(
+            router
+                .oneshot(request("GET", "/vault", json!({}), Some(&cookie), None))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{legacy}");
+        assert_eq!(legacy["data"]["slug"], "default");
+        assert_eq!(
+            state
+                .state
+                .vaults()
+                .legacy_default()
+                .await
+                .unwrap()
+                .unwrap()
+                .slug
+                .as_str(),
+            "default"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabling_and_retrying_one_managed_vault_preserves_its_lifecycle_job() {
+        let (router, _root, _maintenance, cookie, csrf, state) =
+            authenticated_fixture_with_state().await;
+        let (_, created) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/vaults",
+                    json!({"slug": "work", "name": "Work"}),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let revision = created["data"]["vault"]["settings_revision"]
+            .as_i64()
+            .unwrap();
+        let job_id = created["data"]["initialization_job"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let (status, disabled) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "PATCH",
+                    "/vaults/work",
+                    json!({"status": "disabled", "expected_settings_revision": revision}),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{disabled}");
+        assert_eq!(disabled["data"]["availability"], "disabled");
+
+        let work = state
+            .state
+            .vaults()
+            .find_by_slug(&VaultSlug::new("work").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let context = work.context().unwrap();
+        let job = state
+            .state
+            .jobs()
+            .get(&context, job_id.parse().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.status, JobStatus::Cancelled);
+
+        let (status, enabled) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "PATCH",
+                    "/vaults/work",
+                    json!({
+                        "status": "active",
+                        "expected_settings_revision": disabled["data"]["settings_revision"]
+                    }),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{enabled}");
+        assert_eq!(enabled["data"]["availability"], "error");
+
+        let (status, retried) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/vaults/work/initialization/retry",
+                    json!({}),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{retried}");
+        assert_eq!(retried["data"]["status"], "queued");
+
+        let (status, selected) = json_response(
+            router
+                .oneshot(request(
+                    "GET",
+                    "/vaults/work",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{selected}");
+        assert_eq!(selected["data"]["availability"], "initializing");
     }
 
     #[tokio::test]

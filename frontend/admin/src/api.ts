@@ -53,6 +53,31 @@ function clearCsrfCookie() {
 
 export class AdminApiClient {
   private csrfToken: string | null = readCsrfCookie();
+  private vaultSlug: string | null = null;
+
+  setVaultSlug(slug: string | null) {
+    this.vaultSlug = slug;
+  }
+
+  private scopedPath(path: string): string {
+    if (!this.vaultSlug || path.startsWith('/vaults/')) return path;
+    const vaultScoped = [
+      '/vault',
+      '/dashboard',
+      '/webdav',
+      '/mcp',
+      '/providers/mode',
+      '/model-bindings',
+      '/index',
+      '/memories',
+      '/memory',
+      '/jobs',
+      '/audit',
+    ].some((prefix) => path === prefix || path.startsWith(`${prefix}/`) || path.startsWith(`${prefix}?`));
+    return vaultScoped
+      ? `/vaults/${encodeURIComponent(this.vaultSlug)}${path === '/vault' ? '' : path}`
+      : path;
+  }
 
   async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
     const method = (options.method ?? 'GET').toUpperCase();
@@ -64,7 +89,7 @@ export class AdminApiClient {
     if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && this.csrfToken) {
       headers.set('X-CSRF-Token', this.csrfToken);
     }
-    const response = await fetch(`/api/v1${path}`, {
+    const response = await fetch(`/api/v1${this.scopedPath(path)}`, {
       ...options,
       method,
       headers,
@@ -132,6 +157,7 @@ export class AdminApiClient {
 
   clearSession() {
     this.csrfToken = null;
+    this.vaultSlug = null;
     clearCsrfCookie();
   }
 }

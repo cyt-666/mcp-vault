@@ -232,6 +232,12 @@ Back up these together:
 /data/history
 ```
 
+Each new Admin-created Vault is a sibling directory at
+`/data/vaults/<immutable-slug>`. Existing registered roots are retained during
+upgrade; the managed-creation API does not accept an arbitrary host path.
+Every Vault has its own WebDAV/MCP URL and credentials even though the roots
+share one installation database and backup lifecycle.
+
 MCP Vault creates its installation files by default under:
 
 ```text
@@ -290,13 +296,17 @@ encrypted secrets/PATs exist is a hard startup failure and is never replaced.
 2. Open SQLite and apply forward migrations.
 3. Load or atomically create the managed installation key, then validate its
    persisted identity.
-4. Recover incomplete operation-journal entries.
-5. Run the safe initial scan for each active Vault and persist its checkpoint.
+4. Recover incomplete operation-journal entries per Vault. A local
+   unrecoverable Vault is marked `error`; healthy Vaults and Admin continue.
+5. Run the safe initial scan for each ready pre-existing Vault and persist its
+   checkpoint. A newly managed Vault retains its durable `vault.initialize`
+   job instead of blocking startup.
 6. Build routers and bind both listeners.
 7. Start the outbox/job supervisor and the periodic reconciliation loop.
 8. Mark liveness healthy.
-9. Mark readiness healthy only when operational database, Vault storage,
-    initial scan, migrations, and critical workers are ready.
+9. Mark process readiness healthy when the operational database, migrations,
+   key, listeners, and critical workers are ready. Detailed Admin health and
+   the data endpoints report each Vault's own availability.
 
 Provider health is not required for core readiness because providers are optional/degradable.
 
@@ -595,6 +605,10 @@ watcher. This keeps the correctness path independent of watcher event loss.
 The interval is configured with
 `MCP_VAULT_RECONCILIATION_INTERVAL_SECONDS` (default 300, maximum 86400).
 
+The timer admits one deduplicated `vault.reconcile` job per ready Vault instead
+of scanning every root serially in the scheduler. Equal-priority job claims are
+interleaved by Vault so one large backlog cannot starve another Vault.
+
 Periodic full/incremental reconciliation:
 
 - compares path, size, mtime, identity, and content hash as needed;
@@ -746,6 +760,15 @@ Existing explicit master-key mounts remain supported. If moving an established m
 `MCP_VAULT_SECRETS_DIR`, copy the exact existing bytes while the service is
 stopped—never ask the service to generate a replacement for a database that
 already has a key verifier or key-dependent records.
+
+The multi-Vault transition adds no canonical-content migration. On first use,
+the server records `vault.legacy_default_id` from the existing `default` slug
+or sole Vault so historical unscoped Admin clients continue to target the same
+Vault. Existing `/dav/v1/vaults/<slug>/` and `/mcp/v1/vaults/<slug>` URLs,
+credentials, OAuth resources, IDs, histories, indexes, memories, and jobs are
+unchanged. Create and verify a fresh global backup before adding a second
+Vault; an older one-Vault backup remains readable but restore correctly rejects
+it against a different live Vault topology.
 
 ### Rollback
 

@@ -658,11 +658,13 @@ models and health/configuration, then remove every encrypted secret owned by
 that Provider. It deliberately retains canonical notes, memory lifecycle
 records/materialized Markdown, durable job history, and append-only audit.
 
-## 13. Multi-Vault evolution
+## 13. Multi-Vault management
 
-The current product may expose one active Vault, but future multi-Vault support should require enabling management behavior rather than redesigning internals.
+One installation may expose several service-managed Vaults to the same Admin
+owner. Enabling this behavior retains the original isolation architecture
+rather than adding a global Vault selector to business operations.
 
-### Required now
+### Required boundaries
 
 - `vaults` table;
 - `VaultContext` on every application method;
@@ -671,15 +673,27 @@ The current product may expose one active Vault, but future multi-Vault support 
 - `vault_id` on all relevant rows, jobs, events, and caches;
 - per-Vault index namespaces and vector partitions;
 - per-Vault configuration overlay;
-- isolation tests using at least two fixture Vaults.
+- isolation tests using at least two fixture Vaults;
+- a stable legacy-default binding for old unscoped Admin routes;
+- managed admission that atomically creates the registry row and initialization
+  job before data-plane availability;
+- per-Vault readiness and failure isolation.
 
-### Future behavior
+### Current behavior
 
-- Admin UI can create and manage several Vaults;
+- Admin UI creates, selects, disables, and re-enables several managed Vaults;
+- new roots are `<data-dir>/vaults/<immutable-slug>`;
 - one MCP connection is bound to one Vault;
 - an Agent needing two Vaults configures two MCP server connections;
 - cross-Vault search/recall requires a distinct federated capability and explicit grants;
 - no ordinary tool accepts `vault_id`.
+
+Jobs take their Vault identity from the durable job row. Initial scan, index,
+embedding, and memory-generation setup completes through `vault.initialize`;
+the new MCP/WebDAV endpoints return unavailable until it succeeds. Equal-
+priority job claiming is interleaved by Vault, and startup/recovery marks only
+the affected Vault `error` when its local state cannot be recovered. Backup and
+restore remain global coordination operations.
 
 ## 14. Recommended workspace
 

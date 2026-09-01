@@ -3,7 +3,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use mcp_vault_core::{CommitPhase, FailureInjector, VaultCore, VaultError};
+use mcp_vault_core::{
+    CommitPhase, FailureInjector, ManagedVaultService, VaultCore, VaultCoreRuntime, VaultError,
+};
 use mcp_vault_domain::{
     Actor, ActorType, Revision, SourcePlane, VaultContext, VaultId, VaultPath, VaultPathPolicy,
     VaultSlug,
@@ -753,6 +755,227 @@ async fn two_vault_contexts_are_isolated_in_core_state_and_storage() {
     assert_eq!(
         read_bytes(&core, &second, &path("same.md")).await,
         b"second"
+    );
+}
+
+#[tokio::test]
+async fn managed_vault_creation_registers_root_job_and_stable_legacy_default() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let service = ManagedVaultService::new(
+        state.clone(),
+        directory.path().to_owned(),
+        StorageOptions {
+            durability: DurabilityPolicy::None,
+            minimum_free_bytes: 0,
+            ..StorageOptions::default()
+        },
+    );
+
+    let personal = service
+        .create(VaultSlug::new("personal").unwrap(), "Personal")
+        .await
+        .unwrap();
+    assert_eq!(personal.vault.slug.as_str(), "personal");
+    assert_eq!(
+        personal.vault.content_root,
+        directory.path().join("vaults/personal")
+    );
+    assert!(personal.vault.content_root.is_dir());
+    assert_eq!(
+        personal.initialization_job.vault_id,
+        Some(personal.vault.id)
+    );
+    assert_eq!(personal.initialization_job.job_type, "vault.initialize");
+
+    service
+        .create(VaultSlug::new("archive").unwrap(), "Archive")
+        .await
+        .unwrap();
+    assert_eq!(
+        state.vaults().legacy_default().await.unwrap().unwrap().id,
+        personal.vault.id
+    );
+}
+
+#[tokio::test]
+async fn managed_vault_creation_refuses_an_unregistered_non_empty_root() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("vaults/work");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("existing.md"), "existing").unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let service = ManagedVaultService::new(
+        state.clone(),
+        directory.path().to_owned(),
+        StorageOptions::default(),
+    );
+
+    let error = service
+        .create(VaultSlug::new("work").unwrap(), "Work")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, VaultError::Storage(_)));
+    assert!(state.vaults().list().await.unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_vault_creation_refuses_a_symlink_root() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("outside");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::create_dir_all(directory.path().join("vaults")).unwrap();
+    symlink(&target, directory.path().join("vaults/work")).unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let service = ManagedVaultService::new(
+        state.clone(),
+        directory.path().to_owned(),
+        StorageOptions::default(),
+    );
+
+    assert!(matches!(
+        service
+            .create(VaultSlug::new("work").unwrap(), "Work")
+            .await,
+        Err(VaultError::Storage(_))
+    ));
+    assert!(state.vaults().list().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn concurrent_managed_vault_creation_has_one_registry_row_and_job() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let service = ManagedVaultService::new(
+        state.clone(),
+        directory.path().to_owned(),
+        StorageOptions::default(),
+    );
+    let first = service.clone();
+    let second = service.clone();
+    let (first, second) = tokio::join!(
+        first.create(VaultSlug::new("shared").unwrap(), "Shared"),
+        second.create(VaultSlug::new("shared").unwrap(), "Shared"),
+    );
+
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    assert!(matches!(first, Ok(_) | Err(VaultError::AlreadyExists)));
+    assert!(matches!(second, Ok(_) | Err(VaultError::AlreadyExists)));
+    let vaults = state.vaults().list().await.unwrap();
+    assert_eq!(vaults.len(), 1);
+    let context = vaults[0].context().unwrap();
+    assert_eq!(
+        state
+            .jobs()
+            .list(&context, None, Some("vault.initialize"), 10, 0)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn adding_a_managed_vault_does_not_rewrite_a_legacy_single_vault() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let legacy = VaultContext::new(
+        VaultId::new(),
+        VaultSlug::new("default").unwrap(),
+        directory.path().join("legacy-content-root"),
+        Revision::new(7),
+    )
+    .unwrap();
+    let original = state
+        .vaults()
+        .insert(&legacy, "Legacy", VaultStatus::Active)
+        .await
+        .unwrap();
+    let service = ManagedVaultService::new(
+        state.clone(),
+        directory.path().to_owned(),
+        StorageOptions::default(),
+    );
+
+    service
+        .create(VaultSlug::new("work").unwrap(), "Work")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        state
+            .vaults()
+            .find_by_id(legacy.id())
+            .await
+            .unwrap()
+            .unwrap(),
+        original
+    );
+    assert_eq!(
+        state.vaults().legacy_default().await.unwrap().unwrap().id,
+        legacy.id()
+    );
+    assert!(
+        state
+            .jobs()
+            .list(&legacy, None, Some("vault.initialize"), 10, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn internal_recovery_accepts_a_registered_disabled_vault() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let context = VaultContext::new(
+        VaultId::new(),
+        VaultSlug::new("disabled").unwrap(),
+        directory.path().join("disabled"),
+        Revision::ZERO,
+    )
+    .unwrap();
+    state
+        .vaults()
+        .insert(&context, "Disabled", VaultStatus::Active)
+        .await
+        .unwrap();
+    let runtime = VaultCoreRuntime::default();
+    let core = VaultCore::new(
+        state.clone(),
+        directory.path().join("history"),
+        VaultPathPolicy::default(),
+        StorageOptions::default(),
+        runtime.clone(),
+    );
+    state
+        .vaults()
+        .set_status(&context, VaultStatus::Disabled)
+        .await
+        .unwrap();
+    let permit = runtime.maintenance_recovery_permit();
+
+    assert_eq!(
+        core.recover_during_maintenance(&context, &permit)
+            .await
+            .unwrap(),
+        Default::default()
     );
 }
 

@@ -5,9 +5,15 @@ use std::{path::PathBuf, str::FromStr};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 
-use mcp_vault_domain::{Revision, VaultContext, VaultId, VaultPath, VaultPathPolicy, VaultSlug};
+use mcp_vault_domain::{
+    JobId, Revision, VaultContext, VaultId, VaultPath, VaultPathPolicy, VaultSlug,
+};
 
-use crate::{StateError, now_millis};
+use crate::{JobRecord, JobStatus, StateError, now_millis};
+
+/// Typed system-setting key that preserves the Vault targeted by legacy
+/// unscoped Admin routes after multi-Vault management is enabled.
+pub const LEGACY_DEFAULT_VAULT_SETTING: &str = "vault.legacy_default_id";
 
 /// Lifecycle status stored by the Vault registry.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -21,6 +27,42 @@ pub enum VaultStatus {
     Disabled,
     /// Vault configuration or reconciliation needs operator attention.
     Error,
+}
+
+/// Effective data-plane availability derived from registry state and the
+/// durable managed-Vault initialization job.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VaultAvailability {
+    /// Initial reconciliation/index construction is still durable work.
+    Initializing,
+    /// The Vault accepts its normal data-plane behavior.
+    Ready,
+    /// Reads may continue but writes are blocked.
+    Maintenance,
+    /// The Vault is deliberately unavailable.
+    Disabled,
+    /// Initialization or registered Vault health needs operator attention.
+    Error,
+}
+
+impl VaultAvailability {
+    /// Stable API label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Initializing => "initializing",
+            Self::Ready => "ready",
+            Self::Maintenance => "maintenance",
+            Self::Disabled => "disabled",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl std::fmt::Display for VaultAvailability {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 impl VaultStatus {
@@ -170,6 +212,107 @@ impl VaultRepository {
         })
     }
 
+    /// Atomically register a managed Vault, create its initialization job, and
+    /// establish the legacy default only when no earlier Vault owns it.
+    pub async fn insert_managed_with_initialization(
+        &self,
+        context: &VaultContext,
+        name: &str,
+    ) -> Result<(VaultRecord, JobRecord), StateError> {
+        validate_name(name)?;
+        let policy = VaultPathPolicy::default();
+        let content_root = context
+            .content_root()
+            .to_str()
+            .ok_or(StateError::InvalidInput("Vault root must be valid UTF-8"))?;
+        let reserved_root = policy.reserved_root().as_str();
+        let timestamp = now_millis()?;
+        let vault_id = context.id().to_string();
+        let job_id = JobId::new();
+        let dedup_key = format!("vault:{}:initialize", context.id());
+        let payload = serde_json::json!({"reason": "managed_vault_created"});
+        let payload_json = serde_json::to_string(&payload)?;
+        let legacy_value = serde_json::to_string(&vault_id)?;
+        let mut transaction = self.pool.begin().await?;
+
+        sqlx::query(
+            "INSERT INTO vaults
+             (id, slug, name, content_root, reserved_root, status,
+              created_at, updated_at, settings_revision)
+             VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)",
+        )
+        .bind(&vault_id)
+        .bind(context.slug().as_str())
+        .bind(name)
+        .bind(content_root)
+        .bind(reserved_root)
+        .bind(timestamp)
+        .bind(timestamp)
+        .bind(context.settings_revision().as_i64()?)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO jobs
+             (id, vault_id, job_type, dedup_key, payload_json, status,
+              priority, max_attempts, available_at, created_at, updated_at)
+             VALUES (?, ?, 'vault.initialize', ?, ?, 'queued', 20, 10, 0, ?, ?)",
+        )
+        .bind(job_id.to_string())
+        .bind(&vault_id)
+        .bind(&dedup_key)
+        .bind(payload_json)
+        .bind(timestamp)
+        .bind(timestamp)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO system_settings
+             (key, value_json, revision, updated_at, updated_by)
+             VALUES (?, ?, 1, ?, NULL)
+             ON CONFLICT(key) DO NOTHING",
+        )
+        .bind(LEGACY_DEFAULT_VAULT_SETTING)
+        .bind(legacy_value)
+        .bind(timestamp)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+
+        Ok((
+            VaultRecord {
+                id: context.id(),
+                slug: context.slug().clone(),
+                name: name.to_owned(),
+                content_root: context.content_root().to_owned(),
+                reserved_root: policy.reserved_root().clone(),
+                status: VaultStatus::Active,
+                created_at: timestamp,
+                updated_at: timestamp,
+                settings_revision: context.settings_revision(),
+            },
+            JobRecord {
+                id: job_id,
+                vault_id: Some(context.id()),
+                job_type: "vault.initialize".to_owned(),
+                dedup_key,
+                payload,
+                status: JobStatus::Queued,
+                priority: 20,
+                attempts: 0,
+                max_attempts: 10,
+                available_at: 0,
+                lease_owner: None,
+                lease_until: None,
+                progress: None,
+                last_error: None,
+                created_at: timestamp,
+                updated_at: timestamp,
+                completed_at: None,
+                cancel_requested: false,
+            },
+        ))
+    }
+
     /// Find a Vault by its typed ID.
     pub async fn find_by_id(&self, id: VaultId) -> Result<Option<VaultRecord>, StateError> {
         let row = sqlx::query_as::<_, VaultRow>(
@@ -212,6 +355,117 @@ impl VaultRepository {
         .await?;
 
         rows.into_iter().map(row_to_record).collect()
+    }
+
+    /// Resolve effective availability without treating optional Provider or
+    /// derived-feature degradation as a canonical Vault outage.
+    pub async fn availability(&self, vault: &VaultRecord) -> Result<VaultAvailability, StateError> {
+        match vault.status {
+            VaultStatus::Maintenance => return Ok(VaultAvailability::Maintenance),
+            VaultStatus::Disabled => return Ok(VaultAvailability::Disabled),
+            VaultStatus::Error => return Ok(VaultAvailability::Error),
+            VaultStatus::Active => {}
+        }
+        let status = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM jobs
+             WHERE vault_id = ? AND dedup_key = ?
+             LIMIT 1",
+        )
+        .bind(vault.id.to_string())
+        .bind(format!("vault:{}:initialize", vault.id))
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(match status.as_deref() {
+            Some("queued" | "running" | "retry_wait") => VaultAvailability::Initializing,
+            Some("failed" | "cancelled") => VaultAvailability::Error,
+            Some("completed") | None => VaultAvailability::Ready,
+            Some(_) => {
+                return Err(StateError::InvalidInput(
+                    "stored initialization job status is invalid",
+                ));
+            }
+        })
+    }
+
+    /// Resolve the stable Vault used by legacy unscoped Admin routes.
+    ///
+    /// Existing installations did not persist an explicit default because
+    /// they exposed one Vault. The first resolution therefore prefers the
+    /// historical `default` slug, otherwise the sole registered Vault. Once
+    /// chosen, the ID is persisted and adding another Vault cannot change it.
+    pub async fn legacy_default(&self) -> Result<Option<VaultRecord>, StateError> {
+        if let Some(record) = self.stored_legacy_default().await? {
+            return Ok(Some(record));
+        }
+
+        let candidate = match self
+            .find_by_slug(&VaultSlug::new("default").expect("default slug is valid"))
+            .await?
+        {
+            Some(record) => Some(record),
+            None => {
+                let mut rows = sqlx::query_as::<_, VaultRow>(
+                    "SELECT id, slug, name, content_root, reserved_root, status,
+                            created_at, updated_at, settings_revision
+                     FROM vaults
+                     ORDER BY slug ASC
+                     LIMIT 2",
+                )
+                .fetch_all(&self.pool)
+                .await?;
+                if rows.len() == 1 {
+                    Some(row_to_record(rows.remove(0))?)
+                } else {
+                    None
+                }
+            }
+        };
+
+        let Some(candidate) = candidate else {
+            return Ok(None);
+        };
+        self.ensure_legacy_default(&candidate.context()?).await?;
+        self.stored_legacy_default().await
+    }
+
+    /// Persist the legacy default if no earlier caller has selected one.
+    ///
+    /// The insert is create-only so concurrent setup or Vault creation has one
+    /// stable winner. The returned record is the persisted winner, which can
+    /// differ from `context` only when another caller committed first.
+    pub async fn ensure_legacy_default(
+        &self,
+        context: &VaultContext,
+    ) -> Result<VaultRecord, StateError> {
+        let registered = self
+            .find_by_id(context.id())
+            .await?
+            .ok_or(StateError::InvalidInput("Vault context is not registered"))?;
+        if registered.slug != *context.slug() || registered.content_root != context.content_root() {
+            return Err(StateError::InvalidInput(
+                "Vault context does not match registered state",
+            ));
+        }
+
+        let timestamp = now_millis()?;
+        let value_json = serde_json::to_string(&context.id().to_string())?;
+        sqlx::query(
+            "INSERT INTO system_settings
+             (key, value_json, revision, updated_at, updated_by)
+             VALUES (?, ?, 1, ?, NULL)
+             ON CONFLICT(key) DO NOTHING",
+        )
+        .bind(LEGACY_DEFAULT_VAULT_SETTING)
+        .bind(value_json)
+        .bind(timestamp)
+        .execute(&self.pool)
+        .await?;
+
+        self.stored_legacy_default()
+            .await?
+            .ok_or(StateError::InvalidInput(
+                "legacy default Vault setting was not saved",
+            ))
     }
 
     /// Update status only for the Vault represented by the supplied context.
@@ -259,6 +513,26 @@ impl VaultRepository {
             return Err(StateError::InvalidInput("Vault context is not registered"));
         }
         Ok(())
+    }
+
+    async fn stored_legacy_default(&self) -> Result<Option<VaultRecord>, StateError> {
+        let value_json =
+            sqlx::query_scalar::<_, String>("SELECT value_json FROM system_settings WHERE key = ?")
+                .bind(LEGACY_DEFAULT_VAULT_SETTING)
+                .fetch_optional(&self.pool)
+                .await?;
+        let Some(value_json) = value_json else {
+            return Ok(None);
+        };
+        let id = serde_json::from_str::<String>(&value_json)
+            .map_err(StateError::Json)
+            .and_then(|value| VaultId::parse(&value).map_err(StateError::InvalidDomain))?;
+        self.find_by_id(id)
+            .await?
+            .map(Some)
+            .ok_or(StateError::InvalidInput(
+                "legacy default Vault is not registered",
+            ))
     }
 }
 

@@ -2,11 +2,16 @@
 
 ## 1. Product definition
 
-MCP Vault is a self-hosted service that exposes one canonical Markdown Vault to both people and AI Agents.
+MCP Vault is a self-hosted service that exposes one or more isolated canonical
+Markdown Vaults to both people and AI Agents.
 
 A person uses Obsidian and an existing WebDAV synchronization plugin. An Agent uses MCP. The service adds indexing, knowledge discovery, controlled mutation, revision history, and long-term memory without replacing ordinary files with a proprietary note database.
 
-The first supported deployment is a single owner and a single configured Vault. The architecture, schema, credentials, and APIs must preserve a Vault isolation boundary so one service can support multiple Vaults later without redesigning core modules.
+The supported ownership model is one owner/Admin with one or more configured
+Vaults. Each Vault has distinct WebDAV/MCP endpoints and credentials. The
+architecture, schema, jobs, indexes, memory, and APIs preserve the Vault as the
+isolation boundary; multi-user tenancy and cross-Vault recall are separate
+future capabilities.
 
 ## 2. Primary users
 
@@ -208,6 +213,11 @@ The service MUST provide a browser-based administration console for:
 - backup, restore, and retention configuration;
 - system version, migrations, and diagnostics.
 
+The console MUST list, create, select, disable, and re-enable service-managed
+Vaults. New content roots are derived from the immutable Vault slug under the
+service data directory. Existing single-Vault URLs and unscoped Admin behavior
+remain compatible through a stable legacy-default binding.
+
 The first-release console MUST use Simplified Chinese for operator-facing
 copy, group navigation by common tasks, show page-specific summaries instead
 of raw JSON by default, and progressively disclose advanced OAuth,
@@ -397,5 +407,9 @@ The service is complete for the first release when:
 8. Provider outages leave WebDAV, file writes, lexical search, and existing memory recall operational.
 9. Indexes can be deleted and rebuilt without loss of canonical knowledge.
 10. Backup and restore reproduce Vault content, credentials/configuration, revision history, and service operation.
-11. Isolation tests prove every credential and query is bound to one Vault context.
-12. Security, migration, crash-recovery, Litmus, MCP conformance, and end-to-end tests pass.
+11. Two managed Vaults can use the same relative paths while credentials,
+    files/history, jobs, FTS/vectors, memory, settings, and audit remain bound
+    to exactly one Vault context.
+12. One initializing, disabled, or failed Vault does not prevent Admin or a
+    healthy Vault from starting and operating.
+13. Security, migration, crash-recovery, Litmus, MCP conformance, and end-to-end tests pass.

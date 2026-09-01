@@ -19,6 +19,8 @@ function setInputValue(input: HTMLInputElement, value: string) {
 describe('Admin 管理界面', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    window.history.replaceState(null, '', '/');
+    adminApi.setVaultSlug(null);
     vi.spyOn(adminApi, 'restoreSession').mockResolvedValue(null);
     vi.spyOn(adminApi, 'setupStatus').mockResolvedValue({ setup_available: false });
   });
@@ -60,9 +62,21 @@ describe('Admin 管理界面', () => {
       csrf_token: null,
     });
     const request = vi.spyOn(adminApi, 'request').mockImplementation(async (path) => {
-      if (path === '/dashboard') return { ready: true };
-      if (path === '/memories?limit=50') return { memories: [] };
-      if (path === '/memory/extraction') {
+      if (path === '/vaults') {
+        return {
+          vaults: [{
+            id: 'vault-1',
+            slug: 'default',
+            name: '默认 Vault',
+            status: 'active',
+            availability: 'ready',
+            content_root: '/srv/default',
+          }],
+        };
+      }
+      if (path === '/vaults/default/dashboard') return { ready: true };
+      if (path === '/vaults/default/memories?limit=50') return { memories: [] };
+      if (path === '/vaults/default/memory/extraction') {
         return {
           policy: { enabled: true, source_mode: 'automatic', max_evidence_per_note: 3 },
           readiness: { ready: true, blockers: [] },
@@ -72,7 +86,7 @@ describe('Admin 管理界面', () => {
           consolidation: { generation: 0, pipeline_generation: 1 },
         };
       }
-      if (path === '/jobs/overview?limit=50') {
+      if (path === '/vaults/default/jobs/overview?limit=50') {
         return {
           running: [{
             id: 'older-running-memory-job',
@@ -98,9 +112,46 @@ describe('Admin 管理界面', () => {
       memoryNav.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    expect(request).toHaveBeenCalledWith('/jobs/overview?limit=50');
+    expect(request).toHaveBeenCalledWith('/vaults/default/jobs/overview?limit=50');
     expect(container.textContent).toContain('任务执行中 · 50%');
     expect(container.textContent).toContain('older-ru…ry-job');
+
+    await act(async () => root.unmount());
+  });
+
+  it('切换 Vault 后所有页面请求使用新的显式作用域', async () => {
+    vi.mocked(adminApi.restoreSession).mockResolvedValue({
+      user_id: 'admin-1',
+      username: 'owner',
+      expires_at: null,
+      csrf_token: null,
+    });
+    const request = vi.spyOn(adminApi, 'request').mockImplementation(async (path) => {
+      if (path === '/vaults') {
+        return {
+          vaults: [
+            { id: 'v1', slug: 'default', name: '默认', status: 'active', availability: 'ready', content_root: '/default' },
+            { id: 'v2', slug: 'work', name: '工作', status: 'active', availability: 'ready', content_root: '/work' },
+          ],
+        };
+      }
+      if (path.endsWith('/dashboard')) return { ready: true, vault: { name: path.includes('/work/') ? '工作' : '默认' } };
+      return {};
+    });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+
+    await act(async () => root.render(<App />));
+    const selector = container.querySelector<HTMLSelectElement>('.vault-switcher select');
+    expect(selector?.value).toBe('default');
+    await act(async () => {
+      if (!selector) throw new Error('Vault selector missing');
+      selector.value = 'work';
+      selector.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    expect(request).toHaveBeenCalledWith('/vaults/work/dashboard');
+    expect(new URLSearchParams(window.location.search).get('vault')).toBe('work');
 
     await act(async () => root.unmount());
   });

@@ -169,6 +169,7 @@ export function ManagementPage({ page, data, onRefresh }: { page: Page; data: Js
 function VaultPage({ data, notify, onRefresh }: { data: JsonObject | null; notify: Notify; onRefresh: () => void }) {
   const vault = asRecord(data);
   const [busy, setBusy] = useState(false);
+  const availability = stringValue(vault.availability, stringValue(vault.status, 'unknown'));
 
   async function rescan() {
     setBusy(true);
@@ -183,13 +184,28 @@ function VaultPage({ data, notify, onRefresh }: { data: JsonObject | null; notif
     }
   }
 
+  async function retryInitialization() {
+    setBusy(true);
+    try {
+      await adminApi.request('/vault/initialization/retry', { method: 'POST' });
+      notify('Vault 初始化任务已重新加入后台队列。');
+      onRefresh();
+    } catch (error: unknown) {
+      notify(formatRequestError(error), 'danger');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <Panel
       title={vaultName(vault.name)}
       eyebrow="当前知识库"
       description="内容根目录是普通 Obsidian Vault，浏览器不能直接修改路径。"
-      actions={<StatusBadge tone={statusTone(vault.status)}>{statusLabel(vault.status)}</StatusBadge>}
+      actions={<StatusBadge tone={statusTone(availability)}>{statusLabel(availability)}</StatusBadge>}
     >
+      {availability === 'initializing' ? <Notice tone="info">首次扫描、索引和记忆状态正在初始化；完成前该 Vault 的 WebDAV 和 MCP 链接暂不可用。</Notice> : null}
+      {availability === 'error' ? <Notice tone="danger">该 Vault 初始化或恢复失败，其他 Vault 不受影响。检查任务详情后可重试初始化。</Notice> : null}
       <InfoGrid>
         <InfoItem label="标识" value={stringValue(vault.slug)} mono />
         <InfoItem label="内容目录" value={stringValue(vault.content_root)} mono />
@@ -200,6 +216,11 @@ function VaultPage({ data, notify, onRefresh }: { data: JsonObject | null; notif
         <button className="secondary-button" type="button" disabled={busy} onClick={() => void rescan()}>
           {busy ? '正在提交…' : '重新扫描 Vault'}
         </button>
+        {availability === 'error' ? (
+          <button className="secondary-button" type="button" disabled={busy} onClick={() => void retryInitialization()}>
+            重试初始化
+          </button>
+        ) : null}
       </div>
       <details className="disclosure" open>
         <summary>编辑基本设置</summary>

@@ -111,6 +111,11 @@ const errorMessages: Record<string, string> = {
   validation_failed: '填写内容有误，请检查后重试。',
   revision_conflict: '配置已被其他操作更新，请刷新后再保存。',
   state_unavailable: '运行状态暂时不可用，请稍后重试。',
+  vault_selection_required: '请选择要管理的 Vault。',
+  vault_already_exists: '这个 Vault 链接标识已经存在。',
+  vault_root_unavailable: '服务托管目录已存在内容或无法安全使用。',
+  vault_disabled: '请先启用该 Vault。',
+  vault_already_initialized: '该 Vault 已经完成初始化。',
   maintenance: '服务正在维护，当前操作暂时不可用。',
   not_found: '没有找到对应记录。',
   backup_unavailable: '备份服务暂时不可用。',
@@ -217,6 +222,8 @@ const jobErrorMessages: Record<string, string> = {
 
 const statusLabels: Record<string, string> = {
   active: '正常',
+  initializing: '初始化中',
+  ready: '就绪',
   enabled: '已启用',
   disabled: '已停用',
   maintenance: '维护中',

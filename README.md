@@ -20,6 +20,8 @@ MCP Vault 面向希望长期保存个人知识、项目上下文和 Agent 决策
 - WebDAV、MCP 和 Admin 是三个独立的认证边界；
 - 每一次数据操作都绑定一个 <code>VaultContext</code>，协议处理器不能自行访问文件或
   执行 SQL；
+- 同一管理员可以创建多个服务托管 Vault；每个 Vault 使用独立的 WebDAV/MCP 链接、
+  凭据、任务、索引和长期记忆；
 - 远程模型是可选增强，不会阻塞 WebDAV、文件写入、词法搜索和已有记忆回忆。
 
 MCP Vault 不是在线笔记编辑器，不是简单的文件系统 MCP 包装器，也不是用专有

@@ -943,6 +943,35 @@ publication is therefore the setup trust boundary.
 
 ### 10.3 API groups
 
+Multi-Vault management uses an explicit Admin path scope:
+
+```text
+GET    /api/v1/vaults
+POST   /api/v1/vaults
+GET    /api/v1/vaults/{vault_slug}
+PATCH  /api/v1/vaults/{vault_slug}
+POST   /api/v1/vaults/{vault_slug}/rescan
+POST   /api/v1/vaults/{vault_slug}/initialization/retry
+```
+
+`POST /vaults` accepts only `name` and `slug`. The service generates the ID and
+content root and returns `202` with the Vault plus its durable
+`vault.initialize` job. Vault summaries retain ID/slug/name/root/status/revision
+and add effective `availability`: `initializing`, `ready`, `maintenance`,
+`disabled`, or `error`.
+
+Vault-owned groups below are also mounted at
+`/api/v1/vaults/{vault_slug}/<group>`, including `dashboard`, `webdav`, `mcp`,
+the Provider list/mode and model bindings, `index`, `memories`/`memory`, `jobs`,
+and `audit`. The slug is resolved to `VaultContext`; no request body accepts a
+Vault selector. System/health/diagnostics, Provider detail/model inventory, and
+backup/restore remain global.
+
+The historical unscoped forms remain compatibility aliases to the persisted
+legacy-default Vault. They never select the first row after a second Vault is
+created; when an upgraded database has several Vaults and no unique historical
+default, they return `409 vault_selection_required`.
+
 ```text
 GET    /api/v1/dashboard
 GET    /api/v1/system

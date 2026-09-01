@@ -36,7 +36,11 @@ use tracing::{error, info, warn};
 use crate::metrics::Metrics;
 
 type BoxWorkerFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
-type JobTaskResult = (JobId, Option<JobOutcome>, Option<MaintenanceOperationGuard>);
+type JobTaskResult = (
+    JobRecord,
+    Option<JobOutcome>,
+    Option<MaintenanceOperationGuard>,
+);
 
 const MAX_RECORDED_MEMORY_NOTE_FAILURES: usize = 20;
 const MAX_CONSECUTIVE_MEMORY_OUTPUT_FAILURES: u32 = 3;
@@ -523,6 +527,48 @@ impl WorkerSupervisor {
             .min(self.config.lease_duration / 3);
         let lease_duration = self.config.lease_duration;
         for job in jobs {
+            if let Some(vault_id) = job.vault_id {
+                let availability = match self.state.vaults().find_by_id(vault_id).await {
+                    Ok(Some(vault)) => self.state.vaults().availability(&vault).await,
+                    Ok(None) => {
+                        let _ = repository
+                            .fail_permanently(job.id, worker_id, "job_vault_missing")
+                            .await;
+                        continue;
+                    }
+                    Err(_) => {
+                        let _ = repository
+                            .release_claimed(job.id, worker_id, now_millis().saturating_add(5_000))
+                            .await;
+                        continue;
+                    }
+                };
+                match availability {
+                    Ok(mcp_vault_state::VaultAvailability::Ready) => {}
+                    Ok(mcp_vault_state::VaultAvailability::Initializing)
+                        if job.job_type == "vault.initialize" => {}
+                    Ok(mcp_vault_state::VaultAvailability::Disabled) => {
+                        let _ = repository.cancel_claimed(job.id, worker_id).await;
+                        continue;
+                    }
+                    Ok(mcp_vault_state::VaultAvailability::Maintenance) => {
+                        let _ = repository
+                            .release_claimed(job.id, worker_id, now_millis().saturating_add(10_000))
+                            .await;
+                        continue;
+                    }
+                    Ok(
+                        mcp_vault_state::VaultAvailability::Initializing
+                        | mcp_vault_state::VaultAvailability::Error,
+                    )
+                    | Err(_) => {
+                        let _ = repository
+                            .release_claimed(job.id, worker_id, now_millis().saturating_add(60_000))
+                            .await;
+                        continue;
+                    }
+                }
+            }
             if job.job_type.starts_with("memory.")
                 && job
                     .payload
@@ -599,7 +645,7 @@ impl WorkerSupervisor {
                                 vault_id = ?job.vault_id,
                                 "durable job wait interrupted by shutdown"
                             );
-                            return (job.id, None, None);
+                            return (job, None, None);
                         }
                         wait_poll(&shutdown, Duration::from_millis(25)).await;
                     }
@@ -662,10 +708,10 @@ impl WorkerSupervisor {
                         vault_id = ?job.vault_id,
                         "durable job result was not persisted because shutdown started"
                     );
-                    return (job.id, None, maintenance_operation);
+                    return (job, None, maintenance_operation);
                 }
                 log_job_outcome(&job, outcome, started_at.elapsed());
-                (job.id, Some(outcome), maintenance_operation)
+                (job, Some(outcome), maintenance_operation)
             });
         }
     }
@@ -677,7 +723,7 @@ impl WorkerSupervisor {
         result: Result<JobTaskResult, JoinError>,
     ) {
         self.health.in_flight.fetch_sub(1, Ordering::AcqRel);
-        let (job_id, outcome, _maintenance_operation) = match result {
+        let (job, outcome, _maintenance_operation) = match result {
             Ok(value) => value,
             Err(_) => {
                 self.health.error("job_handler_panicked");
@@ -695,6 +741,7 @@ impl WorkerSupervisor {
             // the process is offline.
             return;
         };
+        let job_id = job.id;
         match outcome {
             JobOutcome::Complete => {
                 if repository.complete(job_id, worker_id).await.is_err() {
@@ -730,7 +777,7 @@ impl WorkerSupervisor {
                 }
             }
             JobOutcome::Retry { delay, code } => {
-                if repository
+                match repository
                     .retry_or_fail(
                         job_id,
                         worker_id,
@@ -738,17 +785,22 @@ impl WorkerSupervisor {
                         code,
                     )
                     .await
-                    .is_err()
                 {
-                    self.health.error("job_retry_failed");
-                    error!(
-                        target: "mcp_vault::jobs",
-                        event = "job_state_transition_failed",
-                        job_id = %job_id,
-                        transition = "retry",
-                        error_code = code,
-                        "failed to persist retry job state"
-                    );
+                    Ok(mcp_vault_state::JobStatus::Failed) => {
+                        self.mark_initialization_failed(&job).await;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        self.health.error("job_retry_failed");
+                        error!(
+                            target: "mcp_vault::jobs",
+                            event = "job_state_transition_failed",
+                            job_id = %job_id,
+                            transition = "retry",
+                            error_code = code,
+                            "failed to persist retry job state"
+                        );
+                    }
                 }
             }
             JobOutcome::Failed { code } => {
@@ -766,6 +818,8 @@ impl WorkerSupervisor {
                         error_code = code,
                         "failed to persist failed job state"
                     );
+                } else {
+                    self.mark_initialization_failed(&job).await;
                 }
             }
             JobOutcome::Cancelled => {
@@ -780,6 +834,33 @@ impl WorkerSupervisor {
                     );
                 }
             }
+        }
+    }
+
+    async fn mark_initialization_failed(&self, job: &JobRecord) {
+        if job.job_type != "vault.initialize" {
+            return;
+        }
+        let Some(vault_id) = job.vault_id else {
+            return;
+        };
+        let Ok(Some(vault)) = self.state.vaults().find_by_id(vault_id).await else {
+            return;
+        };
+        if vault.status != mcp_vault_state::VaultStatus::Active {
+            return;
+        }
+        let Ok(context) = vault.context() else {
+            return;
+        };
+        if self
+            .state
+            .vaults()
+            .set_status(&context, mcp_vault_state::VaultStatus::Error)
+            .await
+            .is_err()
+        {
+            self.health.error("initialize_vault_error_status_failed");
         }
     }
 
@@ -1415,6 +1496,93 @@ pub fn index_rebuild_job_handler(
                 Err(_) => JobOutcome::Retry {
                     delay: Duration::from_secs(5),
                     code: "index_rebuild_failed",
+                },
+            }
+        })
+    })
+}
+
+/// Handle an explicit Admin-triggered Vault reconciliation request.
+pub fn vault_initialize_job_handler(
+    state: StateStore,
+    history_root: std::path::PathBuf,
+    core_runtime: mcp_vault_core::VaultCoreRuntime,
+) -> JobHandler {
+    Arc::new(move |job, shutdown| {
+        let state = state.clone();
+        let history_root = history_root.clone();
+        let core_runtime = core_runtime.clone();
+        Box::pin(async move {
+            if shutdown.is_cancelled() {
+                return JobOutcome::Cancelled;
+            }
+            let Some(vault_id) = job.vault_id else {
+                return JobOutcome::Failed {
+                    code: "initialize_vault_missing",
+                };
+            };
+            let vault = match state.vaults().find_by_id(vault_id).await {
+                Ok(Some(vault)) => vault,
+                Ok(None) => {
+                    return JobOutcome::Failed {
+                        code: "initialize_vault_missing",
+                    };
+                }
+                Err(_) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "initialize_vault_lookup_failed",
+                    };
+                }
+            };
+            if vault.status != mcp_vault_state::VaultStatus::Active {
+                return JobOutcome::Complete;
+            }
+            let context = match vault.context() {
+                Ok(context) => context,
+                Err(_) => {
+                    return JobOutcome::Failed {
+                        code: "initialize_vault_context_invalid",
+                    };
+                }
+            };
+            let result = tokio::select! {
+                _ = shutdown.cancelled() => return JobOutcome::Cancelled,
+                result = crate::reconcile_vault_once(
+                    &state,
+                    &history_root,
+                    &vault,
+                    "initial",
+                    &core_runtime,
+                ) => result,
+            };
+            if result.is_err() {
+                return JobOutcome::Retry {
+                    delay: Duration::from_secs(10),
+                    code: "initialize_reconcile_failed",
+                };
+            }
+            match state
+                .memory()
+                .set_pipeline_generation_state(&context, MEMORY_PIPELINE_GENERATION, false)
+                .await
+            {
+                Ok(_) => {
+                    if mcp_vault_indexer::IndexService::new(state.clone())
+                        .schedule_note_embeddings(&context)
+                        .await
+                        .is_err()
+                    {
+                        warn!(
+                            vault_id = %context.id(),
+                            "managed Vault initialization could not schedule optional note embeddings"
+                        );
+                    }
+                    JobOutcome::Complete
+                }
+                Err(_) => JobOutcome::Retry {
+                    delay: Duration::from_secs(5),
+                    code: "initialize_memory_state_failed",
                 },
             }
         })
@@ -3346,11 +3514,11 @@ mod tests {
         memory_consolidation_error_outcome, memory_extract_error_outcome,
         memory_extract_job_handler, memory_output_failure_limit_reached, now_millis,
         outbox_event_job_handler, outbox_to_job_handler, path_is_memory_record,
-        quiesce_memory_pipeline_jobs, redacted_path_hash,
+        quiesce_memory_pipeline_jobs, redacted_path_hash, vault_initialize_job_handler,
     };
     use axum::{Json, Router, extract::State as AxumState, routing::post};
     use mcp_vault_auth::{AuthService, MasterKeyRing};
-    use mcp_vault_core::VaultCore;
+    use mcp_vault_core::{ManagedVaultService, VaultCore, VaultCoreRuntime};
     use mcp_vault_domain::{
         Actor, EventId, FileId, MaintenanceGate, MemoryRawId, Revision, SourcePlane, VaultContext,
         VaultId, VaultPath, VaultPathPolicy, VaultSlug, WritePrecondition,
@@ -3390,6 +3558,142 @@ mod tests {
 
     fn test_outbox_handler(state: &StateStore) -> OutboxHandler {
         outbox_to_job_handler(state.clone(), test_memory_service(state))
+    }
+
+    #[tokio::test]
+    async fn managed_vault_initialization_builds_vault_scoped_state() {
+        let root = tempfile::tempdir().unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let managed = ManagedVaultService::new(
+            state.clone(),
+            root.path().to_owned(),
+            StorageOptions::default(),
+        );
+        let created = managed
+            .create(VaultSlug::new("work").unwrap(), "Work")
+            .await
+            .unwrap();
+        let context = created.vault.context().unwrap();
+        let outcome = (vault_initialize_job_handler(
+            state.clone(),
+            root.path().join("history"),
+            VaultCoreRuntime::default(),
+        ))(created.initialization_job, Cancellation::default())
+        .await;
+
+        assert_eq!(outcome, JobOutcome::Complete);
+        assert_eq!(
+            state
+                .scan_checkpoints()
+                .get(&context, "initial")
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .as_str(),
+            "completed"
+        );
+        assert!(state.index().status(&context).await.unwrap().is_some());
+        assert_eq!(
+            state
+                .memory()
+                .get_consolidation_state(&context)
+                .await
+                .unwrap()
+                .unwrap()
+                .pipeline_generation,
+            MEMORY_PIPELINE_GENERATION
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_initialization_failure_marks_only_that_vault_error() {
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("broken-init").unwrap(),
+            "/srv/broken-init".into(),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Broken init", VaultStatus::Active)
+            .await
+            .unwrap();
+        let job = state
+            .jobs()
+            .enqueue(
+                &context,
+                "vault.initialize",
+                &format!("vault:{}:initialize", context.id()),
+                &json!({}),
+                20,
+                1,
+                0,
+            )
+            .await
+            .unwrap();
+        let supervisor = WorkerSupervisor::new(
+            state.clone(),
+            test_outbox_handler(&state),
+            WorkerConfig {
+                poll_interval: Duration::from_millis(5),
+                lease_duration: Duration::from_millis(100),
+                ..WorkerConfig::default()
+            },
+        )
+        .unwrap();
+        supervisor
+            .register_job_handler(
+                "vault.initialize",
+                Arc::new(|_, _| {
+                    Box::pin(async {
+                        JobOutcome::Failed {
+                            code: "init_failed",
+                        }
+                    })
+                }),
+            )
+            .unwrap();
+        let shutdown = Cancellation::default();
+        let running = tokio::spawn({
+            let supervisor = supervisor.clone();
+            let shutdown = shutdown.clone();
+            async move { supervisor.run(shutdown).await }
+        });
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let failed = state
+                    .jobs()
+                    .get(&context, job.id)
+                    .await
+                    .unwrap()
+                    .is_some_and(|job| job.status == JobStatus::Failed);
+                let errored = state
+                    .vaults()
+                    .find_by_id(context.id())
+                    .await
+                    .unwrap()
+                    .is_some_and(|vault| vault.status == VaultStatus::Error);
+                if failed && errored {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        shutdown.cancel();
+        timeout(Duration::from_secs(2), running)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     async fn mixed_extraction_response(

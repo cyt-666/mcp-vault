@@ -713,6 +713,24 @@ impl VaultStorage {
         .await
     }
 
+    /// Return whether the configured root contains no entries at all.
+    ///
+    /// Provisioning uses this before registering a service-managed Vault. The
+    /// check deliberately includes the reserved namespace and unsafe entry
+    /// kinds; an unregistered non-empty directory must never be claimed merely
+    /// because ordinary Vault listing would hide one of its entries.
+    pub async fn is_root_empty(&self) -> Result<bool, StorageError> {
+        self.ensure_root().await?;
+        let root = self.root.clone();
+        run_blocking(move || {
+            platform::open_root(&root)?;
+            let mut entries = std::fs::read_dir(&root)
+                .map_err(|error| StorageError::io("inspect Vault root entries", error.kind()))?;
+            Ok(entries.next().is_none())
+        })
+        .await
+    }
+
     /// Return free-space diagnostics for the content root filesystem.
     pub async fn disk_space(&self) -> Result<DiskSpace, StorageError> {
         disk_space_for(&self.root).await

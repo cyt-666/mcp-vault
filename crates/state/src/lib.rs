@@ -55,7 +55,9 @@ pub use providers::{
     ProviderHealthRecord, ProviderRecord, ProviderRepository, VectorCandidate,
 };
 pub use settings::{SettingRecord, SettingsRepository};
-pub use vaults::{VaultRecord, VaultRepository, VaultStatus};
+pub use vaults::{
+    LEGACY_DEFAULT_VAULT_SETTING, VaultAvailability, VaultRecord, VaultRepository, VaultStatus,
+};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

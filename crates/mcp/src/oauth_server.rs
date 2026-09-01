@@ -539,7 +539,15 @@ async fn has_enabled_local_oauth(service: &McpService) -> Result<bool, ()> {
         .await
         .map_err(|_| ())?;
     for vault in vaults {
-        if vault.status != mcp_vault_state::VaultStatus::Active {
+        if service
+            .auth_state
+            .state
+            .vaults()
+            .availability(&vault)
+            .await
+            .map_err(|_| ())?
+            != mcp_vault_state::VaultAvailability::Ready
+        {
             continue;
         }
         let context = vault.context().map_err(|_| ())?;
@@ -576,7 +584,15 @@ async fn resolve_local_resource(
         .await
         .map_err(|_| ResourceError::Unavailable)?;
     for vault in vaults {
-        if vault.status != mcp_vault_state::VaultStatus::Active {
+        if service
+            .auth_state
+            .state
+            .vaults()
+            .availability(&vault)
+            .await
+            .map_err(|_| ResourceError::Unavailable)?
+            != mcp_vault_state::VaultAvailability::Ready
+        {
             continue;
         }
         let expected = format!("{origin}/mcp/v1/vaults/{}", vault.slug);

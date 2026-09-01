@@ -2576,6 +2576,7 @@ dependencies = [
  "mcp-vault-domain",
  "mcp-vault-state",
  "mcp-vault-storage-fs",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",

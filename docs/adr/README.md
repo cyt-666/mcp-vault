@@ -2,7 +2,7 @@
 
 Accepted ADRs are binding unless superseded by a later ADR.
 
-The current sequence includes ADR-0019. ADR-0013 keeps ADR-0007 durable memories
+The current sequence includes ADR-0020. ADR-0013 keeps ADR-0007 durable memories
 canonical and provenanced while allowing `recall` to return separately typed,
 rebuildable ordinary-note cues. ADR-0014 replaced model self-score/routine
 review defaults with exact evidence and autonomous promotion. ADR-0015 retains
@@ -24,6 +24,10 @@ revocation.
 ADR-0019 removes the WebDAV proxy socket-peer allow-list and moves protection
 of the plaintext data listener entirely to deployment networking while
 retaining the forwarded-HTTPS requirement.
+
+ADR-0020 enables managed multi-Vault administration while retaining per-Vault
+MCP/WebDAV endpoints, Vault-bound credentials, a stable legacy Admin default,
+and isolated initialization, jobs, indexes, and memory.
 
 Status values:
 

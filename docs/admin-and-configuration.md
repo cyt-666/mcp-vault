@@ -301,7 +301,7 @@ Each change:
 
 ## 6. Admin information architecture
 
-The first-release console uses Simplified Chinese and groups destinations by
+The console uses Simplified Chinese and groups destinations by
 the operator's task rather than presenting every subsystem as one flat list:
 
 ```text
@@ -325,6 +325,12 @@ the operator's task rather than presenting every subsystem as one flat list:
   ├── 审计日志
   └── 系统信息
 ```
+
+The authenticated sidebar also contains an always-visible Vault selector and
+a collapsed “新建 Vault” form. The selection is represented by
+`?vault=<slug>` and every Vault-owned API call uses the explicit scoped path.
+Switching Vaults cancels/ignores older responses and clears one-time WebDAV/PAT
+secrets by remounting the selected management page.
 
 Each page presents a concise status summary and common action first. OAuth
 issuer/grant configuration, restore/recovery controls, and raw API responses
@@ -368,7 +374,11 @@ Do not display note or memory contents on the dashboard.
 
 Functions:
 
+- list and select every registered Vault;
+- create a service-managed Vault from display name and immutable lowercase
+  slug; the server owns `<data-dir>/vaults/<slug>`;
 - show Vault name, slug, content root, reserved root;
+- show effective initializing/ready/maintenance/disabled/error availability;
 - validate filesystem permissions;
 - show initial/reconciliation scan status;
 - configure index include/exclude globs;
@@ -377,6 +387,18 @@ Functions:
 - trigger rescan and projection rebuild;
 - show out-of-band change warnings;
 - configure revision/history and trash retention.
+
+Each selected Vault receives its own connection cards:
+
+```text
+/dav/v1/vaults/<slug>/
+/mcp/v1/vaults/<slug>
+```
+
+Disable is reversible and retains canonical files, history, credentials,
+memories, jobs, and audit. This UI does not detach or delete a Vault. A failed
+managed initialization exposes an explicit retry action; the data links remain
+unavailable until the durable initial scan/index/memory setup completes.
 
 The first release may not expose “Create another Vault,” but the page and backend use a Vault ID internally.
 

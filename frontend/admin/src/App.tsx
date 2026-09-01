@@ -12,14 +12,16 @@ import {
   pageMeta,
 } from './view-model';
 
-const pageEndpoints: Partial<Record<Page, string>> = {
-  dashboard: '/dashboard',
-  vault: '/vault',
-  webdav: '/webdav/credentials',
-  providers: '/providers',
-  index: '/index/status',
-  jobs: '/jobs/overview?limit=50',
-  audit: '/audit?limit=50',
+type VaultSummary = {
+  id: string;
+  slug: string;
+  name: string;
+  status: string;
+  availability: string;
+  content_root: string;
+};
+
+const globalPageEndpoints: Partial<Record<Page, string>> = {
   backup: '/backups?limit=50',
   system: '/system',
 };
@@ -29,28 +31,32 @@ export function isInsecureLanAdminLocation(location: Pick<Location, 'protocol' |
     && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
 }
 
-async function loadPage(page: Page): Promise<JsonObject> {
+function scopedPath(vaultSlug: string, path = ''): string {
+  return `/vaults/${encodeURIComponent(vaultSlug)}${path}`;
+}
+
+async function loadPage(page: Page, vaultSlug: string): Promise<JsonObject> {
   if (page === 'webdav') {
     const [credentialData, connection] = await Promise.all([
-      adminApi.request<{ credentials: unknown[] }>('/webdav/credentials'),
-      adminApi.request<JsonObject>('/mcp/connection-info'),
+      adminApi.request<{ credentials: unknown[] }>(scopedPath(vaultSlug, '/webdav/credentials')),
+      adminApi.request<JsonObject>(scopedPath(vaultSlug, '/mcp/connection-info')),
     ]);
     return { credentials: credentialData.credentials, webdav_endpoint: connection.webdav_endpoint };
   }
 
   if (page === 'mcp') {
     const [connection, tokenData, localOAuth] = await Promise.all([
-      adminApi.request<JsonObject>('/mcp/connection-info'),
-      adminApi.request<{ tokens: unknown[] }>('/mcp/tokens?limit=50'),
-      adminApi.request<JsonObject>('/mcp/oauth/local'),
+      adminApi.request<JsonObject>(scopedPath(vaultSlug, '/mcp/connection-info')),
+      adminApi.request<{ tokens: unknown[] }>(scopedPath(vaultSlug, '/mcp/tokens?limit=50')),
+      adminApi.request<JsonObject>(scopedPath(vaultSlug, '/mcp/oauth/local')),
     ]);
     return { ...connection, tokens: tokenData.tokens, local_oauth: localOAuth };
   }
 
   if (page === 'providers') {
     const [providerData, bindingData] = await Promise.all([
-      adminApi.request<{ providers: unknown[]; provider_mode: unknown }>('/providers'),
-      adminApi.request<{ bindings: unknown[] }>('/model-bindings'),
+      adminApi.request<{ providers: unknown[]; provider_mode: unknown }>(scopedPath(vaultSlug, '/providers')),
+      adminApi.request<{ bindings: unknown[] }>(scopedPath(vaultSlug, '/model-bindings')),
     ]);
     const providers = Array.isArray(providerData.providers) ? providerData.providers : [];
     const modelGroups = await Promise.all(
@@ -79,9 +85,9 @@ async function loadPage(page: Page): Promise<JsonObject> {
 
   if (page === 'memory') {
     const [memoryData, extractionData, jobsOverview] = await Promise.all([
-      adminApi.request<JsonObject>('/memories?limit=50'),
-      adminApi.request<JsonObject>('/memory/extraction'),
-      adminApi.request<JsonObject>('/jobs/overview?limit=50'),
+      adminApi.request<JsonObject>(scopedPath(vaultSlug, '/memories?limit=50')),
+      adminApi.request<JsonObject>(scopedPath(vaultSlug, '/memory/extraction')),
+      adminApi.request<JsonObject>(scopedPath(vaultSlug, '/jobs/overview?limit=50')),
     ]);
     const memoryJobs = ['running', 'queued', 'retry_wait', 'history']
       .flatMap((group) => Array.isArray(jobsOverview[group]) ? jobsOverview[group] : [])
@@ -98,7 +104,13 @@ async function loadPage(page: Page): Promise<JsonObject> {
     };
   }
 
-  const endpoint = pageEndpoints[page];
+  const endpoint = globalPageEndpoints[page] ?? ({
+    dashboard: scopedPath(vaultSlug, '/dashboard'),
+    vault: scopedPath(vaultSlug),
+    index: scopedPath(vaultSlug, '/index/status'),
+    jobs: scopedPath(vaultSlug, '/jobs/overview?limit=50'),
+    audit: scopedPath(vaultSlug, '/audit?limit=50'),
+  } as Partial<Record<Page, string>>)[page];
   return endpoint ? adminApi.request<JsonObject>(endpoint) : {};
 }
 
@@ -112,6 +124,9 @@ export function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshRevision, setRefreshRevision] = useState(0);
+  const [vaults, setVaults] = useState<VaultSummary[]>([]);
+  const [selectedVaultSlug, setSelectedVaultSlug] = useState('');
+  const [vaultRevision, setVaultRevision] = useState(0);
 
   useEffect(() => {
     document.documentElement.scrollTop = 0;
@@ -160,10 +175,47 @@ export function App() {
   useEffect(() => {
     if (!authenticated) return;
     let cancelled = false;
+    adminApi
+      .request<{ vaults: VaultSummary[] }>('/vaults')
+      .then((result) => {
+        if (cancelled) return;
+        const nextVaults = Array.isArray(result.vaults) ? result.vaults : [];
+        setVaults(nextVaults);
+        setSelectedVaultSlug((current) => {
+          if (nextVaults.some((vault) => vault.slug === current)) return current;
+          const requested = new URLSearchParams(window.location.search).get('vault');
+          if (requested && nextVaults.some((vault) => vault.slug === requested)) return requested;
+          return nextVaults.find((vault) => vault.slug === 'default')?.slug
+            ?? nextVaults.find((vault) => vault.status === 'active')?.slug
+            ?? nextVaults[0]?.slug
+            ?? '';
+        });
+      })
+      .catch((requestError: unknown) => {
+        if (!cancelled) setError(formatRequestError(requestError));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticated, vaultRevision]);
+
+  useEffect(() => {
+    adminApi.setVaultSlug(selectedVaultSlug || null);
+    if (!selectedVaultSlug) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set('vault', selectedVaultSlug);
+    window.history.replaceState(null, '', url);
+    setData(null);
+    setError(null);
+  }, [selectedVaultSlug]);
+
+  useEffect(() => {
+    if (!authenticated || !selectedVaultSlug) return;
+    let cancelled = false;
     setLoading(true);
     setError(null);
 
-    loadPage(page)
+    loadPage(page, selectedVaultSlug)
       .then((result) => {
         if (!cancelled) setData(result);
       })
@@ -182,7 +234,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [authenticated, page, refreshRevision]);
+  }, [authenticated, page, refreshRevision, selectedVaultSlug]);
 
   useEffect(() => {
     if (!authenticated || !['jobs', 'memory'].includes(page)) return;
@@ -253,6 +305,16 @@ export function App() {
             <span>管理控制台</span>
           </div>
         </div>
+        <VaultSwitcher
+          vaults={vaults}
+          selected={selectedVaultSlug}
+          onSelect={setSelectedVaultSlug}
+          onCreated={(slug) => {
+            setSelectedVaultSlug(slug);
+            setVaultRevision((revision) => revision + 1);
+          }}
+          onError={setError}
+        />
         <nav>
           {navigationGroups.map((group) => (
             <section className="nav-group" key={group.label} aria-label={group.label}>
@@ -299,7 +361,9 @@ export function App() {
       <section className="content-shell">
         <header className="content-header">
           <div>
-            <p className="breadcrumb">MCP Vault / {selected.label}</p>
+            <p className="breadcrumb">
+              MCP Vault / {vaults.find((vault) => vault.slug === selectedVaultSlug)?.name ?? selectedVaultSlug} / {selected.label}
+            </p>
             <h1>{selected.label}</h1>
             <p>{selected.description}</p>
           </div>
@@ -317,9 +381,10 @@ export function App() {
         {loading ? <LoadingBar /> : null}
 
         {page === 'dashboard' ? (
-          <Dashboard data={data} onNavigate={navigate} />
+          <Dashboard key={selectedVaultSlug} data={data} onNavigate={navigate} />
         ) : (
           <ManagementPage
+            key={`${selectedVaultSlug}:${page}`}
             page={page}
             data={data}
             onRefresh={() => setRefreshRevision((revision) => revision + 1)}
@@ -328,6 +393,98 @@ export function App() {
       </section>
     </main>
   );
+}
+
+function VaultSwitcher({
+  vaults,
+  selected,
+  onSelect,
+  onCreated,
+  onError,
+}: {
+  vaults: VaultSummary[];
+  selected: string;
+  onSelect: (slug: string) => void;
+  onCreated: (slug: string) => void;
+  onError: (message: string | null) => void;
+}) {
+  const [name, setName] = useState('');
+  const [slug, setSlug] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function create(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    onError(null);
+    try {
+      const result = await adminApi.request<{ vault: VaultSummary }>('/vaults', {
+        method: 'POST',
+        body: { name, slug },
+      });
+      setName('');
+      setSlug('');
+      onCreated(result.vault.slug);
+    } catch (requestError: unknown) {
+      onError(formatRequestError(requestError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="vault-switcher" aria-label="当前 Vault">
+      <label>
+        当前 Vault
+        <select
+          value={selected}
+          onChange={(event) => onSelect(event.target.value)}
+          disabled={vaults.length === 0}
+        >
+          {vaults.map((vault) => (
+            <option key={vault.id} value={vault.slug}>
+              {vault.name} · {vaultAvailabilityLabel(vault.availability)}
+            </option>
+          ))}
+        </select>
+      </label>
+      <details>
+        <summary>新建 Vault</summary>
+        <form className="vault-create-form" onSubmit={create}>
+          <label>
+            显示名称
+            <input value={name} onChange={(event) => setName(event.target.value)} required maxLength={256} />
+          </label>
+          <label>
+            链接标识
+            <input
+              value={slug}
+              onChange={(event) => setSlug(event.target.value.toLowerCase())}
+              required
+              maxLength={64}
+              pattern="[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
+              placeholder="work"
+              autoCapitalize="none"
+              spellCheck={false}
+            />
+          </label>
+          <small>内容目录由服务创建；标识将进入 WebDAV 和 MCP 链接，创建后不可修改。</small>
+          <button className="secondary-button" type="submit" disabled={busy}>
+            {busy ? '正在创建…' : '创建 Vault'}
+          </button>
+        </form>
+      </details>
+    </section>
+  );
+}
+
+function vaultAvailabilityLabel(value: string): string {
+  return ({
+    initializing: '初始化中',
+    ready: '就绪',
+    maintenance: '维护中',
+    disabled: '已停用',
+    error: '异常',
+  } as Record<string, string>)[value] ?? value;
 }
 
 function AuthCard({
