@@ -46,8 +46,9 @@ pub use memory::{
     MemoryBundle, MemoryCandidateRecord, MemoryConsolidationProposalRecord,
     MemoryConsolidationStateRecord, MemoryCounts, MemoryDiagnosticRecord, MemoryFilter,
     MemoryIdempotencyRecord, MemoryPipelinePurgeReport, MemoryRecord, MemoryRelationRecord,
-    MemoryRepository, MemorySearchHit, MemorySourceRecord, MemoryStage1Counts,
-    MemoryStage1OutputRecord,
+    MemoryRepository, MemorySearchHit, MemorySourceAuditStateRecord, MemorySourceHealthCounts,
+    MemorySourceHealthDetailRecord, MemorySourceHealthRecord, MemorySourceHealthState,
+    MemorySourceRecord, MemoryStage1Counts, MemoryStage1OutputRecord,
 };
 pub use pool::{StateStore, StateTransaction};
 pub use providers::{
@@ -55,7 +56,9 @@ pub use providers::{
     ProviderHealthRecord, ProviderRecord, ProviderRepository, VectorCandidate,
 };
 pub use settings::{SettingRecord, SettingsRepository};
-pub use vaults::{VaultRecord, VaultRepository, VaultStatus};
+pub use vaults::{
+    LEGACY_DEFAULT_VAULT_SETTING, VaultAvailability, VaultRecord, VaultRepository, VaultStatus,
+};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

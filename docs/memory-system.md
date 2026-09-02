@@ -138,6 +138,9 @@ Local preparation and validation own the bookkeeping:
 - durable Stage 1/current-memory UUIDs never enter the model request or response;
 - each input or memory index must resolve within the exact request snapshot and
   have the lifecycle state required by that operation;
+- dirty inputs are indexed before context-only raw memories, and the request
+  schema enumerates the exact indexes permitted for discards so a Provider
+  cannot produce schema-valid bookkeeping that local validation must reject;
 - every create gets a fresh application-generated UUIDv7;
 - every referenced ready input inherits its application-derived source
   revision/hash provenance, so Phase 2 never chooses evidence coordinates or
@@ -224,11 +227,28 @@ It is not required to equal this supporting evidence:
 I decided that future services use Rust.
 ```
 
-`memory_sources` separately stores source type, file ID, path, note revision,
-whole-source or excerpt hash, optional heading/line range, and Vault ID. Detail
-operations return source metadata; normal recall omits sources by default to
-conserve context. Source evidence can be verified against the retained note
-revision through Vault history permissions.
+`memory_sources` separately stores source type, stable file ID, path, note
+revision, whole-source or excerpt hash, optional heading/line range, and Vault
+ID. Canonical memory Markdown also writes the optional stable ID as
+`sources[].file_id`; legacy files without it remain valid. Detail operations
+resolve `path` from the current active File ID and return null after deletion,
+while `revision` continues to identify evidence. Normal recall omits sources by
+default to conserve context. Source evidence can be verified against the
+retained note revision through Vault history permissions.
+
+`memory_source_health` continuously classifies every final note source as
+`unverified`, `current`, `content_changed`, `deleted`, `identity_missing`, or
+`identity_ambiguous`. A current row records the resolved File ID/path, checked
+revision, and accepted current file hash. `FileMoved` rebinds final and Stage 1
+paths without a Provider call. A memory containing note sources needs at least
+one current note source to remain active, regardless of origin. Source-less
+explicit Agent/Admin memory remains supported by the explicit assertion.
+
+Cross-File-ID recovery uses exact evidence only. Whole-note evidence requires
+one unique normalized full-content hash in the Vault. Excerpt evidence requires
+the same line anchor, optional heading path, and excerpt hash. Multiple
+candidates, no candidate, a truncated scan, and cross-Vault content never bind.
+No filename, vector, semantic, or LLM identity guess is accepted.
 
 Memory types remain extensible text values:
 
@@ -242,6 +262,9 @@ Final lifecycle states are:
 ```text
 active ──newer truth──▶ superseded
    │
+   ├──last note source unavailable──▶ stale
+   │                                  │
+   │                                  └──unique exact recovery──▶ active
    ├──source consolidation──▶ archived
    ├──manual archive────────▶ archived
    └──invalid managed file──▶ quarantined
@@ -263,8 +286,12 @@ recall request
     → token-budgeted memories + related_notes
 ```
 
-Normal recall reads only the latest committed projection/artifacts. It never
-waits for pending Stage 1 work and never performs a live consolidation call.
+Normal recall reads only active memory with current source support. For note-
+dependent memory, the accepted health hash must still equal the current live
+file hash; this fails closed immediately after a file update, before the source
+job runs. Unverified upgraded sources are also excluded. Historical recall may
+explicitly include stale/superseded/archived records. Recall never waits for
+pending Stage 1 work and never performs a live consolidation call.
 `include_sources` defaults to `false`; `get_memory` and memory resources provide
 provenance detail.
 
@@ -275,15 +302,18 @@ Vault receives every user message.
 
 ## 8. Source changes and deletion
 
-A note update does not immediately mark all existing memories stale. The new
-revision is distilled, then Phase 2 updates, merges, or forgets affected global
-memory as one sourced decision. Until that commit, the last complete global
-generation remains recallable.
+A note event first runs `memory.source_reconcile`. Source health is updated and
+normal recall fails closed before optional extraction is admitted. If exact
+anchored evidence still exists, the verified current hash advances and the
+memory stays active. Otherwise a memory with no other current note support
+becomes `stale` with `status_reason: source_unavailable`.
 
 A deleted note marks its current Stage 1 row `withdrawn` and queues Phase 2.
 The consolidation proposal must disposition that withdrawal and archive or
-update unsupported final memory. Other current supporting sources can keep a
-memory active.
+update unsupported final memory. Dirty-source-related stale memories are
+included in Phase 2 and must be updated, archived, or superseded rather than
+duplicated. Provider unavailability leaves them stale and inspectable. Other
+current supporting sources can keep a memory active.
 
 ## 9. Prerelease pipeline cutover
 
@@ -319,19 +349,29 @@ memory.extract
 memory.consolidate
 memory.reset_pipeline
 memory.revalidate
+memory.source_reconcile
+memory.audit_sources
 memory.rebuild
+memory.repair_sources
 embedding.rebuild
 ```
 
 Phase 1 progress reports note cursor/path, processed count, raw inputs staged,
 no-output count, unchanged skips, bounded per-note failures, elapsed time, and
-trusted schema diagnostics. Phase 2 reports raw inputs, created/updated/
-retired/discarded counts, proposal reuse, and committed generation. Logs expose
-the same redacted counts and precise `memory_phase2_*` structural error codes but
+trusted schema diagnostics. Phase 2 reports raw inputs,
+created/updated/retired/discarded counts, proposal reuse, and committed
+generation. `memory.source_reconcile` reports current/rebound/changed/deleted/
+missing/ambiguous final sources plus stale/reactivated memories and Stage 1
+changes. Repeatable paged `memory.audit_sources` reports final sources,
+affected memories, Stage 1 rows, and distinct File IDs separately. The old
+`memory.revalidate` and `memory.repair_sources` handlers remain only to consume
+upgrade-era queued jobs; no new repair version is admitted. Logs expose the
+same redacted counts and precise `memory_phase2_*` structural error codes but
 never note bodies, raw/final memory text, prompts, Provider response text,
-credentials, or authorization headers. A terminal generated-output failure does
-not loop through automatic paid retries; Admin may explicitly retry the same
-durable job after the contract or model configuration is corrected.
+credentials, or authorization headers. A generated-output failure never
+partially commits its global proposal. Generated bookkeeping failures use the
+job's bounded retry budget; Provider/configuration failures retain their
+existing retryability policy.
 
 For local Provider debugging, run `scripts/debug/phase2-replay.sh data`. The
 script creates a temporary SQLite/Vault/history/secret copy, rewrites the copied

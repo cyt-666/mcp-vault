@@ -201,9 +201,17 @@ explicitly reports that exclusive rename is unsupported, storage may
 atomically create the destination as a hard link to MCP Vault's already-synced
 same-directory temporary regular file and then remove the temporary name.
 This is an internal commit primitive, not a user hard-link feature. An existing
-destination still wins with a conflict, and ordinary overwrite-capable rename
-is never used as a no-replace fallback. Directory moves and cross-filesystem
-commits do not use the hard-link path.
+destination still wins with a conflict. Directory moves and user-entry moves
+never use the hard-link path.
+
+File and directory moves also prefer descriptor-relative
+`renameat2(..., RENAME_NOREPLACE)`. When the same-filesystem mount explicitly
+rejects that capability, Vault Core holds a Vault-scoped namespace mutation
+lock across destination validation and commit; storage revalidates absence
+through the opened destination directory and uses ordinary atomic `renameat`.
+All service-mediated absent-target claims participate in that lock, so a known
+concurrent target still wins with a conflict. Non-capability failures and
+cross-filesystem moves do not enter the fallback.
 
 ### 4.5 State repositories
 
@@ -384,6 +392,11 @@ This avoids upgrading a stale WAL snapshot after another commit and leaving a
 canonical file stranded ahead of its revision, audit, and outbox transaction.
 
 Move/copy operations lock source and destination in canonical order to avoid deadlock.
+
+Operations that may claim an absent path first acquire the Vault-scoped
+namespace mutation lock and then acquire sorted path locks. This order permits
+the ADR-0021 compatibility rename without serializing unrelated Vaults or
+allowing a service-mediated check/rename race.
 
 Directory moves extend that lock set to every tracked descendant and prepare
 one journaled path revision per entry before the physical directory rename.
@@ -569,6 +582,24 @@ defaults to omitting sources. It also delegates ordinary-note cues to the Index
 application service; those cues require Vault read permission and never acquire
 memory lifecycle or canonical memory Markdown.
 
+Note provenance stores stable File ID, path, and evidence revision in both the
+projection and canonical memory Markdown. The rebuildable
+`memory_source_health` projection binds that evidence to a verified current
+file hash. Every create/update/move/delete/restore/external event runs source
+coordination before optional Phase 1 admission. A move with unchanged evidence
+updates navigation without Provider work; a sole unavailable note source makes
+any note-dependent memory stale, including explicit memory. Source-less
+explicit Agent/Admin memory remains self-supported.
+
+Cross-File-ID recovery accepts only one exact Vault-scoped full-note or anchored
+excerpt match. Ambiguous, missing, truncated, semantic, filename, and cross-
+Vault candidates never bind. Repeatable generation-keyed audits replace the
+one-time repair scheduler; legacy repair/revalidate handlers only drain queued
+upgrade work.
+Outward note/index queries likewise join stable File ID
+to current active file state, while retaining the analyzed projection revision
+until a full rebuild advances content and revision together.
+
 Incremental Phase 1 compares note revision and an effective profile hash over
 policy, prompt/pipeline, binding, model, and Provider configuration. Explicit
 full re-extraction includes unchanged rows. Malformed output is a note-local
@@ -658,11 +689,13 @@ models and health/configuration, then remove every encrypted secret owned by
 that Provider. It deliberately retains canonical notes, memory lifecycle
 records/materialized Markdown, durable job history, and append-only audit.
 
-## 13. Multi-Vault evolution
+## 13. Multi-Vault management
 
-The current product may expose one active Vault, but future multi-Vault support should require enabling management behavior rather than redesigning internals.
+One installation may expose several service-managed Vaults to the same Admin
+owner. Enabling this behavior retains the original isolation architecture
+rather than adding a global Vault selector to business operations.
 
-### Required now
+### Required boundaries
 
 - `vaults` table;
 - `VaultContext` on every application method;
@@ -671,15 +704,27 @@ The current product may expose one active Vault, but future multi-Vault support 
 - `vault_id` on all relevant rows, jobs, events, and caches;
 - per-Vault index namespaces and vector partitions;
 - per-Vault configuration overlay;
-- isolation tests using at least two fixture Vaults.
+- isolation tests using at least two fixture Vaults;
+- a stable legacy-default binding for old unscoped Admin routes;
+- managed admission that atomically creates the registry row and initialization
+  job before data-plane availability;
+- per-Vault readiness and failure isolation.
 
-### Future behavior
+### Current behavior
 
-- Admin UI can create and manage several Vaults;
+- Admin UI creates, selects, disables, and re-enables several managed Vaults;
+- new roots are `<data-dir>/vaults/<immutable-slug>`;
 - one MCP connection is bound to one Vault;
 - an Agent needing two Vaults configures two MCP server connections;
 - cross-Vault search/recall requires a distinct federated capability and explicit grants;
 - no ordinary tool accepts `vault_id`.
+
+Jobs take their Vault identity from the durable job row. Initial scan, index,
+embedding, and memory-generation setup completes through `vault.initialize`;
+the new MCP/WebDAV endpoints return unavailable until it succeeds. Equal-
+priority job claiming is interleaved by Vault, and startup/recovery marks only
+the affected Vault `error` when its local state cannot be recovered. Backup and
+restore remain global coordination operations.
 
 ## 14. Recommended workspace
 

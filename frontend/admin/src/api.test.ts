@@ -116,4 +116,19 @@ describe('Admin API client', () => {
     await expect(client.restoreSession()).resolves.toBeNull();
     expect(document.cookie).not.toContain('mcp_vault_csrf=');
   });
+
+  it('scopes Vault-owned requests while keeping global Provider routes unchanged', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => (
+      new Response(JSON.stringify({ data: { ok: true }, request_id: 'scope' }), { status: 200 })
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new AdminApiClient();
+    client.setVaultSlug('work');
+
+    await client.request('/jobs/overview?limit=50');
+    await client.request('/providers/provider-1');
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v1/vaults/work/jobs/overview?limit=50');
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('/api/v1/providers/provider-1');
+  });
 });

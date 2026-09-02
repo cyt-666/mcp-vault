@@ -373,6 +373,37 @@ pub(crate) fn move_entry(
     policy: DestinationPolicy,
     durability: DurabilityPolicy,
 ) -> Result<(), StorageError> {
+    move_entry_with_noreplace_attempt(
+        source_parent,
+        source_name,
+        destination_parent,
+        destination_name,
+        policy,
+        durability,
+        || {
+            fs::renameat_with(
+                &source_parent.file,
+                source_name,
+                &destination_parent.file,
+                destination_name,
+                fs::RenameFlags::NOREPLACE,
+            )
+        },
+    )
+}
+
+fn move_entry_with_noreplace_attempt<F>(
+    source_parent: &ParentDir,
+    source_name: &str,
+    destination_parent: &ParentDir,
+    destination_name: &str,
+    policy: DestinationPolicy,
+    durability: DurabilityPolicy,
+    rename_noreplace: F,
+) -> Result<(), StorageError>
+where
+    F: FnOnce() -> Result<(), Errno>,
+{
     let source_kind =
         entry_kind(source_parent, source_name)?.ok_or(StorageError::SourceNotFound)?;
     if !matches!(
@@ -383,22 +414,39 @@ pub(crate) fn move_entry(
     }
     validate_destination(destination_parent, destination_name, policy)?;
 
-    match policy {
-        DestinationPolicy::MustNotExist => fs::renameat_with(
-            &source_parent.file,
-            source_name,
-            &destination_parent.file,
-            destination_name,
-            fs::RenameFlags::NOREPLACE,
-        ),
+    let result = match policy {
+        DestinationPolicy::MustNotExist => match rename_noreplace() {
+            Ok(()) => Ok(()),
+            Err(error) if error == Errno::EXIST => Err(StorageError::DestinationExists),
+            Err(error) if rename_noreplace_unsupported(error) => {
+                // Vault Core serializes every absent-target namespace claim.
+                // Revalidate through the already-opened destination directory
+                // before using overwrite-capable renameat so a target observed
+                // during the capability attempt still wins with a conflict.
+                validate_destination(
+                    destination_parent,
+                    destination_name,
+                    DestinationPolicy::MustNotExist,
+                )?;
+                fs::renameat(
+                    &source_parent.file,
+                    source_name,
+                    &destination_parent.file,
+                    destination_name,
+                )
+                .map_err(|error| errno("move filesystem entry", error))
+            }
+            Err(error) => Err(errno("move filesystem entry", error)),
+        },
         DestinationPolicy::ReplaceExisting => fs::renameat(
             &source_parent.file,
             source_name,
             &destination_parent.file,
             destination_name,
-        ),
-    }
-    .map_err(|error| errno("move filesystem entry", error))?;
+        )
+        .map_err(|error| errno("move filesystem entry", error)),
+    };
+    result?;
     sync_parent(source_parent, durability)?;
     if source_parent.path != destination_parent.path {
         sync_parent(destination_parent, durability)?;
@@ -605,5 +653,111 @@ mod tests {
             map_atomic_link_error(Errno::PERM),
             StorageError::AtomicCreateUnsupported
         ));
+    }
+
+    #[test]
+    fn unsupported_exclusive_move_falls_back_for_regular_files() {
+        let directory = tempdir().unwrap();
+        let parent = open_directory(directory.path()).unwrap();
+        std_fs::write(directory.path().join("source.md"), b"source").unwrap();
+
+        move_entry_with_noreplace_attempt(
+            &parent,
+            "source.md",
+            &parent,
+            "target.md",
+            DestinationPolicy::MustNotExist,
+            DurabilityPolicy::None,
+            || Err(Errno::INVAL),
+        )
+        .unwrap();
+
+        assert!(!directory.path().join("source.md").exists());
+        assert_eq!(
+            std_fs::read(directory.path().join("target.md")).unwrap(),
+            b"source"
+        );
+    }
+
+    #[test]
+    fn unsupported_exclusive_move_falls_back_for_directories() {
+        let directory = tempdir().unwrap();
+        let parent = open_directory(directory.path()).unwrap();
+        std_fs::create_dir(directory.path().join("source")).unwrap();
+        std_fs::write(directory.path().join("source/note.md"), b"source").unwrap();
+
+        move_entry_with_noreplace_attempt(
+            &parent,
+            "source",
+            &parent,
+            "target",
+            DestinationPolicy::MustNotExist,
+            DurabilityPolicy::None,
+            || Err(Errno::OPNOTSUPP),
+        )
+        .unwrap();
+
+        assert!(!directory.path().join("source").exists());
+        assert_eq!(
+            std_fs::read(directory.path().join("target/note.md")).unwrap(),
+            b"source"
+        );
+    }
+
+    #[test]
+    fn compatibility_move_preserves_a_target_created_during_capability_attempt() {
+        let directory = tempdir().unwrap();
+        let parent = open_directory(directory.path()).unwrap();
+        std_fs::write(directory.path().join("source.md"), b"source").unwrap();
+        let target = directory.path().join("target.md");
+
+        let error = move_entry_with_noreplace_attempt(
+            &parent,
+            "source.md",
+            &parent,
+            "target.md",
+            DestinationPolicy::MustNotExist,
+            DurabilityPolicy::None,
+            || {
+                std_fs::write(&target, b"concurrent").unwrap();
+                Err(Errno::NOSYS)
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, StorageError::DestinationExists));
+        assert_eq!(std_fs::read(target).unwrap(), b"concurrent");
+        assert_eq!(
+            std_fs::read(directory.path().join("source.md")).unwrap(),
+            b"source"
+        );
+    }
+
+    #[test]
+    fn unrelated_move_failure_never_uses_compatibility_rename() {
+        let directory = tempdir().unwrap();
+        let parent = open_directory(directory.path()).unwrap();
+        std_fs::write(directory.path().join("source.md"), b"source").unwrap();
+
+        let error = move_entry_with_noreplace_attempt(
+            &parent,
+            "source.md",
+            &parent,
+            "target.md",
+            DestinationPolicy::MustNotExist,
+            DurabilityPolicy::None,
+            || Err(Errno::ACCESS),
+        )
+        .unwrap_err();
+
+        match error {
+            StorageError::Io { operation, kind } => {
+                assert_eq!(operation, "move filesystem entry");
+                assert_eq!(kind, ErrorKind::PermissionDenied);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(directory.path().join("source.md").exists());
+        assert!(!directory.path().join("target.md").exists());
     }
 }

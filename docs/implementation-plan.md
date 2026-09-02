@@ -518,18 +518,17 @@ A verified backup restores a working service with content, operational state, hi
 - provider outage/degradation verified;
 - full requirements traceability reviewed.
 
-## 18. Future multi-Vault enablement
+## 18. Managed multi-Vault enablement
 
-Not required as a first-release UI feature, but readiness is continuously proven by fixture tests.
+ADR-0020 enables one Admin owner to create, select, disable, and re-enable
+several service-managed Vaults. The Admin API/UI uses explicit Vault-scoped
+paths, while existing unscoped routes retain a stable legacy-default binding.
+Each Vault receives generated MCP/DAV endpoints, credentials, configuration
+overrides, initialization/readiness, fair durable jobs, index/vector
+partitions, and an independent memory pipeline.
 
-A future work package may add:
-
-- create/delete/disable several Vaults;
-- per-Vault Admin navigation;
-- per-Vault provider/model overrides;
-- multiple generated MCP/DAV endpoints.
-
-It must not change ordinary tool schemas to add `vault_id`.
+The work does not delete/detach Vaults, attach arbitrary roots, or change
+ordinary tool schemas to add `vault_id`.
 
 Cross-Vault/federated recall is a separate future capability with explicit grants and a new security review.
 

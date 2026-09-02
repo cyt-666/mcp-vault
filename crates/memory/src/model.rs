@@ -264,6 +264,59 @@ pub struct MemoryConsolidationReport {
     pub reused_proposal: bool,
 }
 
+/// Outcome of one idempotent historical memory-source repair pass.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct MemorySourceRepairReport {
+    /// Canonical memory records rewritten with current source metadata.
+    pub memories_rewritten: u64,
+    /// Phase 1 source rows rebound to their current paths/revisions.
+    pub stage1_sources_rebound: u64,
+    /// Note sources whose current readable file identity cannot be proven.
+    pub unresolved_note_sources: u64,
+    /// Active extracted memories made stale because no support remains.
+    pub memories_marked_stale: u64,
+}
+
+/// Exact outcomes of one event-driven source reconciliation pass.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct MemorySourceReconcileReport {
+    /// Final-memory note sources checked.
+    pub final_sources_checked: u64,
+    /// Sources proven current without changing File ID.
+    pub current: u64,
+    /// Sources rebound to one uniquely proven current File ID.
+    pub rebound: u64,
+    /// Sources whose stable file no longer contains the evidence.
+    pub changed: u64,
+    /// Sources whose stable file is tombstoned.
+    pub deleted: u64,
+    /// Sources for which no current identity can be proven.
+    pub missing: u64,
+    /// Sources for which exact identity is not unique.
+    pub ambiguous: u64,
+    /// Memories newly made stale by unavailable note evidence.
+    pub memories_staled: u64,
+    /// Source-unavailable memories reactivated by exact proof.
+    pub memories_reactivated: u64,
+    /// Stage 1 rows rebound to current source metadata.
+    pub stage1_rebound: u64,
+    /// Stage 1 rows withdrawn after source loss.
+    pub stage1_withdrawn: u64,
+    /// Individual sources/memories that could not be processed safely.
+    pub errors: u64,
+}
+
+/// One durable page of the repeatable source audit.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct MemorySourceAuditPage {
+    /// Per-page exact reconciliation outcomes.
+    pub report: MemorySourceReconcileReport,
+    /// Last committed final source identity.
+    pub cursor: Option<String>,
+    /// Whether every final and Stage 1 source has been examined.
+    pub complete: bool,
+}
+
 /// Result of one destructive prerelease memory-pipeline cutover.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MemoryPipelineResetReport {
@@ -461,6 +514,9 @@ pub struct MemoryView {
     pub memory_type: MemoryType,
     /// Lifecycle status.
     pub status: MemoryStatus,
+    /// Machine-readable lifecycle reason, when one applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
     /// Optimistic memory metadata revision.
     pub revision: Revision,
     /// Atomic body.
@@ -508,6 +564,15 @@ pub struct MemorySourceView {
     pub start_line: Option<u32>,
     /// End line.
     pub end_line: Option<u32>,
+    /// Derived source-health state for note sources.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health: Option<String>,
+    /// Bounded source-health diagnostic reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_reason: Option<String>,
+    /// Last exact evidence-check timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<i64>,
 }
 
 /// Compact relation output.

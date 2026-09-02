@@ -500,8 +500,10 @@ Output keeps two collections distinct:
 
 - `memories`: atomic durable memories with status, confidence, importance,
   temporal validity, provenance, relations, and scores;
-- `related_notes`: current revision-bound note cues with file ID, path, title,
-  bounded matching snippet, tags/topics/headings, score, and resource URI.
+- `related_notes`: note cues with stable file ID, current readable path, the
+  analyzed revision, title, bounded matching snippet, tags/topics/headings,
+  score, and resource URI. Before a rebuild, path may already reflect a move
+  while revision still identifies the projection that produced the snippet.
 
 `related_notes` is populated only when the credential also has `vault:read`.
 The caller may bound it independently with `max_related_notes`. A cue is not an
@@ -516,6 +518,11 @@ Scope: `memory:read`.
 
 Input: memory ID.
 
+For a note source, `file_id` and `revision` identify the durable evidence while
+`path` is resolved from the current active file. A moved source therefore
+returns its new readable path. A deleted or unresolved source returns `path:
+null`; it never advertises a known-unreadable historical path as current.
+
 Output includes canonical Markdown path/revision, all sources, lifecycle, relations, and resource links.
 
 ### 6.9 `list_memories`
@@ -529,7 +536,7 @@ Filters:
 - type;
 - lifecycle status;
 - tag/entity;
-- source path;
+- current active source path;
 - validity time;
 - limit/cursor.
 
@@ -593,6 +600,11 @@ Patches must apply exactly; fuzzy patching is forbidden unless a future explicit
 Scope: `vault:write`.
 
 Input includes source path, destination path, source expected revision, destination absence precondition, and idempotency key.
+
+On Unix, same-filesystem file and directory moves prefer
+`RENAME_NOREPLACE`. A mount that explicitly lacks that capability uses the
+ADR-0021 Vault-serialized `renameat` fallback after rechecking absence. Existing
+destinations remain conflicts; cross-filesystem moves are not copied/deleted.
 
 ### 6.13 `delete_note`
 
@@ -943,6 +955,35 @@ publication is therefore the setup trust boundary.
 
 ### 10.3 API groups
 
+Multi-Vault management uses an explicit Admin path scope:
+
+```text
+GET    /api/v1/vaults
+POST   /api/v1/vaults
+GET    /api/v1/vaults/{vault_slug}
+PATCH  /api/v1/vaults/{vault_slug}
+POST   /api/v1/vaults/{vault_slug}/rescan
+POST   /api/v1/vaults/{vault_slug}/initialization/retry
+```
+
+`POST /vaults` accepts only `name` and `slug`. The service generates the ID and
+content root and returns `202` with the Vault plus its durable
+`vault.initialize` job. Vault summaries retain ID/slug/name/root/status/revision
+and add effective `availability`: `initializing`, `ready`, `maintenance`,
+`disabled`, or `error`.
+
+Vault-owned groups below are also mounted at
+`/api/v1/vaults/{vault_slug}/<group>`, including `dashboard`, `webdav`, `mcp`,
+the Provider list/mode and model bindings, `index`, `memories`/`memory`, `jobs`,
+and `audit`. The slug is resolved to `VaultContext`; no request body accepts a
+Vault selector. System/health/diagnostics, Provider detail/model inventory, and
+backup/restore remain global.
+
+The historical unscoped forms remain compatibility aliases to the persisted
+legacy-default Vault. They never select the first row after a second Vault is
+created; when an upgraded database has several Vaults and no unique historical
+default, they return `409 vault_selection_required`.
+
 ```text
 GET    /api/v1/dashboard
 GET    /api/v1/system
@@ -1000,6 +1041,8 @@ GET    /api/v1/memory/extraction
 PUT    /api/v1/memory/extraction
 POST   /api/v1/memory/extraction/run
 POST   /api/v1/memory/extraction/restart
+GET    /api/v1/memory/source-health
+POST   /api/v1/memory/source-health/audit
 
 GET    /api/v1/jobs
 GET    /api/v1/jobs/overview
@@ -1030,6 +1073,18 @@ Origin/CSRF checked, Vault-scoped, revision-aware, and audited. Permanent
 deletion removes the current managed Markdown and memory projection; retained
 file history and backup artifacts remain governed by their own retention
 policies.
+
+`GET /api/v1/memory/source-health` returns separate final-source,
+affected-memory, Stage 1, and distinct-File-ID counts plus a bounded paginated
+detail list. `health` may filter
+`unverified|current|content_changed|deleted|identity_missing|identity_ambiguous`.
+`POST /api/v1/memory/source-health/audit` admits a new generation-keyed paged
+audit; a prior completed audit does not permanently suppress it.
+
+Memory output adds optional `status_reason`. Each note `MemorySourceView` adds
+optional `health`, `health_reason`, and `checked_at`. Its `path` is the current
+navigable path only and is null for unavailable evidence; `revision` remains the
+evidence revision. Existing MCP request structures are unchanged.
 
 The extraction policy returned by `GET /api/v1/memory/extraction` and accepted
 by `PUT` contains `enabled`, fixed `source_mode: "automatic"`,

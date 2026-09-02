@@ -36,6 +36,12 @@ and, for container checks, the image digest.
       paths without exposing any Admin route. Its WebDAV location preserves
       `Authorization`, asserts forwarded HTTPS, and the plaintext data listener
       is unreachable from outside the proxy network.
+- [ ] Multi-Vault E2E creates a second managed Vault, waits for initialization,
+      verifies distinct MCP/WebDAV links and cross-credential rejection, writes
+      different bytes at the same relative path, and proves jobs, FTS/vectors,
+      memory, settings, history, and audit remain isolated. Disabling or
+      breaking one Vault leaves the other operational, and old default links
+      remain unchanged.
 - [ ] A prior prerelease database fixture upgrades through all migrations and
       passes integrity/foreign-key checks.
 - [ ] The target persistent Vault mount passes new-file atomic commit,

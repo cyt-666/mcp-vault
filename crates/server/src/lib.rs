@@ -153,25 +153,7 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
     let data_root = resolve_runtime_path(&config.data_dir)?;
     let history_root = data_root.join("history");
     let backup_root = resolve_runtime_path(&config.backup_root)?;
-    for vault in state.vaults().list().await? {
-        let context = vault.context()?;
-        let recovery_core = core_for_vault(&state, &history_root, &vault, &core_runtime)
-            .map_err(ServerError::Recovery)?;
-        let report = recovery_core.recover(&context).await?;
-        if report.needs_review != 0 {
-            return Err(ServerError::Recovery(
-                mcp_vault_core::VaultError::NeedsReview,
-            ));
-        }
-        if report.rolled_back != 0 || report.finalized != 0 {
-            info!(
-                vault_id = %context.id(),
-                rolled_back = report.rolled_back,
-                finalized = report.finalized,
-                "recovered Vault journal operations"
-            );
-        }
-    }
+    recover_registered_vaults(&state, &history_root, &core_runtime).await?;
 
     run_initial_scans(&state, &history_root, &core_runtime).await?;
 
@@ -187,6 +169,9 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         provider_service.clone(),
     );
     for vault in state.vaults().list().await? {
+        if state.vaults().availability(&vault).await? != mcp_vault_state::VaultAvailability::Ready {
+            continue;
+        }
         let context = vault.context()?;
         if index_service
             .schedule_note_embeddings(&context)
@@ -299,7 +284,17 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
     supervisor
         .register_job_handler(
             "backup.restore",
-            workers::backup_restore_job_handler(backup_service, metrics.clone()),
+            workers::backup_restore_job_handler(state.clone(), backup_service, metrics.clone()),
+        )
+        .map_err(|failure| ServerError::Workers(failure.code))?;
+    supervisor
+        .register_job_handler(
+            "vault.initialize",
+            workers::vault_initialize_job_handler(
+                state.clone(),
+                history_root.clone(),
+                core_runtime.clone(),
+            ),
         )
         .map_err(|failure| ServerError::Workers(failure.code))?;
     supervisor
@@ -359,7 +354,23 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
     supervisor
         .register_job_handler(
             "memory.revalidate",
-            workers::memory_revalidate_job_handler(state.clone(), memory_service.clone()),
+            workers::memory_revalidate_job_handler(
+                state.clone(),
+                history_root.clone(),
+                core_runtime.clone(),
+                memory_service.clone(),
+            ),
+        )
+        .map_err(|failure| ServerError::Workers(failure.code))?;
+    supervisor
+        .register_job_handler(
+            "memory.source_reconcile",
+            workers::memory_source_reconcile_job_handler(
+                state.clone(),
+                history_root.clone(),
+                core_runtime.clone(),
+                memory_service.clone(),
+            ),
         )
         .map_err(|failure| ServerError::Workers(failure.code))?;
     supervisor
@@ -375,11 +386,36 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         .map_err(|failure| ServerError::Workers(failure.code))?;
     supervisor
         .register_job_handler(
+            "memory.repair_sources",
+            workers::memory_source_repair_job_handler(
+                state.clone(),
+                history_root.clone(),
+                core_runtime.clone(),
+                memory_service.clone(),
+            ),
+        )
+        .map_err(|failure| ServerError::Workers(failure.code))?;
+    supervisor
+        .register_job_handler(
+            "memory.audit_sources",
+            workers::memory_source_audit_job_handler(
+                state.clone(),
+                history_root.clone(),
+                core_runtime.clone(),
+                memory_service.clone(),
+            ),
+        )
+        .map_err(|failure| ServerError::Workers(failure.code))?;
+    supervisor
+        .register_job_handler(
             "embedding.rebuild",
             workers::embedding_job_handler(state.clone(), index_service, memory_service.clone()),
         )
         .map_err(|failure| ServerError::Workers(failure.code))?;
     for vault in state.vaults().list().await? {
+        if state.vaults().availability(&vault).await? != mcp_vault_state::VaultAvailability::Ready {
+            continue;
+        }
         let context = vault
             .context()
             .map_err(|_| ServerError::Workers("memory_pipeline_reset_context_invalid"))?;
@@ -416,10 +452,8 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
     let reconciliation_shutdown = workers::Cancellation::default();
     let reconciliation_task = tokio::spawn(run_reconciliation_loop(
         state.clone(),
-        history_root.clone(),
         config.reconciliation_interval,
         maintenance.clone(),
-        core_runtime.clone(),
         memory_service.clone(),
         reconciliation_shutdown.clone(),
     ));
@@ -518,25 +552,94 @@ fn core_for_vault(
     ))
 }
 
+async fn recover_registered_vaults(
+    state: &mcp_vault_state::StateStore,
+    history_root: &Path,
+    core_runtime: &mcp_vault_core::VaultCoreRuntime,
+) -> Result<(), ServerError> {
+    let permit = core_runtime.maintenance_recovery_permit();
+    for vault in state.vaults().list().await? {
+        let context = match vault.context() {
+            Ok(context) => context,
+            Err(error) => {
+                warn!(vault_id = %vault.id, %error, "registered Vault context is invalid");
+                continue;
+            }
+        };
+        let recovery_core = match core_for_vault(state, history_root, &vault, core_runtime) {
+            Ok(core) => core,
+            Err(error) => {
+                state
+                    .vaults()
+                    .set_status(&context, mcp_vault_state::VaultStatus::Error)
+                    .await?;
+                warn!(vault_id = %context.id(), %error, "Vault recovery configuration is invalid");
+                continue;
+            }
+        };
+        match recovery_core
+            .recover_during_maintenance(&context, &permit)
+            .await
+        {
+            Ok(report) if report.needs_review == 0 => {
+                if report.rolled_back != 0 || report.finalized != 0 {
+                    info!(
+                        vault_id = %context.id(),
+                        rolled_back = report.rolled_back,
+                        finalized = report.finalized,
+                        "recovered Vault journal operations"
+                    );
+                }
+            }
+            Ok(_) | Err(mcp_vault_core::VaultError::NeedsReview) => {
+                state
+                    .vaults()
+                    .set_status(&context, mcp_vault_state::VaultStatus::Error)
+                    .await?;
+                warn!(vault_id = %context.id(), "Vault recovery requires operator review");
+            }
+            Err(mcp_vault_core::VaultError::State(error)) => {
+                return Err(ServerError::State(error));
+            }
+            Err(error) => {
+                state
+                    .vaults()
+                    .set_status(&context, mcp_vault_state::VaultStatus::Error)
+                    .await?;
+                warn!(vault_id = %context.id(), %error, "Vault recovery failed in isolation");
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn run_initial_scans(
     state: &mcp_vault_state::StateStore,
     history_root: &Path,
     core_runtime: &mcp_vault_core::VaultCoreRuntime,
 ) -> Result<(), ServerError> {
     for vault in state.vaults().list().await? {
-        if vault.status != mcp_vault_state::VaultStatus::Active {
+        if state.vaults().availability(&vault).await? != mcp_vault_state::VaultAvailability::Ready {
             continue;
         }
         let context = vault.context()?;
-        let report =
-            reconcile_vault_once(state, history_root, &vault, "initial", core_runtime).await?;
-        info!(
-            vault_id = %context.id(),
-            entries_seen = report.entries_seen,
-            imported = report.imported,
-            deleted = report.deleted,
-            "initial Vault scan completed"
-        );
+        match reconcile_vault_once(state, history_root, &vault, "initial", core_runtime).await {
+            Ok(report) => info!(
+                vault_id = %context.id(),
+                entries_seen = report.entries_seen,
+                imported = report.imported,
+                deleted = report.deleted,
+                "initial Vault scan completed"
+            ),
+            Err(ServerError::State(error)) => return Err(ServerError::State(error)),
+            Err(error) => {
+                state
+                    .vaults()
+                    .set_status(&context, mcp_vault_state::VaultStatus::Error)
+                    .await?;
+                warn!(vault_id = %context.id(), %error, "initial Vault scan failed in isolation");
+            }
+        }
     }
     Ok(())
 }
@@ -654,15 +757,20 @@ pub async fn reconcile_vault_once(
                 .await?;
         }
     }
+    workers::enqueue_memory_source_audit_job(
+        state,
+        &context,
+        &generation,
+        &format!("vault_reconciliation:{scan_type}"),
+    )
+    .await?;
     Ok(report)
 }
 
 async fn run_reconciliation_loop(
     state: mcp_vault_state::StateStore,
-    history_root: PathBuf,
     interval: std::time::Duration,
     maintenance: MaintenanceGate,
-    core_runtime: mcp_vault_core::VaultCoreRuntime,
     memory_service: mcp_vault_memory::MemoryService,
     shutdown: workers::Cancellation,
 ) {
@@ -684,23 +792,17 @@ async fn run_reconciliation_loop(
                     }
                 };
                 for vault in vaults {
-                    if vault.status != mcp_vault_state::VaultStatus::Active {
+                    let availability = match state.vaults().availability(&vault).await {
+                        Ok(availability) => availability,
+                        Err(_) => {
+                            warn!(vault_id = %vault.id, "periodic reconciliation could not resolve Vault availability");
+                            continue;
+                        }
+                    };
+                    if availability != mcp_vault_state::VaultAvailability::Ready {
                         continue;
                     }
-                    let Some(_write_operation) = maintenance.try_start_write() else {
-                        break;
-                    };
                     let vault_id = vault.id;
-                    match reconcile_vault_once(&state, &history_root, &vault, "reconciliation", &core_runtime).await {
-                        Ok(report) => info!(
-                            vault_id = %vault_id,
-                            entries_seen = report.entries_seen,
-                            imported = report.imported,
-                            deleted = report.deleted,
-                            "periodic Vault reconciliation completed"
-                        ),
-                        Err(_) => warn!(vault_id = %vault_id, "periodic Vault reconciliation failed"),
-                    }
                     let context = match vault.context() {
                         Ok(context) => context,
                         Err(_) => {
@@ -708,6 +810,33 @@ async fn run_reconciliation_loop(
                             continue;
                         }
                     };
+                    match state.jobs().find_active_by_type(&context, "vault.reconcile").await {
+                        Ok(None) => {
+                            let dedup = format!(
+                                "vault:{}:periodic-reconcile:{}",
+                                context.id(),
+                                mcp_vault_domain::EventId::new()
+                            );
+                            if state
+                                .jobs()
+                                .enqueue(
+                                    &context,
+                                    "vault.reconcile",
+                                    &dedup,
+                                    &serde_json::json!({"reason": "periodic"}),
+                                    0,
+                                    10,
+                                    0,
+                                )
+                                .await
+                                .is_err()
+                            {
+                                warn!(vault_id = %vault_id, "periodic Vault reconciliation admission failed");
+                            }
+                        }
+                        Ok(Some(_)) => {}
+                        Err(_) => warn!(vault_id = %vault_id, "periodic Vault reconciliation lookup failed"),
+                    }
                     if workers::ensure_memory_pipeline_reset_job(&state, &context)
                         .await
                         .is_err()
@@ -852,7 +981,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        config::AppConfig, load_master_key_ring, reconcile_vault_once,
+        config::AppConfig, load_master_key_ring, reconcile_vault_once, recover_registered_vaults,
         remove_obsolete_managed_bootstrap_token, resolve_runtime_path, routers_for_test,
         run_initial_scans, validate_bootstrap_material,
     };
@@ -1182,5 +1311,66 @@ mod tests {
         assert_eq!(outcome, workers::JobOutcome::Complete);
         let second_index = state.index().status(&context).await.unwrap().unwrap();
         assert!(second_index.index_revision > first_index.index_revision);
+    }
+
+    #[tokio::test]
+    async fn disabled_vault_does_not_block_startup_recovery_for_other_vaults() {
+        let root = tempfile::tempdir().unwrap();
+        let state = mcp_vault_state::StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let active = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("active").unwrap(),
+            root.path().join("active"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        let disabled = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("disabled").unwrap(),
+            root.path().join("disabled"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&active, "Active", VaultStatus::Active)
+            .await
+            .unwrap();
+        state
+            .vaults()
+            .insert(&disabled, "Disabled", VaultStatus::Disabled)
+            .await
+            .unwrap();
+
+        recover_registered_vaults(
+            &state,
+            &root.path().join("history"),
+            &mcp_vault_core::VaultCoreRuntime::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            state
+                .vaults()
+                .find_by_id(active.id())
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            VaultStatus::Active
+        );
+        assert_eq!(
+            state
+                .vaults()
+                .find_by_id(disabled.id())
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            VaultStatus::Disabled
+        );
     }
 }

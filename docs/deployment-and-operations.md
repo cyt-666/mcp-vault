@@ -232,6 +232,12 @@ Back up these together:
 /data/history
 ```
 
+Each new Admin-created Vault is a sibling directory at
+`/data/vaults/<immutable-slug>`. Existing registered roots are retained during
+upgrade; the managed-creation API does not accept an arbitrary host path.
+Every Vault has its own WebDAV/MCP URL and credentials even though the roots
+share one installation database and backup lifecycle.
+
 MCP Vault creates its installation files by default under:
 
 ```text
@@ -262,8 +268,14 @@ commit for already-synced temporary regular files. Therefore a deployment
 whose mount rejects both exclusive rename and hard-link creation cannot safely
 host a writable Vault; MCP Vault reports
 `filesystem does not support safe atomic no-replace file creation` instead of
-falling back to an overwrite race. Directory moves still require native atomic
-rename support.
+falling back to an overwrite race.
+
+File and directory moves prefer `RENAME_NOREPLACE`. If the same-filesystem
+mount rejects only that capability, MCP Vault serializes all absent-target
+claims for that Vault, rechecks the destination, and uses ordinary atomic
+`renameat`. This move fallback does not hard-link user entries and does not
+copy/delete across filesystems. Run only one MCP Vault process against a given
+content root and do not race protocol writes with direct host-directory writes.
 
 For an appliance or NAS deployment, check the actual Vault root rather than
 only `/data` because a nested bind/mount can use a different filesystem:
@@ -290,13 +302,17 @@ encrypted secrets/PATs exist is a hard startup failure and is never replaced.
 2. Open SQLite and apply forward migrations.
 3. Load or atomically create the managed installation key, then validate its
    persisted identity.
-4. Recover incomplete operation-journal entries.
-5. Run the safe initial scan for each active Vault and persist its checkpoint.
+4. Recover incomplete operation-journal entries per Vault. A local
+   unrecoverable Vault is marked `error`; healthy Vaults and Admin continue.
+5. Run the safe initial scan for each ready pre-existing Vault and persist its
+   checkpoint. A newly managed Vault retains its durable `vault.initialize`
+   job instead of blocking startup.
 6. Build routers and bind both listeners.
 7. Start the outbox/job supervisor and the periodic reconciliation loop.
 8. Mark liveness healthy.
-9. Mark readiness healthy only when operational database, Vault storage,
-    initial scan, migrations, and critical workers are ready.
+9. Mark process readiness healthy when the operational database, migrations,
+   key, listeners, and critical workers are ready. Detailed Admin health and
+   the data endpoints report each Vault's own availability.
 
 Provider health is not required for core readiness because providers are optional/degradable.
 
@@ -418,6 +434,11 @@ not a model field. Phase 2 requires a summary, bounded memory actions, and a
 local disposition for every dirty raw input. These are multi-field contracts, so the
 generic single-array-envelope repair does not apply; missing or renamed fields
 remain visible contract failures rather than being guessed locally.
+
+Phase 2 assigns dirty inputs request-local indexes before context-only inputs
+and publishes the exact allowed discard indexes in the structured-output
+schema. A generated bookkeeping violation does not partially commit the global
+proposal; it enters `retry_wait` and consumes the job's bounded retry budget.
 
 During a full-Vault run, one malformed generated output is recorded against
 that note and later notes continue. The final job can read “完成但有失败” while
@@ -595,6 +616,10 @@ watcher. This keeps the correctness path independent of watcher event loss.
 The interval is configured with
 `MCP_VAULT_RECONCILIATION_INTERVAL_SECONDS` (default 300, maximum 86400).
 
+The timer admits one deduplicated `vault.reconcile` job per ready Vault instead
+of scanning every root serially in the scheduler. Equal-priority job claims are
+interleaved by Vault so one large backlog cannot starve another Vault.
+
 Periodic full/incremental reconciliation:
 
 - compares path, size, mtime, identity, and content hash as needed;
@@ -746,6 +771,25 @@ Existing explicit master-key mounts remain supported. If moving an established m
 `MCP_VAULT_SECRETS_DIR`, copy the exact existing bytes while the service is
 stopped—never ask the service to generate a replacement for a database that
 already has a key verifier or key-dependent records.
+
+The multi-Vault transition adds no canonical-content migration. On first use,
+the server records `vault.legacy_default_id` from the existing `default` slug
+or sole Vault so historical unscoped Admin clients continue to target the same
+Vault. Existing `/dav/v1/vaults/<slug>/` and `/mcp/v1/vaults/<slug>` URLs,
+credentials, OAuth resources, IDs, histories, indexes, memories, and jobs are
+unchanged. Create and verify a fresh global backup before adding a second
+Vault; an older one-Vault backup remains readable but restore correctly rejects
+it against a different live Vault topology.
+
+The 0.1.17 upgrade adds migration 0013 without deleting memory or canonical
+Markdown. Existing final note sources begin `unverified`; normal recall fails
+closed for those note-dependent memories until the first generation-keyed
+`memory.audit_sources` job proves current evidence. Source-less explicit
+Agent/Admin memory remains available. Every completed full Vault reconciliation,
+including post-restore reconciliation, admits a new paged audit generation.
+Operators can also run it from Admin under **Memory → Source health**. Final-
+source, affected-memory, Stage 1, and distinct-File-ID counts are intentionally
+separate and must not be interpreted as interchangeable totals.
 
 ### Rollback
 

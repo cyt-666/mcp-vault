@@ -154,6 +154,13 @@ textarea { min-height: 7rem; resize: vertical; }
 .sidebar-brand strong, .sidebar-brand span { display: block; }
 .sidebar-brand strong { font-size: 1rem; }
 .sidebar-brand div > span { color: #758ba0; font-size: 0.73rem; margin-top: 0.2rem; }
+.vault-switcher { border-bottom: 1px solid #203247; display: grid; gap: 0.65rem; margin-bottom: 1rem; padding: 0 0.45rem 1rem; }
+.vault-switcher > label, .vault-create-form label { color: #8196a9; display: grid; font-size: 0.7rem; font-weight: 750; gap: 0.35rem; }
+.vault-switcher select, .vault-create-form input { background: #0d1c2c; border-color: #31485e; font-size: 0.78rem; min-width: 0; width: 100%; }
+.vault-switcher details > summary { color: #9fb0c0; cursor: pointer; font-size: 0.75rem; font-weight: 750; }
+.vault-create-form { display: grid; gap: 0.65rem; padding-top: 0.75rem; }
+.vault-create-form small { color: #71869a; font-size: 0.68rem; line-height: 1.45; }
+.vault-create-form .secondary-button { font-size: 0.75rem; min-height: 2.2rem; padding: 0.45rem 0.65rem; }
 .sidebar nav { display: grid; gap: 1rem; overflow-y: auto; padding-right: 0.15rem; }
 .nav-group { display: grid; gap: 0.25rem; }
 .nav-group > p { color: #60758a; font-size: 0.68rem; font-weight: 800; letter-spacing: 0.13em; margin: 0 0 0.25rem 0.65rem; }

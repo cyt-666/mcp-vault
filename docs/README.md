@@ -34,7 +34,7 @@ Then consult:
 | Document | Owns |
 |---|---|
 | `product-requirements.md` | Required behavior, scope, quality attributes, acceptance criteria |
-| `architecture.md` | Components, dependencies, consistency, event/job flows, future multi-Vault shape |
+| `architecture.md` | Components, dependencies, consistency, event/job flows, managed multi-Vault shape |
 | `interfaces.md` | MCP, WebDAV, Admin HTTP contracts and authorization scopes |
 | `data-model.md` | Filesystem layout, SQLite schema, revisions, migrations, rebuildability |
 | `memory-system.md` | Durable memory, low-noise extraction, related-note recall, lifecycle, ranking, provenance |

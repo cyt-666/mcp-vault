@@ -5,8 +5,8 @@ use mcp_vault_domain::{
     VaultContext, VaultId, VaultSlug, WritePrecondition,
 };
 use mcp_vault_state::{
-    MemoryConsolidationProposalRecord, MemoryStage1OutputRecord, StateStore, VaultRepository,
-    VaultStatus,
+    MemoryConsolidationProposalRecord, MemoryStage1OutputRecord, StateStore, VaultAvailability,
+    VaultRepository, VaultStatus,
 };
 use serde_json::json;
 
@@ -66,6 +66,101 @@ async fn vault_repository_round_trips_typed_context_and_status() {
             .unwrap()
             .status,
         VaultStatus::Maintenance
+    );
+}
+
+#[tokio::test]
+async fn legacy_default_is_stable_after_a_second_vault_is_registered() {
+    let store = store().await;
+    let repository = store.vaults();
+    let first = context("personal", "/srv/personal");
+    insert(&repository, &first).await;
+
+    assert_eq!(
+        repository.legacy_default().await.unwrap().unwrap().id,
+        first.id()
+    );
+
+    let earlier_slug = context("archive", "/srv/archive");
+    insert(&repository, &earlier_slug).await;
+    assert_eq!(
+        repository.legacy_default().await.unwrap().unwrap().id,
+        first.id()
+    );
+}
+
+#[tokio::test]
+async fn legacy_default_prefers_the_historical_default_slug() {
+    let store = store().await;
+    let repository = store.vaults();
+    let work = context("work", "/srv/work");
+    let default = context("default", "/srv/default");
+    insert(&repository, &work).await;
+    insert(&repository, &default).await;
+
+    assert_eq!(
+        repository.legacy_default().await.unwrap().unwrap().id,
+        default.id()
+    );
+}
+
+#[tokio::test]
+async fn legacy_default_fails_closed_when_multiple_vaults_are_ambiguous() {
+    let store = store().await;
+    let repository = store.vaults();
+    insert(&repository, &context("personal", "/srv/personal")).await;
+    insert(&repository, &context("work", "/srv/work")).await;
+
+    assert!(repository.legacy_default().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn managed_initialization_job_controls_effective_vault_availability() {
+    let store = store().await;
+    let context = context("managed", "/srv/managed");
+    insert(&store.vaults(), &context).await;
+    let vault = store
+        .vaults()
+        .find_by_id(context.id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.vaults().availability(&vault).await.unwrap(),
+        VaultAvailability::Ready
+    );
+
+    let job = store
+        .jobs()
+        .enqueue(
+            &context,
+            "vault.initialize",
+            &format!("vault:{}:initialize", context.id()),
+            &json!({}),
+            20,
+            3,
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.vaults().availability(&vault).await.unwrap(),
+        VaultAvailability::Initializing
+    );
+    let claimed = store
+        .jobs()
+        .claim_batch("availability-test", 1, 60_000, 1)
+        .await
+        .unwrap();
+    assert_eq!(claimed[0].id, job.id);
+    store
+        .jobs()
+        .complete(job.id, "availability-test")
+        .await
+        .unwrap();
+    assert_eq!(
+        store.vaults().availability(&vault).await.unwrap(),
+        VaultAvailability::Ready
     );
 }
 

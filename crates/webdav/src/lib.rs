@@ -39,7 +39,7 @@ use mcp_vault_core::{CoreMetadata, StagedWrite, VaultCore, VaultCoreRuntime, Vau
 use mcp_vault_domain::{
     MaintenanceGate, Permission, SourcePlane, VaultContext, VaultPath, VaultPathPolicy,
 };
-use mcp_vault_state::{StateStore, VaultRecord, VaultStatus};
+use mcp_vault_state::{StateStore, VaultAvailability, VaultRecord};
 use mcp_vault_storage_fs::{ReadFile, StorageError, StorageOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -139,8 +139,15 @@ impl WebDavService {
             Ok(None) => return public_error(StatusCode::NOT_FOUND, false),
             Err(_) => return public_error(StatusCode::INTERNAL_SERVER_ERROR, false),
         };
-        if vault.status == VaultStatus::Disabled {
-            return public_error(StatusCode::NOT_FOUND, false);
+        match self.state.vaults().availability(&vault).await {
+            Ok(VaultAvailability::Disabled) => {
+                return public_error(StatusCode::NOT_FOUND, false);
+            }
+            Ok(VaultAvailability::Initializing | VaultAvailability::Error) => {
+                return public_error(StatusCode::SERVICE_UNAVAILABLE, false);
+            }
+            Ok(VaultAvailability::Ready | VaultAvailability::Maintenance) => {}
+            Err(_) => return public_error(StatusCode::INTERNAL_SERVER_ERROR, false),
         }
         let context = match vault.context() {
             Ok(context) => context,
@@ -1007,6 +1014,42 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), axum::http::StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn managed_vault_is_unavailable_until_initialization_completes() {
+        let (_directory, state, service, credentials, _) = setup().await;
+        let vault = state
+            .vaults()
+            .find_by_slug(&VaultSlug::new("work").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let context = vault.context().unwrap();
+        state
+            .jobs()
+            .enqueue(
+                &context,
+                "vault.initialize",
+                &format!("vault:{}:initialize", context.id()),
+                &serde_json::json!({}),
+                20,
+                3,
+                0,
+            )
+            .await
+            .unwrap();
+
+        let response = client_router(service)
+            .oneshot(request(
+                "GET",
+                "/work/missing.md",
+                &credentials,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]

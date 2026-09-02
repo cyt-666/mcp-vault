@@ -19,12 +19,12 @@ use std::{
 
 use mcp_vault_domain::{
     Actor, DomainError, FileId, FilesystemEntryKind, MaintenanceGate, MaintenanceOperationGuard,
-    Revision, SourcePlane, VaultContext, VaultPath, VaultPathPolicy,
+    Revision, SourcePlane, VaultContext, VaultId, VaultPath, VaultPathPolicy, VaultSlug,
 };
 use mcp_vault_state::{
     CommitHook, CommitHookPhase, CommitMutationInput, EntryType, FileOperation, FileRecord,
-    FileRevisionRecord, FileStateRepository, IdempotencyLookup, JournalRecord, JournalState,
-    OutboxEventInput, PrepareOperationInput, StateError, StateStore,
+    FileRevisionRecord, FileStateRepository, IdempotencyLookup, JobRecord, JournalRecord,
+    JournalState, OutboxEventInput, PrepareOperationInput, StateError, StateStore, VaultRecord,
 };
 use mcp_vault_storage_fs::{
     AtomicWrite, ContentHash, DestinationPolicy, FileMetadata, HistoryStore, ReadFile,
@@ -37,7 +37,7 @@ use tokio::{
     sync::mpsc,
 };
 
-use crate::lock::PathLockManager;
+use crate::lock::{NamespaceLockManager, PathLockManager};
 
 pub use error::VaultError;
 
@@ -162,6 +162,7 @@ pub struct StagedWrite {
     core: VaultCore,
     context: VaultContext,
     _operation: MaintenanceOperationGuard,
+    _namespace_lock: Option<tokio::sync::OwnedMutexGuard<()>>,
     _locks: Vec<tokio::sync::OwnedMutexGuard<()>>,
     storage: VaultStorage,
     history: HistoryStore,
@@ -341,6 +342,7 @@ pub struct ReconciliationReport {
 /// Process runtime shared by every Core instance and protocol plane.
 #[derive(Clone)]
 pub struct VaultCoreRuntime {
+    namespace_locks: NamespaceLockManager,
     locks: PathLockManager,
     maintenance: MaintenanceGate,
 }
@@ -367,6 +369,7 @@ impl VaultCoreRuntime {
     /// Build a shared Core runtime around the process maintenance gate.
     pub fn new(maintenance: MaintenanceGate) -> Self {
         Self {
+            namespace_locks: NamespaceLockManager::default(),
             locks: PathLockManager::default(),
             maintenance,
         }
@@ -388,6 +391,85 @@ impl VaultCoreRuntime {
 impl Default for VaultCoreRuntime {
     fn default() -> Self {
         Self::new(MaintenanceGate::new())
+    }
+}
+
+/// Result of admitting one new service-managed Vault.
+#[derive(Clone, Debug)]
+pub struct ManagedVaultCreation {
+    /// Registered Vault row.
+    pub vault: VaultRecord,
+    /// Durable initialization job scoped to the new Vault.
+    pub initialization_job: JobRecord,
+}
+
+/// Application service for safe, service-managed Vault admission.
+///
+/// Admin handlers pass validated human input to this boundary. Filesystem
+/// inspection remains in storage-fs and SQL remains in state.
+#[derive(Clone)]
+pub struct ManagedVaultService {
+    state: StateStore,
+    managed_root: PathBuf,
+    storage_options: StorageOptions,
+}
+
+impl ManagedVaultService {
+    /// Construct the service around the process data directory.
+    pub fn new(state: StateStore, data_root: PathBuf, storage_options: StorageOptions) -> Self {
+        Self {
+            state,
+            managed_root: data_root.join("vaults"),
+            storage_options,
+        }
+    }
+
+    /// Create and register one empty managed Vault, then enqueue its initial
+    /// reconciliation. Slug and root bindings are immutable after admission.
+    pub async fn create(
+        &self,
+        slug: VaultSlug,
+        name: &str,
+    ) -> Result<ManagedVaultCreation, VaultError> {
+        // Upgrade compatibility: persist the existing sole/default Vault
+        // before a second row can make legacy selection ambiguous.
+        let _ = self.state.vaults().legacy_default().await?;
+        if self.state.vaults().find_by_slug(&slug).await?.is_some() {
+            return Err(VaultError::AlreadyExists);
+        }
+        let content_root = self.managed_root.join(slug.as_str());
+        let context = VaultContext::new(VaultId::new(), slug, content_root, Revision::ZERO)?;
+        let storage = VaultStorage::new(&context, VaultPathPolicy::default(), self.storage_options);
+        storage.ensure_root().await?;
+        if !storage.is_root_empty().await? {
+            return Err(StorageError::InvalidOperation("managed Vault root is not empty").into());
+        }
+
+        let (vault, initialization_job) = match self
+            .state
+            .vaults()
+            .insert_managed_with_initialization(&context, name)
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                if self
+                    .state
+                    .vaults()
+                    .find_by_slug(context.slug())
+                    .await?
+                    .is_some()
+                {
+                    return Err(VaultError::AlreadyExists);
+                }
+                return Err(error.into());
+            }
+        };
+
+        Ok(ManagedVaultCreation {
+            vault,
+            initialization_job,
+        })
     }
 }
 
@@ -607,6 +689,10 @@ impl VaultCore {
         source_plane: SourcePlane,
     ) -> Result<StagedWrite, VaultError> {
         let maintenance_operation = self.validate_context(context, true).await?;
+        // A PUT may become a create after inspecting current state. Acquire the
+        // namespace serializer first so every possible lock order stays
+        // namespace -> path and legacy no-replace fallback remains safe.
+        let namespace_lock = self.acquire_namespace_lock(context).await;
         let locks = self.acquire_locks(context, &[path]).await;
         let storage = self.storage(context);
         let history = self.history_store(context)?;
@@ -710,6 +796,7 @@ impl VaultCore {
             core: self.clone(),
             context: context.clone(),
             _operation: maintenance_operation,
+            _namespace_lock: Some(namespace_lock),
             _locks: locks,
             storage,
             history,
@@ -730,6 +817,7 @@ impl VaultCore {
         if path.is_root() {
             return Err(VaultError::AlreadyExists);
         }
+        let _namespace_lock = self.acquire_namespace_lock(context).await;
         let _guards = self.acquire_locks(context, &[path]).await;
         let storage = self.storage(context);
         let files = self.state.files();
@@ -1137,6 +1225,7 @@ impl VaultCore {
                 reason: "move source and destination match",
             }));
         }
+        let _namespace_lock = self.acquire_namespace_lock(context).await;
         let storage = self.storage(context);
         let files = self.state.files();
         let initial = files
@@ -2038,7 +2127,10 @@ impl VaultCore {
         if !self.runtime.maintenance.is_same_gate(&permit.maintenance) {
             return Err(VaultError::Maintenance);
         }
-        self.validate_registered_context(context, true).await?;
+        // Recovery is an internal consistency operation, not a user write.
+        // Disabled/error Vaults still need their durable journal reconciled so
+        // one unavailable Vault cannot prevent the process from restarting.
+        self.validate_registered_context(context, false).await?;
         self.recover_inner(context).await
     }
 
@@ -2284,6 +2376,11 @@ impl VaultCore {
         R: AsyncRead + Unpin,
     {
         let _operation = self.validate_context(context, true).await?;
+        let _namespace_lock = if require_absent {
+            Some(self.acquire_namespace_lock(context).await)
+        } else {
+            None
+        };
         let _guards = self.acquire_locks(context, &[path]).await;
         let storage = self.storage(context);
         let history = self.history_store(context)?;
@@ -2859,6 +2956,13 @@ impl VaultCore {
             .await
     }
 
+    async fn acquire_namespace_lock(
+        &self,
+        context: &VaultContext,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.runtime.namespace_locks.acquire(context).await
+    }
+
     fn inject(&self, phase: CommitPhase) -> Result<(), VaultError> {
         self.failure
             .fail(phase)
@@ -3193,6 +3297,7 @@ fn map_storage(error: StorageError) -> VaultError {
     } else {
         match error {
             StorageError::Domain(error) => VaultError::Domain(error),
+            StorageError::DestinationExists => VaultError::AlreadyExists,
             other => VaultError::Storage(other),
         }
     }

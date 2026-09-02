@@ -7,8 +7,8 @@ use axum::{Json, Router, extract::State as AxumState, http::StatusCode, routing:
 use mcp_vault_auth::{AuthService, MasterKeyRing};
 use mcp_vault_core::VaultCore;
 use mcp_vault_domain::{
-    Actor, MemoryConsolidationId, MemoryId, MemoryRawId, ModelId, ProviderId, Revision,
-    SourcePlane, VaultContext, VaultId, VaultPath, VaultSlug, WritePrecondition,
+    Actor, MemoryConsolidationId, MemoryId, MemoryRawId, MemorySourceId, ModelId, ProviderId,
+    Revision, SourcePlane, VaultContext, VaultId, VaultPath, VaultSlug, WritePrecondition,
 };
 use mcp_vault_memory::{
     ExtractionPolicy, ExtractionSourceMode, MEMORY_PIPELINE_GENERATION, MemoryOrigin,
@@ -21,10 +21,12 @@ use mcp_vault_providers::{
 };
 use mcp_vault_state::{
     MemoryBundle, MemoryConsolidationProposalRecord, MemoryFilter, MemoryRecord,
+    MemorySourceHealthRecord, MemorySourceHealthState, MemorySourceRecord,
     MemoryStage1OutputRecord, StateStore, VaultStatus,
 };
 use mcp_vault_storage_fs::StorageOptions;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::io::AsyncReadExt;
 
@@ -545,6 +547,102 @@ async fn remember_is_idempotent_materialized_and_recalled_lexically() {
 }
 
 #[tokio::test]
+async fn unverified_note_memory_fails_closed_until_paged_audit_proves_its_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, service) = fixture(&state, &directory, "audit-fail-closed").await;
+    let source = core
+        .create_bytes(
+            &context,
+            &VaultPath::parse("notes/audit.md").unwrap(),
+            b"Audit exact evidence.",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let memory = remember_and_consolidate(
+        &service,
+        &context,
+        &core,
+        RememberInput {
+            content: "Audit exact evidence supports this fact.".to_owned(),
+            sources: vec![MemorySourceInput {
+                source_type: "note".to_owned(),
+                note_file_id: Some(source.file.id),
+                note_path: Some(source.file.path.clone()),
+                note_revision: Some(source.file.current_revision),
+                start_line: Some(1),
+                end_line: Some(1),
+                ..MemorySourceInput::default()
+            }],
+            origin: MemoryOrigin::Extracted,
+            ..RememberInput::default()
+        },
+    )
+    .await;
+    let source_view = service
+        .get(&context, memory.memory.id)
+        .await
+        .unwrap()
+        .sources[0]
+        .clone();
+    let source_id = state
+        .memory()
+        .list_sources(&context, memory.memory.id)
+        .await
+        .unwrap()[0]
+        .id;
+    state
+        .memory()
+        .upsert_source_health(
+            &context,
+            &MemorySourceHealthRecord {
+                vault_id: context.id(),
+                source_id,
+                state: MemorySourceHealthState::Unverified,
+                resolved_file_id: source_view.file_id,
+                resolved_path: source_view.path,
+                checked_revision: None,
+                verified_content_hash: None,
+                reason: Some("test_audit_required".to_owned()),
+                last_event_id: None,
+                checked_at: None,
+                updated_at: 1,
+            },
+        )
+        .await
+        .unwrap();
+    let request = RecallRequest {
+        query: "audit exact evidence".to_owned(),
+        max_results: 10,
+        max_tokens: 1_000,
+        ..RecallRequest::default()
+    };
+    assert!(
+        service
+            .recall(&context, request.clone())
+            .await
+            .unwrap()
+            .memories
+            .is_empty()
+    );
+    let page = service
+        .audit_source_page(&context, &core, None, 100, None)
+        .await
+        .unwrap();
+    assert!(page.complete);
+    assert_eq!(page.report.current, 1);
+    assert_eq!(
+        service.recall(&context, request).await.unwrap().memories[0].id,
+        memory.memory.id
+    );
+}
+
+#[tokio::test]
 async fn memory_updates_archive_and_vault_isolation_are_revision_aware() {
     let directory = tempfile::tempdir().unwrap();
     let state = StateStore::connect_and_migrate("sqlite::memory:")
@@ -670,6 +768,16 @@ async fn extracted_memory_source_invalidation_marks_only_unsupported_memory_stal
         },
     )
     .await;
+    core.delete(
+        &context,
+        &source.file.path,
+        source.file.current_revision,
+        Actor::system(),
+        SourcePlane::System,
+        None,
+    )
+    .await
+    .unwrap();
     let stale = service
         .invalidate_source(&context, &core, source.file.id, true)
         .await
@@ -683,6 +791,969 @@ async fn extracted_memory_source_invalidation_marks_only_unsupported_memory_stal
             .status,
         MemoryStatus::Stale
     );
+}
+
+#[tokio::test]
+async fn explicit_memory_with_note_source_stales_but_source_less_explicit_memory_remains_active() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, service) = fixture(&state, &directory, "explicit-source-health").await;
+    let source = core
+        .create_bytes(
+            &context,
+            &VaultPath::parse("notes/explicit-source.md").unwrap(),
+            b"A sourced explicit decision.",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let sourced = remember_and_consolidate(
+        &service,
+        &context,
+        &core,
+        RememberInput {
+            content: "The explicit decision depends on its note evidence.".to_owned(),
+            memory_type: MemoryType::Decision,
+            sources: vec![MemorySourceInput {
+                source_type: "note".to_owned(),
+                note_file_id: Some(source.file.id),
+                note_path: Some(source.file.path.clone()),
+                note_revision: Some(source.file.current_revision),
+                start_line: Some(1),
+                end_line: Some(1),
+                ..MemorySourceInput::default()
+            }],
+            origin: MemoryOrigin::ExplicitAdmin,
+            ..RememberInput::default()
+        },
+    )
+    .await;
+    let source_less = remember_and_consolidate(
+        &service,
+        &context,
+        &core,
+        RememberInput {
+            content: "The source-less explicit decision supports itself.".to_owned(),
+            memory_type: MemoryType::Decision,
+            origin: MemoryOrigin::ExplicitAdmin,
+            ..RememberInput::default()
+        },
+    )
+    .await;
+    core.delete(
+        &context,
+        &source.file.path,
+        source.file.current_revision,
+        Actor::system(),
+        SourcePlane::System,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let report = service
+        .reconcile_source_event(&context, &core, source.file.id, "FileDeleted", None)
+        .await
+        .unwrap();
+    assert_eq!(report.memories_staled, 1);
+    assert_eq!(report.stage1_withdrawn, 1);
+    let sourced = service.get(&context, sourced.memory.id).await.unwrap();
+    assert_eq!(sourced.status, MemoryStatus::Stale);
+    assert_eq!(sourced.status_reason.as_deref(), Some("source_unavailable"));
+    assert!(
+        service
+            .restore(&context, &core, sourced.id, sourced.revision,)
+            .await
+            .is_err(),
+        "Admin restore must not bypass unavailable note evidence"
+    );
+    assert_eq!(
+        service
+            .get(&context, source_less.memory.id)
+            .await
+            .unwrap()
+            .status,
+        MemoryStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn multi_source_memory_stales_only_after_its_last_current_note_source_disappears() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, service) = fixture(&state, &directory, "multi-source-health").await;
+    let first = core
+        .create_bytes(
+            &context,
+            &VaultPath::parse("notes/first.md").unwrap(),
+            b"First exact support.",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let second = core
+        .create_bytes(
+            &context,
+            &VaultPath::parse("notes/second.md").unwrap(),
+            b"Second exact support.",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let memory = remember_and_consolidate(
+        &service,
+        &context,
+        &core,
+        RememberInput {
+            content: "Either exact note can support this memory.".to_owned(),
+            sources: [&first.file, &second.file]
+                .into_iter()
+                .map(|file| MemorySourceInput {
+                    source_type: "note".to_owned(),
+                    note_file_id: Some(file.id),
+                    note_path: Some(file.path.clone()),
+                    note_revision: Some(file.current_revision),
+                    start_line: Some(1),
+                    end_line: Some(1),
+                    ..MemorySourceInput::default()
+                })
+                .collect(),
+            origin: MemoryOrigin::Extracted,
+            ..RememberInput::default()
+        },
+    )
+    .await;
+    for (index, mutation) in [first, second].into_iter().enumerate() {
+        core.delete(
+            &context,
+            &mutation.file.path,
+            mutation.file.current_revision,
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+        let report = service
+            .reconcile_source_event(&context, &core, mutation.file.id, "FileDeleted", None)
+            .await
+            .unwrap();
+        assert_eq!(report.memories_staled, u64::from(index == 1));
+        let status = service
+            .get(&context, memory.memory.id)
+            .await
+            .unwrap()
+            .status;
+        assert_eq!(
+            status,
+            if index == 0 {
+                MemoryStatus::Active
+            } else {
+                MemoryStatus::Stale
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn moved_source_rebinds_memory_and_legacy_markdown_without_provider_work() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, service) = fixture(&state, &directory, "source-move").await;
+    let old_path = VaultPath::parse("notes/source.md").unwrap();
+    let source = core
+        .create_bytes(
+            &context,
+            &old_path,
+            b"source",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let extracted = remember_and_consolidate(
+        &service,
+        &context,
+        &core,
+        RememberInput {
+            content: "The moved source supports this fact.".to_owned(),
+            memory_type: MemoryType::Fact,
+            importance: 0.8,
+            confidence: 0.95,
+            valid_from: None,
+            valid_to: None,
+            tags: Vec::new(),
+            entities: Vec::new(),
+            sources: vec![MemorySourceInput {
+                source_type: "note".to_owned(),
+                note_file_id: Some(source.file.id),
+                note_path: Some(old_path.clone()),
+                note_revision: Some(source.file.current_revision),
+                start_line: Some(1),
+                end_line: Some(1),
+                ..MemorySourceInput::default()
+            }],
+            supersedes: None,
+            idempotency_key: None,
+            origin: MemoryOrigin::Extracted,
+            extraction: json!({"pipeline_version": 1}),
+        },
+    )
+    .await;
+    let new_path = VaultPath::parse("archive/renamed.md").unwrap();
+    let moved = core
+        .move_entry(
+            &context,
+            &old_path,
+            &new_path,
+            source.file.current_revision,
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        service
+            .invalidate_source(&context, &core, source.file.id, false)
+            .await
+            .unwrap(),
+        0
+    );
+    let rebound = service.get(&context, extracted.memory.id).await.unwrap();
+    assert_eq!(rebound.status, MemoryStatus::Active);
+    assert_eq!(rebound.sources[0].path.as_ref(), Some(&new_path));
+    assert_eq!(rebound.sources[0].file_id, Some(source.file.id));
+    assert_eq!(
+        rebound.sources[0].revision,
+        Some(moved.file.current_revision)
+    );
+    assert!(
+        service
+            .list(
+                &context,
+                vec![MemoryStatus::Active],
+                Vec::new(),
+                None,
+                None,
+                Some("notes/".to_owned()),
+                10,
+                0,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        service
+            .list(
+                &context,
+                vec![MemoryStatus::Active],
+                Vec::new(),
+                None,
+                None,
+                Some("archive/".to_owned()),
+                10,
+                0,
+            )
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let canonical_path = rebound.canonical_path.clone().unwrap();
+    let mut canonical = core.read_managed(&context, &canonical_path).await.unwrap();
+    let canonical_revision = canonical.file.current_revision;
+    let mut bytes = Vec::new();
+    canonical.reader.read_to_end(&mut bytes).await.unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(text.contains(&format!("file_id: \"{}\"", source.file.id)));
+    assert!(text.contains("path: \"archive/renamed.md\""));
+
+    let legacy = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("file_id:"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    core.replace_managed_bytes(
+        &context,
+        &canonical_path,
+        canonical_revision,
+        legacy.as_bytes(),
+        Actor::system(),
+        SourcePlane::System,
+        None,
+    )
+    .await
+    .unwrap();
+    service.rebuild(&context, &core).await.unwrap();
+    assert_eq!(
+        service
+            .get(&context, extracted.memory.id)
+            .await
+            .unwrap()
+            .sources[0]
+            .file_id,
+        None
+    );
+
+    let repair = service.repair_source_paths(&context, &core).await.unwrap();
+    assert!(repair.memories_rewritten > 0);
+    assert_eq!(repair.unresolved_note_sources, 0);
+    let repaired = service.get(&context, extracted.memory.id).await.unwrap();
+    assert_eq!(repaired.sources[0].file_id, Some(source.file.id));
+    assert_eq!(repaired.sources[0].path.as_ref(), Some(&new_path));
+    assert_eq!(
+        service.repair_source_paths(&context, &core).await.unwrap(),
+        mcp_vault_memory::MemorySourceRepairReport::default()
+    );
+
+    let deleted = core
+        .delete(
+            &context,
+            &new_path,
+            moved.file.current_revision,
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(deleted.file.deleted_at.is_some());
+    assert_eq!(
+        service
+            .invalidate_source(&context, &core, source.file.id, true)
+            .await
+            .unwrap(),
+        1
+    );
+    let deleted_source = service.get(&context, extracted.memory.id).await.unwrap();
+    assert_eq!(deleted_source.status, MemoryStatus::Stale);
+    assert_eq!(deleted_source.sources[0].path, None);
+}
+
+#[tokio::test]
+async fn deleted_source_rebinds_only_to_one_exact_candidate_in_the_same_vault() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, service) = fixture(&state, &directory, "source-reappear").await;
+    let path = VaultPath::parse("notes/original.md").unwrap();
+    let original = core
+        .create_bytes(
+            &context,
+            &path,
+            b"Exact durable source evidence.",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let memory = remember_and_consolidate(
+        &service,
+        &context,
+        &core,
+        RememberInput {
+            content: "The exact source supports a durable memory.".to_owned(),
+            memory_type: MemoryType::Fact,
+            sources: vec![MemorySourceInput {
+                source_type: "note".to_owned(),
+                note_file_id: Some(original.file.id),
+                note_path: Some(path.clone()),
+                note_revision: Some(original.file.current_revision),
+                start_line: Some(1),
+                end_line: Some(1),
+                ..MemorySourceInput::default()
+            }],
+            origin: MemoryOrigin::Extracted,
+            ..RememberInput::default()
+        },
+    )
+    .await;
+    core.delete(
+        &context,
+        &path,
+        original.file.current_revision,
+        Actor::system(),
+        SourcePlane::System,
+        None,
+    )
+    .await
+    .unwrap();
+    service
+        .reconcile_source_event(&context, &core, original.file.id, "FileDeleted", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .get(&context, memory.memory.id)
+            .await
+            .unwrap()
+            .status,
+        MemoryStatus::Stale
+    );
+
+    let (other_context, other_core, _) = fixture(&state, &directory, "source-reappear-other").await;
+    other_core
+        .create_bytes(
+            &other_context,
+            &VaultPath::parse("notes/cross-vault-copy.md").unwrap(),
+            b"Exact durable source evidence.",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let replacement_path = VaultPath::parse("notes/replacement.md").unwrap();
+    let replacement = core
+        .create_bytes(
+            &context,
+            &replacement_path,
+            b"Exact durable source evidence.",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let report = service
+        .reconcile_source_event(&context, &core, replacement.file.id, "FileCreated", None)
+        .await
+        .unwrap();
+    assert_eq!(report.rebound, 1);
+    assert_eq!(report.memories_reactivated, 1);
+    let rebound = service.get(&context, memory.memory.id).await.unwrap();
+    assert_eq!(rebound.status, MemoryStatus::Active);
+    assert_eq!(rebound.sources[0].file_id, Some(replacement.file.id));
+    assert_eq!(rebound.sources[0].path.as_ref(), Some(&replacement_path));
+}
+
+#[tokio::test]
+async fn duplicate_exact_candidates_leave_source_ambiguous_and_memory_stale() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, service) = fixture(&state, &directory, "source-ambiguous").await;
+    let original_path = VaultPath::parse("notes/original.md").unwrap();
+    let original = core
+        .create_bytes(
+            &context,
+            &original_path,
+            b"Duplicated exact evidence.",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let memory = remember_and_consolidate(
+        &service,
+        &context,
+        &core,
+        RememberInput {
+            content: "A duplicate-sensitive memory.".to_owned(),
+            sources: vec![MemorySourceInput {
+                source_type: "note".to_owned(),
+                note_file_id: Some(original.file.id),
+                note_path: Some(original_path.clone()),
+                note_revision: Some(original.file.current_revision),
+                start_line: Some(1),
+                end_line: Some(1),
+                ..MemorySourceInput::default()
+            }],
+            origin: MemoryOrigin::Extracted,
+            ..RememberInput::default()
+        },
+    )
+    .await;
+    core.delete(
+        &context,
+        &original_path,
+        original.file.current_revision,
+        Actor::system(),
+        SourcePlane::System,
+        None,
+    )
+    .await
+    .unwrap();
+    service
+        .reconcile_source_event(&context, &core, original.file.id, "FileDeleted", None)
+        .await
+        .unwrap();
+    let first = core
+        .create_bytes(
+            &context,
+            &VaultPath::parse("notes/copy-a.md").unwrap(),
+            b"Duplicated exact evidence.",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    core.create_bytes(
+        &context,
+        &VaultPath::parse("notes/copy-b.md").unwrap(),
+        b"Duplicated exact evidence.",
+        Actor::system(),
+        SourcePlane::System,
+        None,
+    )
+    .await
+    .unwrap();
+    let report = service
+        .reconcile_source_event(&context, &core, first.file.id, "FileCreated", None)
+        .await
+        .unwrap();
+    assert_eq!(report.ambiguous, 1);
+    assert_eq!(report.memories_reactivated, 0);
+    let stale = service.get(&context, memory.memory.id).await.unwrap();
+    assert_eq!(stale.status, MemoryStatus::Stale);
+    assert_eq!(
+        stale.sources[0].health.as_deref(),
+        Some("identity_ambiguous")
+    );
+}
+
+#[tokio::test]
+async fn legacy_projection_recovers_a_renamed_source_from_path_revision_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, service) = fixture(&state, &directory, "legacy-source-move").await;
+    let temporary_path = VaultPath::parse("notes/agent-temporary.md").unwrap();
+    let source = core
+        .create_bytes(
+            &context,
+            &temporary_path,
+            b"stable source content",
+            Actor::system(),
+            SourcePlane::Mcp,
+            None,
+        )
+        .await
+        .unwrap();
+    let extracted = remember_and_consolidate(
+        &service,
+        &context,
+        &core,
+        RememberInput {
+            content: "The renamed note supports this durable fact.".to_owned(),
+            memory_type: MemoryType::Fact,
+            sources: vec![MemorySourceInput {
+                source_type: "note".to_owned(),
+                note_file_id: Some(source.file.id),
+                note_path: Some(temporary_path.clone()),
+                note_revision: Some(source.file.current_revision),
+                ..MemorySourceInput::default()
+            }],
+            origin: MemoryOrigin::Extracted,
+            ..RememberInput::default()
+        },
+    )
+    .await;
+    let canonical_path = extracted.memory.canonical_path.clone().unwrap();
+    let mut canonical = core.read_managed(&context, &canonical_path).await.unwrap();
+    let canonical_revision = canonical.file.current_revision;
+    let mut canonical_bytes = Vec::new();
+    canonical
+        .reader
+        .read_to_end(&mut canonical_bytes)
+        .await
+        .unwrap();
+    let legacy = String::from_utf8(canonical_bytes)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("file_id:"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+
+    let final_path = VaultPath::parse("notes/final.md").unwrap();
+    let moved = core
+        .move_entry(
+            &context,
+            &temporary_path,
+            &final_path,
+            source.file.current_revision,
+            Actor::system(),
+            SourcePlane::Mcp,
+            None,
+        )
+        .await
+        .unwrap();
+    core.replace_managed_bytes(
+        &context,
+        &canonical_path,
+        canonical_revision,
+        legacy.as_bytes(),
+        Actor::system(),
+        SourcePlane::System,
+        None,
+    )
+    .await
+    .unwrap();
+    service.rebuild(&context, &core).await.unwrap();
+    let legacy_projection = service.get(&context, extracted.memory.id).await.unwrap();
+    assert_eq!(legacy_projection.sources[0].file_id, None);
+    assert_eq!(legacy_projection.sources[0].path, None);
+
+    let report = service.repair_source_paths(&context, &core).await.unwrap();
+    assert_eq!(report.memories_rewritten, 1);
+    assert_eq!(report.unresolved_note_sources, 0);
+    let repaired = service.get(&context, extracted.memory.id).await.unwrap();
+    assert_eq!(repaired.sources[0].file_id, Some(source.file.id));
+    assert_eq!(repaired.sources[0].path.as_ref(), Some(&final_path));
+    assert_eq!(
+        repaired.sources[0].revision,
+        Some(moved.file.current_revision)
+    );
+}
+
+#[tokio::test]
+async fn changed_source_keeps_evidence_revision_and_marks_memory_stale() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, service) = fixture(&state, &directory, "source-change").await;
+    let path = VaultPath::parse("notes/source.md").unwrap();
+    let source = core
+        .create_bytes(
+            &context,
+            &path,
+            b"original source",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let extracted = remember_and_consolidate(
+        &service,
+        &context,
+        &core,
+        RememberInput {
+            content: "The original source supports this fact.".to_owned(),
+            memory_type: MemoryType::Fact,
+            importance: 0.8,
+            confidence: 0.95,
+            valid_from: None,
+            valid_to: None,
+            tags: Vec::new(),
+            entities: Vec::new(),
+            sources: vec![MemorySourceInput {
+                source_type: "note".to_owned(),
+                note_file_id: Some(source.file.id),
+                note_path: Some(path.clone()),
+                note_revision: Some(source.file.current_revision),
+                ..MemorySourceInput::default()
+            }],
+            supersedes: None,
+            idempotency_key: None,
+            origin: MemoryOrigin::Extracted,
+            extraction: json!({"pipeline_version": 1}),
+        },
+    )
+    .await;
+    let updated = core
+        .replace_bytes(
+            &context,
+            &path,
+            source.file.current_revision,
+            b"changed source",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let fail_closed = service
+        .recall(
+            &context,
+            RecallRequest {
+                query: "original source fact".to_owned(),
+                max_results: 10,
+                max_tokens: 1_000,
+                ..RecallRequest::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        fail_closed.memories.is_empty(),
+        "a changed file hash must stop normal recall before the worker updates lifecycle status"
+    );
+
+    assert_eq!(
+        service
+            .invalidate_source(&context, &core, source.file.id, false)
+            .await
+            .unwrap(),
+        1
+    );
+    let stale = service.get(&context, extracted.memory.id).await.unwrap();
+    assert_eq!(stale.status, MemoryStatus::Stale);
+    assert_eq!(stale.sources[0].path, None);
+    assert_eq!(stale.sources[0].health.as_deref(), Some("content_changed"));
+    assert_eq!(
+        stale.sources[0].revision,
+        Some(source.file.current_revision)
+    );
+    assert_ne!(
+        stale.sources[0].revision,
+        Some(updated.file.current_revision)
+    );
+}
+
+#[tokio::test]
+async fn source_health_counts_separate_final_sources_memories_stage1_and_file_ids() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, _) = fixture(&state, &directory, "source-health-counts").await;
+    let file = core
+        .create_bytes(
+            &context,
+            &VaultPath::parse("notes/one-file.md").unwrap(),
+            b"one source file",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let memory_id = MemoryId::new();
+    let sources = (0..199)
+        .map(|_| MemorySourceRecord {
+            id: MemorySourceId::new(),
+            vault_id: context.id(),
+            memory_id,
+            source_type: "note".to_owned(),
+            note_file_id: Some(file.file.id),
+            note_path: Some(file.file.path.clone()),
+            note_revision: Some(file.file.current_revision),
+            heading_path: Vec::new(),
+            start_line: None,
+            end_line: None,
+            excerpt_hash: Some("sha256:one-source-file".to_owned()),
+            actor_id: None,
+            created_at: 1,
+        })
+        .collect::<Vec<_>>();
+    state
+        .memory()
+        .replace_bundle(
+            &context,
+            &MemoryBundle {
+                memory: MemoryRecord {
+                    id: memory_id,
+                    vault_id: context.id(),
+                    memory_type: "fact".to_owned(),
+                    status: "active".to_owned(),
+                    status_reason: None,
+                    status_changed_at: None,
+                    content: "One memory with many source references.".to_owned(),
+                    normalized_content: "one memory with many source references.".to_owned(),
+                    content_hash: "sha256:many-sources".to_owned(),
+                    importance: 1.0,
+                    confidence: 1.0,
+                    origin: "extracted".to_owned(),
+                    revision: Revision::new(1),
+                    canonical_file_id: None,
+                    canonical_path: None,
+                    canonical_revision: None,
+                    valid_from: None,
+                    valid_to: None,
+                    extraction: json!({}),
+                    created_at: 1,
+                    updated_at: 1,
+                    last_recalled_at: None,
+                    recall_count: 0,
+                },
+                sources,
+                entities: Vec::new(),
+                tags: Vec::new(),
+                relations: Vec::new(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    state
+        .memory()
+        .upsert_stage1_output(
+            &context,
+            &MemoryStage1OutputRecord {
+                id: MemoryRawId::new(),
+                vault_id: context.id(),
+                source_type: "note".to_owned(),
+                source_key: file.file.id.to_string(),
+                source_file_id: Some(file.file.id),
+                source_path: Some(file.file.path.clone()),
+                source_revision: Some(file.file.current_revision),
+                profile_hash: "profile".to_owned(),
+                pipeline_version: 10,
+                prompt_version: "prompt".to_owned(),
+                raw_memory: "raw".to_owned(),
+                source_summary: "summary".to_owned(),
+                source_slug: None,
+                evidence: json!([]),
+                metadata: json!({}),
+                output_hash: "sha256:raw".to_owned(),
+                status: "ready".to_owned(),
+                generated_at: 1,
+                updated_at: 1,
+                usage_count: 0,
+                last_usage: None,
+                selected_for_phase2: false,
+                selected_for_phase2_hash: None,
+                selected_for_phase2_at: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let counts = state.memory().source_health_counts(&context).await.unwrap();
+    assert_eq!(counts.final_sources, 199);
+    assert_eq!(counts.memories, 1);
+    assert_eq!(counts.stage1_sources, 1);
+    assert_eq!(counts.distinct_file_ids, 1);
+    assert_eq!(counts.unverified, 199);
+}
+
+#[tokio::test]
+async fn source_audit_rebinds_stage1_to_one_exact_new_file_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, service) = fixture(&state, &directory, "stage1-source-rebind").await;
+    let old_path = VaultPath::parse("notes/stage1-old.md").unwrap();
+    let old = core
+        .create_bytes(
+            &context,
+            &old_path,
+            b"Stage one exact evidence.",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let evidence_hash = format!("sha256:{:x}", Sha256::digest(b"stage one exact evidence."));
+    let raw_id = MemoryRawId::new();
+    state
+        .memory()
+        .upsert_stage1_output(
+            &context,
+            &MemoryStage1OutputRecord {
+                id: raw_id,
+                vault_id: context.id(),
+                source_type: "note".to_owned(),
+                source_key: old.file.id.to_string(),
+                source_file_id: Some(old.file.id),
+                source_path: Some(old_path.clone()),
+                source_revision: Some(old.file.current_revision),
+                profile_hash: "profile".to_owned(),
+                pipeline_version: 10,
+                prompt_version: "prompt".to_owned(),
+                raw_memory: "A Stage 1 raw memory.".to_owned(),
+                source_summary: "A Stage 1 source summary.".to_owned(),
+                source_slug: None,
+                evidence: json!([{
+                    "source_type": "note",
+                    "source_file_id": old.file.id,
+                    "source_path": old_path,
+                    "source_revision": old.file.current_revision,
+                    "start_line": null,
+                    "end_line": null,
+                    "excerpt_hash": evidence_hash,
+                }]),
+                metadata: json!({}),
+                output_hash: "sha256:old-output".to_owned(),
+                status: "ready".to_owned(),
+                generated_at: 1,
+                updated_at: 1,
+                usage_count: 0,
+                last_usage: None,
+                selected_for_phase2: true,
+                selected_for_phase2_hash: Some("sha256:old-output".to_owned()),
+                selected_for_phase2_at: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+    core.delete(
+        &context,
+        &old.file.path,
+        old.file.current_revision,
+        Actor::system(),
+        SourcePlane::System,
+        None,
+    )
+    .await
+    .unwrap();
+    let new_path = VaultPath::parse("notes/stage1-new.md").unwrap();
+    let new = core
+        .create_bytes(
+            &context,
+            &new_path,
+            b"Stage one exact evidence.",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let page = service
+        .audit_source_page(&context, &core, None, 100, None)
+        .await
+        .unwrap();
+    assert!(page.complete);
+    assert_eq!(page.report.stage1_rebound, 1);
+    assert!(
+        state
+            .memory()
+            .get_stage1_output(&context, "note", &old.file.id.to_string())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let rebound = state
+        .memory()
+        .get_stage1_output(&context, "note", &new.file.id.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rebound.id, raw_id);
+    assert_eq!(rebound.source_file_id, Some(new.file.id));
+    assert_eq!(rebound.source_path.as_ref(), Some(&new_path));
+    assert!(!rebound.selected_for_phase2);
 }
 
 #[tokio::test]
@@ -1010,6 +2081,76 @@ async fn invalid_managed_markdown_is_quarantined_without_becoming_recallable() {
         .await
         .unwrap();
     assert!(recall.memories.is_empty());
+}
+
+#[tokio::test]
+async fn canonical_source_file_id_cannot_cross_vaults() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, service) = fixture(&state, &directory, "source-owner").await;
+    let (other_context, other_core, _other_service) =
+        fixture(&state, &directory, "source-other").await;
+    let foreign = other_core
+        .create_bytes(
+            &other_context,
+            &VaultPath::parse("notes/foreign.md").unwrap(),
+            b"foreign",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let created = remember_and_consolidate(
+        &service,
+        &context,
+        &core,
+        RememberInput {
+            content: "A local durable proposition.".to_owned(),
+            memory_type: MemoryType::Fact,
+            importance: 0.8,
+            confidence: 0.9,
+            ..RememberInput::default()
+        },
+    )
+    .await;
+    let path = created.memory.canonical_path.unwrap();
+    let mut read = core.read_managed(&context, &path).await.unwrap();
+    let mut bytes = Vec::new();
+    read.reader.read_to_end(&mut bytes).await.unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    let malicious = text.replacen(
+        "sources:\n",
+        &format!(
+            "sources:\n  - source_type: \"note\"\n    file_id: \"{}\"\n    path: \"notes/foreign.md\"\n    revision: {}\n",
+            foreign.file.id, foreign.file.current_revision
+        ),
+        1,
+    );
+    core.replace_managed_bytes(
+        &context,
+        &path,
+        created.memory.canonical_revision.unwrap(),
+        malicious.as_bytes(),
+        Actor::system(),
+        SourcePlane::System,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let report = service.rebuild(&context, &core).await.unwrap();
+    assert_eq!(report.quarantined, 1);
+    assert_eq!(
+        service
+            .get(&context, created.memory.id)
+            .await
+            .unwrap()
+            .status,
+        MemoryStatus::Quarantined
+    );
 }
 
 #[tokio::test]
@@ -1710,6 +2851,8 @@ async fn global_and_raw_memory_artifacts_include_rows_beyond_one_state_page() {
                         vault_id: context.id(),
                         memory_type: MemoryType::Fact.as_str().to_owned(),
                         status: MemoryStatus::Active.as_str().to_owned(),
+                        status_reason: None,
+                        status_changed_at: None,
                         content: content.clone(),
                         normalized_content: content.to_lowercase(),
                         content_hash: format!("test-hash-{index}"),

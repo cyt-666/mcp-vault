@@ -19,6 +19,8 @@ function setInputValue(input: HTMLInputElement, value: string) {
 describe('Admin 管理界面', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    window.history.replaceState(null, '', '/');
+    adminApi.setVaultSlug(null);
     vi.spyOn(adminApi, 'restoreSession').mockResolvedValue(null);
     vi.spyOn(adminApi, 'setupStatus').mockResolvedValue({ setup_available: false });
   });
@@ -60,9 +62,24 @@ describe('Admin 管理界面', () => {
       csrf_token: null,
     });
     const request = vi.spyOn(adminApi, 'request').mockImplementation(async (path) => {
-      if (path === '/dashboard') return { ready: true };
-      if (path === '/memories?limit=50') return { memories: [] };
-      if (path === '/memory/extraction') {
+      if (path === '/vaults') {
+        return {
+          vaults: [{
+            id: 'vault-1',
+            slug: 'default',
+            name: '默认 Vault',
+            status: 'active',
+            availability: 'ready',
+            content_root: '/srv/default',
+          }],
+        };
+      }
+      if (path === '/vaults/default/dashboard') return { ready: true };
+      if (path === '/vaults/default/memories?limit=50') return { memories: [] };
+      if (path === '/vaults/default/memory/source-health?limit=50') {
+        return { summary: {}, sources: [], audit: null };
+      }
+      if (path === '/vaults/default/memory/extraction') {
         return {
           policy: { enabled: true, source_mode: 'automatic', max_evidence_per_note: 3 },
           readiness: { ready: true, blockers: [] },
@@ -72,7 +89,7 @@ describe('Admin 管理界面', () => {
           consolidation: { generation: 0, pipeline_generation: 1 },
         };
       }
-      if (path === '/jobs/overview?limit=50') {
+      if (path === '/vaults/default/jobs/overview?limit=50') {
         return {
           running: [{
             id: 'older-running-memory-job',
@@ -98,9 +115,46 @@ describe('Admin 管理界面', () => {
       memoryNav.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    expect(request).toHaveBeenCalledWith('/jobs/overview?limit=50');
+    expect(request).toHaveBeenCalledWith('/vaults/default/jobs/overview?limit=50');
     expect(container.textContent).toContain('任务执行中 · 50%');
     expect(container.textContent).toContain('older-ru…ry-job');
+
+    await act(async () => root.unmount());
+  });
+
+  it('切换 Vault 后所有页面请求使用新的显式作用域', async () => {
+    vi.mocked(adminApi.restoreSession).mockResolvedValue({
+      user_id: 'admin-1',
+      username: 'owner',
+      expires_at: null,
+      csrf_token: null,
+    });
+    const request = vi.spyOn(adminApi, 'request').mockImplementation(async (path) => {
+      if (path === '/vaults') {
+        return {
+          vaults: [
+            { id: 'v1', slug: 'default', name: '默认', status: 'active', availability: 'ready', content_root: '/default' },
+            { id: 'v2', slug: 'work', name: '工作', status: 'active', availability: 'ready', content_root: '/work' },
+          ],
+        };
+      }
+      if (path.endsWith('/dashboard')) return { ready: true, vault: { name: path.includes('/work/') ? '工作' : '默认' } };
+      return {};
+    });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+
+    await act(async () => root.render(<App />));
+    const selector = container.querySelector<HTMLSelectElement>('.vault-switcher select');
+    expect(selector?.value).toBe('default');
+    await act(async () => {
+      if (!selector) throw new Error('Vault selector missing');
+      selector.value = 'work';
+      selector.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    expect(request).toHaveBeenCalledWith('/vaults/work/dashboard');
+    expect(new URLSearchParams(window.location.search).get('vault')).toBe('work');
 
     await act(async () => root.unmount());
   });
@@ -268,6 +322,21 @@ describe('Admin 管理界面', () => {
             retry_wait: [],
             history: [
               {
+                id: '019d-source-repair-job',
+                job_type: 'memory.repair_sources',
+                status: 'completed',
+                attempts: 1,
+                max_attempts: 10,
+                progress: {
+                  phase: 'completed',
+                  completed: 5,
+                  memories_rewritten: 3,
+                  stage1_sources_rebound: 2,
+                  unresolved_note_sources: 1,
+                  memories_marked_stale: 1,
+                },
+              },
+              {
                 id: '019d-completed-job',
                 job_type: 'index.rebuild',
                 status: 'completed',
@@ -321,11 +390,11 @@ describe('Admin 管理界面', () => {
               running: 1,
               queued: 1595,
               retry_wait: 0,
-              completed: 2,
+              completed: 3,
               failed: 1,
               cancelled: 0,
               active: 1596,
-              terminal: 3,
+              terminal: 4,
             },
             truncated: { running: false, queued: true, retry_wait: false },
           }}
@@ -338,11 +407,14 @@ describe('Admin 管理界面', () => {
     expect(container.textContent).toContain('重建知识索引');
     expect(container.textContent).toContain('正在执行（1）');
     expect(container.textContent).toContain('等待执行（1595）');
-    expect(container.textContent).toContain('已结束历史（显示 3 / 共 3）');
+    expect(container.textContent).toContain('已结束历史（显示 4 / 共 4）');
     expect(container.textContent).toContain('等待中');
     expect(container.textContent).toContain('进度 25%');
     expect(container.textContent).toContain('进度 100%');
     expect(container.textContent).toContain('阶段一：提取原始记忆');
+    expect(container.textContent).toContain('修复历史记忆来源');
+    expect(container.textContent).toContain('已重写 3 条记忆来源，更新 2 条阶段一来源');
+    expect(container.textContent).toContain('仍有 1 条来源无法证明当前文件身份');
     expect(container.textContent).toContain('正在处理第 1 / 228 篇：projects/current.md');
     expect(container.textContent).toContain('上次尝试：AI 服务已接受请求，但响应正文读取失败');
     expect(container.textContent).toContain('完成但有失败');
@@ -957,7 +1029,10 @@ describe('Admin 管理界面', () => {
       ),
     );
 
-    expect(container.textContent).toContain('查看来源与证据定位（1）');
+    expect(container.textContent).toContain('查看来源笔记与证据定位（1）');
+    expect(container.textContent).toContain(
+      '记忆文件 _mcp-vault/memory/records/2026/08/memory-1.md',
+    );
     expect(container.textContent).toContain('notes/security.md');
     expect(container.textContent).toContain('修订 4');
     expect(container.textContent).toContain('第 12–14 行');

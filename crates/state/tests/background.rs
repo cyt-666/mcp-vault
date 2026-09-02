@@ -104,6 +104,101 @@ async fn jobs_deduplicate_claim_retry_and_reclaim_expired_leases() {
 }
 
 #[tokio::test]
+async fn cancelling_one_vaults_jobs_never_changes_another_vault() {
+    let (store, first) = store_and_context().await;
+    let second = VaultContext::new(
+        VaultId::new(),
+        VaultSlug::new("private").unwrap(),
+        PathBuf::from("/srv/private"),
+        Revision::new(1),
+    )
+    .unwrap();
+    store
+        .vaults()
+        .insert(&second, "Private", VaultStatus::Active)
+        .await
+        .unwrap();
+    let first_job = store
+        .jobs()
+        .enqueue(&first, "index.rebuild", "same", &json!({}), 0, 3, 0)
+        .await
+        .unwrap();
+    let second_job = store
+        .jobs()
+        .enqueue(&second, "index.rebuild", "same", &json!({}), 0, 3, 0)
+        .await
+        .unwrap();
+
+    assert_eq!(store.jobs().request_cancel_all(&first).await.unwrap(), 1);
+    assert_eq!(
+        store
+            .jobs()
+            .get(&first, first_job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        JobStatus::Cancelled
+    );
+    assert_eq!(
+        store
+            .jobs()
+            .get(&second, second_job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        JobStatus::Queued
+    );
+}
+
+#[tokio::test]
+async fn job_claim_batch_is_fair_across_vaults_at_equal_priority() {
+    let (store, first) = store_and_context().await;
+    let second = VaultContext::new(
+        VaultId::new(),
+        VaultSlug::new("second").unwrap(),
+        PathBuf::from("/srv/second"),
+        Revision::new(1),
+    )
+    .unwrap();
+    store
+        .vaults()
+        .insert(&second, "Second", VaultStatus::Active)
+        .await
+        .unwrap();
+    for index in 0..3 {
+        store
+            .jobs()
+            .enqueue(
+                &first,
+                "test.fair",
+                &format!("first-{index}"),
+                &json!({}),
+                0,
+                3,
+                0,
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .jobs()
+        .enqueue(&second, "test.fair", "second-0", &json!({}), 0, 3, 0)
+        .await
+        .unwrap();
+
+    let claimed = store
+        .jobs()
+        .claim_batch("fair-worker", 1, 60_000, 2)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 2);
+    assert!(claimed.iter().any(|job| job.vault_id == Some(first.id())));
+    assert!(claimed.iter().any(|job| job.vault_id == Some(second.id())));
+}
+
+#[tokio::test]
 async fn active_jobs_remain_queryable_outside_bounded_terminal_history() {
     let (store, context) = store_and_context().await;
     let long_running = store

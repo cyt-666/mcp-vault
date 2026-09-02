@@ -2,11 +2,16 @@
 
 ## 1. Product definition
 
-MCP Vault is a self-hosted service that exposes one canonical Markdown Vault to both people and AI Agents.
+MCP Vault is a self-hosted service that exposes one or more isolated canonical
+Markdown Vaults to both people and AI Agents.
 
 A person uses Obsidian and an existing WebDAV synchronization plugin. An Agent uses MCP. The service adds indexing, knowledge discovery, controlled mutation, revision history, and long-term memory without replacing ordinary files with a proprietary note database.
 
-The first supported deployment is a single owner and a single configured Vault. The architecture, schema, credentials, and APIs must preserve a Vault isolation boundary so one service can support multiple Vaults later without redesigning core modules.
+The supported ownership model is one owner/Admin with one or more configured
+Vaults. Each Vault has distinct WebDAV/MCP endpoints and credentials. The
+architecture, schema, jobs, indexes, memory, and APIs preserve the Vault as the
+isolation boundary; multi-user tenancy and cross-Vault recall are separate
+future capabilities.
 
 ## 2. Primary users
 
@@ -73,6 +78,9 @@ The service MUST provide:
 - bounded output with pagination or cursors.
 
 Retrieval MUST continue to work lexically when LLM or embedding providers are unavailable.
+Outward note paths MUST resolve stable File IDs to current active paths so a
+completed move cannot leave an Agent with a known-unreadable old path. A stale
+content projection MUST retain its analyzed revision until rebuilt.
 
 ### 3.4 Controlled mutation and history
 
@@ -110,6 +118,8 @@ It MUST provide:
 - exact source identity/revision/hash checks; model-generated source
   coordinates or confidence/importance scores MUST NOT be used as trust
   evidence;
+- rename-stable source identity and a current readable path when the source is
+  active; deletion MUST NOT expose a last-known path as if it were readable;
 - optional line/heading anchors for explicit or imported provenance, without
   requiring the automatic extraction model to generate them;
 - separate extraction and consolidation model roles, persisted raw-memory
@@ -208,6 +218,11 @@ The service MUST provide a browser-based administration console for:
 - backup, restore, and retention configuration;
 - system version, migrations, and diagnostics.
 
+The console MUST list, create, select, disable, and re-enable service-managed
+Vaults. New content roots are derived from the immutable Vault slug under the
+service data directory. Existing single-Vault URLs and unscoped Admin behavior
+remain compatible through a stable legacy-default binding.
+
 The first-release console MUST use Simplified Chinese for operator-facing
 copy, group navigation by common tasks, show page-specific summaries instead
 of raw JSON by default, and progressively disclose advanced OAuth,
@@ -262,6 +277,24 @@ backfill. The service MUST checkpoint that note without replaying its paid
 request, continue later notes, and retain a bounded redacted failure reason;
 repeated consecutive contract failures MAY open a cost-safety circuit.
 
+Source safety MUST NOT depend on automatic-memory or Provider configuration.
+Every file create, update, move, delete, restore, and reconciled external change
+MUST update note-source health before optional extraction admission. A memory
+with note sources MUST have at least one verified current note source to enter
+normal recall, regardless of origin; a source-less explicit Agent/Admin memory
+remains supported. Current health MUST fail closed when the live file hash
+changes, including before background lifecycle work completes.
+
+Cross-File-ID recovery MUST use one unique exact candidate in the same Vault:
+normalized full-note evidence or the same anchored excerpt hash. Filename,
+semantic/vector, LLM, ambiguous, truncated, and cross-Vault matches MUST NOT
+bind. Source-unavailable stale memory MAY reactivate after exact recovery;
+archived and superseded memory MUST NOT reactivate automatically. Unsupported
+memory MUST be retained unless an authenticated explicit deletion occurs.
+
+Admin MUST expose repeatable paged source audits and separate exact counts for
+final sources, affected memories, Stage 1 sources, and distinct File IDs.
+
 The Admin UI and Admin API MUST run on a separate listener that is not publicly exposed by default. Network restriction does not replace authentication.
 
 ### 3.8 Authentication and authorization
@@ -301,6 +334,7 @@ The service MUST:
 - expose bounded current-unit progress for long jobs without persisting note
   bodies, prompts, or provider responses in operational diagnostics;
 - allow independent rebuild of derived projections.
+- run a repeatable source audit after full reconciliation and restore.
 
 ### 3.10 Backup and recovery
 
@@ -397,5 +431,9 @@ The service is complete for the first release when:
 8. Provider outages leave WebDAV, file writes, lexical search, and existing memory recall operational.
 9. Indexes can be deleted and rebuilt without loss of canonical knowledge.
 10. Backup and restore reproduce Vault content, credentials/configuration, revision history, and service operation.
-11. Isolation tests prove every credential and query is bound to one Vault context.
-12. Security, migration, crash-recovery, Litmus, MCP conformance, and end-to-end tests pass.
+11. Two managed Vaults can use the same relative paths while credentials,
+    files/history, jobs, FTS/vectors, memory, settings, and audit remain bound
+    to exactly one Vault context.
+12. One initializing, disabled, or failed Vault does not prevent Admin or a
+    healthy Vault from starting and operating.
+13. Security, migration, crash-recovery, Litmus, MCP conformance, and end-to-end tests pass.

@@ -314,10 +314,20 @@ async fn protected_resource_for_slug(
         .find_by_slug(slug)
         .await
         .map_err(|_| ())?;
-    let Some(vault) = vault.filter(|vault| vault.status == mcp_vault_state::VaultStatus::Active)
-    else {
+    let Some(vault) = vault else {
         return Ok(None);
     };
+    if service
+        .auth_state
+        .state
+        .vaults()
+        .availability(&vault)
+        .await
+        .map_err(|_| ())?
+        != mcp_vault_state::VaultAvailability::Ready
+    {
+        return Ok(None);
+    }
     let context = vault.context().map_err(|_| ())?;
     let resources = service
         .auth_state
@@ -476,11 +486,22 @@ async fn authenticate_request_context(
         .await
         .map_err(|_| public_error(StatusCode::INTERNAL_SERVER_ERROR, false))?
         .ok_or_else(|| public_error(StatusCode::NOT_FOUND, false))?;
-    if vault.status == mcp_vault_state::VaultStatus::Disabled {
-        return Err(public_error(StatusCode::NOT_FOUND, false));
-    }
-    if vault.status == mcp_vault_state::VaultStatus::Error {
-        return Err(public_error(StatusCode::SERVICE_UNAVAILABLE, false));
+    match state
+        .state
+        .vaults()
+        .availability(&vault)
+        .await
+        .map_err(|_| public_error(StatusCode::INTERNAL_SERVER_ERROR, false))?
+    {
+        mcp_vault_state::VaultAvailability::Disabled => {
+            return Err(public_error(StatusCode::NOT_FOUND, false));
+        }
+        mcp_vault_state::VaultAvailability::Initializing
+        | mcp_vault_state::VaultAvailability::Error => {
+            return Err(public_error(StatusCode::SERVICE_UNAVAILABLE, false));
+        }
+        mcp_vault_state::VaultAvailability::Ready
+        | mcp_vault_state::VaultAvailability::Maintenance => {}
     }
     let context = vault
         .context()
@@ -3124,6 +3145,13 @@ mod tests {
     async fn configured_router_with_scopes(
         scopes: ScopeSet,
     ) -> (axum::Router, String, tempfile::TempDir) {
+        configured_router_with_availability(scopes, false).await
+    }
+
+    async fn configured_router_with_availability(
+        scopes: ScopeSet,
+        initializing: bool,
+    ) -> (axum::Router, String, tempfile::TempDir) {
         let root = tempdir().unwrap();
         let context = VaultContext::new(
             VaultId::new(),
@@ -3156,6 +3184,21 @@ mod tests {
             state
                 .memory()
                 .set_pipeline_generation_state(vault_context, MEMORY_PIPELINE_GENERATION, false)
+                .await
+                .unwrap();
+        }
+        if initializing {
+            state
+                .jobs()
+                .enqueue(
+                    &context,
+                    "vault.initialize",
+                    &format!("vault:{}:initialize", context.id()),
+                    &serde_json::json!({}),
+                    20,
+                    3,
+                    0,
+                )
                 .await
                 .unwrap();
         }
@@ -3375,6 +3418,8 @@ mod tests {
                         vault_id: context.id(),
                         memory_type: MemoryType::Decision.as_str().to_owned(),
                         status: MemoryStatus::Active.as_str().to_owned(),
+                        status_reason: None,
+                        status_changed_at: None,
                         content: "OAuth memory operations are available.".to_owned(),
                         normalized_content: "oauth memory operations are available.".to_owned(),
                         content_hash: "oauth-all-tools-fixture".to_owned(),
@@ -4232,6 +4277,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_vault_mcp_is_unavailable_during_initialization() {
+        let (router, token, _root) = configured_router_with_availability(full_scopes(), true).await;
+        let response = router.oneshot(discover_request(&token)).await.unwrap();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
     async fn stateful_mount_rejects_missing_credentials_before_rmcp() {
         let (router, _token, _root) = configured_router().await;
         let mut request = discover_request("unused");
@@ -4320,7 +4375,26 @@ mod tests {
     #[tokio::test]
     async fn indexed_search_round_trips_through_public_mcp() {
         let (router, token, _root) = configured_indexed_router().await;
+        let moved = router
+            .clone()
+            .oneshot(tool_request(
+                &token,
+                10,
+                "move_note",
+                serde_json::json!({
+                    "source": "notes/search.md",
+                    "destination": "archive/search.md",
+                    "expected_revision": 1
+                }),
+            ))
+            .await
+            .unwrap();
+        let moved = moved.into_body().collect().await.unwrap().to_bytes();
+        let moved: serde_json::Value = serde_json::from_slice(&moved).unwrap();
+        assert_eq!(moved["result"]["isError"], false, "{moved}");
+
         let response = router
+            .clone()
             .oneshot(tool_request(
                 &token,
                 11,
@@ -4347,8 +4421,21 @@ mod tests {
         );
         assert_eq!(
             body["result"]["structuredContent"]["data"]["results"][0]["path"],
-            "notes/search.md"
+            "archive/search.md"
         );
+
+        let read = router
+            .oneshot(tool_request(
+                &token,
+                12,
+                "read_note",
+                serde_json::json!({"path": "archive/search.md"}),
+            ))
+            .await
+            .unwrap();
+        let read = read.into_body().collect().await.unwrap().to_bytes();
+        let read: serde_json::Value = serde_json::from_slice(&read).unwrap();
+        assert_eq!(read["result"]["isError"], false, "{read}");
     }
 
     #[tokio::test]

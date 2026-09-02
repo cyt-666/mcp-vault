@@ -708,16 +708,27 @@ impl JobRepository {
         let limit = validate_batch(limit)?;
         let mut transaction = self.pool.begin().await?;
         let candidates = sqlx::query_as::<_, JobRow>(
-            "SELECT id, vault_id, job_type, dedup_key, payload_json, status,
+            "WITH eligible AS (
+               SELECT id, vault_id, job_type, dedup_key, payload_json, status,
+                      priority, attempts, max_attempts, available_at, lease_owner,
+                      lease_until, progress_json, last_error, created_at,
+                      updated_at, completed_at, cancel_requested,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY COALESCE(vault_id, '__global__')
+                        ORDER BY priority DESC, created_at ASC, id ASC
+                      ) AS vault_rank
+               FROM jobs
+               WHERE status IN ('queued', 'retry_wait', 'running')
+                 AND available_at <= ?
+                 AND (lease_until IS NULL OR lease_until <= ?)
+                 AND (attempts < max_attempts OR cancel_requested = 1)
+             )
+             SELECT id, vault_id, job_type, dedup_key, payload_json, status,
                     priority, attempts, max_attempts, available_at, lease_owner,
                     lease_until, progress_json, last_error, created_at,
                     updated_at, completed_at, cancel_requested
-             FROM jobs
-             WHERE status IN ('queued', 'retry_wait', 'running')
-               AND available_at <= ?
-               AND (lease_until IS NULL OR lease_until <= ?)
-               AND (attempts < max_attempts OR cancel_requested = 1)
-             ORDER BY priority DESC, created_at ASC, id ASC
+             FROM eligible
+             ORDER BY priority DESC, vault_rank ASC, created_at ASC, id ASC
              LIMIT ?",
         )
         .bind(now)
@@ -935,6 +946,33 @@ impl JobRepository {
         Ok(result.rows_affected())
     }
 
+    /// Request cancellation for every cancellable non-terminal job of one
+    /// Vault. Global and other-Vault jobs are never selected.
+    pub async fn request_cancel_all(&self, context: &VaultContext) -> Result<u64, StateError> {
+        self.ensure_context(context).await?;
+        let now = now_millis()?;
+        let result = sqlx::query(
+            "UPDATE jobs
+             SET cancel_requested = 1,
+                 status = CASE WHEN status IN ('queued', 'retry_wait') THEN 'cancelled' ELSE status END,
+                 completed_at = CASE WHEN status IN ('queued', 'retry_wait') THEN ? ELSE completed_at END,
+                 updated_at = ?
+             WHERE vault_id = ?
+               AND status IN ('queued', 'running', 'retry_wait')
+               AND NOT (
+                 status = 'running'
+                 AND (job_type LIKE 'backup.%'
+                      OR job_type IN ('memory.consolidate', 'memory.reset_pipeline'))
+               )",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(context.id().to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Requeue one failed job after an explicit Admin retry action.
     ///
     /// Memory extraction keeps its paid-work cursor so a full-Vault retry
@@ -966,6 +1004,35 @@ impl JobRepository {
         .await?;
         if result.rows_affected() != 1 {
             return Err(StateError::InvalidInput("job is not retryable"));
+        }
+        Ok(())
+    }
+
+    /// Restart one failed or cancelled Vault job for an explicit lifecycle
+    /// recovery action.
+    pub async fn request_restart_terminal(
+        &self,
+        context: &VaultContext,
+        job_id: JobId,
+    ) -> Result<(), StateError> {
+        self.ensure_context(context).await?;
+        let now = now_millis()?;
+        let result = sqlx::query(
+            "UPDATE jobs
+             SET status = 'queued', available_at = ?, lease_owner = NULL,
+                 lease_until = NULL, attempts = 0, progress_json = NULL,
+                 cancel_requested = 0, last_error = NULL, completed_at = NULL,
+                 updated_at = ?
+             WHERE id = ? AND vault_id = ? AND status IN ('failed', 'cancelled')",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(job_id.to_string())
+        .bind(context.id().to_string())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StateError::InvalidInput("job is not restartable"));
         }
         Ok(())
     }

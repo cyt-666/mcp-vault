@@ -2711,4 +2711,146 @@ mod tests {
             Some(created.file.id)
         );
     }
+
+    #[tokio::test]
+    async fn retrieval_resolves_current_paths_before_a_rebuild_after_move() {
+        let root = tempdir().unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("work").unwrap(),
+            root.path().join("vault"),
+            Revision::new(1),
+        )
+        .unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Work", VaultStatus::Active)
+            .await
+            .unwrap();
+        let core = VaultCore::new(
+            state.clone(),
+            root.path().join("history"),
+            VaultPathPolicy::default(),
+            StorageOptions::default(),
+            Default::default(),
+        );
+        let first_path = VaultPath::parse("docs/first.md").unwrap();
+        let second_path = VaultPath::parse("docs/second.md").unwrap();
+        let first = core
+            .create_bytes(
+                &context,
+                &first_path,
+                b"---\ntags: [shared]\n---\n# First\n\nStable alpha cue.",
+                Actor::system(),
+                SourcePlane::System,
+                None,
+            )
+            .await
+            .unwrap();
+        let second = core
+            .create_bytes(
+                &context,
+                &second_path,
+                b"---\ntags: [shared]\n---\n# Second\n\nStable beta cue.",
+                Actor::system(),
+                SourcePlane::System,
+                None,
+            )
+            .await
+            .unwrap();
+        core.create_managed_bytes(
+            &context,
+            &VaultPath::parse("_mcp-vault/index.yaml").unwrap(),
+            b"topics:\n  docs:\n    title: Docs\n    include: [docs/**]\n",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let service = IndexService::new(state.clone());
+        service.rebuild_vault(&core, &context).await.unwrap();
+        let moved_path = VaultPath::parse("archive/renamed.md").unwrap();
+        let moved = core
+            .move_entry(
+                &context,
+                &second_path,
+                &moved_path,
+                second.file.current_revision,
+                Actor::system(),
+                SourcePlane::System,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let search = service
+            .search_notes(&context, "beta", Some("archive/"), None, None, None, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(search.len(), 1);
+        assert_eq!(search[0].path, moved_path);
+        // The snippet still represents the pre-rebuild projection. Keeping its
+        // analyzed revision preserves optimistic-conflict safety.
+        assert_eq!(search[0].revision, second.file.current_revision);
+        assert_ne!(search[0].revision, moved.file.current_revision);
+        assert!(
+            service
+                .search_notes(
+                    &context,
+                    "beta",
+                    Some("docs/second.md"),
+                    None,
+                    None,
+                    None,
+                    10,
+                    0,
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let related = service
+            .related_notes(&context, first.file.id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(related[0].file_id, second.file.id);
+        assert_eq!(related[0].path, moved_path);
+        let node_notes = service
+            .list_node_notes(&context, "topic:docs", 10, 0)
+            .await
+            .unwrap();
+        assert!(node_notes.iter().any(|note| note.path == moved_path));
+
+        core.delete(
+            &context,
+            &moved_path,
+            moved.file.current_revision,
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            service
+                .search_notes(&context, "beta", None, None, None, None, 10, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            service
+                .repository()
+                .get_note_for_retrieval(&context, second.file.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 }
