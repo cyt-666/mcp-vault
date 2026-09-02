@@ -1663,7 +1663,7 @@ mod tests {
 
     #[tokio::test]
     async fn forwarded_https_allows_non_loopback_basic_auth() {
-        let (_, _, service, credentials, _) = setup().await;
+        let (_directory, _state, service, credentials, _) = setup().await;
         let peer = SocketAddr::from(([192, 0, 2, 44], 49_182));
         let public_app = client_router_with_peer(service, peer);
         let response = public_app
