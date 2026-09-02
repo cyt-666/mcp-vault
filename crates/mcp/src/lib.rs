@@ -3418,6 +3418,8 @@ mod tests {
                         vault_id: context.id(),
                         memory_type: MemoryType::Decision.as_str().to_owned(),
                         status: MemoryStatus::Active.as_str().to_owned(),
+                        status_reason: None,
+                        status_changed_at: None,
                         content: "OAuth memory operations are available.".to_owned(),
                         normalized_content: "oauth memory operations are available.".to_owned(),
                         content_hash: "oauth-all-tools-fixture".to_owned(),
@@ -4373,7 +4375,26 @@ mod tests {
     #[tokio::test]
     async fn indexed_search_round_trips_through_public_mcp() {
         let (router, token, _root) = configured_indexed_router().await;
+        let moved = router
+            .clone()
+            .oneshot(tool_request(
+                &token,
+                10,
+                "move_note",
+                serde_json::json!({
+                    "source": "notes/search.md",
+                    "destination": "archive/search.md",
+                    "expected_revision": 1
+                }),
+            ))
+            .await
+            .unwrap();
+        let moved = moved.into_body().collect().await.unwrap().to_bytes();
+        let moved: serde_json::Value = serde_json::from_slice(&moved).unwrap();
+        assert_eq!(moved["result"]["isError"], false, "{moved}");
+
         let response = router
+            .clone()
             .oneshot(tool_request(
                 &token,
                 11,
@@ -4400,8 +4421,21 @@ mod tests {
         );
         assert_eq!(
             body["result"]["structuredContent"]["data"]["results"][0]["path"],
-            "notes/search.md"
+            "archive/search.md"
         );
+
+        let read = router
+            .oneshot(tool_request(
+                &token,
+                12,
+                "read_note",
+                serde_json::json!({"path": "archive/search.md"}),
+            ))
+            .await
+            .unwrap();
+        let read = read.into_body().collect().await.unwrap().to_bytes();
+        let read: serde_json::Value = serde_json::from_slice(&read).unwrap();
+        assert_eq!(read["result"]["isError"], false, "{read}");
     }
 
     #[tokio::test]

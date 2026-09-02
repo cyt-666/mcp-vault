@@ -4,6 +4,7 @@
 - Date: 2026-08-25
 - Supersedes: the direct automatic-promotion portions of ADR-0014 and ADR-0015
 - Upgrade behavior amended by: ADR-0017
+- Source-health and stale-input behavior amended by: ADR-0022
 
 > ADR-0017 supersedes the prerelease preservation/conversion paragraph below.
 > The two-phase architecture remains accepted; current cutovers discard all old

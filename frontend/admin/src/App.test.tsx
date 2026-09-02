@@ -76,6 +76,9 @@ describe('Admin 管理界面', () => {
       }
       if (path === '/vaults/default/dashboard') return { ready: true };
       if (path === '/vaults/default/memories?limit=50') return { memories: [] };
+      if (path === '/vaults/default/memory/source-health?limit=50') {
+        return { summary: {}, sources: [], audit: null };
+      }
       if (path === '/vaults/default/memory/extraction') {
         return {
           policy: { enabled: true, source_mode: 'automatic', max_evidence_per_note: 3 },
@@ -319,6 +322,21 @@ describe('Admin 管理界面', () => {
             retry_wait: [],
             history: [
               {
+                id: '019d-source-repair-job',
+                job_type: 'memory.repair_sources',
+                status: 'completed',
+                attempts: 1,
+                max_attempts: 10,
+                progress: {
+                  phase: 'completed',
+                  completed: 5,
+                  memories_rewritten: 3,
+                  stage1_sources_rebound: 2,
+                  unresolved_note_sources: 1,
+                  memories_marked_stale: 1,
+                },
+              },
+              {
                 id: '019d-completed-job',
                 job_type: 'index.rebuild',
                 status: 'completed',
@@ -372,11 +390,11 @@ describe('Admin 管理界面', () => {
               running: 1,
               queued: 1595,
               retry_wait: 0,
-              completed: 2,
+              completed: 3,
               failed: 1,
               cancelled: 0,
               active: 1596,
-              terminal: 3,
+              terminal: 4,
             },
             truncated: { running: false, queued: true, retry_wait: false },
           }}
@@ -389,11 +407,14 @@ describe('Admin 管理界面', () => {
     expect(container.textContent).toContain('重建知识索引');
     expect(container.textContent).toContain('正在执行（1）');
     expect(container.textContent).toContain('等待执行（1595）');
-    expect(container.textContent).toContain('已结束历史（显示 3 / 共 3）');
+    expect(container.textContent).toContain('已结束历史（显示 4 / 共 4）');
     expect(container.textContent).toContain('等待中');
     expect(container.textContent).toContain('进度 25%');
     expect(container.textContent).toContain('进度 100%');
     expect(container.textContent).toContain('阶段一：提取原始记忆');
+    expect(container.textContent).toContain('修复历史记忆来源');
+    expect(container.textContent).toContain('已重写 3 条记忆来源，更新 2 条阶段一来源');
+    expect(container.textContent).toContain('仍有 1 条来源无法证明当前文件身份');
     expect(container.textContent).toContain('正在处理第 1 / 228 篇：projects/current.md');
     expect(container.textContent).toContain('上次尝试：AI 服务已接受请求，但响应正文读取失败');
     expect(container.textContent).toContain('完成但有失败');
@@ -1008,7 +1029,10 @@ describe('Admin 管理界面', () => {
       ),
     );
 
-    expect(container.textContent).toContain('查看来源与证据定位（1）');
+    expect(container.textContent).toContain('查看来源笔记与证据定位（1）');
+    expect(container.textContent).toContain(
+      '记忆文件 _mcp-vault/memory/records/2026/08/memory-1.md',
+    );
     expect(container.textContent).toContain('notes/security.md');
     expect(container.textContent).toContain('修订 4');
     expect(container.textContent).toContain('第 12–14 行');

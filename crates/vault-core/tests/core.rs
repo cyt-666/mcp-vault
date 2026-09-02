@@ -1025,6 +1025,66 @@ async fn concurrent_exact_replacements_serialize_and_one_conflicts() {
     );
 }
 
+#[tokio::test]
+async fn concurrent_move_and_target_create_have_one_winner_without_overwrite() {
+    let (_directory, _state, context, core) = setup().await;
+    let source = path("source.md");
+    let destination = path("destination.md");
+    let created = core
+        .create_bytes(
+            &context,
+            &source,
+            b"moved source",
+            system_actor(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let move_core = core.clone();
+    let create_core = core.clone();
+    let move_context = context.clone();
+    let create_context = context.clone();
+    let (moved, concurrently_created) = tokio::join!(
+        move_core.move_entry(
+            &move_context,
+            &source,
+            &destination,
+            created.file.current_revision,
+            system_actor(),
+            SourcePlane::Mcp,
+            None,
+        ),
+        create_core.create_bytes(
+            &create_context,
+            &destination,
+            b"concurrent target",
+            system_actor(),
+            SourcePlane::WebDav,
+            None,
+        )
+    );
+
+    assert!(moved.is_ok() ^ concurrently_created.is_ok());
+    assert!(
+        matches!(moved, Ok(_) | Err(VaultError::AlreadyExists))
+            && matches!(concurrently_created, Ok(_) | Err(VaultError::AlreadyExists))
+    );
+    if moved.is_ok() {
+        assert_eq!(
+            read_bytes(&core, &context, &destination).await,
+            b"moved source"
+        );
+        assert!(core.read(&context, &source).await.is_err());
+    } else {
+        assert_eq!(
+            read_bytes(&core, &context, &destination).await,
+            b"concurrent target"
+        );
+        assert_eq!(read_bytes(&core, &context, &source).await, b"moved source");
+    }
+}
+
 struct FailAt {
     phase: CommitPhase,
     fired: AtomicBool,

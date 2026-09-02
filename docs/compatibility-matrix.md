@@ -40,6 +40,13 @@ PUTs leave no incomplete durable operation journals. Litmus remains a separate
 gate because its client drives the deployed HTTP adapter with the upstream
 method/condition suite.
 
+The Unix storage suite forces `RENAME_NOREPLACE` capability failures and proves
+that both file and directory MOVE use the serialized same-filesystem
+`renameat` fallback, preserve a concurrently created target, and never enter
+the fallback for unrelated errors. Public MCP and index tests move a note after
+index construction and prove that search/read use its current path before the
+next rebuild.
+
 The multi-Vault release smoke must create a second managed Vault through Admin,
 wait for `availability: ready`, generate its distinct WebDAV/MCP links, prove
 that each credential fails on the other link, and use the same relative note

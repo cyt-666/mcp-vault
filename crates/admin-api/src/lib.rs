@@ -50,8 +50,9 @@ use mcp_vault_providers::{
 };
 use mcp_vault_state::{
     AuditRecord, BackupRecord, JobRecord, JobStatus, JobStatusCounts, McpTokenRecord, MemoryCounts,
-    ModelBindingRecord, ModelRecord, ProviderHealthRecord, ProviderRecord, StateError, StateStore,
-    VaultRecord, VaultStatus, WebDavCredentialRecord,
+    MemorySourceAuditStateRecord, MemorySourceHealthCounts, MemorySourceHealthDetailRecord,
+    MemorySourceHealthState, ModelBindingRecord, ModelRecord, ProviderHealthRecord, ProviderRecord,
+    StateError, StateStore, VaultRecord, VaultStatus, WebDavCredentialRecord,
 };
 use mcp_vault_storage_fs::StorageOptions;
 use serde::{Deserialize, Serialize};
@@ -269,6 +270,33 @@ impl AdminApiState {
         self.state.memory().counts(context).await
     }
 
+    async fn memory_source_health_counts(
+        &self,
+        context: &VaultContext,
+    ) -> Result<MemorySourceHealthCounts, StateError> {
+        self.state.memory().source_health_counts(context).await
+    }
+
+    async fn memory_source_health_details(
+        &self,
+        context: &VaultContext,
+        health: Option<MemorySourceHealthState>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<MemorySourceHealthDetailRecord>, StateError> {
+        self.state
+            .memory()
+            .list_source_health_details(context, health, limit, offset)
+            .await
+    }
+
+    async fn memory_source_audit(
+        &self,
+        context: &VaultContext,
+    ) -> Result<Option<MemorySourceAuditStateRecord>, StateError> {
+        self.state.memory().get_source_audit(context).await
+    }
+
     async fn memory_regeneration_pending(
         &self,
         context: &VaultContext,
@@ -283,6 +311,30 @@ impl AdminApiState {
 
     async fn pending_jobs_for(&self, context: &VaultContext) -> Result<u64, StateError> {
         self.state.jobs().pending_count_for(context).await
+    }
+
+    async fn enqueue_memory_source_audit(
+        &self,
+        context: &VaultContext,
+        generation: &str,
+    ) -> Result<JobRecord, StateError> {
+        self.state
+            .jobs()
+            .enqueue(
+                context,
+                "memory.audit_sources",
+                &format!("vault:{}:memory-source-audit:{generation}", context.id()),
+                &json!({
+                    "generation": generation,
+                    "reason": "admin",
+                    "page_size": 100,
+                    "pipeline_generation": mcp_vault_memory::MEMORY_PIPELINE_GENERATION,
+                }),
+                6,
+                10,
+                now_millis(),
+            )
+            .await
     }
 
     async fn provider_health(&self) -> Result<Vec<ProviderHealthRecord>, StateError> {
@@ -623,6 +675,8 @@ fn vault_admin_routes() -> Router<AdminApiState> {
             "/memory/extraction/restart",
             post(restart_memory_extraction),
         )
+        .route("/memory/source-health", get(get_memory_source_health))
+        .route("/memory/source-health/audit", post(run_memory_source_audit))
         .route("/jobs", get(list_jobs))
         .route("/jobs/overview", get(jobs_overview))
         .route("/jobs/{id}", get(get_job))
@@ -4777,6 +4831,183 @@ async fn lifecycle_memory(
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct MemorySourceHealthQuery {
+    health: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+}
+
+async fn get_memory_source_health(
+    State(state): State<AdminApiState>,
+    Query(query): Query<MemorySourceHealthQuery>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    let (limit, offset) = match page_params(&PageQuery {
+        limit: query.limit,
+        offset: query.offset,
+    }) {
+        Ok(page) => page,
+        Err(response) => return response,
+    };
+    let health = match query.health.as_deref() {
+        Some(value) => match MemorySourceHealthState::try_from(value) {
+            Ok(health) => Some(health),
+            Err(_) => {
+                return api_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "validation_failed",
+                    "The source health filter is invalid.",
+                    None,
+                    request_id.0,
+                );
+            }
+        },
+        None => None,
+    };
+    let vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    let context = match vault.context() {
+        Ok(context) => context,
+        Err(_) => {
+            return state_error(
+                StateError::InvalidInput("Vault context is invalid"),
+                request_id.0,
+            );
+        }
+    };
+    let counts = match state.memory_source_health_counts(&context).await {
+        Ok(counts) => counts,
+        Err(error) => return state_error(error, request_id.0),
+    };
+    let details = match state
+        .memory_source_health_details(&context, health, limit, offset)
+        .await
+    {
+        Ok(details) => details,
+        Err(error) => return state_error(error, request_id.0),
+    };
+    let audit = match state.memory_source_audit(&context).await {
+        Ok(audit) => audit,
+        Err(error) => return state_error(error, request_id.0),
+    };
+    let sources = details
+        .into_iter()
+        .map(|detail| {
+            let health = detail.health.as_ref();
+            json!({
+                "source_id": detail.source.id.to_string(),
+                "memory_id": detail.source.memory_id.to_string(),
+                "recorded_file_id": detail.source.note_file_id.map(|id| id.to_string()),
+                "recorded_path": detail.source.note_path.as_ref().map(|path| path.as_str()),
+                "evidence_revision": detail.source.note_revision.map(Revision::value),
+                "heading": detail.source.heading_path,
+                "start_line": detail.source.start_line,
+                "end_line": detail.source.end_line,
+                "health": health.map(|health| health.state.as_str()).unwrap_or("unverified"),
+                "health_reason": health.and_then(|health| health.reason.as_deref()),
+                "resolved_file_id": health.and_then(|health| health.resolved_file_id).map(|id| id.to_string()),
+                "current_path": health.and_then(|health| health.resolved_path.as_ref()).map(|path| path.as_str()),
+                "checked_revision": health.and_then(|health| health.checked_revision).map(Revision::value),
+                "checked_at": health.and_then(|health| health.checked_at),
+            })
+        })
+        .collect::<Vec<_>>();
+    let next_offset = (sources.len() == limit as usize).then_some(offset.saturating_add(limit));
+    api_ok(
+        StatusCode::OK,
+        json!({
+            "summary": {
+                "final_sources": {
+                    "total": counts.final_sources,
+                    "current": counts.current,
+                    "rebound": counts.rebound,
+                    "changed": counts.changed,
+                    "deleted": counts.deleted,
+                    "missing": counts.missing,
+                    "ambiguous": counts.ambiguous,
+                    "unverified": counts.unverified,
+                },
+                "memories": {
+                    "affected": counts.memories,
+                    "active": counts.active_memories,
+                    "stale": counts.stale_memories,
+                },
+                "stage1": {
+                    "total": counts.stage1_sources,
+                    "current": counts.stage1_current,
+                    "withdrawn": counts.stage1_withdrawn,
+                    "orphaned": counts.stage1_orphaned,
+                },
+                "distinct_file_ids": counts.distinct_file_ids,
+            },
+            "audit": audit.map(|audit| json!({
+                "generation": audit.generation,
+                "status": audit.status,
+                "cursor_source_id": audit.cursor_source_id.map(|id| id.to_string()),
+                "counters": audit.counters,
+                "started_at": audit.started_at,
+                "updated_at": audit.updated_at,
+                "completed_at": audit.completed_at,
+            })),
+            "sources": sources,
+            "next_offset": next_offset,
+        }),
+        request_id.0,
+    )
+}
+
+async fn run_memory_source_audit(
+    State(state): State<AdminApiState>,
+    headers: HeaderMap,
+    Extension(principal): Extension<AdminPrincipal>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
+        return auth_error(error, request_id.0);
+    }
+    let vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    let context = match vault.context() {
+        Ok(context) => context,
+        Err(_) => {
+            return state_error(
+                StateError::InvalidInput("Vault context is invalid"),
+                request_id.0,
+            );
+        }
+    };
+    let generation = mcp_vault_domain::EventId::new().to_string();
+    match state
+        .enqueue_memory_source_audit(&context, &generation)
+        .await
+    {
+        Ok(job) => {
+            state
+                .append_admin_audit(
+                    Some(&context),
+                    &request_id.0,
+                    &principal.actor,
+                    "admin.memory_source_audit.queued",
+                    Some("job"),
+                    Some(&job.id.to_string()),
+                    json!({"generation": generation}),
+                )
+                .await;
+            api_ok(
+                StatusCode::ACCEPTED,
+                job_admission_summary(&job, "queued"),
+                request_id.0,
+            )
+        }
+        Err(error) => state_error(error, request_id.0),
+    }
+}
+
 async fn memory_extraction_json(
     state: &AdminApiState,
     context: &VaultContext,
@@ -6876,6 +7107,8 @@ mod tests {
                         vault_id: context.id(),
                         memory_type: "decision".to_owned(),
                         status: "active".to_owned(),
+                        status_reason: None,
+                        status_changed_at: None,
                         content: content.to_owned(),
                         normalized_content: content.to_ascii_lowercase(),
                         content_hash: "sha256:test-admin-memory".to_owned(),
@@ -7014,6 +7247,62 @@ mod tests {
                 .iter()
                 .any(|entry| entry["action"] == "admin.memory.deleted")
         );
+    }
+
+    #[tokio::test]
+    async fn memory_source_health_routes_report_separate_counts_and_admit_repeatable_audit() {
+        let (router, _root, _maintenance, cookie, csrf, state) =
+            authenticated_fixture_with_state().await;
+        let vault = state.list_vaults().await.unwrap().remove(0);
+        let context = vault.context().unwrap();
+
+        let (status, health) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    "/memory/source-health?limit=10",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{health}");
+        assert_eq!(health["data"]["summary"]["final_sources"]["total"], 0);
+        assert_eq!(health["data"]["summary"]["memories"]["affected"], 0);
+        assert_eq!(health["data"]["summary"]["stage1"]["total"], 0);
+        assert_eq!(health["data"]["summary"]["distinct_file_ids"], 0);
+
+        let (status, job) = json_response(
+            router
+                .oneshot(request(
+                    "POST",
+                    "/memory/source-health/audit",
+                    json!({}),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{job}");
+        assert_eq!(job["data"]["job_type"], "memory.audit_sources");
+        let queued = state
+            .state
+            .jobs()
+            .find_active_by_type(&context, "memory.audit_sources")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            queued.payload["pipeline_generation"],
+            mcp_vault_memory::MEMORY_PIPELINE_GENERATION
+        );
+        assert_eq!(queued.payload["reason"], "admin");
     }
 
     #[tokio::test]

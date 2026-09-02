@@ -3,6 +3,8 @@
 //! Canonical memory Markdown is written by Vault Core. This module owns only
 //! the authoritative operational projection and rebuildable search metadata.
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
@@ -28,6 +30,10 @@ pub struct MemoryRecord {
     pub memory_type: String,
     /// Candidate/active/superseded/stale/archived/rejected/quarantined.
     pub status: String,
+    /// Stable machine-readable reason for the current lifecycle state.
+    pub status_reason: Option<String>,
+    /// Time at which lifecycle status or reason last changed.
+    pub status_changed_at: Option<i64>,
     /// Atomic proposition body.
     pub content: String,
     /// Deterministically normalized proposition.
@@ -93,6 +99,153 @@ pub struct MemorySourceRecord {
     pub actor_id: Option<String>,
     /// Creation time.
     pub created_at: i64,
+}
+
+/// Derived verification state for one note provenance source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MemorySourceHealthState {
+    /// The source has not yet been checked by the current audit generation.
+    Unverified,
+    /// Exact evidence is available from the resolved current file.
+    Current,
+    /// The stable file exists but no longer contains the recorded evidence.
+    ContentChanged,
+    /// The resolved stable file is tombstoned.
+    Deleted,
+    /// No current file can be proven to contain the evidence.
+    IdentityMissing,
+    /// More than one current file contains the same exact evidence.
+    IdentityAmbiguous,
+}
+
+impl MemorySourceHealthState {
+    /// Stable database/API label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unverified => "unverified",
+            Self::Current => "current",
+            Self::ContentChanged => "content_changed",
+            Self::Deleted => "deleted",
+            Self::IdentityMissing => "identity_missing",
+            Self::IdentityAmbiguous => "identity_ambiguous",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, StateError> {
+        match value {
+            "unverified" => Ok(Self::Unverified),
+            "current" => Ok(Self::Current),
+            "content_changed" => Ok(Self::ContentChanged),
+            "deleted" => Ok(Self::Deleted),
+            "identity_missing" => Ok(Self::IdentityMissing),
+            "identity_ambiguous" => Ok(Self::IdentityAmbiguous),
+            _ => Err(StateError::InvalidInput(
+                "stored memory source health state is invalid",
+            )),
+        }
+    }
+}
+
+impl TryFrom<&str> for MemorySourceHealthState {
+    type Error = StateError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+/// Rebuildable health projection for one note provenance source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemorySourceHealthRecord {
+    /// Vault isolation boundary.
+    pub vault_id: VaultId,
+    /// Stable provenance source identity.
+    pub source_id: MemorySourceId,
+    /// Current verification state.
+    pub state: MemorySourceHealthState,
+    /// Resolved current file identity, when proven or tombstoned.
+    pub resolved_file_id: Option<FileId>,
+    /// Current navigable path, only when one is available.
+    pub resolved_path: Option<VaultPath>,
+    /// File revision checked by the reconciler.
+    pub checked_revision: Option<Revision>,
+    /// Raw current file hash accepted by the last exact evidence check.
+    pub verified_content_hash: Option<String>,
+    /// Bounded machine-readable diagnostic reason.
+    pub reason: Option<String>,
+    /// Durable event that caused the latest check.
+    pub last_event_id: Option<String>,
+    /// Time at which exact evidence was last checked.
+    pub checked_at: Option<i64>,
+    /// Projection update time.
+    pub updated_at: i64,
+}
+
+/// Durable cursor and result of the latest repeatable source audit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemorySourceAuditStateRecord {
+    /// Vault isolation boundary.
+    pub vault_id: VaultId,
+    /// Audit generation supplied by reconciliation or Admin.
+    pub generation: String,
+    /// Pending, running, completed, failed, or cancelled.
+    pub status: String,
+    /// Last final-memory source safely committed by the audit.
+    pub cursor_source_id: Option<MemorySourceId>,
+    /// Exact current/run counters without memory content.
+    pub counters: Value,
+    /// Audit start time.
+    pub started_at: i64,
+    /// Last progress time.
+    pub updated_at: i64,
+    /// Terminal time.
+    pub completed_at: Option<i64>,
+}
+
+/// Current source-health counts for one Vault.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MemorySourceHealthCounts {
+    /// All final note source rows.
+    pub final_sources: u64,
+    /// Exact current final sources.
+    pub current: u64,
+    /// Current sources most recently rebound to a different File ID.
+    pub rebound: u64,
+    /// Sources whose stable file content changed.
+    pub changed: u64,
+    /// Sources whose resolved file is deleted.
+    pub deleted: u64,
+    /// Sources for which no identity can be proven.
+    pub missing: u64,
+    /// Sources for which exact proof is not unique.
+    pub ambiguous: u64,
+    /// Sources not yet audited.
+    pub unverified: u64,
+    /// Distinct affected memories.
+    pub memories: u64,
+    /// Active memories with at least one current note source.
+    pub active_memories: u64,
+    /// Stale memories caused by unavailable sources.
+    pub stale_memories: u64,
+    /// All note-type Stage 1 rows.
+    pub stage1_sources: u64,
+    /// Current Stage 1 rows bound to an active file.
+    pub stage1_current: u64,
+    /// Withdrawn Stage 1 rows.
+    pub stage1_withdrawn: u64,
+    /// Stage 1 rows whose current identity is unavailable.
+    pub stage1_orphaned: u64,
+    /// Distinct referenced or resolved File IDs across both projections.
+    pub distinct_file_ids: u64,
+}
+
+/// One paginated final source paired with its optional health projection.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemorySourceHealthDetailRecord {
+    /// Final-memory provenance row.
+    pub source: MemorySourceRecord,
+    /// Derived health row; absent means legacy/unverified.
+    pub health: Option<MemorySourceHealthRecord>,
 }
 
 /// One relation between two memories in one Vault.
@@ -179,6 +332,8 @@ pub struct MemoryFilter {
     pub valid_at: Option<i64>,
     /// Minimum importance.
     pub min_importance: Option<f64>,
+    /// Require real-time valid source support for normal recall.
+    pub require_current_sources: bool,
 }
 
 /// One lexical memory candidate with a lower-is-better FTS rank.
@@ -380,6 +535,8 @@ struct MemoryRow {
     vault_id: String,
     memory_type: String,
     status: String,
+    status_reason: Option<String>,
+    status_changed_at: Option<i64>,
     content: String,
     normalized_content: String,
     content_hash: String,
@@ -414,6 +571,59 @@ struct SourceRow {
     excerpt_hash: Option<String>,
     actor_id: Option<String>,
     created_at: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct SourceHealthRow {
+    vault_id: String,
+    source_id: String,
+    state: String,
+    resolved_file_id: Option<String>,
+    resolved_path: Option<String>,
+    checked_revision: Option<i64>,
+    verified_content_hash: Option<String>,
+    reason: Option<String>,
+    last_event_id: Option<String>,
+    checked_at: Option<i64>,
+    updated_at: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct SourceAuditStateRow {
+    vault_id: String,
+    generation: String,
+    status: String,
+    cursor_source_id: Option<String>,
+    counters_json: String,
+    started_at: i64,
+    updated_at: i64,
+    completed_at: Option<i64>,
+}
+
+#[derive(Debug, FromRow)]
+struct SourceHealthDetailRow {
+    source_id: String,
+    source_vault_id: String,
+    source_memory_id: String,
+    source_type: String,
+    source_note_file_id: Option<String>,
+    source_note_path: Option<String>,
+    source_note_revision: Option<i64>,
+    source_heading_path_json: String,
+    source_start_line: Option<i64>,
+    source_end_line: Option<i64>,
+    source_excerpt_hash: Option<String>,
+    source_actor_id: Option<String>,
+    source_created_at: i64,
+    health_state: Option<String>,
+    health_resolved_file_id: Option<String>,
+    health_resolved_path: Option<String>,
+    health_checked_revision: Option<i64>,
+    health_verified_content_hash: Option<String>,
+    health_reason: Option<String>,
+    health_last_event_id: Option<String>,
+    health_checked_at: Option<i64>,
+    health_updated_at: Option<i64>,
 }
 
 #[derive(Debug, FromRow)]
@@ -535,14 +745,25 @@ impl MemoryRepository {
         if revision < Revision::new(1) {
             return Err(StateError::InvalidInput("memory revision is invalid"));
         }
+        let existing_sources = if current.is_some() {
+            self.list_sources(context, bundle.memory.id)
+                .await?
+                .into_iter()
+                .map(|source| (source.id.to_string(), source))
+                .collect::<HashMap<_, _>>()
+        } else {
+            HashMap::new()
+        };
         let mut transaction = self.pool.begin().await?;
         sqlx::query(
-            "INSERT INTO memories\n             (id, vault_id, memory_type, status, content,\n              normalized_content, content_hash, importance, confidence, origin,\n              revision, canonical_file_id, canonical_path, canonical_revision,\n              valid_from, valid_to, extraction_json, created_at, updated_at,\n              last_recalled_at, recall_count)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n             ON CONFLICT(vault_id, id) DO UPDATE SET\n              memory_type = excluded.memory_type,\n              status = excluded.status,\n              content = excluded.content,\n              normalized_content = excluded.normalized_content,\n              content_hash = excluded.content_hash,\n              importance = excluded.importance,\n              confidence = excluded.confidence,\n              origin = excluded.origin,\n              revision = excluded.revision,\n              canonical_file_id = excluded.canonical_file_id,\n              canonical_path = excluded.canonical_path,\n              canonical_revision = excluded.canonical_revision,\n              valid_from = excluded.valid_from,\n              valid_to = excluded.valid_to,\n              extraction_json = excluded.extraction_json,\n              updated_at = excluded.updated_at,\n              last_recalled_at = excluded.last_recalled_at,\n              recall_count = excluded.recall_count",
+            "INSERT INTO memories\n             (id, vault_id, memory_type, status, status_reason, status_changed_at,\n              content, normalized_content, content_hash, importance, confidence, origin,\n              revision, canonical_file_id, canonical_path, canonical_revision,\n              valid_from, valid_to, extraction_json, created_at, updated_at,\n              last_recalled_at, recall_count)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n             ON CONFLICT(vault_id, id) DO UPDATE SET\n              memory_type = excluded.memory_type,\n              status = excluded.status,\n              status_reason = excluded.status_reason,\n              status_changed_at = excluded.status_changed_at,\n              content = excluded.content,\n              normalized_content = excluded.normalized_content,\n              content_hash = excluded.content_hash,\n              importance = excluded.importance,\n              confidence = excluded.confidence,\n              origin = excluded.origin,\n              revision = excluded.revision,\n              canonical_file_id = excluded.canonical_file_id,\n              canonical_path = excluded.canonical_path,\n              canonical_revision = excluded.canonical_revision,\n              valid_from = excluded.valid_from,\n              valid_to = excluded.valid_to,\n              extraction_json = excluded.extraction_json,\n              updated_at = excluded.updated_at,\n              last_recalled_at = excluded.last_recalled_at,\n              recall_count = excluded.recall_count",
         )
         .bind(bundle.memory.id.to_string())
         .bind(context.id().to_string())
         .bind(&bundle.memory.memory_type)
         .bind(&bundle.memory.status)
+        .bind(bundle.memory.status_reason.as_deref())
+        .bind(bundle.memory.status_changed_at)
         .bind(&bundle.memory.content)
         .bind(&bundle.memory.normalized_content)
         .bind(&bundle.memory.content_hash)
@@ -573,7 +794,7 @@ impl MemoryRepository {
 
         let vault_id = context.id().to_string();
         let memory_id = bundle.memory.id.to_string();
-        for table in ["memory_sources", "memory_entities", "memory_tags"] {
+        for table in ["memory_entities", "memory_tags"] {
             let sql = format!("DELETE FROM {table} WHERE vault_id = ? AND memory_id = ?");
             sqlx::query(&sql)
                 .bind(&vault_id)
@@ -594,12 +815,33 @@ impl MemoryRepository {
             .execute(&mut *transaction)
             .await?;
 
+        let mut delete_sources =
+            QueryBuilder::<Sqlite>::new("DELETE FROM memory_sources WHERE vault_id = ");
+        delete_sources.push_bind(&vault_id);
+        delete_sources.push(" AND memory_id = ");
+        delete_sources.push_bind(&memory_id);
+        if !bundle.sources.is_empty() {
+            delete_sources.push(" AND id NOT IN (");
+            for (index, source) in bundle.sources.iter().enumerate() {
+                if index != 0 {
+                    delete_sources.push(", ");
+                }
+                delete_sources.push_bind(source.id.to_string());
+            }
+            delete_sources.push(")");
+        }
+        delete_sources.build().execute(&mut *transaction).await?;
+
         for source in &bundle.sources {
             validate_source(context, source)?;
+            let source_id = source.id.to_string();
+            let evidence_changed = existing_sources
+                .get(&source_id)
+                .is_none_or(|existing| !same_source_evidence(existing, source));
             sqlx::query(
-                "INSERT INTO memory_sources\n                 (id, vault_id, memory_id, source_type, note_file_id,\n                  note_path, note_revision, heading_path_json, start_line,\n                  end_line, excerpt_hash, actor_id, created_at)\n                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO memory_sources\n                 (id, vault_id, memory_id, source_type, note_file_id,\n                  note_path, note_revision, heading_path_json, start_line,\n                  end_line, excerpt_hash, actor_id, created_at)\n                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n                 ON CONFLICT(vault_id, id) DO UPDATE SET\n                  memory_id = excluded.memory_id,\n                  source_type = excluded.source_type,\n                  note_file_id = excluded.note_file_id,\n                  note_path = excluded.note_path,\n                  note_revision = excluded.note_revision,\n                  heading_path_json = excluded.heading_path_json,\n                  start_line = excluded.start_line,\n                  end_line = excluded.end_line,\n                  excerpt_hash = excluded.excerpt_hash,\n                  actor_id = excluded.actor_id",
             )
-            .bind(source.id.to_string())
+            .bind(&source_id)
             .bind(&vault_id)
             .bind(&memory_id)
             .bind(&source.source_type)
@@ -614,6 +856,40 @@ impl MemoryRepository {
             .bind(source.created_at)
             .execute(&mut *transaction)
             .await?;
+
+            if source.source_type == "note" {
+                if evidence_changed {
+                    sqlx::query(
+                        "INSERT INTO memory_source_health\n                         (vault_id, source_id, state, resolved_file_id, resolved_path,\n                          checked_revision, verified_content_hash, reason, last_event_id,\n                          checked_at, updated_at)\n                         VALUES (?, ?, 'unverified', ?, ?, NULL, NULL,\n                                 'source_evidence_changed', NULL, NULL, ?)\n                         ON CONFLICT(vault_id, source_id) DO UPDATE SET\n                          state = 'unverified',\n                          resolved_file_id = excluded.resolved_file_id,\n                          resolved_path = excluded.resolved_path,\n                          checked_revision = NULL,\n                          verified_content_hash = NULL,\n                          reason = excluded.reason,\n                          last_event_id = NULL,\n                          checked_at = NULL,\n                          updated_at = excluded.updated_at",
+                    )
+                    .bind(&vault_id)
+                    .bind(&source_id)
+                    .bind(source.note_file_id.map(|id| id.to_string()))
+                    .bind(source.note_path.as_ref().map(VaultPath::as_str))
+                    .bind(now)
+                    .execute(&mut *transaction)
+                    .await?;
+                } else {
+                    sqlx::query(
+                        "INSERT INTO memory_source_health\n                         (vault_id, source_id, state, resolved_file_id, resolved_path,\n                          checked_revision, verified_content_hash, reason, last_event_id,\n                          checked_at, updated_at)\n                         VALUES (?, ?, 'unverified', ?, ?, NULL, NULL,\n                                 'audit_required', NULL, NULL, ?)\n                         ON CONFLICT(vault_id, source_id) DO NOTHING",
+                    )
+                    .bind(&vault_id)
+                    .bind(&source_id)
+                    .bind(source.note_file_id.map(|id| id.to_string()))
+                    .bind(source.note_path.as_ref().map(VaultPath::as_str))
+                    .bind(now)
+                    .execute(&mut *transaction)
+                    .await?;
+                }
+            } else {
+                sqlx::query(
+                    "DELETE FROM memory_source_health WHERE vault_id = ? AND source_id = ?",
+                )
+                .bind(&vault_id)
+                .bind(&source_id)
+                .execute(&mut *transaction)
+                .await?;
+            }
         }
         for entity in &bundle.entities {
             let normalized = normalize_term(entity);
@@ -702,7 +978,7 @@ impl MemoryRepository {
         memory_id: MemoryId,
     ) -> Result<Option<MemoryRecord>, StateError> {
         let row = sqlx::query_as::<_, MemoryRow>(
-            "SELECT id, vault_id, memory_type, status, content,\n                    normalized_content, content_hash, importance, confidence,\n                    origin, revision, canonical_file_id, canonical_path,\n                    canonical_revision, valid_from, valid_to, extraction_json,\n                    created_at, updated_at, last_recalled_at, recall_count\n             FROM memories WHERE vault_id = ? AND id = ?",
+            "SELECT id, vault_id, memory_type, status, status_reason, status_changed_at,\n                    content, normalized_content, content_hash, importance, confidence,\n                    origin, revision, canonical_file_id, canonical_path,\n                    canonical_revision, valid_from, valid_to, extraction_json,\n                    created_at, updated_at, last_recalled_at, recall_count\n             FROM memories WHERE vault_id = ? AND id = ?",
         )
         .bind(context.id().to_string())
         .bind(memory_id.to_string())
@@ -718,7 +994,7 @@ impl MemoryRepository {
         path: &VaultPath,
     ) -> Result<Option<MemoryRecord>, StateError> {
         let row = sqlx::query_as::<_, MemoryRow>(
-            "SELECT id, vault_id, memory_type, status, content,
+            "SELECT id, vault_id, memory_type, status, status_reason, status_changed_at, content,
                     normalized_content, content_hash, importance, confidence,
                     origin, revision, canonical_file_id, canonical_path,
                     canonical_revision, valid_from, valid_to, extraction_json,
@@ -740,7 +1016,8 @@ impl MemoryRepository {
         statuses: &[String],
     ) -> Result<Vec<MemoryRecord>, StateError> {
         let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT m.id, m.vault_id, m.memory_type, m.status, m.content,
+            "SELECT m.id, m.vault_id, m.memory_type, m.status, m.status_reason,
+                    m.status_changed_at, m.content,
                     m.normalized_content, m.content_hash, m.importance,
                     m.confidence, m.origin, m.revision, m.canonical_file_id,
                     m.canonical_path, m.canonical_revision, m.valid_from,
@@ -812,7 +1089,7 @@ impl MemoryRepository {
     ) -> Result<Vec<MemoryRecord>, StateError> {
         validate_page(limit, offset, MAX_MEMORY_LIMIT)?;
         let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT m.id, m.vault_id, m.memory_type, m.status, m.content,\n                    m.normalized_content, m.content_hash, m.importance,\n                    m.confidence, m.origin, m.revision, m.canonical_file_id,\n                    m.canonical_path, m.canonical_revision, m.valid_from,\n                    m.valid_to, m.extraction_json, m.created_at, m.updated_at,\n                    m.last_recalled_at, m.recall_count\n             FROM memories m WHERE m.vault_id = ",
+            "SELECT m.id, m.vault_id, m.memory_type, m.status, m.status_reason,\n                    m.status_changed_at, m.content, m.normalized_content,\n                    m.content_hash, m.importance, m.confidence, m.origin,\n                    m.revision, m.canonical_file_id, m.canonical_path,\n                    m.canonical_revision, m.valid_from, m.valid_to,\n                    m.extraction_json, m.created_at, m.updated_at,\n                    m.last_recalled_at, m.recall_count\n             FROM memories m WHERE m.vault_id = ",
         );
         query.push_bind(context.id().to_string());
         append_memory_filter(&mut query, filter);
@@ -878,7 +1155,7 @@ impl MemoryRepository {
             return Err(StateError::InvalidInput("memory FTS query is invalid"));
         }
         let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT m.id, m.vault_id, m.memory_type, m.status, m.content,\n                    m.normalized_content, m.content_hash, m.importance,\n                    m.confidence, m.origin, m.revision, m.canonical_file_id,\n                    m.canonical_path, m.canonical_revision, m.valid_from,\n                    m.valid_to, m.extraction_json, m.created_at, m.updated_at,\n                    m.last_recalled_at, m.recall_count,\n                    bm25(memory_fts) AS memory_rank\n             FROM memory_fts\n             JOIN memories m ON m.vault_id = memory_fts.vault_id\n                            AND m.id = memory_fts.memory_id\n             WHERE memory_fts.vault_id = ",
+            "SELECT m.id, m.vault_id, m.memory_type, m.status, m.status_reason,\n                    m.status_changed_at, m.content, m.normalized_content,\n                    m.content_hash, m.importance, m.confidence, m.origin,\n                    m.revision, m.canonical_file_id, m.canonical_path,\n                    m.canonical_revision, m.valid_from, m.valid_to,\n                    m.extraction_json, m.created_at, m.updated_at,\n                    m.last_recalled_at, m.recall_count,\n                    bm25(memory_fts) AS memory_rank\n             FROM memory_fts\n             JOIN memories m ON m.vault_id = memory_fts.vault_id\n                            AND m.id = memory_fts.memory_id\n             WHERE memory_fts.vault_id = ",
         );
         query.push_bind(context.id().to_string());
         query.push(" AND memory_fts MATCH ");
@@ -924,7 +1201,7 @@ impl MemoryRepository {
             return Ok(Vec::new());
         }
         let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT m.id, m.vault_id, m.memory_type, m.status, m.content,\n                    m.normalized_content, m.content_hash, m.importance,\n                    m.confidence, m.origin, m.revision, m.canonical_file_id,\n                    m.canonical_path, m.canonical_revision, m.valid_from,\n                    m.valid_to, m.extraction_json, m.created_at, m.updated_at,\n                    m.last_recalled_at, m.recall_count\n             FROM memories m WHERE m.vault_id = ",
+            "SELECT m.id, m.vault_id, m.memory_type, m.status, m.status_reason,\n                    m.status_changed_at, m.content, m.normalized_content,\n                    m.content_hash, m.importance, m.confidence, m.origin,\n                    m.revision, m.canonical_file_id, m.canonical_path,\n                    m.canonical_revision, m.valid_from, m.valid_to,\n                    m.extraction_json, m.created_at, m.updated_at,\n                    m.last_recalled_at, m.recall_count\n             FROM memories m WHERE m.vault_id = ",
         );
         query.push_bind(context.id().to_string());
         query.push(" AND (");
@@ -1077,6 +1354,149 @@ impl MemoryRepository {
         self.get_stage1_output(context, &output.source_type, &output.source_key)
             .await?
             .ok_or(StateError::InvalidInput("raw memory output was not saved"))
+    }
+
+    /// Rebind current Phase 1 provenance for one stable note identity.
+    ///
+    /// A move updates the navigable path without regenerating Provider output.
+    /// The evidence revision advances only after the memory service proves that
+    /// the current content still matches the source revision.
+    pub async fn rebind_stage1_source(
+        &self,
+        context: &VaultContext,
+        file_id: FileId,
+        current_path: &VaultPath,
+        current_revision: Revision,
+        current_content_hash: Option<&str>,
+    ) -> Result<u64, StateError> {
+        self.ensure_vault_context(context).await?;
+        let updated_at = now_millis()?;
+        let revision = current_revision.as_i64()?;
+        let advanced = sqlx::query(
+            "UPDATE memory_stage1_outputs
+             SET source_path = ?, source_revision = ?, updated_at = ?
+             WHERE vault_id = ? AND source_file_id = ?
+               AND (source_revision = ? OR
+                    (? IS NOT NULL AND EXISTS (
+                        SELECT 1 FROM file_revisions evidence_revision
+                        WHERE evidence_revision.vault_id = memory_stage1_outputs.vault_id
+                          AND evidence_revision.file_id = memory_stage1_outputs.source_file_id
+                          AND evidence_revision.revision = memory_stage1_outputs.source_revision
+                          AND evidence_revision.content_hash = ?)))
+               AND (source_path IS NOT ? OR source_revision IS NOT ?)",
+        )
+        .bind(current_path.as_str())
+        .bind(revision)
+        .bind(updated_at)
+        .bind(context.id().to_string())
+        .bind(file_id.to_string())
+        .bind(revision)
+        .bind(current_content_hash)
+        .bind(current_content_hash)
+        .bind(current_path.as_str())
+        .bind(revision)
+        .execute(&self.pool)
+        .await?;
+        let rebound = sqlx::query(
+            "UPDATE memory_stage1_outputs
+             SET source_path = ?, updated_at = ?
+             WHERE vault_id = ? AND source_file_id = ?
+               AND source_path IS NOT ?",
+        )
+        .bind(current_path.as_str())
+        .bind(updated_at)
+        .bind(context.id().to_string())
+        .bind(file_id.to_string())
+        .bind(current_path.as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(advanced
+            .rows_affected()
+            .saturating_add(rebound.rows_affected()))
+    }
+
+    /// Move one exact Stage 1 source identity to a newly proven File ID.
+    ///
+    /// If the target File ID already has its own current Stage 1 row, the old
+    /// row is withdrawn rather than overwriting or duplicating that target.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn rebind_stage1_output_identity(
+        &self,
+        context: &VaultContext,
+        output_id: MemoryRawId,
+        old_file_id: FileId,
+        new_file_id: FileId,
+        new_path: &VaultPath,
+        new_revision: Revision,
+        evidence: &Value,
+        output_hash: &str,
+    ) -> Result<(u64, u64), StateError> {
+        self.ensure_vault_context(context).await?;
+        if output_hash.is_empty() || output_hash.len() > 128 {
+            return Err(StateError::InvalidInput(
+                "raw memory rebound output hash is invalid",
+            ));
+        }
+        let vault_id = context.id().to_string();
+        let mut transaction = self.pool.begin().await?;
+        let current: Option<(String, String)> = sqlx::query_as(
+            "SELECT source_type, source_key FROM memory_stage1_outputs\n             WHERE vault_id = ? AND id = ? AND source_file_id = ?",
+        )
+        .bind(&vault_id)
+        .bind(output_id.to_string())
+        .bind(old_file_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some((source_type, source_key)) = current else {
+            transaction.commit().await?;
+            return Ok((0, 0));
+        };
+        let target_key = if source_type == "note" && source_key == old_file_id.to_string() {
+            new_file_id.to_string()
+        } else {
+            source_key
+        };
+        let target: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM memory_stage1_outputs\n             WHERE vault_id = ? AND source_type = ? AND source_key = ?",
+        )
+        .bind(&vault_id)
+        .bind(&source_type)
+        .bind(&target_key)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if target
+            .as_deref()
+            .is_some_and(|target| target != output_id.to_string())
+        {
+            let withdrawn = sqlx::query(
+                "UPDATE memory_stage1_outputs\n                 SET status = 'withdrawn', selected_for_phase2 = 0,\n                     selected_for_phase2_hash = NULL, selected_for_phase2_at = NULL,\n                     updated_at = ?\n                 WHERE vault_id = ? AND id = ?\n                   AND source_file_id = ? AND status != 'withdrawn'",
+            )
+            .bind(now_millis()?)
+            .bind(&vault_id)
+            .bind(output_id.to_string())
+            .bind(old_file_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            return Ok((0, withdrawn.rows_affected()));
+        }
+        let rebound = sqlx::query(
+            "UPDATE memory_stage1_outputs\n             SET source_key = ?, source_file_id = ?, source_path = ?,\n                 source_revision = ?, evidence_json = ?, output_hash = ?,\n                 selected_for_phase2 = 0, selected_for_phase2_hash = NULL,\n                 selected_for_phase2_at = NULL, updated_at = ?\n             WHERE vault_id = ? AND id = ? AND source_file_id = ?",
+        )
+        .bind(&target_key)
+        .bind(&target_key)
+        .bind(new_path.as_str())
+        .bind(new_revision.as_i64()?)
+        .bind(serde_json::to_string(evidence)?)
+        .bind(output_hash)
+        .bind(now_millis()?)
+        .bind(&vault_id)
+        .bind(output_id.to_string())
+        .bind(old_file_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok((rebound.rows_affected(), 0))
     }
 
     /// List current Phase 1 inputs in deterministic update/id order.
@@ -1306,6 +1726,24 @@ impl MemoryRepository {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() == 1)
+    }
+
+    /// Withdraw every note-dependent Stage 1 row bound to one lost File ID.
+    pub async fn withdraw_stage1_outputs_for_file(
+        &self,
+        context: &VaultContext,
+        file_id: FileId,
+    ) -> Result<u64, StateError> {
+        self.ensure_vault_context(context).await?;
+        let result = sqlx::query(
+            "UPDATE memory_stage1_outputs\n             SET status = 'withdrawn', selected_for_phase2 = 0,\n                 selected_for_phase2_hash = NULL, selected_for_phase2_at = NULL,\n                 updated_at = ?\n             WHERE vault_id = ? AND source_file_id = ? AND status != 'withdrawn'",
+        )
+        .bind(now_millis()?)
+        .bind(context.id().to_string())
+        .bind(file_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     /// Return a prepared/applied Phase 2 proposal for one exact input set.
@@ -1975,6 +2413,19 @@ impl MemoryRepository {
         status: &str,
         expected_revision: Option<Revision>,
     ) -> Result<MemoryRecord, StateError> {
+        self.set_status_with_reason(context, memory_id, status, None, expected_revision)
+            .await
+    }
+
+    /// Update one memory lifecycle/status and its machine-readable reason.
+    pub async fn set_status_with_reason(
+        &self,
+        context: &VaultContext,
+        memory_id: MemoryId,
+        status: &str,
+        reason: Option<&str>,
+        expected_revision: Option<Revision>,
+    ) -> Result<MemoryRecord, StateError> {
         if !matches!(
             status,
             "candidate"
@@ -1987,6 +2438,9 @@ impl MemoryRepository {
         ) {
             return Err(StateError::InvalidInput("memory status is invalid"));
         }
+        if reason.is_some_and(|value| value.is_empty() || value.len() > 128) {
+            return Err(StateError::InvalidInput("memory status reason is invalid"));
+        }
         let current = self
             .get_memory(context, memory_id)
             .await?
@@ -1996,13 +2450,19 @@ impl MemoryRepository {
         {
             return Err(StateError::InvalidInput("memory revision conflict"));
         }
+        if current.status == status && current.status_reason.as_deref() == reason {
+            return Ok(current);
+        }
         let revision = current.revision.next()?;
+        let now = now_millis()?;
         sqlx::query(
-            "UPDATE memories SET status = ?, revision = ?, updated_at = ?\n             WHERE vault_id = ? AND id = ? AND revision = ?",
+            "UPDATE memories\n             SET status = ?, status_reason = ?, status_changed_at = ?,\n                 revision = ?, updated_at = ?\n             WHERE vault_id = ? AND id = ? AND revision = ?",
         )
         .bind(status)
+        .bind(reason)
+        .bind(now)
         .bind(revision.as_i64()?)
-        .bind(now_millis()?)
+        .bind(now)
         .bind(context.id().to_string())
         .bind(memory_id.to_string())
         .bind(current.revision.as_i64()?)
@@ -2069,6 +2529,457 @@ impl MemoryRepository {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(row_to_source).collect()
+    }
+
+    /// Fetch one provenance source inside its Vault boundary.
+    pub async fn get_source(
+        &self,
+        context: &VaultContext,
+        source_id: MemorySourceId,
+    ) -> Result<Option<MemorySourceRecord>, StateError> {
+        let row = sqlx::query_as::<_, SourceRow>(
+            "SELECT id, vault_id, memory_id, source_type, note_file_id,\n                    note_path, note_revision, heading_path_json, start_line,\n                    end_line, excerpt_hash, actor_id, created_at\n             FROM memory_sources WHERE vault_id = ? AND id = ?",
+        )
+        .bind(context.id().to_string())
+        .bind(source_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_source).transpose()
+    }
+
+    /// List one deterministic page of final note sources after a stable cursor.
+    pub async fn list_note_sources_page(
+        &self,
+        context: &VaultContext,
+        after: Option<MemorySourceId>,
+        limit: u32,
+    ) -> Result<Vec<MemorySourceRecord>, StateError> {
+        if limit == 0 || limit > 512 {
+            return Err(StateError::InvalidInput(
+                "memory source audit page is invalid",
+            ));
+        }
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT id, vault_id, memory_id, source_type, note_file_id,\n                    note_path, note_revision, heading_path_json, start_line,\n                    end_line, excerpt_hash, actor_id, created_at\n             FROM memory_sources WHERE vault_id = ",
+        );
+        query.push_bind(context.id().to_string());
+        query.push(" AND source_type = 'note'");
+        if let Some(after) = after {
+            query.push(" AND id > ");
+            query.push_bind(after.to_string());
+        }
+        query.push(" ORDER BY id ASC LIMIT ");
+        query.push_bind(i64::from(limit));
+        let rows = query
+            .build_query_as::<SourceRow>()
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(row_to_source).collect()
+    }
+
+    /// List one deterministic page of note sources without verified current health.
+    pub async fn list_unhealthy_note_sources_page(
+        &self,
+        context: &VaultContext,
+        after: Option<MemorySourceId>,
+        limit: u32,
+    ) -> Result<Vec<MemorySourceRecord>, StateError> {
+        if limit == 0 || limit > 512 {
+            return Err(StateError::InvalidInput(
+                "memory source health page is invalid",
+            ));
+        }
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT s.id, s.vault_id, s.memory_id, s.source_type, s.note_file_id,\n                    s.note_path, s.note_revision, s.heading_path_json, s.start_line,\n                    s.end_line, s.excerpt_hash, s.actor_id, s.created_at\n             FROM memory_sources s\n             LEFT JOIN memory_source_health h\n               ON h.vault_id = s.vault_id AND h.source_id = s.id\n             WHERE s.vault_id = ",
+        );
+        query.push_bind(context.id().to_string());
+        query.push(" AND s.source_type = 'note' AND (h.state IS NULL OR h.state != 'current')");
+        if let Some(after) = after {
+            query.push(" AND s.id > ");
+            query.push_bind(after.to_string());
+        }
+        query.push(" ORDER BY s.id ASC LIMIT ");
+        query.push_bind(i64::from(limit));
+        let rows = query
+            .build_query_as::<SourceRow>()
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(row_to_source).collect()
+    }
+
+    /// List final note sources currently or historically bound to one File ID.
+    pub async fn list_note_sources_for_file(
+        &self,
+        context: &VaultContext,
+        file_id: FileId,
+    ) -> Result<Vec<MemorySourceRecord>, StateError> {
+        let rows = sqlx::query_as::<_, SourceRow>(
+            "SELECT DISTINCT s.id, s.vault_id, s.memory_id, s.source_type,\n                    s.note_file_id, s.note_path, s.note_revision,\n                    s.heading_path_json, s.start_line, s.end_line,\n                    s.excerpt_hash, s.actor_id, s.created_at\n             FROM memory_sources s\n             LEFT JOIN memory_source_health h\n               ON h.vault_id = s.vault_id AND h.source_id = s.id\n             WHERE s.vault_id = ? AND s.source_type = 'note'\n               AND (s.note_file_id = ? OR h.resolved_file_id = ?)\n             ORDER BY s.id ASC",
+        )
+        .bind(context.id().to_string())
+        .bind(file_id.to_string())
+        .bind(file_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_source).collect()
+    }
+
+    /// Fetch the derived health row for one provenance source.
+    pub async fn get_source_health(
+        &self,
+        context: &VaultContext,
+        source_id: MemorySourceId,
+    ) -> Result<Option<MemorySourceHealthRecord>, StateError> {
+        let row = sqlx::query_as::<_, SourceHealthRow>(
+            "SELECT vault_id, source_id, state, resolved_file_id, resolved_path,\n                    checked_revision, verified_content_hash, reason, last_event_id,\n                    checked_at, updated_at\n             FROM memory_source_health WHERE vault_id = ? AND source_id = ?",
+        )
+        .bind(context.id().to_string())
+        .bind(source_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_source_health).transpose()
+    }
+
+    /// List source health rows for one memory in source order.
+    pub async fn list_source_health_for_memory(
+        &self,
+        context: &VaultContext,
+        memory_id: MemoryId,
+    ) -> Result<Vec<MemorySourceHealthRecord>, StateError> {
+        let rows = sqlx::query_as::<_, SourceHealthRow>(
+            "SELECT h.vault_id, h.source_id, h.state, h.resolved_file_id,\n                    h.resolved_path, h.checked_revision, h.verified_content_hash,\n                    h.reason, h.last_event_id, h.checked_at, h.updated_at\n             FROM memory_source_health h\n             JOIN memory_sources s ON s.vault_id = h.vault_id AND s.id = h.source_id\n             WHERE h.vault_id = ? AND s.memory_id = ?\n             ORDER BY s.created_at ASC, s.id ASC",
+        )
+        .bind(context.id().to_string())
+        .bind(memory_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_source_health).collect()
+    }
+
+    /// Atomically persist one source-health result and any proven current binding.
+    pub async fn upsert_source_health(
+        &self,
+        context: &VaultContext,
+        health: &MemorySourceHealthRecord,
+    ) -> Result<MemorySourceHealthRecord, StateError> {
+        if health.vault_id != context.id()
+            || health
+                .reason
+                .as_ref()
+                .is_some_and(|value| value.len() > 256)
+            || health
+                .last_event_id
+                .as_ref()
+                .is_some_and(|value| value.len() > 128)
+        {
+            return Err(StateError::InvalidInput("memory source health is invalid"));
+        }
+        if health.state == MemorySourceHealthState::Current
+            && (health.resolved_file_id.is_none()
+                || health.resolved_path.is_none()
+                || health.checked_revision.is_none()
+                || health.verified_content_hash.is_none()
+                || health.checked_at.is_none())
+        {
+            return Err(StateError::InvalidInput(
+                "current memory source health is incomplete",
+            ));
+        }
+        let source = self
+            .get_source(context, health.source_id)
+            .await?
+            .ok_or(StateError::InvalidInput("memory source does not exist"))?;
+        if source.source_type != "note" {
+            return Err(StateError::InvalidInput(
+                "only note sources have source health",
+            ));
+        }
+        let mut transaction = self.pool.begin().await?;
+        if health.state == MemorySourceHealthState::Current {
+            sqlx::query(
+                "UPDATE memory_sources\n                 SET note_file_id = ?, note_path = ?, note_revision = ?\n                 WHERE vault_id = ? AND id = ? AND source_type = 'note'",
+            )
+            .bind(health.resolved_file_id.map(|id| id.to_string()))
+            .bind(health.resolved_path.as_ref().map(VaultPath::as_str))
+            .bind(
+                health
+                    .checked_revision
+                    .map(Revision::as_i64)
+                    .transpose()?,
+            )
+            .bind(context.id().to_string())
+            .bind(health.source_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO memory_source_health\n             (vault_id, source_id, state, resolved_file_id, resolved_path,\n              checked_revision, verified_content_hash, reason, last_event_id,\n              checked_at, updated_at)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n             ON CONFLICT(vault_id, source_id) DO UPDATE SET\n              state = excluded.state,\n              resolved_file_id = excluded.resolved_file_id,\n              resolved_path = excluded.resolved_path,\n              checked_revision = excluded.checked_revision,\n              verified_content_hash = excluded.verified_content_hash,\n              reason = excluded.reason,\n              last_event_id = excluded.last_event_id,\n              checked_at = excluded.checked_at,\n              updated_at = excluded.updated_at",
+        )
+        .bind(context.id().to_string())
+        .bind(health.source_id.to_string())
+        .bind(health.state.as_str())
+        .bind(health.resolved_file_id.map(|id| id.to_string()))
+        .bind(health.resolved_path.as_ref().map(VaultPath::as_str))
+        .bind(
+            health
+                .checked_revision
+                .map(Revision::as_i64)
+                .transpose()?,
+        )
+        .bind(health.verified_content_hash.as_deref())
+        .bind(health.reason.as_deref())
+        .bind(health.last_event_id.as_deref())
+        .bind(health.checked_at)
+        .bind(health.updated_at)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        self.get_source_health(context, health.source_id)
+            .await?
+            .ok_or(StateError::InvalidInput(
+                "memory source health update disappeared",
+            ))
+    }
+
+    /// Return whether one memory is eligible for normal recall right now.
+    pub async fn is_memory_recall_eligible(
+        &self,
+        context: &VaultContext,
+        memory_id: MemoryId,
+    ) -> Result<bool, StateError> {
+        let eligible: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(\n                SELECT 1 FROM memories m\n                WHERE m.vault_id = ? AND m.id = ? AND m.status = 'active'\n                  AND (\n                    (m.origin IN ('explicit_agent', 'explicit_admin')\n                     AND NOT EXISTS (\n                        SELECT 1 FROM memory_sources s\n                        WHERE s.vault_id = m.vault_id AND s.memory_id = m.id\n                          AND s.source_type = 'note'\n                     ))\n                    OR EXISTS (\n                        SELECT 1 FROM memory_sources s\n                        JOIN memory_source_health h\n                          ON h.vault_id = s.vault_id AND h.source_id = s.id\n                        JOIN file_entries f\n                          ON f.vault_id = h.vault_id AND f.id = h.resolved_file_id\n                        WHERE s.vault_id = m.vault_id AND s.memory_id = m.id\n                          AND s.source_type = 'note' AND h.state = 'current'\n                          AND f.deleted_at IS NULL\n                          AND h.verified_content_hash IS NOT NULL\n                          AND f.content_hash = h.verified_content_hash\n                    )\n                  )\n             )",
+        )
+        .bind(context.id().to_string())
+        .bind(memory_id.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(eligible == 1)
+    }
+
+    /// Return the number of note provenance rows attached to one memory.
+    pub async fn memory_note_source_count(
+        &self,
+        context: &VaultContext,
+        memory_id: MemoryId,
+    ) -> Result<u64, StateError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM memory_sources\n             WHERE vault_id = ? AND memory_id = ? AND source_type = 'note'",
+        )
+        .bind(context.id().to_string())
+        .bind(memory_id.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+        u64::try_from(count).map_err(|_| StateError::InvalidInput("memory source count is invalid"))
+    }
+
+    /// Return whether at least one note source has real-time current support.
+    pub async fn has_current_note_source(
+        &self,
+        context: &VaultContext,
+        memory_id: MemoryId,
+    ) -> Result<bool, StateError> {
+        let supported: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(\n                SELECT 1 FROM memory_sources s\n                JOIN memory_source_health h\n                  ON h.vault_id = s.vault_id AND h.source_id = s.id\n                JOIN file_entries f\n                  ON f.vault_id = h.vault_id AND f.id = h.resolved_file_id\n                WHERE s.vault_id = ? AND s.memory_id = ?\n                  AND s.source_type = 'note' AND h.state = 'current'\n                  AND f.deleted_at IS NULL\n                  AND h.verified_content_hash IS NOT NULL\n                  AND f.content_hash = h.verified_content_hash\n             )",
+        )
+        .bind(context.id().to_string())
+        .bind(memory_id.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(supported == 1)
+    }
+
+    /// Return precise, non-overlapping current source-health counts.
+    pub async fn source_health_counts(
+        &self,
+        context: &VaultContext,
+    ) -> Result<MemorySourceHealthCounts, StateError> {
+        self.ensure_vault_context(context).await?;
+        let vault_id = context.id().to_string();
+        let (final_sources, current, rebound, changed, deleted, missing, ambiguous, unverified): (
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = sqlx::query_as(
+            "SELECT COUNT(*),\n                    COALESCE(SUM(h.state = 'current'), 0),\n                    COALESCE(SUM(h.state = 'current' AND h.reason = 'rebound'), 0),\n                    COALESCE(SUM(h.state = 'content_changed'), 0),\n                    COALESCE(SUM(h.state = 'deleted'), 0),\n                    COALESCE(SUM(h.state = 'identity_missing'), 0),\n                    COALESCE(SUM(h.state = 'identity_ambiguous'), 0),\n                    COALESCE(SUM(h.state IS NULL OR h.state = 'unverified'), 0)\n             FROM memory_sources s\n             LEFT JOIN memory_source_health h\n               ON h.vault_id = s.vault_id AND h.source_id = s.id\n             WHERE s.vault_id = ? AND s.source_type = 'note'",
+        )
+        .bind(&vault_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let (memories, active_memories, stale_memories): (i64, i64, i64) = sqlx::query_as(
+            "SELECT\n                COUNT(DISTINCT s.memory_id),\n                COUNT(DISTINCT CASE WHEN m.status = 'active' AND EXISTS (\n                    SELECT 1 FROM memory_sources current_source\n                    JOIN memory_source_health current_health\n                      ON current_health.vault_id = current_source.vault_id\n                     AND current_health.source_id = current_source.id\n                    JOIN file_entries current_file\n                      ON current_file.vault_id = current_health.vault_id\n                     AND current_file.id = current_health.resolved_file_id\n                    WHERE current_source.vault_id = m.vault_id\n                      AND current_source.memory_id = m.id\n                      AND current_source.source_type = 'note'\n                      AND current_health.state = 'current'\n                      AND current_file.deleted_at IS NULL\n                      AND current_file.content_hash = current_health.verified_content_hash\n                ) THEN m.id END),\n                COUNT(DISTINCT CASE WHEN m.status = 'stale'\n                                      AND m.status_reason = 'source_unavailable'\n                                    THEN m.id END)\n             FROM memory_sources s\n             JOIN memories m ON m.vault_id = s.vault_id AND m.id = s.memory_id\n             WHERE s.vault_id = ? AND s.source_type = 'note'",
+        )
+        .bind(&vault_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let (stage1_sources, stage1_current, stage1_withdrawn, stage1_orphaned): (
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = sqlx::query_as(
+            "SELECT COUNT(*),\n                    COALESCE(SUM(s.status != 'withdrawn' AND f.id IS NOT NULL\n                                 AND f.deleted_at IS NULL), 0),\n                    COALESCE(SUM(s.status = 'withdrawn'), 0),\n                    COALESCE(SUM(s.status != 'withdrawn'\n                                 AND (f.id IS NULL OR f.deleted_at IS NOT NULL)), 0)\n             FROM memory_stage1_outputs s\n             LEFT JOIN file_entries f\n               ON f.vault_id = s.vault_id AND f.id = s.source_file_id\n             WHERE s.vault_id = ? AND s.source_file_id IS NOT NULL",
+        )
+        .bind(&vault_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let distinct_file_ids: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT file_id) FROM (\n                SELECT COALESCE(h.resolved_file_id, s.note_file_id) AS file_id\n                FROM memory_sources s\n                LEFT JOIN memory_source_health h\n                  ON h.vault_id = s.vault_id AND h.source_id = s.id\n                WHERE s.vault_id = ? AND s.source_type = 'note'\n                UNION ALL\n                SELECT source_file_id AS file_id\n                FROM memory_stage1_outputs\n                WHERE vault_id = ? AND source_file_id IS NOT NULL\n             ) WHERE file_id IS NOT NULL",
+        )
+        .bind(&vault_id)
+        .bind(&vault_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let parse = |value: i64| {
+            u64::try_from(value)
+                .map_err(|_| StateError::InvalidInput("memory source count is invalid"))
+        };
+        Ok(MemorySourceHealthCounts {
+            final_sources: parse(final_sources)?,
+            current: parse(current)?,
+            rebound: parse(rebound)?,
+            changed: parse(changed)?,
+            deleted: parse(deleted)?,
+            missing: parse(missing)?,
+            ambiguous: parse(ambiguous)?,
+            unverified: parse(unverified)?,
+            memories: parse(memories)?,
+            active_memories: parse(active_memories)?,
+            stale_memories: parse(stale_memories)?,
+            stage1_sources: parse(stage1_sources)?,
+            stage1_current: parse(stage1_current)?,
+            stage1_withdrawn: parse(stage1_withdrawn)?,
+            stage1_orphaned: parse(stage1_orphaned)?,
+            distinct_file_ids: parse(distinct_file_ids)?,
+        })
+    }
+
+    /// List bounded final-source health details for Admin inspection.
+    pub async fn list_source_health_details(
+        &self,
+        context: &VaultContext,
+        state: Option<MemorySourceHealthState>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<MemorySourceHealthDetailRecord>, StateError> {
+        validate_page(limit, offset, MAX_MEMORY_LIMIT)?;
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT\n                s.id AS source_id, s.vault_id AS source_vault_id,\n                s.memory_id AS source_memory_id, s.source_type AS source_type,\n                s.note_file_id AS source_note_file_id, s.note_path AS source_note_path,\n                s.note_revision AS source_note_revision,\n                s.heading_path_json AS source_heading_path_json,\n                s.start_line AS source_start_line, s.end_line AS source_end_line,\n                s.excerpt_hash AS source_excerpt_hash, s.actor_id AS source_actor_id,\n                s.created_at AS source_created_at, h.state AS health_state,\n                h.resolved_file_id AS health_resolved_file_id,\n                h.resolved_path AS health_resolved_path,\n                h.checked_revision AS health_checked_revision,\n                h.verified_content_hash AS health_verified_content_hash,\n                h.reason AS health_reason, h.last_event_id AS health_last_event_id,\n                h.checked_at AS health_checked_at, h.updated_at AS health_updated_at\n             FROM memory_sources s\n             LEFT JOIN memory_source_health h\n               ON h.vault_id = s.vault_id AND h.source_id = s.id\n             WHERE s.vault_id = ",
+        );
+        query.push_bind(context.id().to_string());
+        query.push(" AND s.source_type = 'note'");
+        if let Some(state) = state {
+            if state == MemorySourceHealthState::Unverified {
+                query.push(" AND (h.state IS NULL OR h.state = 'unverified')");
+            } else {
+                query.push(" AND h.state = ");
+                query.push_bind(state.as_str());
+            }
+        }
+        query.push(" ORDER BY COALESCE(h.updated_at, s.created_at) DESC, s.id ASC LIMIT ");
+        query.push_bind(i64::from(limit));
+        query.push(" OFFSET ");
+        query.push_bind(i64::from(offset));
+        let rows = query
+            .build_query_as::<SourceHealthDetailRow>()
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(row_to_source_health_detail).collect()
+    }
+
+    /// Start or resume one repeatable Vault-scoped source audit generation.
+    pub async fn start_source_audit(
+        &self,
+        context: &VaultContext,
+        generation: &str,
+    ) -> Result<MemorySourceAuditStateRecord, StateError> {
+        self.ensure_vault_context(context).await?;
+        if generation.is_empty() || generation.len() > 128 {
+            return Err(StateError::InvalidInput(
+                "memory source audit generation is invalid",
+            ));
+        }
+        let now = now_millis()?;
+        sqlx::query(
+            "INSERT INTO memory_source_audit_state\n             (vault_id, generation, status, cursor_source_id, counters_json,\n              started_at, updated_at, completed_at)\n             VALUES (?, ?, 'running', NULL, '{}', ?, ?, NULL)\n             ON CONFLICT(vault_id) DO UPDATE SET\n              generation = excluded.generation, status = 'running',\n              cursor_source_id = CASE\n                WHEN memory_source_audit_state.generation = excluded.generation\n                THEN memory_source_audit_state.cursor_source_id ELSE NULL END,\n              counters_json = CASE\n                WHEN memory_source_audit_state.generation = excluded.generation\n                THEN memory_source_audit_state.counters_json ELSE '{}' END,\n              started_at = CASE\n                WHEN memory_source_audit_state.generation = excluded.generation\n                THEN memory_source_audit_state.started_at ELSE excluded.started_at END,\n              updated_at = excluded.updated_at, completed_at = NULL\n             WHERE memory_source_audit_state.generation != excluded.generation\n                OR memory_source_audit_state.status != 'completed'",
+        )
+        .bind(context.id().to_string())
+        .bind(generation)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        self.get_source_audit(context)
+            .await?
+            .ok_or(StateError::InvalidInput(
+                "memory source audit was not started",
+            ))
+    }
+
+    /// Read the latest source-audit cursor and counters.
+    pub async fn get_source_audit(
+        &self,
+        context: &VaultContext,
+    ) -> Result<Option<MemorySourceAuditStateRecord>, StateError> {
+        self.ensure_vault_context(context).await?;
+        let row = sqlx::query_as::<_, SourceAuditStateRow>(
+            "SELECT vault_id, generation, status, cursor_source_id, counters_json,\n                    started_at, updated_at, completed_at\n             FROM memory_source_audit_state WHERE vault_id = ?",
+        )
+        .bind(context.id().to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_source_audit_state).transpose()
+    }
+
+    /// Persist one audit page or terminal result for the active generation.
+    pub async fn update_source_audit(
+        &self,
+        context: &VaultContext,
+        generation: &str,
+        status: &str,
+        cursor: Option<MemorySourceId>,
+        counters: &Value,
+    ) -> Result<MemorySourceAuditStateRecord, StateError> {
+        if !matches!(status, "running" | "completed" | "failed" | "cancelled") {
+            return Err(StateError::InvalidInput(
+                "memory source audit status is invalid",
+            ));
+        }
+        let counters_json = serde_json::to_string(counters)?;
+        if counters_json.len() > 64 * 1024 {
+            return Err(StateError::InvalidInput(
+                "memory source audit counters are too large",
+            ));
+        }
+        let now = now_millis()?;
+        let terminal = status != "running";
+        let result = sqlx::query(
+            "UPDATE memory_source_audit_state\n             SET status = ?, cursor_source_id = ?, counters_json = ?,\n                 updated_at = ?, completed_at = ?\n             WHERE vault_id = ? AND generation = ?",
+        )
+        .bind(status)
+        .bind(cursor.map(|id| id.to_string()))
+        .bind(counters_json)
+        .bind(now)
+        .bind(terminal.then_some(now))
+        .bind(context.id().to_string())
+        .bind(generation)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StateError::InvalidInput(
+                "memory source audit generation is stale",
+            ));
+        }
+        self.get_source_audit(context)
+            .await?
+            .ok_or(StateError::InvalidInput(
+                "memory source audit update disappeared",
+            ))
     }
 
     /// List outgoing relations for one memory.
@@ -2215,7 +3126,7 @@ fn append_memory_filter<'a>(query: &mut QueryBuilder<'a, Sqlite>, filter: &'a Me
     }
     if let Some(source_path) = filter.source_path.as_deref() {
         query.push(
-            " AND EXISTS (SELECT 1 FROM memory_sources filter_source\n                         WHERE filter_source.vault_id = m.vault_id\n                           AND filter_source.memory_id = m.id\n                           AND filter_source.note_path LIKE ",
+            " AND EXISTS (\n                 SELECT 1 FROM memory_sources filter_source\n                 JOIN memory_source_health filter_health\n                   ON filter_health.vault_id = filter_source.vault_id\n                  AND filter_health.source_id = filter_source.id\n                 JOIN file_entries source_file\n                   ON source_file.vault_id = filter_health.vault_id\n                  AND source_file.id = filter_health.resolved_file_id\n                 WHERE filter_source.vault_id = m.vault_id\n                   AND filter_source.memory_id = m.id\n                   AND filter_source.source_type = 'note'\n                   AND filter_health.state = 'current'\n                   AND source_file.deleted_at IS NULL\n                   AND source_file.path LIKE ",
         );
         query.push_bind(format!("{source_path}%"));
         query.push(")");
@@ -2231,6 +3142,11 @@ fn append_memory_filter<'a>(query: &mut QueryBuilder<'a, Sqlite>, filter: &'a Me
         query.push(" AND m.importance >= ");
         query.push_bind(min_importance);
     }
+    if filter.require_current_sources {
+        query.push(
+            " AND (\n                (m.origin IN ('explicit_agent', 'explicit_admin')\n                 AND NOT EXISTS (\n                    SELECT 1 FROM memory_sources self_source\n                    WHERE self_source.vault_id = m.vault_id\n                      AND self_source.memory_id = m.id\n                      AND self_source.source_type = 'note'\n                 ))\n                OR EXISTS (\n                    SELECT 1\n                    FROM memory_sources healthy_source\n                    JOIN memory_source_health healthy\n                      ON healthy.vault_id = healthy_source.vault_id\n                     AND healthy.source_id = healthy_source.id\n                    JOIN file_entries healthy_file\n                      ON healthy_file.vault_id = healthy.vault_id\n                     AND healthy_file.id = healthy.resolved_file_id\n                    WHERE healthy_source.vault_id = m.vault_id\n                      AND healthy_source.memory_id = m.id\n                      AND healthy_source.source_type = 'note'\n                      AND healthy.state = 'current'\n                      AND healthy_file.deleted_at IS NULL\n                      AND healthy.verified_content_hash IS NOT NULL\n                      AND healthy_file.content_hash = healthy.verified_content_hash\n                )\n             )",
+        );
+    }
 }
 
 fn validate_bundle(context: &VaultContext, bundle: &MemoryBundle) -> Result<(), StateError> {
@@ -2238,6 +3154,9 @@ fn validate_bundle(context: &VaultContext, bundle: &MemoryBundle) -> Result<(), 
         || bundle.memory.content.trim().is_empty()
         || bundle.memory.content.len() > 64 * 1024
         || bundle.memory.normalized_content.len() > 64 * 1024
+        || bundle.memory.status_reason.as_ref().is_some_and(|reason| {
+            reason.is_empty() || reason.len() > 128 || reason.chars().any(char::is_control)
+        })
         || bundle
             .memory
             .canonical_path
@@ -2281,12 +3200,25 @@ fn normalize_term(value: &str) -> String {
     value.trim().chars().flat_map(char::to_lowercase).collect()
 }
 
+fn same_source_evidence(left: &MemorySourceRecord, right: &MemorySourceRecord) -> bool {
+    left.source_type == right.source_type
+        && left.note_file_id == right.note_file_id
+        && left.note_path == right.note_path
+        && left.note_revision == right.note_revision
+        && left.heading_path == right.heading_path
+        && left.start_line == right.start_line
+        && left.end_line == right.end_line
+        && left.excerpt_hash == right.excerpt_hash
+}
+
 fn row_to_memory(row: MemoryRow) -> Result<MemoryRecord, StateError> {
     Ok(MemoryRecord {
         id: MemoryId::parse(&row.id)?,
         vault_id: VaultId::parse(&row.vault_id)?,
         memory_type: row.memory_type,
         status: row.status,
+        status_reason: row.status_reason,
+        status_changed_at: row.status_changed_at,
         content: row.content,
         normalized_content: row.normalized_content,
         content_hash: row.content_hash,
@@ -2342,6 +3274,86 @@ fn row_to_source(row: SourceRow) -> Result<MemorySourceRecord, StateError> {
         actor_id: row.actor_id,
         created_at: row.created_at,
     })
+}
+
+fn row_to_source_health(row: SourceHealthRow) -> Result<MemorySourceHealthRecord, StateError> {
+    Ok(MemorySourceHealthRecord {
+        vault_id: VaultId::parse(&row.vault_id)?,
+        source_id: MemorySourceId::parse(&row.source_id)?,
+        state: MemorySourceHealthState::parse(&row.state)?,
+        resolved_file_id: row
+            .resolved_file_id
+            .as_deref()
+            .map(FileId::parse)
+            .transpose()?,
+        resolved_path: row
+            .resolved_path
+            .as_deref()
+            .map(VaultPath::parse)
+            .transpose()?,
+        checked_revision: row.checked_revision.map(Revision::try_from).transpose()?,
+        verified_content_hash: row.verified_content_hash,
+        reason: row.reason,
+        last_event_id: row.last_event_id,
+        checked_at: row.checked_at,
+        updated_at: row.updated_at,
+    })
+}
+
+fn row_to_source_audit_state(
+    row: SourceAuditStateRow,
+) -> Result<MemorySourceAuditStateRecord, StateError> {
+    Ok(MemorySourceAuditStateRecord {
+        vault_id: VaultId::parse(&row.vault_id)?,
+        generation: row.generation,
+        status: row.status,
+        cursor_source_id: row
+            .cursor_source_id
+            .as_deref()
+            .map(MemorySourceId::parse)
+            .transpose()?,
+        counters: serde_json::from_str(&row.counters_json)?,
+        started_at: row.started_at,
+        updated_at: row.updated_at,
+        completed_at: row.completed_at,
+    })
+}
+
+fn row_to_source_health_detail(
+    row: SourceHealthDetailRow,
+) -> Result<MemorySourceHealthDetailRecord, StateError> {
+    let source = row_to_source(SourceRow {
+        id: row.source_id.clone(),
+        vault_id: row.source_vault_id.clone(),
+        memory_id: row.source_memory_id,
+        source_type: row.source_type,
+        note_file_id: row.source_note_file_id,
+        note_path: row.source_note_path,
+        note_revision: row.source_note_revision,
+        heading_path_json: row.source_heading_path_json,
+        start_line: row.source_start_line,
+        end_line: row.source_end_line,
+        excerpt_hash: row.source_excerpt_hash,
+        actor_id: row.source_actor_id,
+        created_at: row.source_created_at,
+    })?;
+    let health = match (row.health_state, row.health_updated_at) {
+        (Some(state), Some(updated_at)) => Some(row_to_source_health(SourceHealthRow {
+            vault_id: row.source_vault_id,
+            source_id: row.source_id,
+            state,
+            resolved_file_id: row.health_resolved_file_id,
+            resolved_path: row.health_resolved_path,
+            checked_revision: row.health_checked_revision,
+            verified_content_hash: row.health_verified_content_hash,
+            reason: row.health_reason,
+            last_event_id: row.health_last_event_id,
+            checked_at: row.health_checked_at,
+            updated_at,
+        })?),
+        _ => None,
+    };
+    Ok(MemorySourceHealthDetailRecord { source, health })
 }
 
 fn row_to_relation(row: RelationRow) -> Result<MemoryRelationRecord, StateError> {

@@ -46,8 +46,9 @@ pub use memory::{
     MemoryBundle, MemoryCandidateRecord, MemoryConsolidationProposalRecord,
     MemoryConsolidationStateRecord, MemoryCounts, MemoryDiagnosticRecord, MemoryFilter,
     MemoryIdempotencyRecord, MemoryPipelinePurgeReport, MemoryRecord, MemoryRelationRecord,
-    MemoryRepository, MemorySearchHit, MemorySourceRecord, MemoryStage1Counts,
-    MemoryStage1OutputRecord,
+    MemoryRepository, MemorySearchHit, MemorySourceAuditStateRecord, MemorySourceHealthCounts,
+    MemorySourceHealthDetailRecord, MemorySourceHealthRecord, MemorySourceHealthState,
+    MemorySourceRecord, MemoryStage1Counts, MemoryStage1OutputRecord,
 };
 pub use pool::{StateStore, StateTransaction};
 pub use providers::{

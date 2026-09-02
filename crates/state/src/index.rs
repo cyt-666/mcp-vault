@@ -673,7 +673,7 @@ impl IndexRepository {
     ) -> Result<Vec<NoteSearchRecord>, StateError> {
         validate_page(limit, offset)?;
         let rows = sqlx::query_as::<_, NoteSearchRow>(
-            "SELECT n.file_id, n.path, n.revision, n.title, n.updated_at,
+            "SELECT n.file_id, file_state.path, n.revision, n.title, n.updated_at,
                     substr(n.plain_text, 1, 280) AS snippet, NULL AS score
              FROM index_nodes node
              JOIN index_memberships membership
@@ -682,8 +682,12 @@ impl IndexRepository {
              JOIN notes n
                ON n.vault_id = membership.vault_id
               AND n.file_id = membership.file_id
+             JOIN file_entries file_state
+               ON file_state.vault_id = n.vault_id
+              AND file_state.id = n.file_id
+              AND file_state.deleted_at IS NULL
              WHERE node.vault_id = ? AND node.stable_key = ?
-             ORDER BY membership.relevance DESC, n.path ASC, n.file_id ASC
+             ORDER BY membership.relevance DESC, file_state.path ASC, n.file_id ASC
              LIMIT ? OFFSET ?",
         )
         .bind(context.id().to_string())
@@ -722,7 +726,7 @@ impl IndexRepository {
                    AND candidate.file_id != ?
                  GROUP BY candidate.file_id
              )
-             SELECT candidate.file_id, candidate.path, candidate.revision,
+             SELECT candidate.file_id, file_state.path, candidate.revision,
                     candidate.title, candidate.updated_at,
                     substr(candidate.plain_text, 1, 280) AS snippet,
                     CAST(
@@ -739,6 +743,10 @@ impl IndexRepository {
                       AS REAL
                     ) AS score
              FROM notes candidate
+             JOIN file_entries file_state
+               ON file_state.vault_id = candidate.vault_id
+              AND file_state.id = candidate.file_id
+              AND file_state.deleted_at IS NULL
              LEFT JOIN shared_tags ON shared_tags.file_id = candidate.file_id
              WHERE candidate.vault_id = ? AND candidate.file_id != ?
                AND (
@@ -753,7 +761,7 @@ impl IndexRepository {
                        )
                  )
                )
-             ORDER BY score DESC, candidate.path ASC, candidate.file_id ASC
+             ORDER BY score DESC, file_state.path ASC, candidate.file_id ASC
              LIMIT ? OFFSET ?",
         )
         .bind(context.id().to_string())
@@ -832,9 +840,14 @@ impl IndexRepository {
         file_id: FileId,
     ) -> Result<Option<NoteSearchRecord>, StateError> {
         let row = sqlx::query_as::<_, NoteSearchRow>(
-            "SELECT file_id, path, revision, title, updated_at,
-                    substr(plain_text, 1, 280) AS snippet, NULL AS score
-             FROM notes WHERE vault_id = ? AND file_id = ?",
+            "SELECT n.file_id, file_state.path, n.revision, n.title, n.updated_at,
+                    substr(n.plain_text, 1, 280) AS snippet, NULL AS score
+             FROM notes n
+             JOIN file_entries file_state
+               ON file_state.vault_id = n.vault_id
+              AND file_state.id = n.file_id
+              AND file_state.deleted_at IS NULL
+             WHERE n.vault_id = ? AND n.file_id = ?",
         )
         .bind(context.id().to_string())
         .bind(file_id.to_string())
@@ -866,19 +879,23 @@ impl IndexRepository {
         }
         let vault_id = context.id().to_string();
         let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT n.file_id, n.path, n.revision, n.title, n.updated_at,
+            "SELECT n.file_id, file_state.path, n.revision, n.title, n.updated_at,
                     snippet(note_fts, 7, '', '', ' … ', 32) AS snippet,
                     bm25(note_fts) AS score
              FROM note_fts
              JOIN notes n ON n.vault_id = note_fts.vault_id
                           AND n.file_id = note_fts.file_id
+             JOIN file_entries file_state
+               ON file_state.vault_id = n.vault_id
+              AND file_state.id = n.file_id
+              AND file_state.deleted_at IS NULL
              WHERE note_fts.vault_id = ",
         );
         query.push_bind(&vault_id);
         query.push(" AND note_fts MATCH ");
         query.push_bind(fts_query);
         if let Some(path_prefix) = path_prefix {
-            query.push(" AND n.path LIKE ");
+            query.push(" AND file_state.path LIKE ");
             query.push_bind(format!("{path_prefix}%"));
         }
         for tag in tags {
@@ -914,7 +931,7 @@ impl IndexRepository {
             query.push(" AND n.updated_at <= ");
             query.push_bind(modified_before);
         }
-        query.push(" ORDER BY score ASC, n.path ASC, n.file_id ASC LIMIT ");
+        query.push(" ORDER BY score ASC, file_state.path ASC, n.file_id ASC LIMIT ");
         query.push_bind(i64::from(limit));
         query.push(" OFFSET ");
         query.push_bind(i64::from(offset));

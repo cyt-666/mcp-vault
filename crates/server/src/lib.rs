@@ -284,7 +284,7 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
     supervisor
         .register_job_handler(
             "backup.restore",
-            workers::backup_restore_job_handler(backup_service, metrics.clone()),
+            workers::backup_restore_job_handler(state.clone(), backup_service, metrics.clone()),
         )
         .map_err(|failure| ServerError::Workers(failure.code))?;
     supervisor
@@ -354,13 +354,51 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
     supervisor
         .register_job_handler(
             "memory.revalidate",
-            workers::memory_revalidate_job_handler(state.clone(), memory_service.clone()),
+            workers::memory_revalidate_job_handler(
+                state.clone(),
+                history_root.clone(),
+                core_runtime.clone(),
+                memory_service.clone(),
+            ),
+        )
+        .map_err(|failure| ServerError::Workers(failure.code))?;
+    supervisor
+        .register_job_handler(
+            "memory.source_reconcile",
+            workers::memory_source_reconcile_job_handler(
+                state.clone(),
+                history_root.clone(),
+                core_runtime.clone(),
+                memory_service.clone(),
+            ),
         )
         .map_err(|failure| ServerError::Workers(failure.code))?;
     supervisor
         .register_job_handler(
             "memory.rebuild",
             workers::memory_rebuild_job_handler(
+                state.clone(),
+                history_root.clone(),
+                core_runtime.clone(),
+                memory_service.clone(),
+            ),
+        )
+        .map_err(|failure| ServerError::Workers(failure.code))?;
+    supervisor
+        .register_job_handler(
+            "memory.repair_sources",
+            workers::memory_source_repair_job_handler(
+                state.clone(),
+                history_root.clone(),
+                core_runtime.clone(),
+                memory_service.clone(),
+            ),
+        )
+        .map_err(|failure| ServerError::Workers(failure.code))?;
+    supervisor
+        .register_job_handler(
+            "memory.audit_sources",
+            workers::memory_source_audit_job_handler(
                 state.clone(),
                 history_root.clone(),
                 core_runtime.clone(),
@@ -719,6 +757,13 @@ pub async fn reconcile_vault_once(
                 .await?;
         }
     }
+    workers::enqueue_memory_source_audit_job(
+        state,
+        &context,
+        &generation,
+        &format!("vault_reconciliation:{scan_type}"),
+    )
+    .await?;
     Ok(report)
 }
 

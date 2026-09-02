@@ -1396,6 +1396,7 @@ function noteSemanticBlockerLabel(code: string): string {
 function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; notify: Notify; onRefresh: () => void }) {
   const [memories, setMemories] = useState(() => arrayRecords(data?.memories));
   const extraction = asRecord(data?.extraction);
+  const sourceHealth = asRecord(data?.source_health);
   const memoryJobs = arrayRecords(data?.memory_jobs);
   const [memoryActionId, setMemoryActionId] = useState('');
 
@@ -1443,6 +1444,7 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
     <div className="page-stack">
       <Notice tone="info">照常写笔记即可，不需要添加特殊标记或逐条审核。系统先从每篇笔记提炼带来源的原始记忆，再在后台合并、去重和处理冲突；只有整理后的语义内容会进入长期记忆。</Notice>
       <MemoryExtractionPanel data={extraction} jobs={memoryJobs} notify={notify} onRefresh={onRefresh} />
+      <MemorySourceHealthPanel data={sourceHealth} notify={notify} onRefresh={onRefresh} />
       <Panel title={`长期记忆（${memories.length}）`} eyebrow="有来源的上下文" description="默认召回不调用在线模型。">
         {memories.length === 0 ? (
           <EmptyState title="还没有长期记忆" detail="Agent 主动记住或系统从普通笔记自动识别出的耐久信息会出现在这里。" />
@@ -1453,11 +1455,12 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
               return (
                 <article className="record-item record-item--stack" key={stringValue(memory.id)}>
                   <div className="record-title"><strong>{stringValue(memory.content, '无内容')}</strong><StatusBadge tone={statusTone(memory.status)}>{statusLabel(memory.status)}</StatusBadge></div>
-                  <p>{memoryTypeLabel(memory.memory_type)} · <code>{stringValue(memory.canonical_path)}</code></p>
+                  <p>{memoryTypeLabel(memory.memory_type)} · 记忆文件 <code>{stringValue(memory.canonical_path)}</code></p>
+                  {stringValue(memory.status_reason, '') ? <small>状态原因：{memoryStatusReasonLabel(memory.status_reason)}</small> : null}
                   <small>最近更新 {formatTime(memory.updated_at)}</small>
                   {sources.length > 0 ? (
                     <details className="disclosure memory-source-details">
-                      <summary>查看来源与证据定位（{sources.length}）</summary>
+                      <summary>查看来源笔记与证据定位（{sources.length}）</summary>
                       <div className="summary-list">
                         {sources.map((source, index) => (
                           <SummaryRow
@@ -1509,7 +1512,90 @@ function memorySourceLocation(source: JsonObject): string {
   if (startLine > 0) parts.push(endLine > startLine ? `第 ${startLine}–${endLine} 行` : `第 ${startLine} 行`);
   const heading = Array.isArray(source.heading) ? source.heading.map(String).filter(Boolean).join(' › ') : '';
   if (heading) parts.push(`标题 ${heading}`);
+  const health = stringValue(source.health, '');
+  if (health) parts.push(`健康：${memorySourceHealthLabel(health)}`);
   return parts.join(' · ') || '已认证的显式输入（无笔记行号）';
+}
+
+function memoryStatusReasonLabel(value: unknown): string {
+  const reason = stringValue(value);
+  const labels: Record<string, string> = {
+    source_unavailable: '没有可验证的当前来源笔记，已退出正常召回',
+    source_retired: '来源变化已由记忆整理归档',
+    superseded_by_consolidation: '已被更新的长期记忆替代',
+    manual_archive: '由管理员或 Agent 明确归档',
+    superseded: '已合并到另一条长期记忆',
+  };
+  return labels[reason] ?? reason;
+}
+
+function memorySourceHealthLabel(value: unknown): string {
+  const health = stringValue(value, 'unverified');
+  const labels: Record<string, string> = {
+    current: '当前有效',
+    unverified: '尚未核验',
+    content_changed: '内容已变化',
+    deleted: '来源文件已删除',
+    identity_missing: '无法确认当前文件身份',
+    identity_ambiguous: '存在多个精确候选',
+  };
+  return labels[health] ?? health;
+}
+
+function MemorySourceHealthPanel({ data, notify, onRefresh }: { data: JsonObject; notify: Notify; onRefresh: () => void }) {
+  const [submitting, setSubmitting] = useState(false);
+  const summary = asRecord(data.summary);
+  const finalSources = asRecord(summary.final_sources);
+  const memories = asRecord(summary.memories);
+  const stage1 = asRecord(summary.stage1);
+  const audit = asRecord(data.audit);
+  const sources = arrayRecords(data.sources);
+
+  async function runAudit() {
+    setSubmitting(true);
+    try {
+      const job = asRecord(await adminApi.request('/memory/source-health/audit', { method: 'POST' }));
+      notify(`来源健康审计任务 ${truncateId(stringValue(job.id))} 已提交。`);
+      onRefresh();
+    } catch (error: unknown) {
+      notify(formatRequestError(error), 'danger');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Panel
+      title="来源健康"
+      eyebrow="持续核验"
+      description="文件创建、更新、移动、删除和恢复都会先核验记忆来源；无法证明的记忆会保留用于审计，但不会进入正常召回。"
+      actions={<button className="secondary-button" disabled={submitting} type="button" onClick={() => void runAudit()}>{submitting ? '正在提交…' : '重新审计全部来源'}</button>}
+    >
+      <div className="summary-list">
+        <SummaryRow label="最终记忆来源" value={`${numberValue(finalSources.total)} 条（有效 ${numberValue(finalSources.current)} · 重绑 ${numberValue(finalSources.rebound)} · 内容变化 ${numberValue(finalSources.changed)} · 删除 ${numberValue(finalSources.deleted)} · 缺失 ${numberValue(finalSources.missing)} · 歧义 ${numberValue(finalSources.ambiguous)} · 未核验 ${numberValue(finalSources.unverified)}）`} />
+        <SummaryRow label="受影响记忆" value={`${numberValue(memories.affected)} 条（保持 active ${numberValue(memories.active)} · 来源失效 stale ${numberValue(memories.stale)}）`} />
+        <SummaryRow label="阶段一来源" value={`${numberValue(stage1.total)} 条（当前 ${numberValue(stage1.current)} · 已撤回 ${numberValue(stage1.withdrawn)} · 孤立 ${numberValue(stage1.orphaned)}）`} />
+        <SummaryRow label="不同文件身份" value={`${numberValue(summary.distinct_file_ids)} 个 FileId`} />
+      </div>
+      {numberValue(finalSources.unverified) > 0 ? <Notice tone="warning">首次审计尚未覆盖所有来源。未核验的笔记依赖型记忆会暂时退出正常召回。</Notice> : null}
+      {Object.keys(audit).length > 0 ? <small>最近审计：{stringValue(audit.status, '未知')} · 更新于 {formatTime(audit.updated_at)} · 代次 <code>{truncateId(stringValue(audit.generation))}</code></small> : <small>尚未记录完整来源审计。</small>}
+      {sources.length > 0 ? (
+        <details className="disclosure memory-source-details">
+          <summary>查看来源健康明细样例（{sources.length}）</summary>
+          <div className="record-list">
+            {sources.map((source) => (
+              <article className="record-item record-item--stack" key={stringValue(source.source_id)}>
+                <div className="record-title"><strong>{memorySourceHealthLabel(source.health)}</strong><StatusBadge tone={stringValue(source.health) === 'current' ? 'success' : stringValue(source.health) === 'unverified' ? 'neutral' : 'warning'}>{memorySourceHealthLabel(source.health)}</StatusBadge></div>
+                <p>来源笔记 <code>{stringValue(source.current_path, stringValue(source.recorded_path, '当前路径不可用'))}</code></p>
+                <small>记忆 {truncateId(stringValue(source.memory_id))} · 来源 {truncateId(stringValue(source.source_id))} · 证据修订 {numberValue(source.evidence_revision)}</small>
+                {stringValue(source.health_reason, '') ? <small>原因：{stringValue(source.health_reason)}</small> : null}
+              </article>
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </Panel>
+  );
 }
 
 function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonObject; jobs: JsonObject[]; notify: Notify; onRefresh: () => void }) {
@@ -1809,12 +1895,23 @@ function jobProgressDetail(job: JsonObject): string {
   const discarded = numberValue(progress.discarded);
   const pendingRawInputs = numberValue(progress.pending_raw_inputs);
   const generation = numberValue(progress.generation);
+  const memoriesRewritten = numberValue(progress.memories_rewritten);
+  const stage1SourcesRebound = numberValue(progress.stage1_sources_rebound);
+  const unresolvedNoteSources = numberValue(progress.unresolved_note_sources);
+  const memoriesMarkedStale = numberValue(progress.memories_marked_stale);
   const noteStartedAt = numberValue(progress.note_started_at);
   const lastNoteElapsedMs = numberValue(progress.last_note_elapsed_ms);
+  const sourceCounts = asRecord(progress.counts);
+  const auditedSources = numberValue(sourceCounts.final_sources_checked);
+  const sourceErrors = numberValue(sourceCounts.errors);
 
   let detail: string;
   if (phase === 'consolidating') {
     detail = `正在整理原始记忆：已处理 ${completed} / ${total || completed + pendingRawInputs} 条${pendingRawInputs > 0 ? `，仍待 ${pendingRawInputs} 条` : ''}`;
+  } else if (phase === 'repairing_memory_sources') {
+    detail = '正在核对历史记忆的文件身份和当前路径';
+  } else if (phase === 'auditing_sources') {
+    detail = `正在持续核验记忆来源：已处理 ${auditedSources} 条最终来源`;
   } else if (phase === 'resetting_memory_pipeline') {
     detail = '正在清空旧版记忆系统';
   } else if (phase === 'extracting_note') {
@@ -1829,6 +1926,12 @@ function jobProgressDetail(job: JsonObject): string {
     detail = `已完成第 ${generation} 版全局记忆整理`;
   } else if (phase === 'completed' && stringValue(job.job_type) === 'memory.reset_pipeline') {
     detail = '旧版记忆和任务已作废，准备从头生成';
+  } else if (phase === 'completed' && stringValue(job.job_type) === 'memory.repair_sources') {
+    detail = `已重写 ${memoriesRewritten} 条记忆来源，更新 ${stage1SourcesRebound} 条阶段一来源`;
+  } else if (['completed', 'completed_with_errors'].includes(phase) && stringValue(job.job_type) === 'memory.audit_sources') {
+    detail = `来源审计完成：核验 ${auditedSources} 条最终来源${sourceErrors > 0 ? `，${sourceErrors} 条未能安全处理` : ''}`;
+  } else if (phase === 'completed' && stringValue(job.job_type) === 'memory.source_reconcile') {
+    detail = `文件事件来源协调完成：核验 ${numberValue(progress.final_sources_checked)} 条最终来源`;
   } else if (phase === 'note_completed' || phase === 'completed' || phase === 'completed_with_errors') {
     detail = `已处理 ${completed} / ${total} 篇`;
   } else if (stringValue(details.scope, '') === 'all') {
@@ -1854,6 +1957,8 @@ function jobProgressDetail(job: JsonObject): string {
   if (updated > 0) outcomes.push(`更新长期记忆 ${updated} 条`);
   if (retired > 0) outcomes.push(`归档或替代 ${retired} 条`);
   if (discarded > 0) outcomes.push(`丢弃低价值原始输入 ${discarded} 条`);
+  if (memoriesMarkedStale > 0) outcomes.push(`标记失效记忆 ${memoriesMarkedStale} 条`);
+  if (unresolvedNoteSources > 0) outcomes.push(`仍有 ${unresolvedNoteSources} 条来源无法证明当前文件身份`);
   if (sourceIngestionFailures > 0) outcomes.push(`源文件无法处理 ${sourceIngestionFailures} 篇（模型未调用）`);
   const latestSourceFailure = sourceIngestionFailureNotes.length > 0
     ? sourceIngestionFailureNotes[sourceIngestionFailureNotes.length - 1]
@@ -1879,7 +1984,7 @@ function jobProgressDetail(job: JsonObject): string {
   if (numberValue(progress.cleared_memories) > 0) outcomes.push(`清空旧版长期记忆 ${numberValue(progress.cleared_memories)} 条`);
   if (numberValue(progress.cleared_stage1_outputs) > 0) outcomes.push(`清空旧版原始记忆 ${numberValue(progress.cleared_stage1_outputs)} 条`);
   if (booleanValue(details.include_evaluated)) outcomes.push('任务模式：重新提取全部笔记');
-  if (phase === 'completed' && total === 0) outcomes.push('没有 Markdown 笔记');
+  if (phase === 'completed' && total === 0 && stringValue(job.job_type) === 'memory.extract') outcomes.push('没有 Markdown 笔记');
   return outcomes.length > 0 ? `${detail} · ${outcomes.join(' · ')}` : detail;
 }
 
@@ -2172,7 +2277,10 @@ function jobTypeLabel(value: unknown): string {
     'memory.consolidate': '阶段二：整理长期记忆',
     'memory.reset_pipeline': '重置记忆系统',
     'memory.revalidate': '记忆来源校验',
+    'memory.source_reconcile': '协调记忆来源',
+    'memory.audit_sources': '审计记忆来源健康',
     'memory.rebuild': '重建记忆投影',
+    'memory.repair_sources': '修复历史记忆来源',
     'embedding.rebuild': '重建语义向量',
     'backup.create': '创建备份',
     'backup.verify': '验证备份',
@@ -2207,6 +2315,7 @@ function auditActionLabel(value: unknown): string {
     'admin.memory.archived': '归档长期记忆',
     'admin.memory.restored': '恢复长期记忆',
     'admin.memory.deleted': '永久删除长期记忆',
+    'admin.memory_source_audit.queued': '提交记忆来源健康审计',
     'admin.index.rebuild_queued': '提交索引重建',
     'admin.backup.created': '创建备份',
     'admin.restore.requested': '请求恢复',

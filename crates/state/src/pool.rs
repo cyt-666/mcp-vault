@@ -474,7 +474,7 @@ fn sqlite_file_path(database_url: &str) -> Option<PathBuf> {
 mod tests {
     use std::path::Path;
 
-    use mcp_vault_domain::{FileId, MemoryId, MemoryRawId, RevisionId, VaultId};
+    use mcp_vault_domain::{FileId, MemoryId, MemoryRawId, MemorySourceId, RevisionId, VaultId};
     use sqlx::Executor;
     use tempfile::TempDir;
 
@@ -536,6 +536,8 @@ mod tests {
             "memory_candidates",
             "memory_idempotency",
             "memory_diagnostics",
+            "memory_source_health",
+            "memory_source_audit_state",
             "memory_stage1_outputs",
             "memory_consolidation_proposals",
             "memory_consolidation_state",
@@ -556,7 +558,7 @@ mod tests {
         let report = store.integrity_check().await.unwrap();
         assert!(report.integrity_ok);
         assert_eq!(report.foreign_key_violations, 0);
-        assert_eq!(report.migration_version, 12);
+        assert_eq!(report.migration_version, 13);
         assert!(store.foreign_keys_enabled().await.unwrap());
     }
 
@@ -678,7 +680,7 @@ mod tests {
         }
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 12);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 13);
     }
 
     #[tokio::test]
@@ -720,7 +722,7 @@ mod tests {
         assert!(jwks.is_none());
         assert_eq!(enabled, 0);
         assert!(store.has_table("installation_key_checks").await.unwrap());
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 12);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 13);
     }
 
     #[tokio::test]
@@ -771,7 +773,7 @@ mod tests {
         assert_eq!(store.integrity_check().await.unwrap().migration_version, 10);
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 12);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 13);
     }
 
     #[tokio::test]
@@ -927,7 +929,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(pipeline_column, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 12);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 13);
     }
 
     #[tokio::test]
@@ -989,7 +991,92 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(retained, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 12);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 13);
+    }
+
+    #[tokio::test]
+    async fn migration_0013_fail_closes_legacy_note_sources_without_losing_memory() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = StateStore::connect(&database_url(directory.path()))
+            .await
+            .unwrap();
+        let mut pre_source_health = sqlx::migrate::Migrator::DEFAULT;
+        pre_source_health.migrations = std::borrow::Cow::Owned(
+            crate::migrations::MIGRATOR
+                .iter()
+                .filter(|migration| migration.version <= 12)
+                .cloned()
+                .collect(),
+        );
+        pre_source_health.run(&store.pool).await.unwrap();
+        let vault = VaultId::new();
+        let file = FileId::new();
+        let active_memory = MemoryId::new();
+        let stale_memory = MemoryId::new();
+        insert_vault(&store, vault, "source-health-upgrade").await;
+        sqlx::query(
+            "INSERT INTO file_entries\n             (id, vault_id, path, entry_type, current_revision, content_hash,\n              size, modified_at, created_at, updated_at)\n             VALUES (?, ?, 'notes/source.md', 'file', 3, 'sha256:raw', 4, 1, 1, 1)",
+        )
+        .bind(file.to_string())
+        .bind(vault.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        for (memory, status, hash) in [
+            (active_memory, "active", "memory-active"),
+            (stale_memory, "stale", "memory-stale"),
+        ] {
+            sqlx::query(
+                "INSERT INTO memories\n                 (id, vault_id, memory_type, status, content, normalized_content,\n                  content_hash, importance, confidence, origin, revision,\n                  extraction_json, created_at, updated_at)\n                 VALUES (?, ?, 'fact', ?, ?, ?, ?, 1.0, 1.0, 'extracted',\n                         1, '{}', 10, 20)",
+            )
+            .bind(memory.to_string())
+            .bind(vault.to_string())
+            .bind(status)
+            .bind(hash)
+            .bind(hash)
+            .bind(hash)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO memory_sources\n                 (id, vault_id, memory_id, source_type, note_file_id, note_path,\n                  note_revision, heading_path_json, excerpt_hash, created_at)\n                 VALUES (?, ?, ?, 'note', ?, 'notes/source.md', 3, '[]',\n                         'sha256:evidence', 10)",
+            )
+            .bind(MemorySourceId::new().to_string())
+            .bind(vault.to_string())
+            .bind(memory.to_string())
+            .bind(file.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+
+        store.migrate().await.unwrap();
+
+        let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories WHERE vault_id = ?")
+            .bind(vault.to_string())
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(retained, 2);
+        let unverified: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM memory_source_health\n             WHERE vault_id = ? AND state = 'unverified'\n               AND reason = 'upgrade_audit_required'",
+        )
+        .bind(vault.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(unverified, 2);
+        let (reason, changed_at): (Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT status_reason, status_changed_at FROM memories\n             WHERE vault_id = ? AND id = ?",
+        )
+        .bind(vault.to_string())
+        .bind(stale_memory.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(reason.as_deref(), Some("source_unavailable"));
+        assert_eq!(changed_at, Some(20));
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 13);
     }
 
     #[tokio::test]

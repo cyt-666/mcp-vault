@@ -448,6 +448,44 @@ impl FileStateRepository {
         row.map(row_to_file).transpose()
     }
 
+    /// Resolve one current active file from an exact historical path/revision
+    /// pair. Ambiguous path reuse deliberately returns no identity.
+    pub async fn find_unique_active_by_historical_path_revision(
+        &self,
+        context: &VaultContext,
+        path: &VaultPath,
+        revision: Revision,
+    ) -> Result<Option<FileRecord>, StateError> {
+        let rows = sqlx::query_as::<_, FileRow>(
+            "SELECT DISTINCT current_file.id, current_file.vault_id,
+                    current_file.path, current_file.entry_type,
+                    current_file.current_revision, current_file.content_hash,
+                    current_file.size, current_file.modified_at,
+                    current_file.filesystem_identity, current_file.deleted_at,
+                    current_file.created_at, current_file.updated_at
+             FROM file_revisions historical
+             JOIN file_entries current_file
+               ON current_file.vault_id = historical.vault_id
+              AND current_file.id = historical.file_id
+             WHERE historical.vault_id = ?
+               AND historical.revision = ?
+               AND (historical.path_before = ? OR historical.path_after = ?)
+               AND current_file.deleted_at IS NULL
+             ORDER BY current_file.id ASC
+             LIMIT 2",
+        )
+        .bind(context.id().to_string())
+        .bind(revision.as_i64()?)
+        .bind(path.as_str())
+        .bind(path.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.len() != 1 {
+            return Ok(None);
+        }
+        rows.into_iter().next().map(row_to_file).transpose()
+    }
+
     /// List all live entries for one Vault in deterministic path order.
     pub async fn list_active_entries(
         &self,

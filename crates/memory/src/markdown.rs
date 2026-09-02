@@ -1,6 +1,6 @@
 //! Deterministic canonical memory Markdown serialization and bounded parsing.
 
-use mcp_vault_domain::{MemoryId, MemoryRelationId, Revision, VaultId, VaultPath};
+use mcp_vault_domain::{FileId, MemoryId, MemoryRelationId, Revision, VaultId, VaultPath};
 use mcp_vault_state::{MemoryBundle, MemoryRecord};
 use serde_json::{Value, json};
 use yaml_rust::{Yaml, YamlLoader};
@@ -16,6 +16,8 @@ pub struct ParsedMemoryMarkdown {
     pub memory_type: MemoryType,
     /// Lifecycle status.
     pub status: MemoryStatus,
+    /// Optional machine-readable lifecycle reason.
+    pub status_reason: Option<String>,
     /// Proposition body.
     pub content: String,
     /// Importance.
@@ -70,6 +72,9 @@ pub fn render(bundle: &MemoryBundle) -> Result<String, MemoryError> {
     output.push_str(&format!("id: {}\n", yaml_quote(&memory.id.to_string())));
     output.push_str(&format!("type: {}\n", yaml_quote(memory_type.as_str())));
     output.push_str(&format!("status: {}\n", yaml_quote(status.as_str())));
+    if let Some(reason) = memory.status_reason.as_deref() {
+        output.push_str(&format!("status_reason: {}\n", yaml_quote(reason)));
+    }
     output.push_str(&format!("importance: {:.6}\n", memory.importance));
     output.push_str(&format!("confidence: {:.6}\n", memory.confidence));
     output.push_str(&format!("origin: {}\n", yaml_quote(origin.as_str())));
@@ -96,6 +101,12 @@ pub fn render(bundle: &MemoryBundle) -> Result<String, MemoryError> {
         output.push_str("  - source_type: ");
         output.push_str(&yaml_quote(&source.source_type));
         output.push('\n');
+        if let Some(file_id) = source.note_file_id {
+            output.push_str(&format!(
+                "    file_id: {}\n",
+                yaml_quote(&file_id.to_string())
+            ));
+        }
         if let Some(path) = &source.note_path {
             output.push_str(&format!("    path: {}\n", yaml_quote(path.as_str())));
         }
@@ -165,6 +176,7 @@ pub fn parse(bytes: &[u8], path: &VaultPath) -> Result<ParsedMemoryMarkdown, Mem
         .map_err(|_| MemoryError::Markdown)?;
     let status = MemoryStatus::try_from(required_string(root, "status")?.as_str())
         .map_err(|_| MemoryError::Markdown)?;
+    let status_reason = optional_string(root, "status_reason");
     let origin = parse_origin(required_string(root, "origin")?.as_str())?;
     let importance = required_float(root, "importance")?;
     let confidence = required_float(root, "confidence")?;
@@ -193,6 +205,7 @@ pub fn parse(bytes: &[u8], path: &VaultPath) -> Result<ParsedMemoryMarkdown, Mem
         id,
         memory_type,
         status,
+        status_reason,
         content: body,
         importance,
         confidence,
@@ -229,6 +242,8 @@ pub fn projection(
             vault_id,
             memory_type: parsed.memory_type.as_str().to_owned(),
             status: parsed.status.as_str().to_owned(),
+            status_reason: parsed.status_reason,
+            status_changed_at: None,
             content: parsed.content,
             normalized_content,
             content_hash,
@@ -301,6 +316,12 @@ fn source_to_state(
         .map(VaultPath::parse)
         .transpose()
         .map_err(|_| MemoryError::Markdown)?;
+    let note_file_id = object
+        .get("file_id")
+        .and_then(Value::as_str)
+        .map(FileId::parse)
+        .transpose()
+        .map_err(|_| MemoryError::Markdown)?;
     let heading_path = object
         .get("heading")
         .and_then(Value::as_array)
@@ -317,7 +338,7 @@ fn source_to_state(
         vault_id,
         memory_id,
         source_type,
-        note_file_id: None,
+        note_file_id,
         note_path,
         note_revision: object
             .get("revision")
@@ -347,6 +368,13 @@ fn required_string(root: &Yaml, key: &str) -> Result<String, MemoryError> {
         .and_then(Yaml::as_str)
         .map(str::to_owned)
         .ok_or(MemoryError::Markdown)
+}
+
+fn optional_string(root: &Yaml, key: &str) -> Option<String> {
+    root.as_hash()
+        .and_then(|hash| hash.get(&Yaml::String(key.to_owned())))
+        .and_then(Yaml::as_str)
+        .map(str::to_owned)
 }
 
 fn required_float(root: &Yaml, key: &str) -> Result<f64, MemoryError> {

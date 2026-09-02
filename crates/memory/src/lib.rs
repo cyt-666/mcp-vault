@@ -9,9 +9,10 @@ pub use error::MemoryError;
 pub use model::{
     ExtractionPolicy, ExtractionPolicyState, ExtractionReadiness, ExtractionSourceMode,
     MemoryConsolidationReport, MemoryOrigin, MemoryPipelineResetReport, MemoryRelationView,
-    MemorySourceInput, MemorySourceView, MemoryStatus, MemoryType, MemoryUpdateInput, MemoryView,
-    NoteExtractionOptions, NoteExtractionResult, PipelineRegenerationAdmission, RecallContext,
-    RecallRequest, RecallResult, RelatedNoteView, RememberInput, RememberResult,
+    MemorySourceAuditPage, MemorySourceInput, MemorySourceReconcileReport,
+    MemorySourceRepairReport, MemorySourceView, MemoryStatus, MemoryType, MemoryUpdateInput,
+    MemoryView, NoteExtractionOptions, NoteExtractionResult, PipelineRegenerationAdmission,
+    RecallContext, RecallRequest, RecallResult, RelatedNoteView, RememberInput, RememberResult,
 };
 pub use service::{
     EXTRACTION_PIPELINE_VERSION, MEMORY_PIPELINE_GENERATION, MemoryRebuildReport, MemoryService,

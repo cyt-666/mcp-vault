@@ -63,8 +63,10 @@ test -f migrations/0009_auth_runtime_hardening.sql
 test -f migrations/0010_codex_two_phase_memory.sql
 test -f migrations/0011_prerelease_memory_pipeline_cutover.sql
 test -f migrations/0012_builtin_oauth_authorization_server.sql
+test -f migrations/0013_continuous_memory_source_health.sql
 test -f docs/adr/0018-built-in-oauth-authorization-server.md
 test -f docs/adr/0019-remove-webdav-proxy-peer-allowlist.md
+test -f docs/adr/0022-continuous-exact-memory-source-health.md
 test -f crates/state/tests/fixtures/pre_wp02.sql
 
 grep -q '"build"' frontend/admin/package.json

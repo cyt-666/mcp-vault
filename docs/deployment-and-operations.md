@@ -268,8 +268,14 @@ commit for already-synced temporary regular files. Therefore a deployment
 whose mount rejects both exclusive rename and hard-link creation cannot safely
 host a writable Vault; MCP Vault reports
 `filesystem does not support safe atomic no-replace file creation` instead of
-falling back to an overwrite race. Directory moves still require native atomic
-rename support.
+falling back to an overwrite race.
+
+File and directory moves prefer `RENAME_NOREPLACE`. If the same-filesystem
+mount rejects only that capability, MCP Vault serializes all absent-target
+claims for that Vault, rechecks the destination, and uses ordinary atomic
+`renameat`. This move fallback does not hard-link user entries and does not
+copy/delete across filesystems. Run only one MCP Vault process against a given
+content root and do not race protocol writes with direct host-directory writes.
 
 For an appliance or NAS deployment, check the actual Vault root rather than
 only `/data` because a nested bind/mount can use a different filesystem:
@@ -428,6 +434,11 @@ not a model field. Phase 2 requires a summary, bounded memory actions, and a
 local disposition for every dirty raw input. These are multi-field contracts, so the
 generic single-array-envelope repair does not apply; missing or renamed fields
 remain visible contract failures rather than being guessed locally.
+
+Phase 2 assigns dirty inputs request-local indexes before context-only inputs
+and publishes the exact allowed discard indexes in the structured-output
+schema. A generated bookkeeping violation does not partially commit the global
+proposal; it enters `retry_wait` and consumes the job's bounded retry budget.
 
 During a full-Vault run, one malformed generated output is recorded against
 that note and later notes continue. The final job can read “完成但有失败” while
@@ -769,6 +780,16 @@ credentials, OAuth resources, IDs, histories, indexes, memories, and jobs are
 unchanged. Create and verify a fresh global backup before adding a second
 Vault; an older one-Vault backup remains readable but restore correctly rejects
 it against a different live Vault topology.
+
+The 0.1.17 upgrade adds migration 0013 without deleting memory or canonical
+Markdown. Existing final note sources begin `unverified`; normal recall fails
+closed for those note-dependent memories until the first generation-keyed
+`memory.audit_sources` job proves current evidence. Source-less explicit
+Agent/Admin memory remains available. Every completed full Vault reconciliation,
+including post-restore reconciliation, admits a new paged audit generation.
+Operators can also run it from Admin under **Memory → Source health**. Final-
+source, affected-memory, Stage 1, and distinct-File-ID counts are intentionally
+separate and must not be interpreted as interchangeable totals.
 
 ### Rollback
 

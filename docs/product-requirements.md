@@ -78,6 +78,9 @@ The service MUST provide:
 - bounded output with pagination or cursors.
 
 Retrieval MUST continue to work lexically when LLM or embedding providers are unavailable.
+Outward note paths MUST resolve stable File IDs to current active paths so a
+completed move cannot leave an Agent with a known-unreadable old path. A stale
+content projection MUST retain its analyzed revision until rebuilt.
 
 ### 3.4 Controlled mutation and history
 
@@ -115,6 +118,8 @@ It MUST provide:
 - exact source identity/revision/hash checks; model-generated source
   coordinates or confidence/importance scores MUST NOT be used as trust
   evidence;
+- rename-stable source identity and a current readable path when the source is
+  active; deletion MUST NOT expose a last-known path as if it were readable;
 - optional line/heading anchors for explicit or imported provenance, without
   requiring the automatic extraction model to generate them;
 - separate extraction and consolidation model roles, persisted raw-memory
@@ -272,6 +277,24 @@ backfill. The service MUST checkpoint that note without replaying its paid
 request, continue later notes, and retain a bounded redacted failure reason;
 repeated consecutive contract failures MAY open a cost-safety circuit.
 
+Source safety MUST NOT depend on automatic-memory or Provider configuration.
+Every file create, update, move, delete, restore, and reconciled external change
+MUST update note-source health before optional extraction admission. A memory
+with note sources MUST have at least one verified current note source to enter
+normal recall, regardless of origin; a source-less explicit Agent/Admin memory
+remains supported. Current health MUST fail closed when the live file hash
+changes, including before background lifecycle work completes.
+
+Cross-File-ID recovery MUST use one unique exact candidate in the same Vault:
+normalized full-note evidence or the same anchored excerpt hash. Filename,
+semantic/vector, LLM, ambiguous, truncated, and cross-Vault matches MUST NOT
+bind. Source-unavailable stale memory MAY reactivate after exact recovery;
+archived and superseded memory MUST NOT reactivate automatically. Unsupported
+memory MUST be retained unless an authenticated explicit deletion occurs.
+
+Admin MUST expose repeatable paged source audits and separate exact counts for
+final sources, affected memories, Stage 1 sources, and distinct File IDs.
+
 The Admin UI and Admin API MUST run on a separate listener that is not publicly exposed by default. Network restriction does not replace authentication.
 
 ### 3.8 Authentication and authorization
@@ -311,6 +334,7 @@ The service MUST:
 - expose bounded current-unit progress for long jobs without persisting note
   bodies, prompts, or provider responses in operational diagnostics;
 - allow independent rebuild of derived projections.
+- run a repeatable source audit after full reconciliation and restore.
 
 ### 3.10 Backup and recovery
 

@@ -4,8 +4,8 @@ MCP Vault 是一个自托管的 Markdown 知识库和长期记忆服务。
 它让人通过 Obsidian 管理同一个 Vault，也让 AI Agent 通过 MCP 发现、检索、
 回忆和安全修改这些内容。
 
-当前版本：<code>0.1.14</code>（2026-08-31）。部署示例默认使用
-<code>mcp-vault:0.1.14</code>，目标架构为 <code>linux/amd64</code>。
+当前版本：<code>0.1.17</code>（2026-09-02）。部署示例默认使用
+<code>mcp-vault:0.1.17</code>，目标架构为 <code>linux/amd64</code>。
 
 ## 项目定位
 
@@ -118,14 +118,14 @@ curl --fail http://127.0.0.1:8080/health/ready
 当前版本镜像可以这样构建：
 
 ~~~bash
-docker build --platform linux/amd64 --tag mcp-vault:0.1.14 --tag mcp-vault:latest .
+docker build --platform linux/amd64 --tag mcp-vault:0.1.17 --tag mcp-vault:latest .
 ~~~
 
 镜像包含 Rust 服务和编译后的 Admin 前端，运行用户为非 root 的 <code>mcpvault</code>，
 入口命令为 <code>/usr/local/bin/mcp-vault</code>。在部署前可以执行：
 
 ~~~bash
-docker run --rm --platform linux/amd64 --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m mcp-vault:0.1.14 --check-config
+docker run --rm --platform linux/amd64 --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m mcp-vault:0.1.17 --check-config
 ~~~
 
 ## 首次配置顺序
@@ -164,7 +164,13 @@ https://vault.example.com/dav/v1/vaults/default/
 NAS 或低版本内核部署必须确认 Vault 内容根目录支持安全的原子创建。服务优先
 使用 <code>RENAME_NOREPLACE</code>；明确不支持该接口时，普通文件创建才会使用服务自己
 创建的同目录临时文件硬链接兼容路径。这个路径不会提供用户可调用的硬链接
-功能，也不会把普通覆盖式 <code>rename</code> 当作降级方案。
+功能。文件或目录移动不会使用硬链接：服务会先用 Vault 级命名空间锁串行化
+所有目标占用操作，再次确认目标不存在，然后以普通原子 <code>renameat</code> 兼容
+同文件系统移动。跨文件系统移动仍会失败，不会隐式复制删除。
+
+同一个 Vault 内容根目录只能由一个 MCP Vault 服务进程管理。直接在宿主机目录
+中进行的并发写入不会参与进程内锁，应避免与 MCP/WebDAV 写入同时发生；非并发
+的目录外变更仍会由 reconciliation 导入。
 
 ## MCP 接口
 
@@ -238,9 +244,15 @@ Access Token 有效期为 1 小时。每次成功刷新都会重新获得 180 �
 空闲期限。相同旧 Refresh Token 在 60 秒内的重复提交只返回 <code>invalid_grant</code>，
 不会撤销第一次成功签发的新令牌；超过宽限期的重放才会撤销整个令牌 family。
 
-升级到 <code>0.1.14</code> 不会主动使已有未过期 Token 失效，旧 grant 也可以继续刷新。
+从 <code>0.1.14</code> 或 <code>0.1.15</code> 升级到 <code>0.1.16</code>
+不会主动使已有未过期 Token 失效，旧 grant 也可以继续刷新。
 如果希望 ChatGPT 保存新的 <code>offline_access</code> grant，升级后建议在 ChatGPT 中点一次
 “重新连接”。Token 已过期、被撤销或被 ChatGPT 丢失时，才必须重新登录。
+
+从 <code>0.1.16</code> 升级到 <code>0.1.17</code> 不会重置记忆、OAuth 或 Vault 内容。
+迁移 0013 将旧笔记来源标记为待核验，并在首次完整 Vault reconciliation 后自动提交
+分页来源审计。审计完成前，未核验的笔记依赖型记忆暂不参与普通 recall；无笔记来源的
+Agent/Admin 显式记忆不受影响。升级前仍应创建并验证备份；数据库迁移为前向迁移。
 
 ## 长期记忆
 
@@ -273,9 +285,32 @@ _mcp-vault/memory/source_summaries/
 _mcp-vault/memory/records/YYYY/MM/memory-id.md
 ~~~
 
+这些是长期记忆自身的规范 Markdown，不是 Agent 写笔记时遗留的临时文件。
+Admin 中的“记忆文件”显示上述路径；展开“来源笔记与证据定位”后看到的
+<code>sources[].path</code> 才是支持该记忆的原始笔记路径。
+
 最终记忆会带有来源、置信度、时间有效性、生命周期和 Vault 身份。<code>recall</code> 只
 读取本地持久化投影，不会在查询时调用 LLM；普通文章知识以单独的
 <code>related_notes</code> 提示返回，不会被自动冒充为长期事实。
+
+笔记来源以稳定 <code>FileId</code>、证据修订和精确证据哈希记录在规范记忆
+Markdown 中。文件创建、更新、移动、删除、恢复或由外部同步修改时，服务都会先
+协调来源健康，再决定是否提交可选的 AI 提取任务。纯移动且内容未变时只更新路径，
+不会调用模型。
+
+任何带笔记来源的记忆都必须至少有一个当前有效来源才能保持
+<code>active</code>；这也适用于 Agent/Admin 显式创建但附带笔记证据的记忆。完全
+不依赖笔记的显式记忆继续有效。最后一个有效来源消失时，记忆进入
+<code>stale</code> 并退出普通 <code>recall</code>，但不会自动删除；历史查询仍可查看。
+
+跨 <code>FileId</code> 只接受当前 Vault 内唯一的精确全文哈希，或同一行锚点/标题路径的
+精确摘录哈希。候选重复、扫描受限、跨 Vault 内容和语义相似都不会绑定。文件重新
+出现且能够严格证明时，因 <code>source_unavailable</code> 失效的记忆会自动恢复。
+
+升级和每次完整 Vault 扫描后都会运行可重复的“审计记忆来源健康”任务。Admin
+分别显示最终记忆来源、受影响记忆、阶段一来源和不同 FileId 数量，不再把它们合并为
+含义模糊的“未解析来源”总数。首次 0.1.17 审计完成前，未核验的笔记依赖型记忆会
+暂时退出普通召回，宁可少返回也不会继续提供无法证明的来源。
 
 如果未配置 Provider，WebDAV、文件写入、词法搜索和已有记忆回忆仍可用；Admin
 会显示记忆功能的配置阻塞原因和任务状态。

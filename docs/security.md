@@ -406,6 +406,15 @@ fallback is never used for directories or replacement writes. If the mount
 cannot provide either exclusive rename or this constrained link operation,
 the write fails explicitly instead of using a racy check-then-rename.
 
+User-entry moves never use that hard-link exception. They prefer an exclusive
+descriptor-relative rename; an explicitly unsupported mount may use ordinary
+same-filesystem `renameat` only while Vault Core holds the Vault-scoped
+namespace claim lock and after storage rechecks destination absence through the
+opened directory. Every service-mediated absent-target claim uses the same lock
+order. Cross-filesystem moves and unrelated filesystem errors fail closed.
+Direct host writers do not participate in this in-process lock and must not race
+live protocol mutations.
+
 If symlinks are supported later, they require an explicit safe policy and tests.
 
 ### 9.3 Archive restore
@@ -535,12 +544,12 @@ changes may therefore reach the configured Phase 1 Provider. Legacy
 `explicit_only` and `all_notes` configuration deserialize to `automatic`;
 every other path/content privacy rule continues to apply.
 
-Phase 1 and Phase 2 model output is untrusted. Phase 1 must return semantic raw
-memory separately from bounded source-line selections. The Provider receives a
-numbered untrusted view and returns only start/end labels. Local code validates
-the range against the current note revision, derives the exact excerpt itself,
-and persists only Vault/file/revision/line metadata plus an excerpt hash; model
-text never becomes evidence. Phase 2 may paraphrase and merge only referenced Stage 1 inputs.
+Phase 1 and Phase 2 model output is untrusted. Automatic Phase 1 returns only
+semantic raw memory, source summary, and slug; local code binds the current
+Vault/File ID/revision and normalized whole-note hash. Explicit/imported
+evidence may carry locally validated heading/line anchors and excerpt hashes.
+Model text never becomes evidence. Phase 2 may paraphrase and merge only
+referenced Stage 1 inputs.
 Local code rejects unknown or cross-Vault references, missing evidence,
 unsupported lifecycle actions, stale base revisions, and incomplete raw-input
 dispositions before any canonical write or selection commit. Neither phase
@@ -553,6 +562,13 @@ unambiguous single-array schema whose direct item/array already passes the
 complete item schema; the multi-field Phase 1 and Phase 2 contracts do not
 qualify. Every repaired value is revalidated against the full root schema.
 No response content is emitted into logs or progress.
+
+Normal memory recall additionally joins Vault-scoped source health to current
+file metadata and requires the verified file hash to remain current. Cross-
+File-ID identity uses one exact candidate inside the same Vault; filename,
+semantic/vector, LLM, ambiguous, truncated, and cross-Vault candidates are
+rejected. Source audits and event reconciliation run without a Provider and
+persist only hashes, IDs, paths, revisions, bounded reasons, and counts.
 
 Schema failures persist only a project-owned category, a path assembled from
 the trusted request schema, and a bounded Admin-visible source path. Unknown

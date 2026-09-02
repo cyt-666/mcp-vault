@@ -38,6 +38,11 @@ Memory projection tables remain the authoritative operational index for
 memory-specific metadata. Canonical Markdown remains the portable knowledge
 copy; deleting/rebuilding projections never deletes it.
 
+Canonical note-source entries include optional stable `file_id`, current/last
+known path, and evidence revision. A versioned idempotent repair rewrites legacy
+managed records through this same Core boundary; it does not invoke a Provider,
+reset the memory generation, or guess an identity from an unavailable path.
+
 ## Consequences
 
 Positive:

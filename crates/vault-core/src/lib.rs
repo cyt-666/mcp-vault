@@ -37,7 +37,7 @@ use tokio::{
     sync::mpsc,
 };
 
-use crate::lock::PathLockManager;
+use crate::lock::{NamespaceLockManager, PathLockManager};
 
 pub use error::VaultError;
 
@@ -162,6 +162,7 @@ pub struct StagedWrite {
     core: VaultCore,
     context: VaultContext,
     _operation: MaintenanceOperationGuard,
+    _namespace_lock: Option<tokio::sync::OwnedMutexGuard<()>>,
     _locks: Vec<tokio::sync::OwnedMutexGuard<()>>,
     storage: VaultStorage,
     history: HistoryStore,
@@ -341,6 +342,7 @@ pub struct ReconciliationReport {
 /// Process runtime shared by every Core instance and protocol plane.
 #[derive(Clone)]
 pub struct VaultCoreRuntime {
+    namespace_locks: NamespaceLockManager,
     locks: PathLockManager,
     maintenance: MaintenanceGate,
 }
@@ -367,6 +369,7 @@ impl VaultCoreRuntime {
     /// Build a shared Core runtime around the process maintenance gate.
     pub fn new(maintenance: MaintenanceGate) -> Self {
         Self {
+            namespace_locks: NamespaceLockManager::default(),
             locks: PathLockManager::default(),
             maintenance,
         }
@@ -686,6 +689,10 @@ impl VaultCore {
         source_plane: SourcePlane,
     ) -> Result<StagedWrite, VaultError> {
         let maintenance_operation = self.validate_context(context, true).await?;
+        // A PUT may become a create after inspecting current state. Acquire the
+        // namespace serializer first so every possible lock order stays
+        // namespace -> path and legacy no-replace fallback remains safe.
+        let namespace_lock = self.acquire_namespace_lock(context).await;
         let locks = self.acquire_locks(context, &[path]).await;
         let storage = self.storage(context);
         let history = self.history_store(context)?;
@@ -789,6 +796,7 @@ impl VaultCore {
             core: self.clone(),
             context: context.clone(),
             _operation: maintenance_operation,
+            _namespace_lock: Some(namespace_lock),
             _locks: locks,
             storage,
             history,
@@ -809,6 +817,7 @@ impl VaultCore {
         if path.is_root() {
             return Err(VaultError::AlreadyExists);
         }
+        let _namespace_lock = self.acquire_namespace_lock(context).await;
         let _guards = self.acquire_locks(context, &[path]).await;
         let storage = self.storage(context);
         let files = self.state.files();
@@ -1216,6 +1225,7 @@ impl VaultCore {
                 reason: "move source and destination match",
             }));
         }
+        let _namespace_lock = self.acquire_namespace_lock(context).await;
         let storage = self.storage(context);
         let files = self.state.files();
         let initial = files
@@ -2366,6 +2376,11 @@ impl VaultCore {
         R: AsyncRead + Unpin,
     {
         let _operation = self.validate_context(context, true).await?;
+        let _namespace_lock = if require_absent {
+            Some(self.acquire_namespace_lock(context).await)
+        } else {
+            None
+        };
         let _guards = self.acquire_locks(context, &[path]).await;
         let storage = self.storage(context);
         let history = self.history_store(context)?;
@@ -2941,6 +2956,13 @@ impl VaultCore {
             .await
     }
 
+    async fn acquire_namespace_lock(
+        &self,
+        context: &VaultContext,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.runtime.namespace_locks.acquire(context).await
+    }
+
     fn inject(&self, phase: CommitPhase) -> Result<(), VaultError> {
         self.failure
             .fail(phase)
@@ -3275,6 +3297,7 @@ fn map_storage(error: StorageError) -> VaultError {
     } else {
         match error {
             StorageError::Domain(error) => VaultError::Domain(error),
+            StorageError::DestinationExists => VaultError::AlreadyExists,
             other => VaultError::Storage(other),
         }
     }

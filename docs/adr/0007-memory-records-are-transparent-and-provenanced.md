@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-19
+- Continuous source-health behavior amended by: ADR-0022
 
 ## Context
 
@@ -14,6 +15,14 @@ Automatic extraction first creates derived candidates in SQLite.
 An accepted/promoted durable memory is materialized as one atomic Markdown record under the reserved Vault namespace. It contains lifecycle, temporal, confidence, source, entity, and extraction metadata.
 
 Every memory has provenance or is explicitly marked as an assertion. LLM output is validated before promotion. Normal recall excludes stale, superseded, archived, and rejected records.
+
+Note provenance uses stable Vault-scoped File ID plus an evidence revision.
+Canonical Markdown stores that identity as an optional `sources[].file_id` so
+renames survive projection rebuild. Outward source `path` is resolved from the
+current active file and is absent after deletion; the evidence revision remains
+historical until content equality proves it can advance. Legacy records without
+an ID remain readable and are repaired only when path/revision state proves the
+identity without guessing.
 
 ## Consequences
 

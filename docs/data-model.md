@@ -776,6 +776,21 @@ The complete memory schema is defined in `memory-system.md`. At minimum it inclu
 
 Memory queries always include `vault_id`.
 
+Note-source identity is stable across rename: `memory_sources.note_file_id`
+binds the source to `file_entries.id`, `note_revision` identifies the evidence,
+and `note_path` retains the evidence binding. Canonical memory Markdown mirrors
+the stable identity in optional `sources[].file_id`. Runtime output exposes a
+path only when source health proves a current readable file.
+
+Migration `0013_continuous_memory_source_health.sql` adds optional
+`memories.status_reason`/`status_changed_at`, the Vault-scoped derived
+`memory_source_health` table, and the latest repeatable audit cursor/result.
+Health state is one of `unverified|current|content_changed|deleted|identity_missing|identity_ambiguous`.
+Current rows include resolved File ID/path, checked revision, verified raw file
+hash, event, reason, and timestamps. Legacy note sources are inserted as
+`unverified`; legacy stale rows receive `source_unavailable` so exact first-
+audit recovery can reactivate them safely.
+
 Migration `0007_memory_state.sql` owns final `memories`, `memory_sources`,
 `memory_entities`, `memory_tags`, `memory_relations`, legacy
 `memory_candidates`, explicit-command idempotency, diagnostics, and the
@@ -813,6 +828,11 @@ state:
   post-cutover `regeneration_pending` admission flag;
 - a partial unique index that permits at most one queued/running/retry-wait
   `memory.consolidate` job per Vault.
+
+`memory_source_health` is derived and may be rebuilt. `status_reason`, final
+provenance, and lifecycle remain part of the durable projection and canonical
+Markdown. Replacing a memory bundle upserts stable source IDs and deletes only
+removed sources so an unrelated metadata update cannot erase verified health.
 
 Stage 1 evidence JSON contains source type, file ID/path/revision, optional line
 range, and excerpt hash; exact model quotations are not persisted. Generated
