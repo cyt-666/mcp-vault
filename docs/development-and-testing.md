@@ -463,6 +463,17 @@ without response values; generic single-array-envelope repair remains bounded
 to schemas where the direct item/array already validates, while the multi-field
 Phase 1/Phase 2 contracts reject missing fields.
 
+The MCP metadata contract test enumerates every advertised tool and requires a
+unique title, an explicit selection condition, model-readable success field
+guidance, a bounded description length, closed-world annotation, and a non-empty
+description for every top-level input property. It rejects implementation terms
+that do not help the model choose or consume a tool and pins the critical
+routing distinctions between `search_notes`, `recall`, `remember`, and
+`edit_note`. Before a release that changes names, descriptions, parameters, or
+tool count, replay a labeled prompt set in the target Host with direct, indirect,
+and negative prompts and record which tool was selected; static schema checks
+cannot by themselves prove model routing quality.
+
 Worker fixtures prove a full-Vault Phase 1 job continues after one malformed
 note output, checkpoints a bounded redacted failure, preserves its paid-work
 cursor, and admits Phase 2. State fixtures prove one active consolidation per

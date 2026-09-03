@@ -203,6 +203,30 @@ Return tools in this deterministic order, omitting tools the caller’s scopes d
 
 Names may receive a stable namespace if required by SDK conventions, but once released they must remain backward compatible.
 
+Tool-selection metadata is part of this public contract. Every advertised tool
+MUST provide:
+
+- a unique human-readable title in addition to its stable protocol name;
+- a model-facing description, not operator prose or an explanation of the
+  internal implementation. It states when to call the tool, the inputs or prior
+  calls needed for correctness, consequential side effects and conflict/error
+  handling, the exact success fields the model should consume, and the next or
+  neighboring tool to use;
+- a non-empty description for every top-level input property, including units,
+  ranges, defaults, opaque-ID provenance, and examples where those details are
+  needed for a correct call;
+- accurate read-only, destructive, idempotent, and open-world hints. MCP Vault
+  operations are confined to the authenticated Vault and therefore advertise
+  `openWorldHint: false`.
+
+Descriptions follow the compact sequence `Use this when` / required input /
+`On success, data contains` / next action. They name actual wire fields such as
+`data.results`, `data.memories`, and `data.related_notes` rather than terms such
+as projection, query-time generation, or other architecture rationale. This
+lets a model distinguish discovery, source search, exact reads, task recall,
+canonical-note mutation, and long-term-memory mutation without knowing how MCP
+Vault is implemented.
+
 The MCP foundation advertises deterministic discovery, browse, lexical
 `search_notes`, read, mutation, and history tools. WP-11 adds `recall`,
 `get_memory`, `list_memories`, `remember`, `update_memory`, and `forget_memory`
@@ -450,22 +474,24 @@ Input:
 Selection kinds:
 
 ```text
-full
-line_range
-heading
-byte_range
+full        # implemented
+line_range  # reserved; currently returns unsupported_selection
+heading     # reserved; currently returns unsupported_selection
+byte_range  # reserved; currently returns unsupported_selection
 ```
 
 Output:
 
-- path, file ID, revision, content hash;
-- MIME type and encoding;
-- requested content;
-- selected source anchor;
+- path, selected revision, content hash, and size;
+- requested UTF-8 content or safe binary metadata;
+- selected full-content anchor;
 - truncation flag;
-- outline summary when truncated.
+- note resource URI.
 
-Binary files are returned as resource links/metadata rather than embedded base64 unless a negotiated capability explicitly requires content.
+Binary files set `binary: true` and return a resource URI/metadata rather than
+embedded base64. A current read returns the revision used as an edit
+precondition; a retained historical read returns the selected historical
+revision for inspection.
 
 ### 6.6 `note_context`
 

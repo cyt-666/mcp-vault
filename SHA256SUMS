@@ -17,7 +17,7 @@ a3897dcd40f3179c7383316480bcc6baad80b1c47fd3a16150720dda79672a69  ./docs/adr/000
 8fd99d97a91fd3bcc8ada86fa14f45034fd946718d9b86c2a4668abc339b0a90  ./docs/architecture.md
 64289ab53c8938fa0cfad337caf92c0711bb36e5c84951b70dd6e25489969d75  ./docs/data-model.md
 d7f65aeb6b39a13596b0141aab33e927f7bc10f4e6dcd1c4f5d30e6966b47d6a  ./docs/deployment-and-operations.md
-9ef8da076b3f27b9a10d4158b7ad3ed1b4768e334b20f36769c4f6d0971e1cdd  ./docs/development-and-testing.md
+3928cdcab0b419c402a5acae53fb96ef29d201f7ea4ab254ed8409c79893973a  ./docs/development-and-testing.md
 93b155cd4bb6877dfdda20e8207ee11f1b0366a05106d4a883b23629e62ba9e9  ./docs/release-readiness.md
 47b88e4099d5edfc67c3990b79320dbed3c86f2590d3699dd12642ca150fec3a  ./docs/requirements-traceability.md
 64739590961c1b6c484cfb7f9769fae79a1c93858f039b5393a192d5fd54be25  ./docs/exec-plans/README.md
@@ -25,7 +25,7 @@ d7f65aeb6b39a13596b0141aab33e927f7bc10f4e6dcd1c4f5d30e6966b47d6a  ./docs/deploym
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  ./docs/exec-plans/active/.gitkeep
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  ./docs/exec-plans/completed/.gitkeep
 476bbafa290563587cd248bc526c9d4d3d679cbc150ac08f07b94aa69cb271ae  ./docs/implementation-plan.md
-2517e740b811f358f00be3a7b2bb18d2a554a1d700c51038c6091585b5638e31  ./docs/interfaces.md
+2721c7bc53eee3d5b5183bae127bb6041a5dd6abdcd7dba3e4685fdd58c6e098  ./docs/interfaces.md
 ebaf79df5bd904f778c6774a386087f72bb2a4b1dedefe13b25cf202bcb18d95  ./docs/memory-system.md
 484f11cd0aff87d4abafdfecd5859dd54ad7e12ecce3babc1316ae00d6594058  ./docs/product-requirements.md
 557265e65d2d0e7caba52e4aab90b2b60886d12f608013b6637bc01d3b885c72  ./docs/security.md

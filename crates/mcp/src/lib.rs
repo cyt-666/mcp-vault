@@ -665,45 +665,60 @@ fn oauth_public_error(
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct VaultOverviewInput {
+    /// Include newest-first revision metadata in the overview. Defaults to false.
     #[serde(default)]
     include_recent: Option<bool>,
+    /// Maximum number of direct entries and recent changes to return. Range 1-100; default 25.
     #[serde(default)]
     limit: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct BrowseIndexInput {
+    /// Stable index node ID to expand. Omit to browse the root; reuse IDs returned by this tool.
     #[serde(default)]
     node_id: Option<String>,
+    /// Number of child levels to expand. Range 0-2; default 1.
     #[serde(default)]
     depth: Option<u8>,
+    /// Maximum number of children to return. Range 1-100; default 50.
     #[serde(default)]
     limit: Option<u32>,
+    /// Opaque pagination cursor returned by a previous browse_index call.
     #[serde(default)]
     cursor: Option<String>,
+    /// Include bounded candidate-note metadata for the selected node. Defaults to false.
     #[serde(default)]
     include_note_candidates: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct RecentChangesInput {
+    /// Maximum number of newest-first revisions to return. Range 1-100; default 50.
     #[serde(default)]
     limit: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct SearchNotesInput {
+    /// Natural-language concept or exact keywords to find in canonical Markdown notes.
     query: String,
+    /// Retrieval strategy. Defaults to lexical; semantic and hybrid may report provider degradation.
     #[serde(default)]
     mode: Option<SearchMode>,
+    /// Optional path, topic, tag, and modification-time filters applied within this Vault.
     #[serde(default)]
     scope: Option<SearchScope>,
+    /// Result unit: `note` or `section`. Defaults to `note`.
     #[serde(default)]
     result_granularity: Option<String>,
+    /// Maximum number of matches to return. Range 1-100; default 12.
     #[serde(default)]
     limit: Option<u32>,
+    /// Opaque pagination cursor returned by a previous search_notes call.
     #[serde(default)]
     cursor: Option<String>,
+    /// Include component ranking scores for diagnostics. Defaults to false.
     #[serde(default)]
     include_score_breakdown: Option<bool>,
 }
@@ -711,33 +726,45 @@ struct SearchNotesInput {
 #[derive(Clone, Copy, Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum SearchMode {
+    /// Exact-token full-text retrieval that works without an embedding provider.
     #[default]
     Lexical,
+    /// Vector similarity retrieval; requires the note-embedding role and may degrade.
     Semantic,
+    /// Rank-fused lexical and vector retrieval; falls back safely when vectors are unavailable.
     Hybrid,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
 struct SearchScope {
+    /// Vault-relative folder or file prefix, for example `projects/alpha`.
     #[serde(default)]
     path_prefix: Option<String>,
+    /// Stable topic IDs returned by vault_overview or browse_index. Maximum 20.
     #[serde(default)]
     topic_ids: Vec<String>,
+    /// Exact note tags that matches must carry. Maximum 20.
     #[serde(default)]
     tags: Vec<String>,
+    /// Inclusive lower bound for note modification time as Unix milliseconds.
     #[serde(default)]
     modified_after: Option<i64>,
+    /// Inclusive upper bound for note modification time as Unix milliseconds.
     #[serde(default)]
     modified_before: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct ReadNoteInput {
+    /// Current Vault-relative path from search, recall, browse, or another read result.
     path: String,
+    /// Retained historical revision to read. Omit to read the current revision.
     #[serde(default)]
     revision: Option<u64>,
+    /// Content selection. Omit or use `{ "kind": "full" }`; other declared kinds are reserved and currently rejected.
     #[serde(default)]
     selection: Option<NoteSelection>,
+    /// Maximum bytes to return. Defaults to 131072 and cannot exceed 1048576.
     #[serde(default)]
     max_bytes: Option<u64>,
 }
@@ -745,10 +772,27 @@ struct ReadNoteInput {
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum NoteSelection {
+    /// Read the complete file subject to max_bytes.
     Full,
-    LineRange { start_line: u32, end_line: u32 },
-    Heading { heading: String },
-    ByteRange { start: u64, end: u64 },
+    /// Reserved one-based Markdown line range; the current handler rejects it.
+    LineRange {
+        /// First one-based line to return.
+        start_line: u32,
+        /// Last one-based line to return; must not precede start_line.
+        end_line: u32,
+    },
+    /// Reserved Markdown heading selection; the current handler rejects it.
+    Heading {
+        /// Heading text to select, without Markdown `#` markers.
+        heading: String,
+    },
+    /// Reserved half-open byte range; the current handler rejects it.
+    ByteRange {
+        /// Zero-based first byte offset.
+        start: u64,
+        /// Exclusive end byte offset; must exceed start.
+        end: u64,
+    },
 }
 
 impl NoteSelection {
@@ -776,19 +820,27 @@ impl NoteSelection {
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct CreateNoteInput {
+    /// New Vault-relative Markdown path, for example `projects/alpha/status.md`.
     path: String,
+    /// Complete UTF-8 Markdown body for the new note, up to 1048576 bytes.
     content: String,
+    /// Absent-path precondition. Omit or set true; false is rejected.
     #[serde(default)]
     if_absent: Option<bool>,
+    /// Stable retry key for this logical creation; reuse only with the identical request.
     #[serde(default)]
     idempotency_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct EditNoteInput {
+    /// Existing Vault-relative note path obtained from a current read or search result.
     path: String,
+    /// Current revision returned by read_note or search_notes; conflicts must be reread, not overwritten.
     expected_revision: u64,
+    /// One exact edit operation. Prefer the narrowest operation that preserves unrelated content.
     operation: EditOperation,
+    /// Stable retry key for this logical edit when the selected operation supports safe retry.
     #[serde(default)]
     idempotency_key: Option<String>,
 }
@@ -796,40 +848,60 @@ struct EditNoteInput {
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum EditOperation {
+    /// Replace the entire note; use only when the complete desired body is known.
     ReplaceAll {
+        /// Complete replacement Markdown body, up to 1048576 bytes.
         content: String,
     },
+    /// Apply an exact unified diff; context must match and fuzzy patching is never attempted.
     ApplyUnifiedDiff {
+        /// Unified diff against the expected current revision.
         patch: String,
     },
+    /// Append Markdown to the end of the note without changing existing text.
     Append {
+        /// Markdown content to append.
         content: String,
     },
+    /// Insert Markdown immediately after a uniquely matched heading.
     InsertAfterHeading {
+        /// Existing heading text, without Markdown `#` markers.
         heading: String,
+        /// Markdown to insert after the heading.
         insertion: String,
     },
+    /// Replace one heading and its section while preserving the rest of the note.
     ReplaceHeadingSection {
+        /// Existing heading text, without Markdown `#` markers.
         heading: String,
+        /// Complete replacement Markdown for that heading section.
         replacement: String,
     },
 }
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct MoveNoteInput {
+    /// Existing Vault-relative source note or directory path.
     source: String,
+    /// New Vault-relative destination path, which must not already exist.
     destination: String,
+    /// Current source revision returned by a read, search, or metadata result.
     expected_revision: u64,
+    /// Stable retry key for this logical move; reuse only with the identical request.
     #[serde(default)]
     idempotency_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct DeleteNoteInput {
+    /// Existing Vault-relative note path to remove.
     path: String,
+    /// Current revision returned by read_note or search_notes.
     expected_revision: u64,
+    /// Deletion mode. Only `trash` is currently supported; `permanent` is rejected.
     #[serde(default)]
     mode: DeleteMode,
+    /// Stable retry key for this logical deletion; reuse only with the identical request.
     #[serde(default)]
     idempotency_key: Option<String>,
 }
@@ -837,157 +909,221 @@ struct DeleteNoteInput {
 #[derive(Clone, Copy, Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum DeleteMode {
+    /// Create a recoverable tombstone and preserve required history.
     #[default]
     Trash,
+    /// Reserved value; the current MCP surface rejects permanent note deletion.
     Permanent,
 }
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct NoteHistoryInput {
+    /// Vault-relative path whose retained revision metadata should be listed.
     path: String,
 }
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct RestoreNoteRevisionInput {
+    /// Current Vault-relative note path.
     path: String,
+    /// Retained historical revision whose content should become current.
     revision: u64,
+    /// Current live revision checked before restoration to prevent overwriting newer work.
     expected_current_revision: u64,
+    /// Stable retry key for this logical restore; reuse only with the identical request.
     #[serde(default)]
     idempotency_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
 struct RecallMemoryInput {
+    /// Current user question or task, written with enough context to rank relevant durable memory.
     query: String,
+    /// Optional continuity signals that disambiguate the current project, entities, and recent topics.
     #[serde(default)]
     context: Option<RecallMemoryContextInput>,
+    /// Optional memory-type filter: identity, preference, decision, constraint, fact, project, progress, event, relationship, or procedure.
     #[serde(default)]
     types: Vec<String>,
+    /// Point in time for validity filtering as Unix milliseconds. Defaults to now.
     #[serde(default)]
     valid_at: Option<i64>,
+    /// Minimum stored importance in the inclusive range 0-1. Defaults to 0.
     #[serde(default)]
     min_importance: Option<f64>,
+    /// Include stale, superseded, archived, and other historical lifecycle states. Defaults to false.
     #[serde(default)]
     include_historical: Option<bool>,
+    /// Include detailed provenance in each memory result. Defaults to false to conserve context.
     #[serde(default)]
     include_sources: Option<bool>,
+    /// Include component ranking scores for diagnostics. Defaults to false.
     #[serde(default)]
     include_score_breakdown: Option<bool>,
+    /// Maximum durable memories to return. Range 1-100; default 12.
     #[serde(default)]
     max_results: Option<u32>,
+    /// Maximum ordinary-note retrieval cues to return. Range 0-100; default 8 when vault:read is granted.
     #[serde(default)]
     max_related_notes: Option<u32>,
+    /// Approximate combined result token budget. Range 128-32000; default 1800.
     #[serde(default)]
     max_tokens: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
 struct RecallMemoryContextInput {
+    /// Name or stable label of the project currently being discussed.
     #[serde(default)]
     active_project: Option<String>,
+    /// People, systems, organizations, or other named entities active in the task.
     #[serde(default)]
     entities: Vec<String>,
+    /// Recent conversation topics that help rank otherwise ambiguous memories.
     #[serde(default)]
     recent_topics: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct MemoryIdInput {
+    /// Stable durable-memory ID returned by recall or list_memories.
     id: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
 struct ListMemoryInput {
+    /// Lifecycle filters: candidate, active, superseded, stale, archived, rejected, or quarantined.
     #[serde(default)]
     statuses: Vec<String>,
+    /// Memory-type filters: identity, preference, decision, constraint, fact, project, progress, event, relationship, or procedure.
     #[serde(default)]
     types: Vec<String>,
+    /// Exact tag that returned memories must carry.
     #[serde(default)]
     tag: Option<String>,
+    /// Exact indexed entity that returned memories must reference.
     #[serde(default)]
     entity: Option<String>,
+    /// Current Vault-relative source-note path used as a provenance filter.
     #[serde(default)]
     source_path: Option<String>,
+    /// Maximum records to return. Range 1-100; default 50.
     #[serde(default)]
     limit: Option<u32>,
+    /// Opaque pagination cursor returned by a previous list_memories call.
     #[serde(default)]
     cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
 struct RememberMemoryInput {
+    /// One concise durable proposition, not a transcript, temporary thought, or complete note body.
     content: String,
+    /// Memory type: identity, preference, decision, constraint, fact, project, progress, event, relationship, or procedure.
     memory_type: String,
+    /// Long-term significance in the inclusive range 0-1.
     importance: f64,
+    /// Confidence supported by the stated source in the inclusive range 0-1.
     confidence: f64,
+    /// Optional validity start as Unix milliseconds.
     #[serde(default)]
     valid_from: Option<i64>,
+    /// Optional exclusive validity end as Unix milliseconds; must be later than valid_from.
     #[serde(default)]
     valid_to: Option<i64>,
+    /// Display and retrieval tags. At most 64 tags, each at most 512 characters.
     #[serde(default)]
     tags: Vec<String>,
+    /// Named people, systems, projects, or organizations. At most 64 entries, each at most 512 characters.
     #[serde(default)]
     entities: Vec<String>,
+    /// Optional exact source-note provenance. Read the source first instead of inventing coordinates.
     #[serde(default)]
     source_note: Option<MemorySourceInputDto>,
+    /// Optional active memory ID that this new durable proposition replaces.
     #[serde(default)]
     supersedes: Option<String>,
+    /// Stable key that makes retries idempotent; reuse only with the identical logical memory.
     #[serde(default)]
     idempotency_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
 struct MemorySourceInputDto {
+    /// Current Vault-relative source-note path.
     path: String,
+    /// Stable file ID returned by read_note or search_notes when available.
     #[serde(default)]
     file_id: Option<String>,
+    /// Exact source revision returned by read_note or search_notes.
     #[serde(default)]
     revision: Option<u64>,
+    /// Ordered Markdown heading path that contains the supporting evidence.
     #[serde(default)]
     heading: Vec<String>,
+    /// Optional inclusive one-based evidence start line.
     #[serde(default)]
     start_line: Option<u32>,
+    /// Optional inclusive one-based evidence end line; provide it together with start_line.
     #[serde(default)]
     end_line: Option<u32>,
+    /// Optional server-compatible evidence hash already obtained from a trusted source; never invent it.
     #[serde(default)]
     excerpt_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
 struct UpdateMemoryInput {
+    /// Stable durable-memory ID returned by get_memory, recall, or list_memories.
     id: String,
+    /// Current metadata revision returned by get_memory; conflicts must be reread, not overwritten.
     expected_revision: u64,
+    /// Replacement durable proposition. Omit to preserve the current content.
     #[serde(default)]
     content: Option<String>,
+    /// Replacement type from the supported memory-type list. Omit to preserve it.
     #[serde(default)]
     memory_type: Option<String>,
+    /// Replacement importance in the inclusive range 0-1. Omit to preserve it.
     #[serde(default)]
     importance: Option<f64>,
+    /// Replacement confidence in the inclusive range 0-1. Omit to preserve it.
     #[serde(default)]
     confidence: Option<f64>,
+    /// Optional replacement validity start as Unix milliseconds.
     #[serde(default)]
     valid_from: Option<Option<i64>>,
+    /// Optional replacement exclusive validity end as Unix milliseconds.
     #[serde(default)]
     valid_to: Option<Option<i64>>,
+    /// Complete replacement tag set. Omit to preserve the current tags.
     #[serde(default)]
     tags: Option<Vec<String>>,
+    /// Complete replacement entity set. Omit to preserve the current entities.
     #[serde(default)]
     entities: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct ForgetMemoryInput {
+    /// Stable durable-memory ID returned by get_memory, recall, or list_memories.
     id: String,
+    /// Current metadata revision returned by get_memory.
     expected_revision: u64,
+    /// False archives the memory; true permanently deletes it. Defaults to false.
     #[serde(default)]
     permanent: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 struct ToolErrorBody {
+    /// Stable machine-readable reason for the failure, such as `invalid_argument` or `conflict`.
     code: String,
+    /// Sanitized human-readable explanation of what failed.
     message: String,
+    /// True only when retrying the same logical operation later may succeed without changing its intent.
     retryable: bool,
+    /// Optional sanitized structured context that may help correct the next call.
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<Value>,
 }
@@ -1010,13 +1146,16 @@ impl ToolErrorBody {
 
 #[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 struct ToolEnvelope {
+    /// Request identifier for correlating this result with logs or support diagnostics.
     request_id: String,
+    /// True when the call succeeded and `data` is present; false when `error` is present.
     ok: bool,
-    /// All MCP Vault tool payloads are JSON objects. Keeping this explicit in
-    /// the advertised schema also preserves compatibility with the dated
-    /// MCP schemas, which reject an unconstrained `true` value schema here.
+    /// Tool-specific success object described by the selected tool. Omitted on failure.
+    /// Keeping this object-shaped also preserves compatibility with dated MCP
+    /// schemas, which reject an unconstrained `true` value schema here.
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<Map<String, Value>>,
+    /// Failure information. Inspect `code` and `retryable`; omitted on success.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<ToolErrorBody>,
 }
@@ -1043,8 +1182,9 @@ enum ReadSource {
 impl McpHandler {
     #[tool(
         name = "vault_overview",
-        description = "Return bounded Vault identity, statistics, direct entries, and recent change metadata.",
-        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
+        title = "Inspect Vault overview",
+        description = "Use this when you need a high-level map of the user's Vault before choosing what to search or read. Set include_recent=true when recent activity may matter. On success, `data` contains `vault`, `statistics`, top-level `topics`, `index` coverage and revision state, optional `recent` changes, and `truncated`. Pass a returned topic ID to browse_index for deeper navigation; use search_notes when you already know the subject to find.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn vault_overview(
@@ -1068,8 +1208,9 @@ impl McpHandler {
 
     #[tool(
         name = "browse_index",
-        description = "Browse a bounded deterministic Vault tree through Vault Core.",
-        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
+        title = "Browse knowledge index",
+        description = "Use this when you need to explore the Vault's topic tree without relying on exact keywords. Omit node_id to start at the root, or pass an ID returned by vault_overview or a previous browse_index call; set include_note_candidates=true to see notes under the node. On success, `data` contains `node`, `children`, `note_candidates`, `index_revision`, `coverage`, `next_cursor`, and `truncated`. Follow `next_cursor` when present; use search_notes for content-based matching.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn browse_index(
@@ -1117,8 +1258,9 @@ impl McpHandler {
 
     #[tool(
         name = "recent_changes",
-        description = "Return bounded Vault-scoped immutable revision metadata in newest-first order.",
-        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
+        title = "View recent Vault changes",
+        description = "Use this when the user asks what changed recently or when recent edits may affect the task. Pass limit to bound the newest-first history. On success, `data.changes` contains revision records with `operation`, `revision`, `path_before`, `path_after`, actor/source information, and `created_at`, while `data.limit` reports the applied bound; note bodies are not included. Use read_note to inspect an active note and note_history to inspect all retained revisions of one note.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn recent_changes(
@@ -1163,8 +1305,9 @@ impl McpHandler {
 
     #[tool(
         name = "search_notes",
-        description = "Search indexed Markdown source material with bounded lexical filters.",
-        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
+        title = "Search Vault notes",
+        description = "Use this when you need to find Vault notes that match keywords, concepts, paths, topics, tags, or modification times. Pass the search phrase in query; choose lexical for exact text, semantic for meaning-based matches, or hybrid for both. On success, `data.results` contains each note's `file_id`, `path`, current `revision`, `title`, matching `snippet`, tags, headings, links, score, and `resource_uri`; `data.mode`, `result_granularity`, `available_result_count`, `index_revision`, `coverage`, `degraded`, `degradation_reasons`, `next_cursor`, and `truncated` describe how to interpret or continue the results. Use read_note for exact content and recall instead when the question depends on previously saved personal or project context.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn search_notes(
@@ -1200,8 +1343,9 @@ impl McpHandler {
 
     #[tool(
         name = "read_note",
-        description = "Read bounded UTF-8 note content or safe binary metadata through Vault Core.",
-        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
+        title = "Read a Vault note",
+        description = "Use this when you know a Vault-relative path and need the exact current note or a retained historical revision. Pass path, optionally revision, and a max_bytes limit; only full-note selection is currently supported. On success, `data` contains `path`, selected `revision`, `selection`, `content`, `content_hash`, `size`, `binary`, `truncated`, and `resource_uri`. Use the revision from a current read as expected_revision before edit_note, move_note, or delete_note; use search_notes or browse_index when the path is unknown.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn read_note(
@@ -1284,8 +1428,9 @@ impl McpHandler {
 
     #[tool(
         name = "recall",
-        description = "Recall durable sourced context plus related ordinary-note cues for the current task without a query-time generative LLM; read returned note sources for exact details.",
-        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
+        title = "Recall relevant memory",
+        description = "Use this proactively before answering when the current request may depend on information the user previously saved, such as preferences, decisions, constraints, project state, progress, relationships, procedures, or past work. Pass the current question or task as query. On success, `data.memories` contains concise long-term context relevant to the task, while `data.related_notes` contains candidate source notes with paths, revisions, and snippets; `memory_count`, `related_note_count`, `degraded`, and `truncated` show coverage limits. Use the memories as context, call read_note when exact source wording or more detail matters, and use search_notes instead for general document or quotation search.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn recall(
@@ -1347,8 +1492,9 @@ impl McpHandler {
 
     #[tool(
         name = "get_memory",
-        description = "Inspect one durable memory, its lifecycle, canonical Markdown path, and provenance.",
-        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
+        title = "Inspect a durable memory",
+        description = "Use this when you already have a long-term memory ID from recall or list_memories and need the complete stored record. Pass that ID. On success, `data` contains `id`, `memory_type`, lifecycle `status`, current `revision`, `content`, importance, confidence, validity dates, tags, entities, source references, relations, and managed note location. Use its revision before update_memory or forget_memory; use read_note on a returned source path when exact evidence matters. Use recall when you do not yet know the relevant memory ID.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn get_memory(
@@ -1375,8 +1521,9 @@ impl McpHandler {
 
     #[tool(
         name = "list_memories",
-        description = "Browse durable memories deliberately with bounded lifecycle, type, tag, entity, and source filters.",
-        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
+        title = "List durable memories",
+        description = "Use this when the user explicitly wants to browse or audit stored long-term memories, or when you need records matching a lifecycle status, type, tag, entity, or source path. Pass only the needed filters and reuse the returned cursor for pagination. On success, `data.memories` contains complete memory records and `next_cursor` and `truncated` indicate more results. Use get_memory for one known ID and recall instead when the goal is to retrieve context relevant to the current task.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn list_memories(
@@ -1442,8 +1589,9 @@ impl McpHandler {
 
     #[tool(
         name = "remember",
-        description = "Stage one explicit sourced memory input for durable background consolidation. Returns the raw input and consolidation job IDs; final recall changes after Phase 2 commits.",
-        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true),
+        title = "Save a durable memory",
+        description = "Use this only when the user has authorized saving one concise fact, preference, decision, constraint, relationship, procedure, or project state for future conversations. Pass the proposition in content, classify it with memory_type, provide importance and confidence from 0 to 1, and include exact source-note details only when verified; provide idempotency_key for safe retries. On success, `data` contains `outcome`, optional `memory`, `raw_memory_id`, and `consolidation_job_id`; newly staged content is queued for background consolidation and is not immediately available to recall. Use create_note or edit_note when the user wants readable Vault note content changed.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn remember(
@@ -1549,8 +1697,9 @@ impl McpHandler {
 
     #[tool(
         name = "update_memory",
-        description = "Update one durable memory under its expected metadata revision.",
-        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true),
+        title = "Update a durable memory",
+        description = "Use this only when the user has authorized correcting an existing long-term memory. First call get_memory, then pass its id and current revision as expected_revision together with only the fields that should change. On success, `data` contains the updated memory record and its new revision. If a revision conflict occurs, call get_memory again and reconsider the change instead of overwriting newer content. This does not edit the source note; use edit_note for note content and remember for a new memory.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn update_memory(
@@ -1606,8 +1755,9 @@ impl McpHandler {
 
     #[tool(
         name = "forget_memory",
-        description = "Archive or explicitly permanently delete one durable memory under an expected revision.",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true),
+        title = "Forget a durable memory",
+        description = "Use this only when the user explicitly asks to stop using a known long-term memory or to delete it permanently. First call get_memory, then pass its id and current revision as expected_revision; omit permanent or set it to false to archive, and set it to true only for an explicitly authorized irreversible deletion. On success, `data` contains the affected memory record. If a revision conflict occurs, call get_memory again; do not retry with a guessed revision.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn forget_memory(
@@ -1647,8 +1797,9 @@ impl McpHandler {
 
     #[tool(
         name = "create_note",
-        description = "Create a new canonical note with an absent-path precondition and idempotency key.",
-        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true),
+        title = "Create a Vault note",
+        description = "Use this when the user has authorized creating a new Markdown note and search confirms that no existing note should be updated instead. Pass a new Vault-relative path and the complete initial Markdown content; provide idempotency_key for safe retries. On success, `data.file` contains the new file ID, path, and current revision, `data.revision` describes the create operation, and `data.etag` identifies the resulting content. If the path already exists, use read_note and edit_note rather than replacing it.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn create_note(
@@ -1706,8 +1857,9 @@ impl McpHandler {
 
     #[tool(
         name = "edit_note",
-        description = "Apply one exact revision-checked note edit through Vault Core.",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
+        title = "Edit a Vault note",
+        description = "Use this when the user has authorized changing an existing Markdown note, including correcting facts or updating decisions, constraints, and project progress. First call read_note, then pass its path and current revision as expected_revision and choose the narrowest operation: replace_all, apply_unified_diff, append, insert_after_heading, or replace_heading_section. On success, `data.file` contains the updated path and revision, `data.revision` describes the edit, and `data.etag` identifies the result. On conflict, reread and reconsider; use remember only to save a separate long-term memory.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn edit_note(
@@ -1823,8 +1975,9 @@ impl McpHandler {
 
     #[tool(
         name = "move_note",
-        description = "Move a note or directory with an exact source revision precondition.",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
+        title = "Move or rename a Vault note",
+        description = "Use this only when the user explicitly requests renaming or moving an existing note or directory. Pass the current source path, a new destination path that does not exist, and the source's current revision as expected_revision; provide idempotency_key for safe retries. On success, `data.file.path` is the new path, `data.revision` records path_before and path_after, and `data.etag` identifies the moved entry. On conflict, reread the source state; do not reorganize the Vault merely because another layout seems preferable.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn move_note(
@@ -1867,8 +2020,9 @@ impl McpHandler {
 
     #[tool(
         name = "delete_note",
-        description = "Tombstone a note after an exact revision check; permanent deletion is not exposed.",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
+        title = "Delete a Vault note",
+        description = "Use this only when the user explicitly requests removing an existing note. First call read_note, then pass its path and current revision as expected_revision; use mode=trash because permanent note deletion is not supported. On success, `data.file` represents the inactive entry, `data.revision` records the deletion, and `data.etag` identifies the tombstone. The note remains recoverable through its retained history; on conflict, reread instead of guessing a revision.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn delete_note(
@@ -1916,8 +2070,9 @@ impl McpHandler {
 
     #[tool(
         name = "note_history",
-        description = "Return immutable revision metadata for one Vault-relative note path.",
-        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
+        title = "View note revision history",
+        description = "Use this when the user asks how a note changed, when you need to audit its edits, or before choosing a version to restore. Pass the current Vault-relative path. On success, `data.path` identifies the note and `data.revisions` lists retained versions with revision number, operation, paths before and after, content hash, size, actor/source, and timestamp; note bodies are not included. Pass a selected revision to read_note to inspect its content before considering restore_note_revision.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn note_history(
@@ -1947,8 +2102,9 @@ impl McpHandler {
 
     #[tool(
         name = "restore_note_revision",
-        description = "Restore one retained revision as a new current revision after two precondition checks.",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
+        title = "Restore a note revision",
+        description = "Use this only when the user explicitly authorizes restoring a retained historical note version. First call note_history, inspect the target with read_note(revision), and read the current note; then pass path, the target revision, and the current live revision as expected_current_revision. On success, `data.file` contains the restored current state, `data.revision` records a new restore operation, and `data.etag` identifies the result. On conflict, repeat the reads and reconsider instead of overwriting newer work.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn restore_note_revision(
@@ -2002,8 +2158,8 @@ impl ServerHandler for McpHandler {
             "This server is the user's persistent Markdown knowledge Vault.\n\
              Use vault_overview or browse_index when you need to understand the available knowledge.\n\
              Use recall proactively when the task may depend on prior decisions, preferences, constraints, project state, past work, or knowledge that may already exist in the Vault. Treat related_notes as retrieval cues, then use read_note to verify exact source material.\n\
-             Use mutation tools only when the user requests or clearly authorizes a persistent change. Preserve revisions and never overwrite a revision conflict.\n\
-             MCP Vault binds each request to the Vault slug in the endpoint and the bearer credential. Recall is projection-based and does not require a query-time LLM; semantic providers are optional and report degradation.",
+             When the user requests or clearly authorizes a persistent note change, search for the existing note, read its current revision, and use the narrowest mutation; create a note only when no existing note should be updated. Never overwrite a revision conflict.\n\
+             Every result has request_id and ok. On success consume data; on failure inspect error.code and error.retryable, and retry the same logical operation only when retryable is true. Treat degraded or truncated results as incomplete coverage.",
         )
     }
 
@@ -2991,11 +3147,11 @@ fn vault_error(error: VaultError) -> ToolErrorBody {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::ErrorKind, path::PathBuf};
+    use std::{collections::BTreeSet, io::ErrorKind, path::PathBuf};
 
     use super::{
-        McpService, bearer_token, mounted_slug, oauth_metadata_router, router, stateful_router,
-        vault_error,
+        McpHandler, McpService, bearer_token, mounted_slug, oauth_metadata_router, router,
+        stateful_router, vault_error,
     };
     use axum::{Router, body::Body, http::Request};
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -3035,6 +3191,108 @@ mod tests {
         );
         assert!(mounted_slug("/mcp/v1/vaults/work/extra").is_err());
         assert!(mounted_slug("/mcp/v1/vaults/../work").is_err());
+    }
+
+    #[test]
+    fn tool_metadata_is_model_facing_selection_and_result_guidance() {
+        let tools = McpHandler::default().tool_router.list_all();
+        assert_eq!(tools.len(), 17);
+
+        let mut titles = BTreeSet::new();
+        for tool in &tools {
+            let title = tool
+                .title
+                .as_deref()
+                .unwrap_or_else(|| panic!("{} is missing a title", tool.name));
+            assert!(!title.trim().is_empty(), "{} has an empty title", tool.name);
+            assert!(titles.insert(title), "tool title must be unique: {title}");
+
+            let description = tool
+                .description
+                .as_deref()
+                .unwrap_or_else(|| panic!("{} is missing a description", tool.name));
+            assert!(
+                description.starts_with("Use this when")
+                    || description.starts_with("Use this proactively")
+                    || description.starts_with("Use this only when"),
+                "{} does not state its selection condition: {description}",
+                tool.name
+            );
+            assert!(
+                description.contains("On success, `data"),
+                "{} does not explain its result fields: {description}",
+                tool.name
+            );
+            assert!(
+                description.len() <= 1_000,
+                "{} has an overly long description",
+                tool.name
+            );
+            for implementation_term in [
+                "Vault Core",
+                "projection-based",
+                "query-time",
+                "durable sourced",
+                "ordinary-note cues",
+                "bounded deterministic",
+            ] {
+                assert!(
+                    !description.contains(implementation_term),
+                    "{} exposes implementation terminology {implementation_term}: {description}",
+                    tool.name
+                );
+            }
+
+            let annotations = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} is missing annotations", tool.name));
+            assert_eq!(
+                annotations.open_world_hint,
+                Some(false),
+                "{} must declare the Vault as a closed world",
+                tool.name
+            );
+
+            let properties = tool
+                .input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("{} has no object input properties", tool.name));
+            assert!(
+                !properties.is_empty(),
+                "{} has no input properties",
+                tool.name
+            );
+            for (property, schema) in properties {
+                assert!(
+                    schema
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|description| !description.trim().is_empty()),
+                    "{}.{} is missing a parameter description",
+                    tool.name,
+                    property
+                );
+            }
+        }
+
+        let description = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.name.as_ref() == name)
+                .and_then(|tool| tool.description.as_deref())
+                .unwrap()
+        };
+        assert!(description("search_notes").contains("`data.results`"));
+        assert!(description("search_notes").contains("degradation_reasons"));
+        assert!(description("recall").contains("proactively before answering"));
+        assert!(description("recall").contains("`data.memories`"));
+        assert!(description("recall").contains("`data.related_notes`"));
+        assert!(description("remember").contains("`raw_memory_id`"));
+        assert!(description("remember").contains("not immediately available to recall"));
+        assert!(description("edit_note").contains("First call read_note"));
+        assert!(description("edit_note").contains("replace_heading_section"));
     }
 
     #[test]
@@ -4189,6 +4447,25 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["result"]["ttlMs"], super::LIST_CACHE_TTL_MS);
         assert_eq!(body["result"]["cacheScope"], "private");
+        let search = body["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "search_notes")
+            .unwrap();
+        assert_eq!(search["title"], "Search Vault notes");
+        assert!(
+            search["description"]
+                .as_str()
+                .unwrap()
+                .contains("`data.results`")
+        );
+        assert!(
+            search["inputSchema"]["properties"]["query"]["description"]
+                .as_str()
+                .is_some_and(|description| !description.is_empty())
+        );
+        assert_eq!(search["annotations"]["openWorldHint"], false);
     }
 
     #[tokio::test]
