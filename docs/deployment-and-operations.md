@@ -791,6 +791,18 @@ Operators can also run it from Admin under **Memory → Source health**. Final-
 source, affected-memory, Stage 1, and distinct-File-ID counts are intentionally
 separate and must not be interpreted as interchangeable totals.
 
+Migration 0014 creates only Vault-scoped multilingual retrieval projections and
+rebuilds memory FTS; it does not rewrite existing canonical memory Markdown or
+advance the prerelease memory pipeline generation. Take and verify a backup
+before upgrade as usual. After upgrade, inspect **Memory → Cross-language
+retrieval**. Existing active, stale, and superseded memory remains uncovered
+until an Admin explicitly confirms backfill. The dialog reports estimated
+eight-item Provider batches and may equivalently restore verifiable translated
+bodies to their source language. Those body changes create ordinary revisions
+and can be restored from history. Cancelled or failed work retains applied
+metadata and resumes from durable pending/proposal state; do not delete the
+retrieval proposal table to retry a paid response.
+
 ### Rollback
 
 Database migrations are forward-only. Rollback to an older binary may require restoring the pre-upgrade backup. Release notes must state compatibility.
@@ -842,6 +854,19 @@ When local embeddings are enabled:
 - isolate inference on bounded blocking workers;
 - account for CPU/memory readiness;
 - keep FTS operational during download/failure.
+
+After upgrading from the original 6,000-character note-vector profile, open
+the Knowledge Index page and run **Rebuild index** once. The deterministic
+`text-v2` source keys and embedding projection version admit fresh
+`embedding.rebuild` jobs instead of reusing terminal jobs from the old profile.
+The completed index job only schedules vector work; verify the separate
+“Rebuild semantic vectors” jobs and semantic coverage before declaring the
+upgrade complete.
+
+If `embedding_memory` was already bound before upgrade, open the Memory page
+and use **Generate missing vectors**. This rebuilds vectors from current memory
+records and does not re-run memory extraction, consolidation, or multilingual
+alias generation.
 
 ## 17. Diagnostics
 

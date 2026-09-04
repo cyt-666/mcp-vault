@@ -2302,7 +2302,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-admin-api"
-version = "0.1.17"
+version = "0.1.21"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2329,7 +2329,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-auth"
-version = "0.1.17"
+version = "0.1.21"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -2354,7 +2354,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-backup"
-version = "0.1.17"
+version = "0.1.21"
 dependencies = [
  "fs2",
  "mcp-vault-core",
@@ -2374,7 +2374,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-core"
-version = "0.1.17"
+version = "0.1.21"
 dependencies = [
  "mcp-vault-domain",
  "mcp-vault-state",
@@ -2388,7 +2388,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-domain"
-version = "0.1.17"
+version = "0.1.21"
 dependencies = [
  "percent-encoding",
  "serde",
@@ -2399,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-indexer"
-version = "0.1.17"
+version = "0.1.21"
 dependencies = [
  "async-trait",
  "axum",
@@ -2422,7 +2422,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-mcp"
-version = "0.1.17"
+version = "0.1.21"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2451,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-memory"
-version = "0.1.17"
+version = "0.1.21"
 dependencies = [
  "async-trait",
  "axum",
@@ -2476,7 +2476,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-providers"
-version = "0.1.17"
+version = "0.1.21"
 dependencies = [
  "async-trait",
  "axum",
@@ -2499,7 +2499,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-server"
-version = "0.1.17"
+version = "0.1.21"
 dependencies = [
  "axum",
  "http-body-util",
@@ -2534,7 +2534,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-state"
-version = "0.1.17"
+version = "0.1.21"
 dependencies = [
  "mcp-vault-domain",
  "serde",
@@ -2544,11 +2544,12 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "unicode-normalization",
 ]
 
 [[package]]
 name = "mcp-vault-storage-fs"
-version = "0.1.17"
+version = "0.1.21"
 dependencies = [
  "fs2",
  "mcp-vault-domain",
@@ -2562,7 +2563,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-webdav"
-version = "0.1.17"
+version = "0.1.21"
 dependencies = [
  "axum",
  "base64 0.22.1",

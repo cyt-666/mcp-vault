@@ -119,8 +119,12 @@ three-field root template in the prompt and still validates the result locally.
 If Phase 1 returns valid `raw_memory` but omits only auxiliary
 `rollout_summary`, MCP Vault copies `raw_memory` verbatim into that field and
 reruns the full validator. Unknown or empty objects still fail without issuing
-an automatic second paid request. Source provenance is derived locally; MiMo is
-never asked for evidence line coordinates. This is `memory-stage1-v4`.
+an automatic second paid request. An invalid optional `rollout_slug` is dropped
+instead of discarding otherwise valid semantic output. Source provenance is
+derived locally; MiMo is never asked for evidence line coordinates. This is
+`memory-stage1-v5`. The v5 prompt also requires `raw_memory` and
+`rollout_summary` to retain the note's primary language while preserving
+technical literals.
 
 Phase 2 likewise includes an exact compact root template, but does not ask MiMo
 to generate or copy durable identifiers, evidence indexes, or mechanically
@@ -131,9 +135,19 @@ snapshot, allocates every create ID locally, expands ready inputs to validated
 evidence, and derives `used`, `no_output`, and `withdrawn` state. An out-of-range
 reference is reported as a redacted `memory_phase2_*_index_invalid` code; the
 Provider response body is never retained. This is the
-`memory-consolidation-v4` contract. Older prepared proposals are rejected before
+`memory-consolidation-v7` contract. The v7 prompt uses the primary language of
+supporting raw inputs for creates and retains current-memory language for
+updates. Older prepared proposals are rejected before
 parsing, and revision-only projection drift does not invalidate unchanged
 semantic memory.
+
+Multilingual retrieval enrichment is a third prompt contract, not a third
+model role. `memory-retrieval-v1` reuses the effective
+`memory_consolidation` binding with at most eight request-local memory indexes.
+It returns a BCP-47 source language, an optional equivalent source-language
+rewrite, and bounded aliases for source/`zh-Hans`/`en`. MCP Vault redacts and
+validates the complete result, persists it before application, and never logs
+or retries a paid response merely because application was interrupted.
 
 ### 4.3 Zhipu GLM
 
@@ -141,6 +155,15 @@ The API root ends at `/api/paas/v4/`; adding another `/v1` is invalid. GLM
 structured output uses JSON Object mode and a prompt-defined structure. The
 OpenAI-compatibility guide excludes temperature zero, so MCP Vault omits its
 usual deterministic `0.0` value for the GLM preset.
+
+Zhipu `embedding-3` uses the same root plus `embeddings`, Bearer authentication,
+and the OpenAI-compatible `{model,input}` response shape. Its documented
+per-input limit is 3,072 tokens and its default output is 2,048 dimensions.
+Provider model discovery is not treated as a complete catalog, so Admin may
+manually register `embedding-3` with Embedding capability and dimension 2,048.
+MCP Vault's `text-v2` note projection caps the complete decoded input at 2,048
+UTF-8 bytes; this conservative bound avoids coupling rebuild correctness to a
+vendor tokenizer. The prior 6,000-character profile is obsolete derived state.
 
 ### 4.4 Moonshot/Kimi
 

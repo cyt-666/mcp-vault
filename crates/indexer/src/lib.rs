@@ -4,7 +4,7 @@
 //! queries are delegated to the state repository.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -42,12 +42,23 @@ pub const MAX_YAML_BYTES: usize = 256 * 1024;
 pub const MAX_YAML_DEPTH: usize = 16;
 /// Maximum YAML scalar/collection nodes decoded.
 pub const MAX_YAML_NODES: usize = 4096;
-/// Maximum Unicode scalar values sent in one note embedding chunk.
-pub const NOTE_EMBEDDING_CHUNK_CHARS: usize = 6_000;
-/// Overlap retained between adjacent semantic chunks.
-pub const NOTE_EMBEDDING_CHUNK_OVERLAP: usize = 400;
+/// Maximum UTF-8 bytes sent in one note embedding input, including context.
+///
+/// This deliberately uses a conservative byte envelope instead of assuming a
+/// Provider token is equivalent to one Unicode scalar value. In particular,
+/// it keeps multilingual inputs below lower-limit embedding APIs without
+/// coupling the Index service to a vendor tokenizer.
+pub const NOTE_EMBEDDING_MAX_INPUT_BYTES: usize = 2_048;
+/// Maximum UTF-8 bytes reserved for deterministic path/title/heading context.
+pub const NOTE_EMBEDDING_CONTEXT_MAX_BYTES: usize = 512;
+/// Approximate UTF-8 byte overlap retained between adjacent semantic chunks.
+pub const NOTE_EMBEDDING_CHUNK_OVERLAP_BYTES: usize = 256;
 /// Maximum semantic chunks derived from one bounded note projection.
 pub const MAX_NOTE_EMBEDDING_CHUNKS: usize = 128;
+/// Derived note-vector chunk profile encoded into every source key.
+pub const NOTE_EMBEDDING_CHUNK_PROFILE: &str = "text-v2";
+/// Maximum raw note-vector rows considered before current-note aggregation.
+const MAX_NOTE_VECTOR_CANDIDATES: u32 = 10_000;
 
 /// Errors exposed by the index application boundary.
 #[derive(Debug, Error)]
@@ -166,7 +177,7 @@ pub struct NoteRetrievalScope {
 pub struct NoteRetrievalHit {
     /// Bounded source metadata and snippet.
     pub note: NoteSearchRecord,
-    /// Fused positive relevance score.
+    /// Fused non-negative relevance score.
     pub score: f64,
     /// Stable component scores when requested.
     pub score_breakdown: Option<BTreeMap<String, f64>>,
@@ -228,6 +239,12 @@ struct RankedNote {
 struct NoteEmbeddingChunk {
     key: String,
     text: String,
+    snippet: String,
+    content_hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CurrentNoteEmbeddingChunk {
     snippet: String,
     content_hash: String,
 }
@@ -1351,7 +1368,9 @@ impl IndexService {
                 binding.model_id,
                 &EmbeddingRequest {
                     model: model.external_model_id,
-                    inputs: vec![query.to_owned()],
+                    inputs: vec![
+                        truncate_utf8_bytes(query, NOTE_EMBEDDING_MAX_INPUT_BYTES).to_owned(),
+                    ],
                 },
             )
             .await
@@ -1370,9 +1389,18 @@ impl IndexService {
             degraded.push("semantic_provider_invalid_response".to_owned());
             return Ok(());
         };
+        let vector_candidate_limit = pool_limit
+            .saturating_mul(u32::try_from(MAX_NOTE_EMBEDDING_CHUNKS).unwrap_or(u32::MAX))
+            .min(MAX_NOTE_VECTOR_CANDIDATES);
         let vector_hits = match providers
             .embeddings()
-            .search(context, binding.model_id, query_vector, pool_limit)
+            .search(
+                context,
+                binding.model_id,
+                "note",
+                query_vector,
+                vector_candidate_limit,
+            )
             .await
         {
             Ok(hits) => hits,
@@ -1385,50 +1413,78 @@ impl IndexService {
             degraded.push("semantic_index_empty".to_owned());
             return Ok(());
         }
-        let mut sources = HashMap::<FileId, NoteEmbeddingSourceRecord>::new();
+        let mut current_chunks =
+            HashMap::<FileId, HashMap<String, CurrentNoteEmbeddingChunk>>::new();
+        let mut selected_notes = HashSet::<FileId>::new();
+        let mut excluded_notes = HashSet::<FileId>::new();
         let mut semantic_rank = 0_usize;
         let mut current_note_vectors = 0_usize;
+        let mut saw_non_negative_candidate = false;
         for hit in vector_hits {
+            if hit.score < 0.0 {
+                break;
+            }
+            saw_non_negative_candidate = true;
             if hit.embedding.object_type != "note" {
                 continue;
             }
             let Ok(file_id) = FileId::parse(&hit.embedding.object_id) else {
                 continue;
             };
-            let source = if let Some(source) = sources.get(&file_id) {
-                source.clone()
-            } else {
-                let Some(source) = self
-                    .repository()
-                    .get_note_embedding_source(context, file_id)
-                    .await?
-                else {
-                    continue;
-                };
-                sources.insert(file_id, source.clone());
-                source
+            if selected_notes.contains(&file_id) || excluded_notes.contains(&file_id) {
+                continue;
+            }
+            let chunks = match current_chunks.entry(file_id) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let chunks = if let Some(source) = self
+                        .repository()
+                        .get_note_embedding_source(context, file_id)
+                        .await?
+                    {
+                        note_embedding_chunks(&source)
+                            .into_iter()
+                            .map(|chunk| {
+                                (
+                                    chunk.key,
+                                    CurrentNoteEmbeddingChunk {
+                                        snippet: chunk.snippet,
+                                        content_hash: chunk.content_hash,
+                                    },
+                                )
+                            })
+                            .collect()
+                    } else {
+                        HashMap::new()
+                    };
+                    entry.insert(chunks)
+                }
             };
-            let Some(chunk) = note_embedding_chunks(&source).into_iter().find(|chunk| {
-                chunk.key == hit.embedding.chunk_key
-                    && chunk.content_hash == hit.embedding.content_hash
-            }) else {
+            let Some(chunk) = chunks.get(&hit.embedding.chunk_key) else {
                 continue;
             };
+            if chunk.content_hash != hit.embedding.content_hash {
+                continue;
+            }
+            let snippet = chunk.snippet.clone();
+            current_note_vectors = current_note_vectors.saturating_add(1);
             let Some(mut note) = self
                 .repository()
                 .get_note_for_retrieval(context, file_id)
                 .await?
             else {
+                excluded_notes.insert(file_id);
                 continue;
             };
-            current_note_vectors = current_note_vectors.saturating_add(1);
             if !note_matches_scope(&note, scope) {
+                excluded_notes.insert(file_id);
                 continue;
             }
-            let component = reciprocal_rank(1.0, semantic_rank);
-            semantic_rank = semantic_rank.saturating_add(1);
+            let Some(component) = semantic_note_rank_score(hit.score, semantic_rank) else {
+                continue;
+            };
             let entry = ranked.entry(file_id).or_insert_with(|| {
-                note.snippet = chunk.snippet.clone();
+                note.snippet = snippet.clone();
                 RankedNote {
                     note,
                     score: 0.0,
@@ -1436,10 +1492,11 @@ impl IndexService {
                 }
             });
             if entry.components.contains_key("semantic_rrf") {
+                selected_notes.insert(file_id);
                 continue;
             }
             if !entry.components.contains_key("lexical_rrf") {
-                entry.note.snippet = chunk.snippet;
+                entry.note.snippet = snippet;
             }
             entry.score += component;
             entry
@@ -1448,8 +1505,13 @@ impl IndexService {
             entry
                 .components
                 .insert("semantic_cosine".to_owned(), f64::from(hit.score));
+            selected_notes.insert(file_id);
+            semantic_rank = semantic_rank.saturating_add(1);
+            if selected_notes.len() >= pool_limit as usize {
+                break;
+            }
         }
-        if current_note_vectors == 0 {
+        if saw_non_negative_candidate && current_note_vectors == 0 {
             degraded.push("semantic_note_index_empty_or_stale".to_owned());
         }
         Ok(())
@@ -1756,6 +1818,10 @@ fn reciprocal_rank(weight: f64, rank: usize) -> f64 {
     weight / (60.0 + rank as f64 + 1.0)
 }
 
+fn semantic_note_rank_score(similarity: f32, rank: usize) -> Option<f64> {
+    (similarity >= 0.0).then(|| f64::from(similarity) * reciprocal_rank(1.0, rank))
+}
+
 fn note_matches_scope(note: &NoteSearchRecord, scope: &NoteRetrievalScope) -> bool {
     if scope
         .path_prefix
@@ -1797,7 +1863,7 @@ fn note_embedding_chunks(source: &NoteEmbeddingSourceRecord) -> Vec<NoteEmbeddin
             return Vec::new();
         }
         return vec![NoteEmbeddingChunk {
-            key: "text-v1:0000".to_owned(),
+            key: format!("{NOTE_EMBEDDING_CHUNK_PROFILE}:0000"),
             snippet: source
                 .title
                 .clone()
@@ -1806,42 +1872,40 @@ fn note_embedding_chunks(source: &NoteEmbeddingSourceRecord) -> Vec<NoteEmbeddin
             text: context,
         }];
     }
-    let mut boundaries = body
-        .char_indices()
-        .map(|(offset, _)| offset)
-        .collect::<Vec<_>>();
-    boundaries.push(body.len());
-    let character_count = boundaries.len().saturating_sub(1);
-    let step = NOTE_EMBEDDING_CHUNK_CHARS.saturating_sub(NOTE_EMBEDDING_CHUNK_OVERLAP);
-    let natural_count = if character_count <= NOTE_EMBEDDING_CHUNK_CHARS {
+
+    let prefix = if context.is_empty() {
+        String::new()
+    } else {
+        format!("{context}\n\n")
+    };
+    let body_limit = NOTE_EMBEDDING_MAX_INPUT_BYTES.saturating_sub(prefix.len());
+    debug_assert!(body_limit > NOTE_EMBEDDING_CHUNK_OVERLAP_BYTES);
+    let step = body_limit.saturating_sub(NOTE_EMBEDDING_CHUNK_OVERLAP_BYTES);
+    let natural_count = if body.len() <= body_limit {
         1
     } else {
-        character_count
-            .saturating_sub(NOTE_EMBEDDING_CHUNK_OVERLAP)
+        body.len()
+            .saturating_sub(NOTE_EMBEDDING_CHUNK_OVERLAP_BYTES)
             .div_ceil(step)
     };
     let chunk_count = natural_count.min(MAX_NOTE_EMBEDDING_CHUNKS);
-    let max_start = character_count.saturating_sub(NOTE_EMBEDDING_CHUNK_CHARS);
+    let max_start = body.len().saturating_sub(body_limit);
     (0..chunk_count)
         .map(|ordinal| {
-            let start_character = if natural_count <= MAX_NOTE_EMBEDDING_CHUNKS {
+            let target_start = if natural_count <= MAX_NOTE_EMBEDDING_CHUNKS {
                 ordinal.saturating_mul(step).min(max_start)
             } else if chunk_count <= 1 {
                 0
             } else {
                 max_start.saturating_mul(ordinal) / (chunk_count - 1)
             };
-            let end_character = start_character
-                .saturating_add(NOTE_EMBEDDING_CHUNK_CHARS)
-                .min(character_count);
-            let body_chunk = &body[boundaries[start_character]..boundaries[end_character]];
-            let text = if context.is_empty() {
-                body_chunk.to_owned()
-            } else {
-                format!("{context}\n\n{body_chunk}")
-            };
+            let start = ceil_char_boundary(body, target_start);
+            let end = floor_char_boundary(body, start.saturating_add(body_limit).min(body.len()));
+            let body_chunk = &body[start..end];
+            let text = format!("{prefix}{body_chunk}");
+            debug_assert!(text.len() <= NOTE_EMBEDDING_MAX_INPUT_BYTES);
             NoteEmbeddingChunk {
-                key: format!("text-v1:{ordinal:04}"),
+                key: format!("{NOTE_EMBEDDING_CHUNK_PROFILE}:{ordinal:04}"),
                 text: text.clone(),
                 snippet: body_chunk.chars().take(280).collect(),
                 content_hash: content_hash(&text),
@@ -1865,7 +1929,27 @@ fn note_embedding_context(source: &NoteEmbeddingSourceRecord) -> String {
             .join(" > ");
         lines.push(format!("Headings: {headings}"));
     }
-    lines.join("\n").chars().take(2_048).collect()
+    truncate_utf8_bytes(&lines.join("\n"), NOTE_EMBEDDING_CONTEXT_MAX_BYTES).to_owned()
+}
+
+fn floor_char_boundary(value: &str, mut index: usize) -> usize {
+    index = index.min(value.len());
+    while index > 0 && !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn ceil_char_boundary(value: &str, mut index: usize) -> usize {
+    index = index.min(value.len());
+    while index < value.len() && !value.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
+fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> &str {
+    &value[..floor_char_boundary(value, max_bytes)]
 }
 
 #[derive(Clone, Debug)]
@@ -2194,22 +2278,23 @@ fn current_millis() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{collections::HashMap, path::PathBuf};
 
     use super::{
-        IndexService, MAX_NOTE_EMBEDDING_CHUNKS, NOTE_EMBEDDING_CHUNK_CHARS, NoteRetrievalMode,
-        NoteRetrievalScope, Taxonomy, analyze_markdown, content_hash, note_embedding_chunks,
-        parse_taxonomy, quote_fts_query,
+        IndexService, MAX_NOTE_EMBEDDING_CHUNKS, NOTE_EMBEDDING_CHUNK_PROFILE,
+        NOTE_EMBEDDING_MAX_INPUT_BYTES, NoteRetrievalMode, NoteRetrievalScope, Taxonomy,
+        analyze_markdown, content_hash, note_embedding_chunks, parse_taxonomy, quote_fts_query,
+        semantic_note_rank_score,
     };
-    use axum::{Json, Router, routing::post};
+    use axum::{Json, Router, http::StatusCode, routing::post};
     use mcp_vault_auth::{AuthService, MasterKeyRing};
     use mcp_vault_core::VaultCore;
     use mcp_vault_domain::{
         Actor, Revision, SourcePlane, VaultContext, VaultId, VaultPath, VaultPathPolicy, VaultSlug,
     };
     use mcp_vault_providers::{
-        ModelCapabilities, ModelInput, ModelSettings, ProviderInput, ProviderKind, ProviderMode,
-        ProviderService, ProviderSettings,
+        EmbeddingInput, EmbeddingSourceRef, ModelCapabilities, ModelInput, ModelSettings,
+        ProviderInput, ProviderKind, ProviderMode, ProviderService, ProviderSettings,
     };
     use mcp_vault_state::{NoteEmbeddingSourceRecord, StateStore, VaultStatus};
     use mcp_vault_storage_fs::StorageOptions;
@@ -2225,8 +2310,18 @@ mod tests {
         )
     }
 
-    async fn semantic_embeddings(Json(request): Json<Value>) -> Json<Value> {
+    async fn semantic_embeddings(Json(request): Json<Value>) -> (StatusCode, Json<Value>) {
         let inputs = request["input"].as_array().cloned().unwrap_or_default();
+        if inputs.iter().any(|input| {
+            input
+                .as_str()
+                .is_none_or(|input| input.len() > NOTE_EMBEDDING_MAX_INPUT_BYTES)
+        }) {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(json!({"error": "embedding input too large"})),
+            );
+        }
         let data = inputs
             .iter()
             .enumerate()
@@ -2240,32 +2335,145 @@ mod tests {
                 json!({"index": index, "embedding": vector})
             })
             .collect::<Vec<_>>();
-        Json(json!({"model": "semantic-test", "data": data}))
+        (
+            StatusCode::OK,
+            Json(json!({"model": "semantic-test", "data": data})),
+        )
+    }
+
+    async fn ranking_embeddings(Json(request): Json<Value>) -> (StatusCode, Json<Value>) {
+        let Some(inputs) = request["input"].as_array() else {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"error": "embedding input array missing"})),
+            );
+        };
+        if inputs
+            .iter()
+            .any(|input| input.as_str().is_none_or(|input| input.len() > 2_048))
+        {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(json!({"error": "embedding input too large"})),
+            );
+        }
+        let data = inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                let input = input.as_str().unwrap_or_default().to_ascii_lowercase();
+                let body_preview = input
+                    .rsplit_once("\n\n")
+                    .map_or(input.as_str(), |(_, body)| body)
+                    .chars()
+                    .take(280)
+                    .collect::<String>();
+                let vector = if matches!(
+                    input.trim(),
+                    "ranking query" | "keywordneedle" | "stale-high"
+                ) || input.contains("/dominant.md")
+                {
+                    json!([1.0, 0.0])
+                } else if input.contains("/runner-up.md") {
+                    json!([0.98, 0.2])
+                } else if input.contains("/third-place.md") {
+                    json!([0.95, 0.31])
+                } else if input.contains("/stale-current.md") {
+                    json!([0.9, 0.4358899])
+                } else if input.contains("/negative.md") {
+                    json!([-1.0, 0.0])
+                } else if body_preview.contains("semantic-tail") {
+                    json!([0.8, 0.6])
+                } else {
+                    json!([0.0, 1.0])
+                };
+                json!({"index": index, "embedding": vector})
+            })
+            .collect::<Vec<_>>();
+        (
+            StatusCode::OK,
+            Json(json!({"model": "ranking-test", "data": data})),
+        )
     }
 
     #[test]
     fn note_embedding_chunks_are_bounded_deterministic_and_cover_the_tail() {
+        let repeated = "边界🙂abc";
         let source = NoteEmbeddingSourceRecord {
             file_id: mcp_vault_domain::FileId::new(),
             path: VaultPath::parse("notes/long.md").unwrap(),
             revision: Revision::new(2),
             title: Some("Long note".to_owned()),
             headings: vec!["Start".to_owned(), "End".to_owned()],
-            plain_text: (0..(NOTE_EMBEDDING_CHUNK_CHARS * (MAX_NOTE_EMBEDDING_CHUNKS + 5)))
-                .map(|index| char::from(b'a' + (index % 26) as u8))
-                .collect(),
+            plain_text: repeated.repeat(
+                NOTE_EMBEDDING_MAX_INPUT_BYTES * (MAX_NOTE_EMBEDDING_CHUNKS + 5) / repeated.len(),
+            ),
             analyzed_content_hash: "sha256:canonical".to_owned(),
         };
         let first = note_embedding_chunks(&source);
         let second = note_embedding_chunks(&source);
         assert_eq!(first, second);
         assert_eq!(first.len(), MAX_NOTE_EMBEDDING_CHUNKS);
-        assert_eq!(first.first().unwrap().key, "text-v1:0000");
+        assert_eq!(
+            first.first().unwrap().key,
+            format!("{NOTE_EMBEDDING_CHUNK_PROFILE}:0000")
+        );
         assert_eq!(
             first.last().unwrap().key,
-            format!("text-v1:{:04}", MAX_NOTE_EMBEDDING_CHUNKS - 1)
+            format!(
+                "{NOTE_EMBEDDING_CHUNK_PROFILE}:{:04}",
+                MAX_NOTE_EMBEDDING_CHUNKS - 1
+            )
         );
+        assert!(
+            first
+                .iter()
+                .all(|chunk| chunk.text.len() <= NOTE_EMBEDDING_MAX_INPUT_BYTES)
+        );
+        assert!(first.iter().all(|chunk| chunk.text.is_char_boundary(0)));
         assert!(!first.last().unwrap().snippet.is_empty());
+        assert!(
+            first
+                .last()
+                .unwrap()
+                .text
+                .ends_with(source.plain_text.trim().chars().last().unwrap())
+        );
+    }
+
+    #[test]
+    fn note_embedding_chunks_bound_multibyte_context_and_body_together() {
+        let source = NoteEmbeddingSourceRecord {
+            file_id: mcp_vault_domain::FileId::new(),
+            path: VaultPath::parse("知识/长笔记.md").unwrap(),
+            revision: Revision::new(1),
+            title: Some("标题".repeat(300)),
+            headings: vec!["章节".repeat(300)],
+            plain_text: "这是需要生成向量的中文正文。".repeat(1_000),
+            analyzed_content_hash: "sha256:multibyte".to_owned(),
+        };
+
+        let chunks = note_embedding_chunks(&source);
+        assert!(chunks.len() > 1);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.text.len() <= NOTE_EMBEDDING_MAX_INPUT_BYTES)
+        );
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| std::str::from_utf8(chunk.text.as_bytes()).is_ok())
+        );
+    }
+
+    #[test]
+    fn semantic_note_score_uses_cosine_and_discards_negative_similarity() {
+        assert!(semantic_note_rank_score(-0.01, 0).is_none());
+        assert_eq!(semantic_note_rank_score(0.0, 0), Some(0.0));
+        assert!(
+            semantic_note_rank_score(0.9, 1).unwrap() > semantic_note_rank_score(0.4, 0).unwrap()
+        );
     }
 
     #[test]
@@ -2411,6 +2619,10 @@ mod tests {
                 "# Recovery\n\nMalicious process quarantine restoration procedure.",
             ),
             ("food/cooking.md", "# Cooking\n\nBake bread with flour."),
+            (
+                "knowledge/long.md",
+                &format!("# 长文\n\n{}", "多语言向量内容。".repeat(1_000)),
+            ),
         ] {
             core.create_bytes(
                 &context,
@@ -2464,19 +2676,20 @@ mod tests {
         let service = IndexService::with_provider_service(state.clone(), providers);
         service.rebuild_vault(&core, &context).await.unwrap();
         let sources = service.note_embedding_sources(&context).await.unwrap();
-        assert_eq!(sources.len(), 2);
+        assert!(sources.len() > 3);
+        let source_count = sources.len() as u64;
         assert_eq!(
             service
                 .reembed_note_sources(&context, model.id, &sources)
                 .await
                 .unwrap(),
-            2
+            source_count
         );
         let semantic_status = service.note_semantic_status(&context).await.unwrap();
         assert!(semantic_status.configured);
         assert!(semantic_status.provider_mode_enabled);
-        assert_eq!(semantic_status.source_chunks, 2);
-        assert_eq!(semantic_status.indexed_chunks, 2);
+        assert_eq!(semantic_status.source_chunks, source_count);
+        assert_eq!(semantic_status.indexed_chunks, source_count);
         assert_eq!(semantic_status.stale_vectors, 0);
         assert!(semantic_status.blockers.is_empty());
 
@@ -2518,7 +2731,7 @@ mod tests {
                 .is_empty()
         );
         let current = service.schedule_note_embeddings(&context).await.unwrap();
-        assert_eq!(current.source_chunks, 2);
+        assert_eq!(current.source_chunks, source_count);
         assert_eq!(current.queued_chunks, 0);
         assert_eq!(current.pruned_vectors, 0);
 
@@ -2542,10 +2755,279 @@ mod tests {
         .unwrap();
         service.rebuild_vault(&core, &context).await.unwrap();
         let changed = service.schedule_note_embeddings(&context).await.unwrap();
-        assert_eq!(changed.source_chunks, 2);
+        assert_eq!(changed.source_chunks, source_count);
         assert_eq!(changed.queued_chunks, 1);
         assert_eq!(changed.pruned_vectors, 1);
         assert_eq!(changed.jobs, 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn semantic_note_ranking_uses_one_best_current_chunk_per_note() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/v1/embeddings", post(ranking_embeddings)),
+            )
+            .await
+            .unwrap();
+        });
+        let root = tempdir().unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("semantic-ranking").unwrap(),
+            root.path().join("vault"),
+            Revision::new(1),
+        )
+        .unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Semantic ranking", VaultStatus::Active)
+            .await
+            .unwrap();
+        let core = VaultCore::new(
+            state.clone(),
+            root.path().join("history"),
+            VaultPathPolicy::default(),
+            StorageOptions::default(),
+            Default::default(),
+        );
+        let dominant_body = format!(
+            "# Dominant\n\n{}",
+            "A long note must not consume more than one result slot. ".repeat(2_000)
+        );
+        let hybrid_body = format!(
+            "# Hybrid\n\nkeywordneedle {} {}",
+            "neutral filler ".repeat(400),
+            "semantic-tail ".repeat(400)
+        );
+        let mut created = HashMap::new();
+        for (path, body) in [
+            ("ranking/dominant.md", dominant_body.as_str()),
+            ("ranking/runner-up.md", "# Runner up\n\nSecond note."),
+            ("ranking/third-place.md", "# Third place\n\nThird note."),
+            (
+                "ranking/stale-current.md",
+                "# Current\n\nThe current chunk must survive a stale higher hit.",
+            ),
+            ("ranking/negative.md", "# Negative\n\nUnrelated note."),
+            ("snippets/hybrid.md", hybrid_body.as_str()),
+        ] {
+            let result = core
+                .create_bytes(
+                    &context,
+                    &VaultPath::parse(path).unwrap(),
+                    body.as_bytes(),
+                    Actor::system(),
+                    SourcePlane::System,
+                    None,
+                )
+                .await
+                .unwrap();
+            created.insert(path, result.file.id);
+        }
+
+        let providers = ProviderService::new(
+            state.clone(),
+            AuthService::new(
+                state.auth(),
+                MasterKeyRing::from_bytes(1, &[43_u8; 32]).unwrap(),
+            ),
+        );
+        providers
+            .set_provider_mode(&context, ProviderMode::LocalOnly, None)
+            .await
+            .unwrap();
+        let provider = providers
+            .create_provider(ProviderInput {
+                name: "ranking fake".to_owned(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url: Url::parse(&format!("http://{address}/v1/")).unwrap(),
+                settings: ProviderSettings::default(),
+                enabled: true,
+                secret: None,
+            })
+            .await
+            .unwrap();
+        let model = providers
+            .register_model(ModelInput {
+                provider_id: provider.id,
+                external_model_id: "ranking-test".to_owned(),
+                capabilities: ModelCapabilities {
+                    embeddings: true,
+                    dimension: Some(2),
+                    ..ModelCapabilities::default()
+                },
+                settings: ModelSettings::default(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        providers
+            .bind_model(Some(&context), "embedding_note", model.id, json!({}), None)
+            .await
+            .unwrap();
+        let service = IndexService::with_provider_service(state.clone(), providers.clone());
+        service.rebuild_vault(&core, &context).await.unwrap();
+        let sources = service.note_embedding_sources(&context).await.unwrap();
+        let dominant_id = created["ranking/dominant.md"].to_string();
+        assert!(
+            sources
+                .iter()
+                .filter(|source| source.object_id == dominant_id)
+                .count()
+                > 50
+        );
+        for batch in sources.chunks(64) {
+            service
+                .reembed_note_sources(&context, model.id, batch)
+                .await
+                .unwrap();
+        }
+        providers
+            .embeddings()
+            .embed_and_store(
+                &context,
+                model.id,
+                &[EmbeddingInput {
+                    source: EmbeddingSourceRef {
+                        object_type: "note".to_owned(),
+                        object_id: created["ranking/stale-current.md"].to_string(),
+                        chunk_key: "text-v1:0000".to_owned(),
+                        content_hash: "sha256:stale".to_owned(),
+                    },
+                    text: "stale-high".to_owned(),
+                }],
+            )
+            .await
+            .unwrap();
+
+        let result = service
+            .retrieve_notes(
+                &context,
+                "ranking query",
+                NoteRetrievalMode::Semantic,
+                &NoteRetrievalScope::default(),
+                10,
+                0,
+                true,
+            )
+            .await
+            .unwrap();
+        assert!(result.degraded.is_empty(), "{:?}", result.degraded);
+        assert_eq!(result.available_result_count, 5);
+        assert_eq!(result.hits.len(), 5);
+        assert_eq!(result.hits[0].note.path.as_str(), "ranking/dominant.md");
+        assert_eq!(result.hits[1].note.path.as_str(), "ranking/runner-up.md");
+        assert_eq!(result.hits[2].note.path.as_str(), "ranking/third-place.md");
+        assert_eq!(
+            result.hits[3].note.path.as_str(),
+            "ranking/stale-current.md"
+        );
+        assert_eq!(result.hits[4].note.path.as_str(), "snippets/hybrid.md");
+        assert!(
+            result
+                .hits
+                .iter()
+                .all(|hit| hit.note.path.as_str() != "ranking/negative.md")
+        );
+        let dominant = &result.hits[0];
+        let dominant_breakdown = dominant.score_breakdown.as_ref().unwrap();
+        assert!((dominant.score - 1.0 / 61.0).abs() < 1e-12);
+        assert_eq!(dominant.score, dominant_breakdown["semantic_rrf"]);
+        assert_eq!(dominant_breakdown["semantic_cosine"], 1.0);
+        let stale_current = &result.hits[3];
+        assert!(
+            (stale_current.score_breakdown.as_ref().unwrap()["semantic_cosine"] - 0.9).abs() < 1e-6
+        );
+
+        let first_page = service
+            .retrieve_notes(
+                &context,
+                "ranking query",
+                NoteRetrievalMode::Semantic,
+                &NoteRetrievalScope::default(),
+                2,
+                0,
+                false,
+            )
+            .await
+            .unwrap();
+        let second_page = service
+            .retrieve_notes(
+                &context,
+                "ranking query",
+                NoteRetrievalMode::Semantic,
+                &NoteRetrievalScope::default(),
+                2,
+                2,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first_page.available_result_count, 5);
+        assert_eq!(second_page.available_result_count, 5);
+        assert_eq!(first_page.hits[0].note.path.as_str(), "ranking/dominant.md");
+        assert_eq!(
+            first_page.hits[1].note.path.as_str(),
+            "ranking/runner-up.md"
+        );
+        assert_eq!(
+            second_page.hits[0].note.path.as_str(),
+            "ranking/third-place.md"
+        );
+        assert_eq!(
+            second_page.hits[1].note.path.as_str(),
+            "ranking/stale-current.md"
+        );
+
+        let semantic_snippet = service
+            .retrieve_notes(
+                &context,
+                "keywordneedle",
+                NoteRetrievalMode::Semantic,
+                &NoteRetrievalScope::default(),
+                10,
+                0,
+                true,
+            )
+            .await
+            .unwrap()
+            .hits
+            .into_iter()
+            .find(|hit| hit.note.path.as_str() == "snippets/hybrid.md")
+            .unwrap();
+        assert!(semantic_snippet.note.snippet.contains("semantic-tail"));
+        let hybrid_snippet = service
+            .retrieve_notes(
+                &context,
+                "keywordneedle",
+                NoteRetrievalMode::Hybrid,
+                &NoteRetrievalScope::default(),
+                10,
+                0,
+                true,
+            )
+            .await
+            .unwrap()
+            .hits
+            .into_iter()
+            .find(|hit| hit.note.path.as_str() == "snippets/hybrid.md")
+            .unwrap();
+        assert!(hybrid_snippet.note.snippet.contains("keywordneedle"));
+        assert!(!hybrid_snippet.note.snippet.contains("semantic-tail"));
+        assert!(
+            hybrid_snippet
+                .score_breakdown
+                .as_ref()
+                .unwrap()
+                .contains_key("lexical_rrf")
+        );
         server.abort();
     }
 

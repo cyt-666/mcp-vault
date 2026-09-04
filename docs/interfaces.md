@@ -163,6 +163,9 @@ depend on prior preferences, decisions, constraints, project state,
 progress, events, relationships, past work, or knowledge that may already
 exist in ordinary Vault notes.
 
+Pass the task in its natural language. Persisted multilingual metadata handles
+covered cross-language memory recall; do not translate only for this call.
+
 Treat related_notes returned by recall as retrieval cues and use read_note to
 verify exact details. Treat recalled memories as sourced durable context,
 observing their confidence, validity, lifecycle status, and provenance.
@@ -442,6 +445,14 @@ hybrid
 
 If semantic search is unavailable, hybrid falls back to lexical and reports degradation.
 
+Semantic candidates are returned at note granularity. The server validates
+current chunk hashes, retains only the highest non-negative cosine chunk for
+each File ID, and ranks unique notes; additional chunks from a long note do not
+consume result slots or add score. `semantic_cosine` is the winning raw cosine
+and `semantic_rrf` is that cosine multiplied by the note's reciprocal-rank
+weight. Hybrid results retain a lexical snippet when the lexical channel also
+matched; otherwise the winning semantic chunk supplies the snippet.
+
 Output result fields:
 
 - file ID, path, title;
@@ -451,6 +462,9 @@ Output result fields:
 - lexical/semantic/fused score when requested;
 - tags/topic IDs, outgoing links, and backlink count;
 - resource link.
+
+`available_result_count` counts unique notes after lexical/semantic fusion and
+note-level semantic aggregation, before pagination.
 
 ### 6.5 `read_note`
 
@@ -535,6 +549,13 @@ Output keeps two collections distinct:
 The caller may bound it independently with `max_related_notes`. A cue is not an
 accepted fact; the Agent reads the canonical note before relying on exact
 details.
+
+The response also contains read-only `retrieval_coverage` with
+`prompt_version`, `profile_hash`, target languages, `eligible`, `current`,
+`pending`, `failed`, and `estimated_batches`. When current alias coverage is incomplete, recall
+still returns existing lexical/vector/context results and includes
+`multilingual_alias_coverage_incomplete` in `degraded`. Recall never translates
+the query or invokes a generative model.
 
 ### 6.8 `get_memory`
 
@@ -1069,6 +1090,8 @@ POST   /api/v1/memory/extraction/run
 POST   /api/v1/memory/extraction/restart
 GET    /api/v1/memory/source-health
 POST   /api/v1/memory/source-health/audit
+GET    /api/v1/memory/retrieval
+POST   /api/v1/memory/retrieval/backfill
 
 GET    /api/v1/jobs
 GET    /api/v1/jobs/overview
@@ -1107,6 +1130,18 @@ detail list. `health` may filter
 `POST /api/v1/memory/source-health/audit` admits a new generation-keyed paged
 audit; a prior completed audit does not permanently suppress it.
 
+`GET /api/v1/vaults/{vault_slug}/memory/retrieval` returns the fixed target
+languages, current retrieval prompt/profile version, exact
+`eligible|current|pending|failed|estimated_batches` coverage, and any active
+`memory.enrich_retrieval` job. The profile hash covers the prompt, target
+languages, and deterministic lexical profile. `POST
+.../memory/retrieval/backfill` is a
+state-changing Admin operation protected by the existing session, Origin,
+CSRF, and selected-Vault boundary. It explicitly admits uncovered active,
+stale, and superseded memory and returns the durable job. The bundled UI
+requires confirmation and warns about backup and Provider cost before calling
+it. Historical unscoped aliases retain the same legacy-default behavior.
+
 Memory output adds optional `status_reason`. Each note `MemorySourceView` adds
 optional `health`, `health_reason`, and `checked_at`. Its `path` is the current
 navigable path only and is null for unavailable evidence; `revision` remains the
@@ -1116,7 +1151,7 @@ The extraction policy returned by `GET /api/v1/memory/extraction` and accepted
 by `PUT` contains `enabled`, fixed `source_mode: "automatic"`,
 and `request_timeout_seconds`. `max_evidence_per_note` and legacy
 `max_candidates_per_note` remain accepted/returned as prerelease compatibility
-fields but do not affect Phase 1 v4. `explicit_only` and `all_notes` are source-
+fields but do not affect Phase 1 v5. `explicit_only` and `all_notes` are source-
 mode migration aliases. Source admission does not depend on note frontmatter,
 tags, paths, or folders, and there are no model-score threshold fields.
 
@@ -1163,7 +1198,29 @@ longer clears or exposes candidate review state.
 from `note_semantic`: effective `embedding_note` model, current/expected chunk
 counts, stale vectors, coverage ratio, and stable readiness blockers. A missing
 semantic binding is not an index failure because lexical retrieval remains
-operational.
+operational. A completed `index.rebuild` is not a completed
+`embedding.rebuild`; clients must use semantic coverage and vector job state.
+`POST /api/v1/vaults/{vault_slug}/index/embeddings/rebuild` uses the existing
+Admin session, Origin, and CSRF boundary to prune obsolete selected-model note
+vectors and admit only missing current `text-v2` source references. It returns
+`source_chunks`, `queued_chunks`, `pruned_vectors`, and `jobs`; no note body is
+returned or stored in the job payload.
+
+`GET /api/v1/vaults/{vault_slug}/memory/embeddings` returns the effective
+`embedding_memory` model, Provider-mode readiness, eligible/current/stale
+counts, and stable blockers. `POST
+/api/v1/vaults/{vault_slug}/memory/embeddings/rebuild` is protected by the
+existing Admin session, Origin, CSRF, and selected-Vault boundary. It prunes
+obsolete selected-model rows and returns `eligible`, `current`, `queued`,
+`pruned`, `jobs`, and the selected model identifiers after admitting reference-
+only `embedding.rebuild` jobs. It never invokes Phase 1, Phase 2, or canonical
+memory writes.
+
+Embedding job summaries expose only `projection_version`, internal `model_id`,
+homogeneous `source_type`, and `source_count`. They never expose source IDs,
+paths, hashes, input text, Provider response bodies, or credentials. Terminal
+Provider errors retain the existing stable redacted Provider code rather than
+collapsing every failure to `embedding_rebuild_failed`.
 
 Connection info uses the configured canonical data public origin. Without an
 external origin, direct-listener URLs include the actual data bind port; the

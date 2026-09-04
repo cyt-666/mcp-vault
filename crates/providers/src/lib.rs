@@ -25,8 +25,8 @@ pub use policy::{
     OpenAiTokenLimitField, ProviderKind, ProviderMode, ProviderSettings, endpoint_ip_allowed,
 };
 pub use service::{
-    EmbeddingInput, EmbeddingService, EmbeddingSourceResolver, ModelInput, ProviderInput,
-    ProviderModeState, ProviderService,
+    EMBEDDING_PROJECTION_VERSION, EmbeddingInput, EmbeddingService, EmbeddingSourceResolver,
+    ModelInput, ProviderInput, ProviderModeState, ProviderService,
 };
 pub use transport::{
     AuthStyle, JsonResponse, ProviderTransport, RequestOptions, endpoint_url, retryable_status,

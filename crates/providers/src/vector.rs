@@ -27,11 +27,17 @@ pub trait VectorIndex: Send + Sync {
         vector: &[f32],
     ) -> Result<(), ProviderError>;
 
-    /// Search one Vault/model/dimension partition.
+    /// Search one Vault/model/object-type/dimension partition.
+    ///
+    /// Results are cosine-descending chunk candidates. Equal scores use
+    /// object ID, chunk key, and embedding ID as deterministic tie breakers;
+    /// the owning application validates current content and performs any
+    /// object-level aggregation.
     async fn search(
         &self,
         context: &VaultContext,
         model_id: ModelId,
+        object_type: &str,
         dimension: u32,
         query: &[f32],
         limit: u32,
@@ -82,11 +88,16 @@ impl VectorIndex for SqliteVectorIndex {
         &self,
         context: &VaultContext,
         model_id: ModelId,
+        object_type: &str,
         dimension: u32,
         query: &[f32],
         limit: u32,
     ) -> Result<Vec<VectorHit>, ProviderError> {
-        if dimension == 0 || query.len() != dimension as usize || limit == 0 {
+        if object_type.is_empty()
+            || dimension == 0
+            || query.len() != dimension as usize
+            || limit == 0
+        {
             return Err(ProviderError::DimensionMismatch);
         }
         if query.iter().any(|value| !value.is_finite()) {
@@ -98,7 +109,7 @@ impl VectorIndex for SqliteVectorIndex {
         let candidates = self
             .state
             .providers()
-            .list_vectors(context, model_id, dimension, 10_000)
+            .list_vectors(context, model_id, object_type, dimension, 10_000)
             .await?;
         let mut hits = candidates
             .into_iter()
@@ -130,6 +141,8 @@ impl VectorIndex for SqliteVectorIndex {
             right
                 .score
                 .total_cmp(&left.score)
+                .then_with(|| left.embedding.object_id.cmp(&right.embedding.object_id))
+                .then_with(|| left.embedding.chunk_key.cmp(&right.embedding.chunk_key))
                 .then_with(|| left.embedding.id.cmp(&right.embedding.id))
         });
         hits.truncate(limit as usize);

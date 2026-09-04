@@ -71,6 +71,11 @@ The service MUST provide:
 - hybrid ranking;
 - automatic rebuildable note-level semantic projections when the
   `embedding_note` role is configured;
+- deterministic versioned embedding inputs whose complete UTF-8 payload is
+  bounded conservatively enough for configured remote Provider limits;
+- note-level semantic Top-K after current-chunk validation: only the highest
+  non-negative cosine chunk for one note may contribute, and chunk count must
+  not increase that note's score or consume another note's result slot;
 - scoped search by path, topic, tag, type, and time;
 - full note reads;
 - section/outline reads that avoid loading an entire long note unnecessarily;
@@ -134,7 +139,17 @@ It MUST provide:
   revision-aware permanent deletion;
 - canonical Markdown materialization for committed semantic memories and
   inspectable generated raw/summary layers;
+- source-language `raw_memory`, summaries, and canonical memory bodies rather
+  than silently translating user knowledge to the prompt language;
+- persisted, rebuildable retrieval aliases for the source language,
+  Simplified Chinese, and English so covered memories support offline
+  cross-language lexical recall;
+- automatic alias enrichment for new or body-changed memory, plus an explicit
+  authenticated Admin backfill for existing active, stale, and superseded
+  memory;
 - recall that does not require a live LLM call.
+- direct current-model vector rebuilding for existing durable memory without
+  re-running Phase 1 or Phase 2.
 
 While the memory format remains explicitly prerelease, an incompatible
 pipeline-generation upgrade MUST discard old memory jobs/state and regenerate
@@ -161,6 +176,7 @@ The owner MUST be able to configure and test:
 - a bounded role-specific extraction deadline suitable for slower reasoning models;
 - global defaults with future per-Vault overrides;
 - provider timeouts, concurrency, retry, and privacy policy.
+- model-change re-embedding and redacted per-job Provider failure categories.
 - revision-safe editing, disabling, secret rotation, and deletion of Provider
   configurations from Admin without direct database access.
 
@@ -294,6 +310,15 @@ memory MUST be retained unless an authenticated explicit deletion occurs.
 
 Admin MUST expose repeatable paged source audits and separate exact counts for
 final sources, affected memories, Stage 1 sources, and distinct File IDs.
+
+Existing-memory multilingual backfill MUST be an explicit Admin action with a
+model-cost and backup warning. A source-language rewrite is permitted only
+when bounded current source samples are verified through Vault Core. It MUST
+preserve identity, lifecycle, provenance, relations, validity, technical
+literals, and normal revision history. Unavailable or ambiguous sources permit
+safe aliases only. A failed alias/rewrite batch MUST NOT roll back canonical
+memory, and normal recall MUST report incomplete alias coverage while returning
+the results it can produce.
 
 The Admin UI and Admin API MUST run on a separate listener that is not publicly exposed by default. Network restriction does not replace authentication.
 
@@ -437,3 +462,5 @@ The service is complete for the first release when:
 12. One initializing, disabled, or failed Vault does not prevent Admin or a
     healthy Vault from starting and operating.
 13. Security, migration, crash-recovery, Litmus, MCP conformance, and end-to-end tests pass.
+14. Covered Chinese and English memories can be recalled with either language
+    while the embedding role is unavailable, without a query-time LLM call.

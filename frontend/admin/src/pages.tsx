@@ -1339,21 +1339,33 @@ function IndexPage({ data, notify, onRefresh }: { data: JsonObject | null; notif
   const status = asRecord(data?.status);
   const noteSemantic = asRecord(data?.note_semantic);
   const semanticBlockers = Array.isArray(noteSemantic.blockers) ? noteSemantic.blockers.map(String) : [];
-  const [busy, setBusy] = useState(false);
+  const [indexBusy, setIndexBusy] = useState(false);
+  const [embeddingBusy, setEmbeddingBusy] = useState(false);
 
   async function rebuild() {
-    setBusy(true);
+    setIndexBusy(true);
     try {
       await adminApi.request('/index/rebuild', { method: 'POST' });
       notify('索引重建任务已加入后台队列。');
       onRefresh();
     } catch (error: unknown) {
       notify(formatRequestError(error), 'danger');
-    } finally { setBusy(false); }
+    } finally { setIndexBusy(false); }
+  }
+
+  async function rebuildEmbeddings() {
+    setEmbeddingBusy(true);
+    try {
+      const report = asRecord(await adminApi.request('/index/embeddings/rebuild', { method: 'POST' }));
+      notify(`笔记向量任务已提交：待生成 ${numberValue(report.queued_chunks)} 个分块，共 ${numberValue(report.jobs)} 个后台任务。`);
+      onRefresh();
+    } catch (error: unknown) {
+      notify(formatRequestError(error), 'danger');
+    } finally { setEmbeddingBusy(false); }
   }
 
   return (
-    <Panel title="全文与知识索引" eyebrow="可重建数据" description="索引损坏或删除不会影响 Markdown 原文件。" actions={<button className="secondary-button" type="button" disabled={busy} onClick={() => void rebuild()}>{busy ? '正在提交…' : '重建索引'}</button>}>
+    <Panel title="全文与知识索引" eyebrow="可重建数据" description="索引损坏或删除不会影响 Markdown 原文件。" actions={<div className="button-row"><button className="secondary-button" type="button" disabled={embeddingBusy || !booleanValue(noteSemantic.configured) || (numberValue(noteSemantic.indexed_chunks) >= numberValue(noteSemantic.source_chunks) && numberValue(noteSemantic.stale_vectors) === 0)} onClick={() => void rebuildEmbeddings()}>{embeddingBusy ? '正在提交…' : '生成缺失向量'}</button><button className="secondary-button" type="button" disabled={indexBusy} onClick={() => void rebuild()}>{indexBusy ? '正在提交…' : '重建索引'}</button></div>}>
       {Object.keys(status).length === 0 ? (
         <EmptyState title="索引尚未建立" detail="首次扫描完成后会自动建立，也可以手动重建。" />
       ) : (
@@ -1387,7 +1399,7 @@ function noteSemanticBlockerLabel(code: string): string {
     provider_mode_disabled: 'AI 数据发送策略仍为禁用',
     model_binding_missing: '尚未绑定“笔记向量”模型',
     model_missing: '绑定的模型记录不存在',
-    embedding_coverage_incomplete: '仍有笔记分块等待生成向量',
+    embedding_coverage_incomplete: '仍有笔记分块等待生成向量；请在后台任务中检查“重建语义向量”，“重建知识索引”完成不代表向量任务完成',
     semantic_status_unavailable: '暂时无法读取语义索引状态',
   };
   return labels[code] ?? code;
@@ -1397,6 +1409,8 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
   const [memories, setMemories] = useState(() => arrayRecords(data?.memories));
   const extraction = asRecord(data?.extraction);
   const sourceHealth = asRecord(data?.source_health);
+  const retrieval = asRecord(data?.retrieval);
+  const embedding = asRecord(data?.embedding);
   const memoryJobs = arrayRecords(data?.memory_jobs);
   const [memoryActionId, setMemoryActionId] = useState('');
 
@@ -1444,6 +1458,8 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
     <div className="page-stack">
       <Notice tone="info">照常写笔记即可，不需要添加特殊标记或逐条审核。系统先从每篇笔记提炼带来源的原始记忆，再在后台合并、去重和处理冲突；只有整理后的语义内容会进入长期记忆。</Notice>
       <MemoryExtractionPanel data={extraction} jobs={memoryJobs} notify={notify} onRefresh={onRefresh} />
+      <MemoryRetrievalPanel data={retrieval} notify={notify} onRefresh={onRefresh} />
+      <MemoryEmbeddingPanel data={embedding} notify={notify} onRefresh={onRefresh} />
       <MemorySourceHealthPanel data={sourceHealth} notify={notify} onRefresh={onRefresh} />
       <Panel title={`长期记忆（${memories.length}）`} eyebrow="有来源的上下文" description="默认召回不调用在线模型。">
         {memories.length === 0 ? (
@@ -1486,6 +1502,106 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
         )}
       </Panel>
     </div>
+  );
+}
+
+function MemoryEmbeddingPanel({ data, notify, onRefresh }: { data: JsonObject; notify: Notify; onRefresh: () => void }) {
+  const [submitting, setSubmitting] = useState(false);
+  const configured = booleanValue(data.configured);
+  const eligible = numberValue(data.eligible);
+  const current = numberValue(data.current);
+  const stale = numberValue(data.stale);
+  const blockers = Array.isArray(data.blockers) ? data.blockers.map(String) : [];
+
+  async function rebuild() {
+    setSubmitting(true);
+    try {
+      const report = asRecord(await adminApi.request('/memory/embeddings/rebuild', { method: 'POST' }));
+      notify(`记忆向量任务已提交：待生成 ${numberValue(report.queued)} 条，共 ${numberValue(report.jobs)} 个后台任务。`);
+      onRefresh();
+    } catch (error: unknown) {
+      notify(formatRequestError(error), 'danger');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Panel
+      title="记忆向量"
+      eyebrow="可重建语义投影"
+      description="直接根据现有长期记忆生成向量，不会重新分析笔记、调用记忆整理模型或修改记忆正文。"
+      actions={<button className="secondary-button" disabled={submitting || !configured || (current >= eligible && stale === 0)} type="button" onClick={() => void rebuild()}>{submitting ? '正在提交…' : '生成缺失向量'}</button>}
+    >
+      <div className="summary-list">
+        <SummaryRow label="语义模型" value={configured ? stringValue(data.external_model_id, '模型记录缺失') : '未绑定'} mono={configured} />
+        <SummaryRow label="覆盖情况" value={`${current} / ${eligible} 条`} />
+        <SummaryRow label="过期向量" value={`${stale} 条`} />
+      </div>
+      {!configured ? <Notice tone="info">在“AI 服务”中绑定“记忆向量”模型后即可生成；跨语言别名检索仍可独立工作。</Notice> : null}
+      {configured && blockers.length > 0 ? <Notice tone="warning">记忆语义召回尚未完全就绪：{blockers.map(memoryEmbeddingBlockerLabel).join('；')}。</Notice> : null}
+      {configured && blockers.length === 0 ? <Notice tone="success">当前可召回记忆均已有所选模型的语义向量。</Notice> : null}
+    </Panel>
+  );
+}
+
+function memoryEmbeddingBlockerLabel(code: string): string {
+  const labels: Record<string, string> = {
+    provider_mode_disabled: 'AI 数据发送策略未启用',
+    model_binding_missing: '尚未绑定“记忆向量”模型',
+    model_missing: '绑定的模型记录不存在',
+    model_disabled: '绑定的模型已停用',
+    provider_missing: '模型所属 AI 服务不存在',
+    provider_disabled: '模型所属 AI 服务已停用',
+    embedding_coverage_incomplete: '仍有记忆等待生成向量',
+  };
+  return labels[code] ?? code;
+}
+
+function MemoryRetrievalPanel({ data, notify, onRefresh }: { data: JsonObject; notify: Notify; onRefresh: () => void }) {
+  const coverage = asRecord(data.coverage);
+  const activeJob = asRecord(data.active_job);
+  const [submitting, setSubmitting] = useState(false);
+  const eligible = numberValue(coverage.eligible);
+  const current = numberValue(coverage.current);
+  const pending = numberValue(coverage.pending);
+  const failed = numberValue(coverage.failed);
+  const estimatedBatches = numberValue(coverage.estimated_batches);
+  const profileVersion = stringValue(coverage.prompt_version, 'memory-retrieval-v1');
+  const active = ['queued', 'running', 'retry_wait'].includes(stringValue(activeJob.status));
+  const targetLanguages = Array.isArray(coverage.target_languages)
+    ? coverage.target_languages.map(String).join(' · ')
+    : 'source · zh-Hans · en';
+
+  async function runBackfill() {
+    if (!window.confirm(`确定回填现有记忆的跨语言检索信息吗？\n\n待覆盖 ${Math.max(0, eligible - current)} 条，预计最多 ${estimatedBatches} 次批量模型调用，这些调用可能产生费用。可验证来源的旧英文正文会等义改回来源语言，并产生可恢复修订；请先确认已有可用备份。`)) return;
+    setSubmitting(true);
+    try {
+      const job = asRecord(await adminApi.request('/memory/retrieval/backfill', { method: 'POST' }));
+      notify(`跨语言回填任务 ${truncateId(stringValue(job.id))} 已提交。`);
+      onRefresh();
+    } catch (error: unknown) {
+      notify(formatRequestError(error), 'danger');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Panel
+      title="跨语言检索"
+      eyebrow="离线召回覆盖"
+      description="记忆正文保持来源语言；来源语、简体中文和英文别名作为可重建检索投影保存，recall 不会为翻译再调用在线模型。"
+      actions={<button className="secondary-button" disabled={submitting || active || eligible === current} type="button" onClick={() => void runBackfill()}>{submitting ? '正在提交…' : active ? '回填正在运行' : '回填现有记忆'}</button>}
+    >
+      <div className="summary-list">
+        <SummaryRow label="目标语言" value={targetLanguages} mono />
+        <SummaryRow label="检索配置档" value={profileVersion} mono />
+        <SummaryRow label="覆盖情况" value={`${current} / ${eligible} 条（待处理 ${pending} · 失败 ${failed}）`} />
+        <SummaryRow label="预计模型批次" value={`${estimatedBatches} 次（每批最多 8 条）`} />
+      </div>
+      {current < eligible ? <Notice tone="warning">覆盖尚未完成。recall 会继续返回现有词法/向量结果，并明确报告跨语言别名覆盖不完整。</Notice> : <Notice tone="success">当前可召回状态的记忆均已具备离线跨语言检索信息。</Notice>}
+    </Panel>
   );
 }
 
@@ -1904,10 +2020,15 @@ function jobProgressDetail(job: JsonObject): string {
   const sourceCounts = asRecord(progress.counts);
   const auditedSources = numberValue(sourceCounts.final_sources_checked);
   const sourceErrors = numberValue(sourceCounts.errors);
+  const enriched = numberValue(progress.enriched);
+  const rewrittenForLanguage = numberValue(progress.rewritten);
+  const retrievalRemaining = numberValue(progress.remaining);
 
   let detail: string;
   if (phase === 'consolidating') {
     detail = `正在整理原始记忆：已处理 ${completed} / ${total || completed + pendingRawInputs} 条${pendingRawInputs > 0 ? `，仍待 ${pendingRawInputs} 条` : ''}`;
+  } else if (phase === 'enriching') {
+    detail = `正在生成跨语言检索信息：已完成 ${enriched} 条${retrievalRemaining > 0 ? `，仍待 ${retrievalRemaining} 条` : ''}`;
   } else if (phase === 'repairing_memory_sources') {
     detail = '正在核对历史记忆的文件身份和当前路径';
   } else if (phase === 'auditing_sources') {
@@ -1928,12 +2049,19 @@ function jobProgressDetail(job: JsonObject): string {
     detail = '旧版记忆和任务已作废，准备从头生成';
   } else if (phase === 'completed' && stringValue(job.job_type) === 'memory.repair_sources') {
     detail = `已重写 ${memoriesRewritten} 条记忆来源，更新 ${stage1SourcesRebound} 条阶段一来源`;
+  } else if (phase === 'completed' && stringValue(job.job_type) === 'memory.enrich_retrieval') {
+    detail = `跨语言检索回填完成：覆盖 ${enriched} 条，等义改写 ${rewrittenForLanguage} 条`;
   } else if (['completed', 'completed_with_errors'].includes(phase) && stringValue(job.job_type) === 'memory.audit_sources') {
     detail = `来源审计完成：核验 ${auditedSources} 条最终来源${sourceErrors > 0 ? `，${sourceErrors} 条未能安全处理` : ''}`;
   } else if (phase === 'completed' && stringValue(job.job_type) === 'memory.source_reconcile') {
     detail = `文件事件来源协调完成：核验 ${numberValue(progress.final_sources_checked)} 条最终来源`;
   } else if (phase === 'note_completed' || phase === 'completed' || phase === 'completed_with_errors') {
     detail = `已处理 ${completed} / ${total} 篇`;
+  } else if (stringValue(job.job_type) === 'embedding.rebuild' && stringValue(details.source_type, '')) {
+    const sourceLabel = stringValue(details.source_type) === 'memory' ? '记忆' : '笔记分块';
+    const model = stringValue(details.model_id, '');
+    const version = numberValue(details.projection_version);
+    detail = `生成 ${numberValue(details.source_count)} 个${sourceLabel}向量${model ? ` · 模型 ${truncateId(model)}` : ''}${version > 0 ? ` · 投影 v${version}` : ''}`;
   } else if (stringValue(details.scope, '') === 'all') {
     detail = '等待扫描当前 Vault 的 Markdown';
   } else if (stringValue(details.source_path, '')) {
@@ -2275,6 +2403,7 @@ function jobTypeLabel(value: unknown): string {
     'outbox.event': '文件事件处理',
     'memory.extract': '阶段一：提取原始记忆',
     'memory.consolidate': '阶段二：整理长期记忆',
+    'memory.enrich_retrieval': '跨语言记忆检索回填',
     'memory.reset_pipeline': '重置记忆系统',
     'memory.revalidate': '记忆来源校验',
     'memory.source_reconcile': '协调记忆来源',

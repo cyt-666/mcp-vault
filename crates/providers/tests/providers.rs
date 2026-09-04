@@ -371,21 +371,72 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
         .await
         .unwrap();
     assert_eq!(records.len(), 2);
+    embeddings
+        .embed_and_store(
+            &work,
+            embedding.id,
+            &[EmbeddingInput {
+                source: EmbeddingSourceRef {
+                    object_type: "note".to_owned(),
+                    object_id: "note-a".to_owned(),
+                    chunk_key: "appendix".to_owned(),
+                    content_hash: "sha256:a-appendix".to_owned(),
+                },
+                text: "another first".to_owned(),
+            }],
+        )
+        .await
+        .unwrap();
+    embeddings
+        .embed_and_store(
+            &work,
+            embedding.id,
+            &[EmbeddingInput {
+                source: EmbeddingSourceRef {
+                    object_type: "memory".to_owned(),
+                    object_id: "memory-a".to_owned(),
+                    chunk_key: "body".to_owned(),
+                    content_hash: "sha256:memory-a".to_owned(),
+                },
+                text: "memory".to_owned(),
+            }],
+        )
+        .await
+        .unwrap();
     let hits = embeddings
-        .search(&work, embedding.id, &[1.0, 0.0, 0.0], 10)
+        .search(&work, embedding.id, "note", &[1.0, 0.0, 0.0], 1)
         .await
         .unwrap();
     assert_eq!(hits[0].embedding.object_id, "note-a");
+    assert_eq!(hits[0].score, 1.0);
+    let tied_hits = embeddings
+        .search(&work, embedding.id, "note", &[1.0, 0.0, 0.0], 3)
+        .await
+        .unwrap();
+    assert_eq!(tied_hits[0].embedding.chunk_key, "appendix");
+    assert_eq!(tied_hits[1].embedding.chunk_key, "root");
+    assert_eq!(tied_hits[2].embedding.object_id, "note-b");
+    let differently_ranked = embeddings
+        .search(&work, embedding.id, "note", &[0.0, 1.0, 0.0], 1)
+        .await
+        .unwrap();
+    assert_eq!(differently_ranked[0].embedding.object_id, "note-b");
+    assert_eq!(differently_ranked[0].score, 1.0);
+    let memory_hits = embeddings
+        .search(&work, embedding.id, "memory", &[1.0, 0.0, 0.0], 1)
+        .await
+        .unwrap();
+    assert_eq!(memory_hits[0].embedding.object_id, "memory-a");
     assert!(
         embeddings
-            .search(&other, embedding.id, &[1.0, 0.0, 0.0], 10)
+            .search(&other, embedding.id, "note", &[1.0, 0.0, 0.0], 10)
             .await
             .unwrap()
             .is_empty()
     );
     let coverage = embeddings.coverage(&work, embedding.id).await.unwrap();
-    assert_eq!(coverage.total, 2);
-    assert_eq!(coverage.objects, 2);
+    assert_eq!(coverage.total, 4);
+    assert_eq!(coverage.objects, 3);
     assert_eq!(coverage.dimensions, vec![3]);
 
     let changed_model = service
@@ -466,6 +517,8 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
         .await
         .unwrap();
     assert_eq!(job.job_type, "embedding.rebuild");
+    assert_eq!(job.payload["projection_version"], 2);
+    assert!(job.dedup_key.contains(":embedding:v2:"));
     assert!(job.payload.to_string().contains("note-a"));
     assert!(!job.payload.to_string().contains("first"));
 

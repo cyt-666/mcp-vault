@@ -653,6 +653,11 @@ rerank
 missing/stale current note chunks through durable `embedding.rebuild` jobs;
 lexical note recall remains available when it is unbound.
 
+`embedding_memory` powers the durable-memory semantic candidate channel.
+Binding or changing it schedules existing active, stale, and superseded memory
+directly from current projections. This does not invoke extraction,
+consolidation, or canonical writes.
+
 The first-release console writes a current-Vault override and displays an
 effective global binding when one exists. Future multi-Vault administration can
 add global-default editing without changing binding resolution.
@@ -692,7 +697,11 @@ Actions:
 
 Ordinary Markdown is indexed automatically and does not enter memory review.
 The page distinguishes FTS coverage from optional `embedding_note` coverage so
-an operator can tell lexical availability from semantic readiness.
+an operator can tell lexical availability from semantic readiness. It also
+states that a completed `index.rebuild` only admitted separate
+`embedding.rebuild` work and is not proof that semantic vectors completed. A
+separate “generate missing vectors” action admits note-vector work without
+rebuilding FTS or note metadata.
 
 Rebuild actions must state which data is derived and which canonical data will not be touched.
 
@@ -713,6 +722,10 @@ The UI includes:
 - recall simulator;
 - prompt/provider/pipeline metadata;
 - embedding coverage and failures.
+- selected memory-vector model, current/stale coverage, and a “generate missing
+  vectors” action that does not re-run memory extraction;
+- multilingual retrieval coverage, estimated Provider batches, active job
+  progress, and an explicit existing-memory backfill action.
 
 The page explains the distinction between automatically recallable ordinary
 notes and durable memory. Once automatic memory is enabled for the Vault,
@@ -729,6 +742,20 @@ model does not generate evidence text or coordinates. Phase 2 uses the
 separately bound consolidation model to merge, deduplicate, resolve conflicts,
 forget obsolete input, and write final semantic memory. Neither model supplies
 a trust score, and there is no human review queue.
+
+The cross-language card reports source/`zh-Hans`/`en` alias coverage over
+active, stale, and superseded memory. New or body-changed memory is enriched
+asynchronously. Existing memory is not sent automatically on upgrade: the
+operator must confirm a dialog that states the estimated maximum eight-item
+model batches, warns that calls may be billed, and asks for a current backup.
+The action uses `POST /api/v1/vaults/{vault}/memory/retrieval/backfill`; the
+usual Admin session, Origin, CSRF, and selected-Vault checks apply.
+
+The card makes clear that canonical bodies remain in their source language and
+that aliases are rebuildable search metadata. A verifiable historical source
+may permit an equivalent source-language rewrite with a normal revision;
+unavailable sources receive aliases only. Failed or incomplete coverage does
+not disable recall and is displayed separately from canonical memory health.
 
 The two-stage card is explicit about both model roles. Automatic memory is off
 by default. Once enabled, non-managed Markdown create, update, move, and
@@ -799,6 +826,12 @@ its snapshot before canonical writes and the atomic selection commit.
 `memory.rebuild` and `embedding.rebuild` remain separate jobs; Provider outages
 degrade new extraction/consolidation and semantic search but do not make
 existing lexical recall or canonical Vault writes fail.
+
+`memory.enrich_retrieval` is a separate cancellable-between-batches job that
+reuses `memory_consolidation`. Its progress reports covered, rewritten,
+rewrite-skipped, remaining, and persisted-proposal reuse counts. Cancellation
+does not remove already validated metadata or canonical revisions; retry
+continues from durable pending rows/proposal progress.
 
 The runtime stores the following Vault-scoped settings through the typed
 configuration API rather than an unvalidated key/value editor:

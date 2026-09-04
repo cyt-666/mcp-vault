@@ -318,6 +318,19 @@ describe('Admin 管理界面', () => {
                 max_attempts: 3,
                 progress: 0.25,
               },
+              {
+                id: '019d-embedding-job',
+                job_type: 'embedding.rebuild',
+                status: 'queued',
+                attempts: 0,
+                max_attempts: 10,
+                details: {
+                  projection_version: 2,
+                  model_id: '01a066c8-7710-72d1-9699-5f37819fae27',
+                  source_type: 'note',
+                  source_count: 37,
+                },
+              },
             ],
             retry_wait: [],
             history: [
@@ -405,6 +418,9 @@ describe('Admin 管理界面', () => {
 
     expect(container.textContent).toContain('Vault 重新扫描');
     expect(container.textContent).toContain('重建知识索引');
+    expect(container.textContent).toContain('重建语义向量');
+    expect(container.textContent).toContain('生成 37 个笔记分块向量');
+    expect(container.textContent).toContain('投影 v2');
     expect(container.textContent).toContain('正在执行（1）');
     expect(container.textContent).toContain('等待执行（1595）');
     expect(container.textContent).toContain('已结束历史（显示 4 / 共 4）');
@@ -459,6 +475,13 @@ describe('Admin 管理界面', () => {
   });
 
   it('知识索引页面区分全文覆盖率和笔记语义向量覆盖率', async () => {
+    const request = vi.spyOn(adminApi, 'request').mockResolvedValue({
+      source_chunks: 220,
+      queued_chunks: 110,
+      pruned_vectors: 2,
+      jobs: 2,
+    });
+    const onRefresh = vi.fn();
     const container = document.createElement('div');
     const root = createRoot(container);
     await act(async () =>
@@ -485,7 +508,7 @@ describe('Admin 管理界面', () => {
               blockers: ['embedding_coverage_incomplete'],
             },
           }}
-          onRefresh={() => undefined}
+          onRefresh={onRefresh}
         />,
       ),
     );
@@ -494,6 +517,15 @@ describe('Admin 管理界面', () => {
     expect(container.textContent).toContain('50%');
     expect(container.textContent).toContain('110 / 220 个内容分块');
     expect(container.textContent).toContain('仍有笔记分块等待生成向量');
+    expect(container.textContent).toContain('“重建知识索引”完成不代表向量任务完成');
+    const rebuild = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === '生成缺失向量',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      rebuild.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(request).toHaveBeenCalledWith('/index/embeddings/rebuild', { method: 'POST' });
+    expect(onRefresh).toHaveBeenCalledOnce();
 
     await act(async () => root.unmount());
   });
@@ -719,15 +751,135 @@ describe('Admin 管理界面', () => {
     expect(jobErrorLabel('provider_output_truncated')).toContain('Token 上限');
     expect(jobErrorLabel('provider_structured_json_invalid')).toContain('不是完整的 JSON');
     expect(jobErrorLabel('provider_final_content_missing')).toContain('没有最终文本内容');
+    expect(jobErrorLabel('embedding_dimension_mismatch')).toContain('默认维度');
     expect(jobErrorLabel('provider_schema_invalid')).toContain('返回了 JSON');
     expect(jobErrorLabel('memory_extract_output_failure_limit')).toContain('连续 3 次');
     expect(jobErrorLabel('memory_source_too_large')).toContain('512 KiB');
+    expect(jobErrorLabel('memory_phase1_slug_invalid')).toContain('升级后重试');
     expect(jobErrorLabel('memory_phase1_evidence_anchor_invalid')).toContain('超出笔记范围');
     expect(jobErrorLabel('memory_phase2_memory_index_invalid')).toContain('不存在的记忆序号');
     expect(jobErrorLabel('memory_phase2_input_index_invalid')).toContain('原始记忆序号');
     expect(jobErrorLabel('memory_phase2_input_undispositioned')).toContain('既未使用也未明确丢弃');
     expect(jobErrorLabel('memory_phase2_prepared_invalid')).toContain('无法安全恢复');
     expect(jobErrorLabel('memory_consolidation_waiting_for_phase1')).toContain('不会消耗重试次数');
+    expect(jobErrorLabel('memory_retrieval_alias_too_long')).toContain('128 字节');
+    expect(jobErrorLabel('memory_retrieval_alias_secret')).toContain('疑似包含秘密');
+  });
+
+  it('跨语言检索面板显示覆盖和付费提示并经确认后启动回填', async () => {
+    const request = vi.spyOn(adminApi, 'request').mockResolvedValue({
+      id: 'retrieval-job-1',
+      job_type: 'memory.enrich_retrieval',
+      status: 'queued',
+    });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const onRefresh = vi.fn();
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(
+        <ManagementPage
+          page="memory"
+          data={{
+            memories: [],
+            extraction: {
+              policy: { enabled: true, source_mode: 'automatic' },
+              readiness: { ready: true, blockers: [] },
+              phase1_readiness: { ready: true, blockers: [] },
+              phase2_readiness: { ready: true, blockers: [] },
+              stage1: { total: 0, ready: 0, no_output: 0, pending: 0 },
+              consolidation: { generation: 1, pipeline_generation: 2 },
+            },
+            retrieval: {
+              coverage: {
+                prompt_version: 'memory-retrieval-v1',
+                target_languages: ['source', 'zh-Hans', 'en'],
+                eligible: 17,
+                current: 9,
+                pending: 7,
+                failed: 1,
+                estimated_batches: 1,
+              },
+              active_job: null,
+            },
+            memory_jobs: [],
+          }}
+          onRefresh={onRefresh}
+        />,
+      ),
+    );
+
+    expect(container.textContent).toContain('跨语言检索');
+    expect(container.textContent).toContain('memory-retrieval-v1');
+    expect(container.textContent).toContain('9 / 17 条（待处理 7 · 失败 1）');
+    expect(container.textContent).toContain('来源语、简体中文和英文别名');
+    const backfill = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === '回填现有记忆',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      backfill.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(confirm.mock.calls[0][0]).toContain('请先确认已有可用备份');
+    expect(confirm.mock.calls[0][0]).toContain('预计最多 1 次批量模型调用');
+    expect(confirm.mock.calls[0][0]).toContain('可能产生费用');
+    expect(request).toHaveBeenCalledWith('/memory/retrieval/backfill', { method: 'POST' });
+    expect(onRefresh).toHaveBeenCalledOnce();
+
+    await act(async () => root.unmount());
+  });
+
+  it('记忆向量面板显示当前模型覆盖并可直接补齐缺失向量', async () => {
+    const request = vi.spyOn(adminApi, 'request').mockResolvedValue({
+      eligible: 6,
+      current: 2,
+      queued: 4,
+      pruned: 0,
+      jobs: 1,
+      external_model_id: 'embedding-3',
+    });
+    const onRefresh = vi.fn();
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(
+        <ManagementPage
+          page="memory"
+          data={{
+            memories: [],
+            extraction: {},
+            retrieval: { coverage: { eligible: 0, current: 0 } },
+            embedding: {
+              configured: true,
+              external_model_id: 'embedding-3',
+              eligible: 6,
+              current: 2,
+              stale: 0,
+              blockers: ['embedding_coverage_incomplete'],
+            },
+            memory_jobs: [],
+          }}
+          onRefresh={onRefresh}
+        />,
+      ),
+    );
+
+    expect(container.textContent).toContain('记忆向量');
+    expect(container.textContent).toContain('embedding-3');
+    expect(container.textContent).toContain('2 / 6 条');
+    expect(container.textContent).toContain('不会重新分析笔记');
+    const rebuild = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === '生成缺失向量',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      rebuild.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(request).toHaveBeenCalledWith('/memory/embeddings/rebuild', { method: 'POST' });
+    expect(onRefresh).toHaveBeenCalledOnce();
+
+    await act(async () => root.unmount());
   });
 
   it('两阶段记忆页面不暴露候选审核并显示可解释的持久化进度', async () => {

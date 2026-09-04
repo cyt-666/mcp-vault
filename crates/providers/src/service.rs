@@ -30,6 +30,13 @@ use crate::{
     new_embedding_id,
 };
 
+/// Current reference-only embedding job/projection contract.
+///
+/// Bump this when source chunk identity or resolution changes incompatibly so
+/// a corrected rebuild does not reuse a terminal job created by an older
+/// projection.
+pub const EMBEDDING_PROJECTION_VERSION: u32 = 2;
+
 const PROVIDER_SECRET_PURPOSE: &str = "provider-api-key";
 const PROVIDER_SECRET_OWNER: &str = "provider";
 const PROVIDER_MODE_SETTING: &str = "provider.mode";
@@ -824,11 +831,12 @@ impl EmbeddingService {
         self.embed_and_store(context, model_id, &inputs).await
     }
 
-    /// Search a single Vault/model/dimension vector partition.
+    /// Search one Vault/model/object-type/dimension partition for raw candidates.
     pub async fn search(
         &self,
         context: &VaultContext,
         model_id: ModelId,
+        object_type: &str,
         query: &[f32],
         limit: u32,
     ) -> Result<Vec<VectorHit>, ProviderError> {
@@ -845,7 +853,14 @@ impl EmbeddingService {
             return Err(ProviderError::DimensionMismatch);
         }
         self.vector
-            .search(context, model_id, query.len() as u32, query, limit)
+            .search(
+                context,
+                model_id,
+                object_type,
+                query.len() as u32,
+                query,
+                limit,
+            )
             .await
     }
 
@@ -876,12 +891,14 @@ impl EmbeddingService {
             ));
         }
         let payload = json!({
+            "projection_version": EMBEDDING_PROJECTION_VERSION,
             "model_id": model_id,
             "sources": sources,
         });
         let dedup_key = format!(
-            "vault:{}:embedding:{}:{}",
+            "vault:{}:embedding:v{}:{}:{}",
             context.id(),
+            EMBEDDING_PROJECTION_VERSION,
             model_id,
             hash_json(&payload)
         );

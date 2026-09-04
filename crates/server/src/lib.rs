@@ -342,6 +342,17 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         .map_err(|failure| ServerError::Workers(failure.code))?;
     supervisor
         .register_job_handler(
+            "memory.enrich_retrieval",
+            workers::memory_retrieval_job_handler(
+                state.clone(),
+                history_root.clone(),
+                core_runtime.clone(),
+                memory_service.clone(),
+            ),
+        )
+        .map_err(|failure| ServerError::Workers(failure.code))?;
+    supervisor
+        .register_job_handler(
             "memory.reset_pipeline",
             workers::memory_reset_pipeline_job_handler(
                 state.clone(),
@@ -439,6 +450,10 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
             .map_err(|_| ServerError::Workers("memory_regeneration_admission_failed"))?;
             workers::ensure_memory_consolidation_job(&state, &context, "startup_recovery", None)
                 .await?;
+            memory_service
+                .ensure_retrieval_enrichment(&context, "startup_recovery")
+                .await
+                .map_err(|_| ServerError::Workers("memory_retrieval_admission_failed"))?;
         }
     }
     let worker_shutdown = workers::Cancellation::default();
@@ -865,6 +880,13 @@ async fn run_reconciliation_loop(
                     .is_err()
                     {
                         warn!(vault_id = %vault_id, "periodic memory consolidation admission failed");
+                    }
+                    if memory_service
+                        .ensure_retrieval_enrichment(&context, "periodic_recovery")
+                        .await
+                        .is_err()
+                    {
+                        warn!(vault_id = %vault_id, "periodic memory retrieval admission failed");
                     }
                 }
             }

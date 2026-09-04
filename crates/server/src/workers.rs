@@ -2602,6 +2602,7 @@ pub(crate) async fn ensure_memory_pipeline_reset_job(
     for job_type in [
         "memory.extract",
         "memory.consolidate",
+        "memory.enrich_retrieval",
         "memory.revalidate",
         "memory.source_reconcile",
         "memory.audit_sources",
@@ -2676,6 +2677,7 @@ async fn quiesce_memory_pipeline_jobs(
     for job_type in [
         "memory.extract",
         "memory.consolidate",
+        "memory.enrich_retrieval",
         "memory.revalidate",
         "memory.source_reconcile",
         "memory.audit_sources",
@@ -2966,6 +2968,223 @@ fn memory_consolidation_error_outcome(error: MemoryError) -> JobOutcome {
         },
         _ => JobOutcome::Failed {
             code: "memory_consolidation_failed",
+        },
+    }
+}
+
+/// Generate persisted multilingual aliases and optional source-language rewrites.
+pub fn memory_retrieval_job_handler(
+    state: StateStore,
+    history_root: std::path::PathBuf,
+    core_runtime: mcp_vault_core::VaultCoreRuntime,
+    memory: MemoryService,
+) -> JobHandler {
+    Arc::new(move |job, shutdown| {
+        let state = state.clone();
+        let history_root = history_root.clone();
+        let core_runtime = core_runtime.clone();
+        let memory = memory.clone();
+        Box::pin(async move {
+            if shutdown.is_cancelled() {
+                return JobOutcome::Cancelled;
+            }
+            let Some(vault_id) = job.vault_id else {
+                return JobOutcome::Failed {
+                    code: "memory_retrieval_vault_missing",
+                };
+            };
+            let vault = match state.vaults().find_by_id(vault_id).await {
+                Ok(Some(vault)) => vault,
+                Ok(None) => {
+                    return JobOutcome::Failed {
+                        code: "memory_retrieval_vault_missing",
+                    };
+                }
+                Err(_) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "memory_retrieval_vault_lookup_failed",
+                    };
+                }
+            };
+            let context = match vault.context() {
+                Ok(context) => context,
+                Err(_) => {
+                    return JobOutcome::Failed {
+                        code: "memory_retrieval_context_invalid",
+                    };
+                }
+            };
+            let current_profile_hash = match memory.retrieval_coverage(&context).await {
+                Ok(coverage) => coverage.profile_hash,
+                Err(error) => return memory_retrieval_error_outcome(error),
+            };
+            if job.attempts > 1
+                && state
+                    .memory()
+                    .retry_failed_retrieval_metadata(&context, &current_profile_hash)
+                    .await
+                    .is_err()
+            {
+                return JobOutcome::Retry {
+                    delay: Duration::from_secs(5),
+                    code: "memory_retrieval_retry_admission_failed",
+                };
+            }
+            let core = match super::core_for_vault(&state, &history_root, &vault, &core_runtime) {
+                Ok(core) => core,
+                Err(_) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "memory_retrieval_core_unavailable",
+                    };
+                }
+            };
+            let Some(worker_id) = job.lease_owner.as_deref() else {
+                return JobOutcome::Failed {
+                    code: "memory_retrieval_lease_missing",
+                };
+            };
+            let prior_progress = job.progress.as_ref();
+            let mut completed = prior_progress
+                .and_then(|progress| progress.get("enriched"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let mut rewritten = prior_progress
+                .and_then(|progress| progress.get("rewritten"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let mut rewrite_skipped = prior_progress
+                .and_then(|progress| progress.get("rewrite_skipped"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let mut snapshot_conflicts = prior_progress
+                .and_then(|progress| progress.get("snapshot_conflicts"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let mut reused_proposal = prior_progress
+                .and_then(|progress| progress.get("reused_proposal"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let pending = match state
+                .memory()
+                .retrieval_pending_count(&context, &current_profile_hash)
+                .await
+            {
+                Ok(total) => total,
+                Err(_) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "memory_retrieval_pending_count_failed",
+                    };
+                }
+            };
+            let mut total = prior_progress
+                .and_then(|progress| progress.get("total"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .max(completed.saturating_add(pending));
+            loop {
+                if shutdown.is_cancelled() {
+                    return JobOutcome::Cancelled;
+                }
+                match state.jobs().should_cancel_claimed(job.id, worker_id).await {
+                    Ok(true) => return JobOutcome::Cancelled,
+                    Ok(false) => {}
+                    Err(_) => {
+                        return JobOutcome::Retry {
+                            delay: Duration::from_secs(5),
+                            code: "memory_retrieval_cancel_check_failed",
+                        };
+                    }
+                }
+                let report = match memory.enrich_retrieval(&context, &core).await {
+                    Ok(report) => report,
+                    Err(error) => return memory_retrieval_error_outcome(error),
+                };
+                completed = completed.saturating_add(u64::from(report.enriched));
+                rewritten = rewritten.saturating_add(u64::from(report.rewritten));
+                rewrite_skipped = rewrite_skipped.saturating_add(u64::from(report.rewrite_skipped));
+                snapshot_conflicts =
+                    snapshot_conflicts.saturating_add(u64::from(report.snapshot_conflicts));
+                reused_proposal |= report.reused_proposal;
+                let coverage = match memory.retrieval_coverage(&context).await {
+                    Ok(coverage) => coverage,
+                    Err(error) => return memory_retrieval_error_outcome(error),
+                };
+                total = total.max(completed.saturating_add(report.remaining));
+                if state
+                    .jobs()
+                    .update_progress(
+                        job.id,
+                        worker_id,
+                        &json!({
+                            "phase": if report.remaining == 0 { "completed" } else { "enriching" },
+                            "completed": completed,
+                            "total": total,
+                            "enriched": completed,
+                            "rewritten": rewritten,
+                            "rewrite_skipped": rewrite_skipped,
+                            "snapshot_conflicts": snapshot_conflicts,
+                            "remaining": report.remaining,
+                            "coverage_current": coverage.current,
+                            "coverage_eligible": coverage.eligible,
+                            "profile_hash": current_profile_hash.as_str(),
+                            "reused_proposal": reused_proposal,
+                            "error_code": null,
+                        }),
+                    )
+                    .await
+                    .is_err()
+                {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "memory_retrieval_progress_failed",
+                    };
+                }
+                if report.remaining == 0 {
+                    return JobOutcome::Complete;
+                }
+                if report.snapshot_conflicts != 0 {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(2),
+                        code: "memory_retrieval_snapshot_changed",
+                    };
+                }
+                if report.processed == 0 {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(2),
+                        code: "memory_retrieval_no_progress",
+                    };
+                }
+            }
+        })
+    })
+}
+
+fn memory_retrieval_error_outcome(error: MemoryError) -> JobOutcome {
+    match error {
+        MemoryError::Configuration(code) | MemoryError::GeneratedOutput(code) => {
+            JobOutcome::Failed { code }
+        }
+        MemoryError::Provider(error) if error.retryable() => JobOutcome::Retry {
+            delay: Duration::from_secs(10),
+            code: error.code(),
+        },
+        MemoryError::Provider(error) => JobOutcome::Failed { code: error.code() },
+        MemoryError::Conflict => JobOutcome::Retry {
+            delay: Duration::from_secs(2),
+            code: "memory_retrieval_snapshot_changed",
+        },
+        error if error.retryable() => JobOutcome::Retry {
+            delay: Duration::from_secs(10),
+            code: "memory_retrieval_retryable",
+        },
+        MemoryError::InvalidInput(_) | MemoryError::Markdown => JobOutcome::Failed {
+            code: "memory_retrieval_prepared_invalid",
+        },
+        _ => JobOutcome::Failed {
+            code: "memory_retrieval_failed",
         },
     }
 }
@@ -4036,43 +4255,14 @@ pub fn embedding_job_handler(
                         _ = shutdown.cancelled() => return JobOutcome::Cancelled,
                         result = index.reembed_note_sources(&context, model_id, &sources) => result,
                     };
-                    match result {
-                        Ok(_) => JobOutcome::Complete,
-                        Err(
-                            mcp_vault_indexer::IndexError::State(_)
-                            | mcp_vault_indexer::IndexError::Core(_),
-                        ) => JobOutcome::Retry {
-                            delay: Duration::from_secs(10),
-                            code: "embedding_retryable",
-                        },
-                        Err(mcp_vault_indexer::IndexError::Provider(error))
-                            if error.retryable() =>
-                        {
-                            JobOutcome::Retry {
-                                delay: Duration::from_secs(10),
-                                code: "embedding_retryable",
-                            }
-                        }
-                        Err(_) => JobOutcome::Failed {
-                            code: "embedding_rebuild_failed",
-                        },
-                    }
+                    note_embedding_error_outcome(result)
                 }
                 Some("memory") => {
                     let result = tokio::select! {
                         _ = shutdown.cancelled() => return JobOutcome::Cancelled,
                         result = memory.reembed_sources(&context, model_id, &sources) => result,
                     };
-                    match result {
-                        Ok(_) | Err(MemoryError::NotFound) => JobOutcome::Complete,
-                        Err(error) if error.retryable() => JobOutcome::Retry {
-                            delay: Duration::from_secs(10),
-                            code: "embedding_retryable",
-                        },
-                        Err(_) => JobOutcome::Failed {
-                            code: "embedding_rebuild_failed",
-                        },
-                    }
+                    memory_embedding_error_outcome(result)
                 }
                 _ => JobOutcome::Failed {
                     code: "embedding_source_unsupported",
@@ -4080,6 +4270,41 @@ pub fn embedding_job_handler(
             }
         })
     })
+}
+
+fn note_embedding_error_outcome(result: Result<u64, mcp_vault_indexer::IndexError>) -> JobOutcome {
+    match result {
+        Ok(_) => JobOutcome::Complete,
+        Err(mcp_vault_indexer::IndexError::Provider(error)) if error.retryable() => {
+            JobOutcome::Retry {
+                delay: Duration::from_secs(10),
+                code: error.code(),
+            }
+        }
+        Err(mcp_vault_indexer::IndexError::Provider(error)) => {
+            JobOutcome::Failed { code: error.code() }
+        }
+        Err(mcp_vault_indexer::IndexError::State(_) | mcp_vault_indexer::IndexError::Core(_)) => {
+            JobOutcome::Retry {
+                delay: Duration::from_secs(10),
+                code: "embedding_retryable",
+            }
+        }
+        Err(_) => JobOutcome::Failed {
+            code: "embedding_rebuild_failed",
+        },
+    }
+}
+
+fn memory_embedding_error_outcome(result: Result<u64, MemoryError>) -> JobOutcome {
+    match result {
+        Ok(_) | Err(MemoryError::NotFound) => JobOutcome::Complete,
+        Err(error) if error.retryable() => JobOutcome::Retry {
+            delay: Duration::from_secs(10),
+            code: error.code(),
+        },
+        Err(error) => JobOutcome::Failed { code: error.code() },
+    }
 }
 
 async fn wait_poll(shutdown: &Cancellation, duration: Duration) {
@@ -4156,8 +4381,9 @@ mod tests {
         enqueue_memory_source_audit_job, ensure_memory_consolidation_job,
         ensure_memory_pipeline_regeneration_job, index_rebuild_job_handler,
         memory_consolidate_job_handler, memory_consolidation_error_outcome,
-        memory_extract_error_outcome, memory_extract_job_handler,
-        memory_output_failure_limit_reached, memory_source_reconcile_job_handler, now_millis,
+        memory_embedding_error_outcome, memory_extract_error_outcome, memory_extract_job_handler,
+        memory_output_failure_limit_reached, memory_retrieval_job_handler,
+        memory_source_reconcile_job_handler, note_embedding_error_outcome, now_millis,
         outbox_event_job_handler, outbox_to_job_handler, path_is_memory_record,
         quiesce_memory_pipeline_jobs, redacted_path_hash, vault_initialize_job_handler,
     };
@@ -4346,6 +4572,43 @@ mod tests {
         Json(request): Json<Value>,
     ) -> Json<Value> {
         if request["model"] == "fake-consolidation" {
+            if request["messages"][0]["content"]
+                .as_str()
+                .is_some_and(|prompt| prompt.contains("search-only multilingual metadata"))
+            {
+                let user = request["messages"]
+                    .as_array()
+                    .and_then(|messages| messages.last())
+                    .and_then(|message| message["content"].as_str())
+                    .unwrap();
+                let payload = user
+                    .strip_prefix("<untrusted_retrieval_inputs>\n")
+                    .and_then(|value| value.strip_suffix("\n</untrusted_retrieval_inputs>"))
+                    .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                    .unwrap();
+                let items = payload["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|item| {
+                        json!({
+                            "memory_index": item["memory_index"],
+                            "source_language": "en",
+                            "rewritten_content": null,
+                            "aliases": [
+                                {"language": "en", "terms": ["durable decision"]},
+                                {"language": "zh-Hans", "terms": ["持久决策"]}
+                            ]
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                return Json(json!({
+                    "choices": [{
+                        "message": {"content": json!({"items": items}).to_string()},
+                        "finish_reason": "stop"
+                    }]
+                }));
+            }
             let user = request["messages"]
                 .as_array()
                 .and_then(|messages| messages.last())
@@ -4433,6 +4696,29 @@ mod tests {
             })),
             JobOutcome::Failed {
                 code: "provider_response_timeout",
+            }
+        );
+    }
+
+    #[test]
+    fn embedding_jobs_preserve_redacted_provider_error_codes() {
+        assert_eq!(
+            note_embedding_error_outcome(Err(mcp_vault_indexer::IndexError::Provider(
+                ProviderError::HttpStatus {
+                    status: 413,
+                    retryable: false,
+                },
+            ))),
+            JobOutcome::Failed {
+                code: "provider_http_error",
+            }
+        );
+        assert_eq!(
+            memory_embedding_error_outcome(Err(MemoryError::Provider(
+                ProviderError::DimensionMismatch,
+            ))),
+            JobOutcome::Failed {
+                code: "embedding_dimension_mismatch",
             }
         );
     }
@@ -5433,6 +5719,19 @@ mod tests {
             )
             .await
             .unwrap();
+        let retrieval = state
+            .jobs()
+            .enqueue(
+                &context,
+                "memory.enrich_retrieval",
+                "legacy:old-retrieval-enrichment",
+                &json!({}),
+                0,
+                5,
+                0,
+            )
+            .await
+            .unwrap();
 
         assert!(
             !quiesce_memory_pipeline_jobs(&state, &context)
@@ -5451,6 +5750,16 @@ mod tests {
             state
                 .jobs()
                 .get(&context, consolidation.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Cancelled
+        );
+        assert_eq!(
+            state
+                .jobs()
+                .get(&context, retrieval.id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -5936,6 +6245,37 @@ mod tests {
         state
             .jobs()
             .complete(consolidation_id, "consolidation-worker")
+            .await
+            .unwrap();
+        let retrieval_job = state
+            .jobs()
+            .find_active_by_type(&context, "memory.enrich_retrieval")
+            .await
+            .unwrap()
+            .unwrap();
+        let now = now_millis();
+        let claimed_retrieval = state
+            .jobs()
+            .claim_batch("retrieval-worker", now, now.saturating_add(60_000), 1)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(claimed_retrieval.id, retrieval_job.id);
+        let retrieval_outcome = memory_retrieval_job_handler(
+            state.clone(),
+            history_root.clone(),
+            core_runtime.clone(),
+            memory.clone(),
+        )(claimed_retrieval, Cancellation::default())
+        .await;
+        assert_eq!(retrieval_outcome, JobOutcome::Complete);
+        assert_eq!(
+            memory.retrieval_coverage(&context).await.unwrap().current,
+            1
+        );
+        state
+            .jobs()
+            .complete(retrieval_job.id, "retrieval-worker")
             .await
             .unwrap();
 

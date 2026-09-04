@@ -769,7 +769,7 @@ The complete memory schema is defined in `memory-system.md`. At minimum it inclu
 - sourced Phase 1 raw outputs and no-output coverage;
 - prepared Phase 2 proposals and committed consolidation generations;
 - entities, tags, and relations;
-- FTS projection;
+- FTS and multilingual retrieval projections;
 - embeddings;
 - lifecycle and temporal validity;
 - recall statistics.
@@ -791,6 +791,24 @@ hash, event, reason, and timestamps. Legacy note sources are inserted as
 `unverified`; legacy stale rows receive `source_unavailable` so exact first-
 audit recovery can reactivate them safely.
 
+Migration `0014_multilingual_memory_retrieval.sql` adds two Vault-scoped,
+rebuildable structures:
+
+- `memory_retrieval_metadata`, keyed by `(vault_id, memory_id)`, binds aliases
+  to the exact canonical `content_hash` and retrieval `profile_hash`. A ready
+  row stores the validated source language, bounded structured aliases,
+  flattened alias text, deterministic search terms, timestamps, and an
+  optional stable rewrite warning. Pending/failed rows carry no Provider text.
+- `memory_retrieval_proposals` stores the server-owned snapshot and fully
+  validated prepared proposal before any canonical rewrite. Its applied-prefix
+  counter makes partial application resumable without repeating the Provider
+  call.
+
+The same migration recreates derived `memory_fts` with `aliases` and
+`search_terms` fields. Application rebuilds emit NFKC/case/punctuation-
+normalized Latin terms and overlapping Han bigrams; aliases are never part of
+the canonical memory content hash, source evidence, or duplicate identity.
+
 Migration `0007_memory_state.sql` owns final `memories`, `memory_sources`,
 `memory_entities`, `memory_tags`, `memory_relations`, legacy
 `memory_candidates`, explicit-command idempotency, diagnostics, and the
@@ -807,7 +825,7 @@ from reconciliation delete inference.
 The Vault-scoped extraction setting includes fixed `source_mode: "automatic"`
 and a per-note timeout. `max_evidence_per_note` and
 `max_candidates_per_note` deserialize for prerelease compatibility but are not
-part of the Phase 1 v4 model contract. Legacy `explicit_only` and `all_notes`
+part of the Phase 1 v5 model contract. Legacy `explicit_only` and `all_notes`
 inputs remain source-mode aliases. No author-facing note metadata or score
 threshold controls source admission.
 
@@ -939,19 +957,37 @@ A pinned `sqlite-vec` backend may be used, but it remains behind the project int
 
 Never mix dimensions or models in one similarity query.
 
+Similarity queries also require an exact object type before Top-K selection.
+The current values are `memory` and `note`; each `note` row represents one
+deterministic note chunk. Filtering after Top-K is forbidden because a large
+note partition could otherwise crowd memory vectors out of recall.
+
+For note retrieval, the object-type-filtered vector rows form a bounded raw
+candidate pool rather than the final note Top-K. The Index service reconstructs
+current chunk keys/hashes, rejects stale and negative hits, and retains only the
+highest cosine row per `object_id` before unique-note rank fusion. This keeps
+current-source validation above the generic vector backend and prevents a long
+note's many chunk rows from occupying multiple note result slots.
+
 The exact fallback stores normalized f32 values in a Vault-scoped
 embedding_vectors BLOB row referenced by embedding_records. Both metadata and
 vector bytes are derived and may be deleted and rebuilt independently of
 canonical notes and memory Markdown.
 
 For `object_type = 'note'`, `object_id` is the stable `FileId` and `chunk_key`
-is a versioned deterministic plain-text chunk key such as `text-v1:0000`.
+is a versioned deterministic plain-text chunk key such as `text-v2:0000`.
 `content_hash` covers the exact title/path/heading context and chunk text sent
-to the embedding model. The Index service resolves the reference from the
-current `notes` projection before a job sends content, skips a stale hash, and
-removes obsolete current-model vectors before scheduling replacements. No
-separate canonical chunk table is required; chunks are reproducible from the
-canonical note-derived projection.
+to the embedding model. A `text-v2` input is at most 2,048 UTF-8 bytes including
+context. The Index service resolves the reference from the current `notes`
+projection before a job sends content, skips a stale hash, and removes obsolete
+current-model vectors before scheduling replacements. No separate canonical
+chunk table is required; chunks are reproducible from the canonical note-derived
+projection.
+
+`embedding.rebuild` payloads also contain `projection_version`. This version is
+part of the deduplication key so a corrected derived profile never mutates or
+silently reuses an older terminal job. Admin job projections omit source IDs,
+chunk hashes, paths, and bodies.
 
 ## 16. Audit
 
@@ -1015,6 +1051,7 @@ artifact.
 | Topic projections | Files + taxonomy + provider config | Yes |
 | Stage 1 SQLite projection | Managed raw/source-summary artifacts + source notes | Yes |
 | Phase 2/query projection | Canonical memory artifacts | Yes |
+| Multilingual memory aliases/proposals | Canonical memory + verified sources + Provider config | Yes |
 | Active memory Markdown | Canonical memory files | No; must be preserved |
 | Credentials and settings | Operational DB | No |
 | Revisions/history | Operational DB + blob store | No |
@@ -1045,4 +1082,12 @@ artifact.
   backup/non-memory state, recreates generation state with explicit
   `pipeline_generation`/`regeneration_pending` fields, and admits filesystem
   cleanup through the durable `memory.reset_pipeline` job.
+- Migration 0012 adds the built-in OAuth authorization server without changing
+  existing Vault credentials.
+- Migration 0013 adds continuously reconciled memory-source health and
+  initializes legacy note sources as unverified.
+- Migration 0014 adds multilingual retrieval metadata/recovery proposals and
+  rebuilds only the derived memory FTS. It does not rewrite existing canonical
+  memory; an authenticated Admin starts any historical body/alias backfill
+  after taking a backup.
 - Every migration must preserve Vault IDs and credential bindings.

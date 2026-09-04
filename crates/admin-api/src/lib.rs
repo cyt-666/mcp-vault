@@ -657,6 +657,7 @@ fn vault_admin_routes() -> Router<AdminApiState> {
         .route("/model-bindings/{role}", put(update_model_binding))
         .route("/index/status", get(index_status))
         .route("/index/rebuild", post(rebuild_index))
+        .route("/index/embeddings/rebuild", post(rebuild_note_embeddings))
         .route("/index/nodes", get(index_nodes))
         .route("/memories", get(list_memories))
         .route("/memories/merge", post(merge_memories))
@@ -677,6 +678,16 @@ fn vault_admin_routes() -> Router<AdminApiState> {
         )
         .route("/memory/source-health", get(get_memory_source_health))
         .route("/memory/source-health/audit", post(run_memory_source_audit))
+        .route("/memory/retrieval", get(get_memory_retrieval))
+        .route(
+            "/memory/retrieval/backfill",
+            post(run_memory_retrieval_backfill),
+        )
+        .route("/memory/embeddings", get(get_memory_embeddings))
+        .route(
+            "/memory/embeddings/rebuild",
+            post(rebuild_memory_embeddings),
+        )
         .route("/jobs", get(list_jobs))
         .route("/jobs/overview", get(jobs_overview))
         .route("/jobs/{id}", get(get_job))
@@ -2256,6 +2267,28 @@ fn job_admission_summary(job: &JobRecord, admission: &str) -> Value {
 }
 
 fn job_details(job: &JobRecord) -> Option<Value> {
+    if job.job_type == "embedding.rebuild" {
+        let sources = job.payload.get("sources").and_then(Value::as_array);
+        let source_type = sources.and_then(|sources| {
+            let first = sources
+                .first()
+                .and_then(|source| source.get("object_type"))
+                .and_then(Value::as_str)?;
+            sources
+                .iter()
+                .all(|source| source.get("object_type").and_then(Value::as_str) == Some(first))
+                .then_some(first)
+        });
+        return Some(json!({
+            "projection_version": job
+                .payload
+                .get("projection_version")
+                .and_then(Value::as_u64),
+            "model_id": job.payload.get("model_id").and_then(Value::as_str),
+            "source_type": source_type,
+            "source_count": sources.map_or(0, Vec::len),
+        }));
+    }
     if job.job_type != "memory.extract" {
         return None;
     }
@@ -4123,6 +4156,60 @@ async fn update_model_binding(
                     }
                 }
             }
+            if role == "embedding_memory"
+                && let Some(object) = value.as_object_mut()
+            {
+                let targets = if binding.vault_id.is_some() {
+                    Ok(vec![context.clone()])
+                } else {
+                    state.list_vaults().await.map(|vaults| {
+                        vaults
+                            .into_iter()
+                            .filter(|vault| vault.status == VaultStatus::Active)
+                            .filter_map(|vault| vault.context().ok())
+                            .collect::<Vec<_>>()
+                    })
+                };
+                match targets {
+                    Ok(targets) => {
+                        let mut eligible = 0_u64;
+                        let mut current = 0_u64;
+                        let mut queued = 0_u64;
+                        let mut pruned = 0_u64;
+                        let mut jobs = 0_u64;
+                        let mut degraded = false;
+                        for target in targets {
+                            match state.memory().schedule_memory_embeddings(&target).await {
+                                Ok(report) => {
+                                    eligible = eligible.saturating_add(report.eligible);
+                                    current = current.saturating_add(report.current);
+                                    queued = queued.saturating_add(report.queued);
+                                    pruned = pruned.saturating_add(report.pruned);
+                                    jobs = jobs.saturating_add(report.jobs);
+                                }
+                                Err(_) => degraded = true,
+                            }
+                        }
+                        object.insert(
+                            "embedding_schedule".to_owned(),
+                            json!({
+                                "eligible": eligible,
+                                "current": current,
+                                "queued": queued,
+                                "pruned": pruned,
+                                "jobs": jobs,
+                                "degraded": degraded,
+                            }),
+                        );
+                    }
+                    Err(_) => {
+                        object.insert(
+                            "embedding_schedule".to_owned(),
+                            json!({"degraded": true, "code": "memory_embedding_schedule_failed"}),
+                        );
+                    }
+                }
+            }
             api_ok(StatusCode::OK, value, request_id.0)
         }
         Err(error) => provider_error(error, request_id.0),
@@ -4252,6 +4339,61 @@ async fn rebuild_index(
             api_ok(StatusCode::ACCEPTED, job_summary(&job), request_id.0)
         }
         Err(error) => state_error(error, request_id.0),
+    }
+}
+
+async fn rebuild_note_embeddings(
+    State(state): State<AdminApiState>,
+    headers: HeaderMap,
+    Extension(principal): Extension<AdminPrincipal>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
+        return auth_error(error, request_id.0);
+    }
+    let vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    let context = match vault.context() {
+        Ok(context) => context,
+        Err(_) => {
+            return state_error(
+                StateError::InvalidInput("Vault context is invalid"),
+                request_id.0,
+            );
+        }
+    };
+    match state.index().schedule_note_embeddings(&context).await {
+        Ok(report) => {
+            state
+                .append_admin_audit(
+                    Some(&context),
+                    &request_id.0,
+                    &principal.actor,
+                    "admin.note_embeddings.rebuild_queued",
+                    Some("embedding"),
+                    None,
+                    json!({
+                        "source_chunks": report.source_chunks,
+                        "queued_chunks": report.queued_chunks,
+                        "pruned_vectors": report.pruned_vectors,
+                        "jobs": report.jobs,
+                    }),
+                )
+                .await;
+            api_ok(
+                StatusCode::ACCEPTED,
+                json!({
+                    "source_chunks": report.source_chunks,
+                    "queued_chunks": report.queued_chunks,
+                    "pruned_vectors": report.pruned_vectors,
+                    "jobs": report.jobs,
+                }),
+                request_id.0,
+            )
+        }
+        Err(error) => index_error(error, request_id.0),
     }
 }
 
@@ -5005,6 +5147,174 @@ async fn run_memory_source_audit(
             )
         }
         Err(error) => state_error(error, request_id.0),
+    }
+}
+
+async fn get_memory_retrieval(
+    State(state): State<AdminApiState>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    let vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    let context = match vault.context() {
+        Ok(context) => context,
+        Err(_) => {
+            return state_error(
+                StateError::InvalidInput("Vault context is invalid"),
+                request_id.0,
+            );
+        }
+    };
+    let coverage = match state.memory().retrieval_coverage(&context).await {
+        Ok(coverage) => coverage,
+        Err(error) => return memory_error(error, request_id.0),
+    };
+    let active_job = match state
+        .active_job_for(&context, "memory.enrich_retrieval")
+        .await
+    {
+        Ok(job) => job.map(|job| job_summary(&job)),
+        Err(error) => return state_error(error, request_id.0),
+    };
+    api_ok(
+        StatusCode::OK,
+        json!({"coverage": coverage, "active_job": active_job}),
+        request_id.0,
+    )
+}
+
+async fn run_memory_retrieval_backfill(
+    State(state): State<AdminApiState>,
+    headers: HeaderMap,
+    Extension(principal): Extension<AdminPrincipal>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
+        return auth_error(error, request_id.0);
+    }
+    let vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    let context = match vault.context() {
+        Ok(context) => context,
+        Err(_) => {
+            return state_error(
+                StateError::InvalidInput("Vault context is invalid"),
+                request_id.0,
+            );
+        }
+    };
+    let readiness = match state.memory().consolidation_readiness(&context).await {
+        Ok(readiness) => readiness,
+        Err(error) => return memory_error(error, request_id.0),
+    };
+    if !readiness.ready {
+        return api_error(
+            StatusCode::CONFLICT,
+            "memory_retrieval_not_ready",
+            "The memory consolidation model is not ready for retrieval enrichment.",
+            Some(json!({"blockers": readiness.blockers})),
+            request_id.0,
+        );
+    }
+    match state.memory().admit_retrieval_backfill(&context).await {
+        Ok(job) => {
+            let coverage = state.memory().retrieval_coverage(&context).await.ok();
+            state
+                .append_admin_audit(
+                    Some(&context),
+                    &request_id.0,
+                    &principal.actor,
+                    "admin.memory_retrieval_backfill.queued",
+                    Some("job"),
+                    Some(&job.id.to_string()),
+                    json!({
+                        "job_type": "memory.enrich_retrieval",
+                        "eligible": coverage.as_ref().map(|value| value.eligible),
+                        "estimated_batches": coverage.as_ref().map(|value| value.estimated_batches),
+                    }),
+                )
+                .await;
+            api_ok(
+                StatusCode::ACCEPTED,
+                job_admission_summary(&job, "queued"),
+                request_id.0,
+            )
+        }
+        Err(error) => memory_error(error, request_id.0),
+    }
+}
+
+async fn get_memory_embeddings(
+    State(state): State<AdminApiState>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    let vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    let context = match vault.context() {
+        Ok(context) => context,
+        Err(_) => {
+            return state_error(
+                StateError::InvalidInput("Vault context is invalid"),
+                request_id.0,
+            );
+        }
+    };
+    match state.memory().embedding_status(&context).await {
+        Ok(status) => api_ok(StatusCode::OK, status, request_id.0),
+        Err(error) => memory_error(error, request_id.0),
+    }
+}
+
+async fn rebuild_memory_embeddings(
+    State(state): State<AdminApiState>,
+    headers: HeaderMap,
+    Extension(principal): Extension<AdminPrincipal>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
+        return auth_error(error, request_id.0);
+    }
+    let vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    let context = match vault.context() {
+        Ok(context) => context,
+        Err(_) => {
+            return state_error(
+                StateError::InvalidInput("Vault context is invalid"),
+                request_id.0,
+            );
+        }
+    };
+    match state.memory().schedule_memory_embeddings(&context).await {
+        Ok(report) => {
+            state
+                .append_admin_audit(
+                    Some(&context),
+                    &request_id.0,
+                    &principal.actor,
+                    "admin.memory_embeddings.rebuild_queued",
+                    Some("embedding"),
+                    report.model_id.as_deref(),
+                    json!({
+                        "eligible": report.eligible,
+                        "current": report.current,
+                        "queued": report.queued,
+                        "pruned": report.pruned,
+                        "jobs": report.jobs,
+                    }),
+                )
+                .await;
+            api_ok(StatusCode::ACCEPTED, report, request_id.0)
+        }
+        Err(error) => memory_error(error, request_id.0),
     }
 }
 
@@ -6124,7 +6434,7 @@ fn memory_error(error: mcp_vault_memory::MemoryError, request_id: String) -> Res
         mcp_vault_memory::MemoryError::Configuration(code) => (
             StatusCode::CONFLICT,
             code,
-            "Memory extraction is not fully configured.",
+            "The requested memory capability is not fully configured.",
         ),
         mcp_vault_memory::MemoryError::State(StateError::InvalidDomain(
             DomainError::RevisionConflict { .. } | DomainError::PreconditionFailed { .. },
@@ -7069,6 +7379,61 @@ mod tests {
         assert_eq!(visible_running[0]["id"], running.id.to_string());
         assert_eq!(visible_running[0]["status"], JobStatus::Running.as_str());
         assert_eq!(body["data"]["truncated"]["running"], false);
+    }
+
+    #[tokio::test]
+    async fn embedding_jobs_expose_only_redacted_model_and_source_summary() {
+        let (router, _root, _maintenance, cookie, _csrf, state) =
+            authenticated_fixture_with_state().await;
+        let vault = state.list_vaults().await.unwrap().remove(0);
+        let context = vault.context().unwrap();
+        let model_id = mcp_vault_domain::ModelId::new();
+        state
+            .state
+            .jobs()
+            .enqueue(
+                &context,
+                "embedding.rebuild",
+                "admin-jobs:embedding-details",
+                &json!({
+                    "projection_version": 2,
+                    "model_id": model_id,
+                    "sources": [{
+                        "object_type": "note",
+                        "object_id": "private-note-id",
+                        "chunk_key": "text-v2:0000",
+                        "content_hash": "sha256:private-source-hash"
+                    }]
+                }),
+                0,
+                5,
+                0,
+            )
+            .await
+            .unwrap();
+
+        let (status, body) = json_response(
+            router
+                .oneshot(request(
+                    "GET",
+                    "/jobs?job_type=embedding.rebuild&limit=10",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let job = &body["data"]["jobs"][0];
+        assert_eq!(job["details"]["projection_version"], 2);
+        assert_eq!(job["details"]["model_id"], model_id.to_string());
+        assert_eq!(job["details"]["source_type"], "note");
+        assert_eq!(job["details"]["source_count"], 1);
+        let serialized = job.to_string();
+        assert!(!serialized.contains("private-note-id"));
+        assert!(!serialized.contains("private-source-hash"));
     }
 
     #[tokio::test]
@@ -8320,6 +8685,241 @@ mod tests {
             consolidation_binding["data"]["role"],
             "memory_consolidation"
         );
+
+        let (status, embedding_model) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    &format!("/providers/{provider_id}/models"),
+                    json!({
+                        "external_model_id": "fixture-embedding-model",
+                        "capabilities": {"embeddings": true, "dimension": 2},
+                        "settings": {},
+                        "enabled": true
+                    }),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{embedding_model}");
+        let embedding_model_id = embedding_model["data"]["id"].as_str().unwrap();
+        let (status, embedding_binding) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "PUT",
+                    "/model-bindings/embedding_memory",
+                    json!({
+                        "model_id": embedding_model_id,
+                        "settings": {},
+                        "vault_override": true
+                    }),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{embedding_binding}");
+        assert_eq!(embedding_binding["data"]["role"], "embedding_memory");
+        assert_eq!(
+            embedding_binding["data"]["embedding_schedule"]["eligible"],
+            0
+        );
+        let (status, note_embedding_binding) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "PUT",
+                    "/model-bindings/embedding_note",
+                    json!({
+                        "model_id": embedding_model_id,
+                        "settings": {},
+                        "vault_override": true
+                    }),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{note_embedding_binding}");
+        assert_eq!(note_embedding_binding["data"]["role"], "embedding_note");
+        assert_eq!(
+            note_embedding_binding["data"]["embedding_schedule"]["source_chunks"],
+            0
+        );
+
+        let (status, rejected_note_embedding_rebuild) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/vaults/default/index/embeddings/rebuild",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{rejected_note_embedding_rebuild}"
+        );
+        let (status, note_embedding_rebuild) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/vaults/default/index/embeddings/rebuild",
+                    json!({}),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{note_embedding_rebuild}");
+        assert_eq!(note_embedding_rebuild["data"]["source_chunks"], 0);
+        assert_eq!(note_embedding_rebuild["data"]["queued_chunks"], 0);
+
+        let (status, embedding_status) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    "/vaults/default/memory/embeddings",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{embedding_status}");
+        assert_eq!(embedding_status["data"]["configured"], true);
+        assert_eq!(
+            embedding_status["data"]["external_model_id"],
+            "fixture-embedding-model"
+        );
+        assert_eq!(embedding_status["data"]["eligible"], 0);
+
+        let (status, rejected_embedding_rebuild) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/vaults/default/memory/embeddings/rebuild",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{rejected_embedding_rebuild}"
+        );
+        assert_eq!(rejected_embedding_rebuild["error"]["code"], "csrf_rejected");
+
+        let (status, embedding_rebuild) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/vaults/default/memory/embeddings/rebuild",
+                    json!({}),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{embedding_rebuild}");
+        assert_eq!(embedding_rebuild["data"]["eligible"], 0);
+        assert_eq!(embedding_rebuild["data"]["queued"], 0);
+        assert_eq!(embedding_rebuild["data"]["jobs"], 0);
+
+        let (status, retrieval) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    "/vaults/default/memory/retrieval",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retrieval}");
+        assert_eq!(retrieval["data"]["coverage"]["eligible"], 0);
+        assert_eq!(
+            retrieval["data"]["coverage"]["prompt_version"],
+            "memory-retrieval-v1"
+        );
+        assert!(
+            retrieval["data"]["coverage"]["profile_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        assert_eq!(
+            retrieval["data"]["coverage"]["target_languages"],
+            json!(["source", "zh-Hans", "en"])
+        );
+        assert!(retrieval["data"]["active_job"].is_null());
+
+        let (status, rejected_backfill) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/vaults/default/memory/retrieval/backfill",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{rejected_backfill}");
+        assert_eq!(rejected_backfill["error"]["code"], "csrf_rejected");
+
+        let (status, retrieval_job) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/vaults/default/memory/retrieval/backfill",
+                    json!({}),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{retrieval_job}");
+        assert_eq!(retrieval_job["data"]["job_type"], "memory.enrich_retrieval");
+        assert_eq!(retrieval_job["data"]["admission"], "queued");
 
         let (status, extraction) = json_response(
             router

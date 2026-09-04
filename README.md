@@ -4,8 +4,8 @@ MCP Vault 是一个自托管的 Markdown 知识库和长期记忆服务。
 它让人通过 Obsidian 管理同一个 Vault，也让 AI Agent 通过 MCP 发现、检索、
 回忆和安全修改这些内容。
 
-当前版本：<code>0.1.17</code>（2026-09-02）。部署示例默认使用
-<code>mcp-vault:0.1.17</code>，目标架构为 <code>linux/amd64</code>。
+当前版本：<code>0.1.21</code>（2026-09-04）。部署示例默认使用
+<code>mcp-vault:0.1.21</code>，目标架构为 <code>linux/amd64</code>。
 
 ## 项目定位
 
@@ -118,14 +118,14 @@ curl --fail http://127.0.0.1:8080/health/ready
 当前版本镜像可以这样构建：
 
 ~~~bash
-docker build --platform linux/amd64 --tag mcp-vault:0.1.17 --tag mcp-vault:latest .
+docker build --platform linux/amd64 --tag mcp-vault:0.1.21 --tag mcp-vault:latest .
 ~~~
 
 镜像包含 Rust 服务和编译后的 Admin 前端，运行用户为非 root 的 <code>mcpvault</code>，
 入口命令为 <code>/usr/local/bin/mcp-vault</code>。在部署前可以执行：
 
 ~~~bash
-docker run --rm --platform linux/amd64 --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m mcp-vault:0.1.17 --check-config
+docker run --rm --platform linux/amd64 --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m mcp-vault:0.1.21 --check-config
 ~~~
 
 ## 首次配置顺序
@@ -134,7 +134,9 @@ docker run --rm --platform linux/amd64 --read-only --tmpfs /tmp:rw,noexec,nosuid
 2. 确认 Vault 内容根目录和扫描状态。
 3. 创建独立的 WebDAV 凭据，复制一次性密码。
 4. 在 Admin 的“MCP / ChatGPT OAuth”页面创建独立的 Vault OAuth 用户，或创建 PAT。
-5. 如需语义检索，配置 embedding Provider 并绑定 <code>embedding_note</code> 角色。
+5. 如需语义检索，配置 embedding Provider，并按需绑定
+   <code>embedding_note</code> 与 <code>embedding_memory</code>；索引页和记忆页可分别
+   生成缺失向量，无需重新分析笔记或整理记忆。
 6. 如需自动记忆，分别绑定 <code>memory_extraction</code> 和 <code>memory_consolidation</code> 模型，
    然后显式启用 Vault 级自动记忆。
 7. 完成备份目录、保留策略和反向代理配置后，再将数据面发布到公网。

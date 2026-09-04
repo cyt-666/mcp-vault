@@ -264,6 +264,86 @@ pub struct MemoryConsolidationReport {
     pub reused_proposal: bool,
 }
 
+/// Current multilingual retrieval coverage for one Vault.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct MemoryRetrievalCoverageView {
+    /// Stable retrieval metadata contract version.
+    pub prompt_version: String,
+    /// Hash of the alias targets, prompt contract, and lexical profile.
+    pub profile_hash: String,
+    /// Languages generated for each memory after source-language deduplication.
+    pub target_languages: Vec<String>,
+    /// Active, stale, and superseded memories eligible for backfill.
+    pub eligible: u64,
+    /// Current metadata matching exact memory content.
+    pub current: u64,
+    /// Missing or explicitly pending metadata.
+    pub pending: u64,
+    /// Current content whose latest enrichment failed.
+    pub failed: u64,
+    /// Maximum eight-item Provider batches required for uncovered memory.
+    pub estimated_batches: u64,
+}
+
+/// Current durable-memory vector projection status for one Vault/model binding.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct MemoryEmbeddingStatusView {
+    /// Whether an effective `embedding_memory` model is bound.
+    pub configured: bool,
+    /// Whether current Vault Provider policy permits embedding calls.
+    pub provider_mode_enabled: bool,
+    /// Selected internal model identity.
+    pub model_id: Option<String>,
+    /// Provider-visible model identifier.
+    pub external_model_id: Option<String>,
+    /// Active, stale, and superseded memories eligible for vector projection.
+    pub eligible: u64,
+    /// Current-model vectors matching exact current memory content.
+    pub current: u64,
+    /// Current-model vector rows that do not match the current projection.
+    pub stale: u64,
+    /// Stable redacted readiness blockers.
+    pub blockers: Vec<String>,
+}
+
+/// Outcome of admitting missing current-memory vectors to durable jobs.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct MemoryEmbeddingScheduleReport {
+    /// Eligible current memory records considered.
+    pub eligible: u64,
+    /// Already-current vectors for the selected model.
+    pub current: u64,
+    /// Missing current vectors admitted or deduplicated.
+    pub queued: u64,
+    /// Obsolete selected-model vectors removed before admission.
+    pub pruned: u64,
+    /// Durable `embedding.rebuild` jobs admitted or deduplicated.
+    pub jobs: u64,
+    /// Selected internal model identity.
+    pub model_id: Option<String>,
+    /// Provider-visible model identifier.
+    pub external_model_id: Option<String>,
+}
+
+/// Outcome of one bounded multilingual retrieval-enrichment batch.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct MemoryRetrievalEnrichmentReport {
+    /// Memories present in the prepared batch.
+    pub processed: u32,
+    /// Metadata rows made current.
+    pub enriched: u32,
+    /// Canonical bodies equivalently rewritten into source language.
+    pub rewritten: u32,
+    /// Items kept in their existing language because safe rewrite was unavailable.
+    pub rewrite_skipped: u32,
+    /// Items re-admitted because their revision/content snapshot changed.
+    pub snapshot_conflicts: u32,
+    /// Remaining explicitly admitted rows after this batch.
+    pub remaining: u64,
+    /// Whether a persisted proposal avoided a second Provider call.
+    pub reused_proposal: bool,
+}
+
 /// Outcome of one idempotent historical memory-source repair pass.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct MemorySourceRepairReport {
@@ -603,6 +683,8 @@ pub struct RecallResult {
     pub truncated: bool,
     /// Stable degradation codes.
     pub degraded: Vec<String>,
+    /// Current offline multilingual retrieval coverage.
+    pub retrieval_coverage: MemoryRetrievalCoverageView,
 }
 
 /// A rebuildable cue that points an Agent back to canonical note source.

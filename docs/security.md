@@ -555,6 +555,28 @@ unsupported lifecycle actions, stale base revisions, and incomplete raw-input
 dispositions before any canonical write or selection commit. Neither phase
 accepts model-generated confidence or importance as trust evidence.
 
+Multilingual retrieval enrichment is equally untrusted. The Provider receives
+only bounded source samples and request-local integer indexes, never
+application-owned memory IDs. Local validation requires an exact item set,
+valid BCP-47 language tags, source/`zh-Hans`/`en` coverage after language
+deduplication, one to eight aliases per language, and a 128-byte per-alias
+limit. Control characters, out-of-scope languages, and secret-shaped aliases
+reject the complete proposal. A source-language body rewrite is separately
+fail-closed: it is allowed only for a current hash-verified Vault Core source,
+must retain every detected URL, UUID, path, code span, number, and version, and
+otherwise leaves the canonical body unchanged while retaining only validated
+aliases and a stable warning code.
+
+When a note source cannot be verified, local code stores BCP-47 `und` and
+accepts only the `zh-Hans` and `en` alias groups; it does not let Provider text
+claim a source language or authorize a body rewrite.
+
+The complete validated retrieval proposal is persisted before any canonical
+mutation. Recovery applies an exact revision/content snapshot item by item and
+records its prefix, so an interruption cannot justify replaying the paid
+Provider request or overwriting a concurrent memory edit. Alias generation
+failure occurs after the core memory commit and cannot roll that memory back.
+
 Generated raw memory, source summaries, global summaries, final semantic
 content, reasons, and metadata strings receive best-effort secret redaction
 before persistence. Provider schema-envelope repair is allowed only for an
@@ -586,6 +608,16 @@ authenticated principal has `vault:read`; `memory:read` alone cannot reveal
 ordinary note paths, titles, snippets, tags, or headings. Query embeddings and
 durable `embedding_note` jobs remain subject to the same per-Vault provider
 mode and path/content privacy policy as other provider requests.
+
+Persisted aliases are search-only derived state and are never returned as
+facts or provenance. Recall uses bounded escaped OR terms and reports
+`multilingual_alias_coverage_incomplete` when the current memory/profile set is
+not fully covered. It does not translate the user's query at request time.
+Vector candidates are constrained by Vault, model, dimension, and object type
+before the bounded candidate pool so one projection class cannot reveal or
+crowd out another. Note chunks are then validated against the current derived
+note projection and collapsed by File ID before the final note Top-K; stale
+chunks cannot win or hide a lower-scoring current chunk for the same note.
 
 Provider audit records include byte/token estimates and model, not note body.
 

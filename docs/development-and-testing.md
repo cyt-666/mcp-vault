@@ -272,6 +272,11 @@ Test application services with real temporary filesystem + SQLite:
 - embedding dimension/model/Vault partition and re-embedding job references;
 - deterministic bounded note chunks, missing/stale vector scheduling, semantic
   paraphrase retrieval, lexical fallback, and two-Vault note-cue isolation;
+- note-vector over-fetch followed by current-hash validation, max-cosine
+  per-File-ID aggregation, negative-hit rejection, cosine-weighted unique-note
+  ranking, stale-winner fallthrough, and lexical/semantic snippet precedence;
+- `recall.related_notes` retaining multiple unique notes when one long note
+  contributes more than the raw result limit in high-scoring chunks;
 - memory materialization;
 - forced Unix `RENAME_NOREPLACE` capability failure followed by a complete
   same-directory link commit, destination-race preservation, temporary cleanup,

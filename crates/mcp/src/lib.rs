@@ -1429,7 +1429,7 @@ impl McpHandler {
     #[tool(
         name = "recall",
         title = "Recall relevant memory",
-        description = "Use this proactively before answering when the current request may depend on information the user previously saved, such as preferences, decisions, constraints, project state, progress, relationships, procedures, or past work. Pass the current question or task as query. On success, `data.memories` contains concise long-term context relevant to the task, while `data.related_notes` contains candidate source notes with paths, revisions, and snippets; `memory_count`, `related_note_count`, `degraded`, and `truncated` show coverage limits. Use the memories as context, call read_note when exact source wording or more detail matters, and use search_notes instead for general document or quotation search.",
+        description = "Use this proactively before answering when the current request may depend on information the user previously saved, such as preferences, decisions, constraints, project state, progress, relationships, procedures, or past work. Pass the current question or task in its natural language as query; MCP Vault uses persisted multilingual aliases and optional semantic vectors, so do not translate the query just for this tool. On success, `data.memories` contains concise long-term context relevant to the task, while `data.related_notes` contains candidate source notes with paths, revisions, and snippets; `retrieval_coverage`, `memory_count`, `related_note_count`, `degraded`, and `truncated` show coverage limits. Use the memories as context, call read_note when exact source wording or more detail matters, and use search_notes instead for general document or quotation search.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -2157,7 +2157,7 @@ impl ServerHandler for McpHandler {
         .with_instructions(
             "This server is the user's persistent Markdown knowledge Vault.\n\
              Use vault_overview or browse_index when you need to understand the available knowledge.\n\
-             Use recall proactively when the task may depend on prior decisions, preferences, constraints, project state, past work, or knowledge that may already exist in the Vault. Treat related_notes as retrieval cues, then use read_note to verify exact source material.\n\
+             Use recall proactively when the task may depend on prior decisions, preferences, constraints, project state, past work, or knowledge that may already exist in the Vault. Pass the task in its natural language; persisted multilingual metadata handles covered cross-language recall without query-time translation. Treat related_notes as retrieval cues, then use read_note to verify exact source material.\n\
              When the user requests or clearly authorizes a persistent note change, search for the existing note, read its current revision, and use the narrowest mutation; create a note only when no existing note should be updated. Never overwrite a revision conflict.\n\
              Every result has request_id and ok. On success consume data; on failure inspect error.code and error.retryable, and retry the same logical operation only when retryable is true. Treat degraded or truncated results as incomplete coverage.",
         )
@@ -3289,6 +3289,8 @@ mod tests {
         assert!(description("recall").contains("proactively before answering"));
         assert!(description("recall").contains("`data.memories`"));
         assert!(description("recall").contains("`data.related_notes`"));
+        assert!(description("recall").contains("natural language"));
+        assert!(description("recall").contains("`retrieval_coverage`"));
         assert!(description("remember").contains("`raw_memory_id`"));
         assert!(description("remember").contains("not immediately available to recall"));
         assert!(description("edit_note").contains("First call read_note"));
@@ -4745,6 +4747,11 @@ mod tests {
             "vault://note/notes/search%2Emd"
         );
         assert_eq!(data["available_related_note_count"], 1);
+        assert_eq!(data["retrieval_coverage"]["eligible"], 0);
+        assert_eq!(
+            data["retrieval_coverage"]["target_languages"],
+            json!(["source", "zh-Hans", "en"])
+        );
     }
 
     #[tokio::test]

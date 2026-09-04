@@ -541,6 +541,8 @@ mod tests {
             "memory_stage1_outputs",
             "memory_consolidation_proposals",
             "memory_consolidation_state",
+            "memory_retrieval_metadata",
+            "memory_retrieval_proposals",
             "memory_fts",
             "audit_log",
             "backups",
@@ -558,7 +560,7 @@ mod tests {
         let report = store.integrity_check().await.unwrap();
         assert!(report.integrity_ok);
         assert_eq!(report.foreign_key_violations, 0);
-        assert_eq!(report.migration_version, 13);
+        assert_eq!(report.migration_version, 14);
         assert!(store.foreign_keys_enabled().await.unwrap());
     }
 
@@ -680,7 +682,7 @@ mod tests {
         }
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 13);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 14);
     }
 
     #[tokio::test]
@@ -722,7 +724,7 @@ mod tests {
         assert!(jwks.is_none());
         assert_eq!(enabled, 0);
         assert!(store.has_table("installation_key_checks").await.unwrap());
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 13);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 14);
     }
 
     #[tokio::test]
@@ -773,7 +775,7 @@ mod tests {
         assert_eq!(store.integrity_check().await.unwrap().migration_version, 10);
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 13);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 14);
     }
 
     #[tokio::test]
@@ -929,7 +931,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(pipeline_column, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 13);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 14);
     }
 
     #[tokio::test]
@@ -991,7 +993,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(retained, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 13);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 14);
     }
 
     #[tokio::test]
@@ -1076,7 +1078,145 @@ mod tests {
         .unwrap();
         assert_eq!(reason.as_deref(), Some("source_unavailable"));
         assert_eq!(changed_at, Some(20));
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 13);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 14);
+    }
+
+    #[tokio::test]
+    async fn migration_0014_adds_only_rebuildable_retrieval_state_and_preserves_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = StateStore::connect(&database_url(directory.path()))
+            .await
+            .unwrap();
+        let mut pre_multilingual = sqlx::migrate::Migrator::DEFAULT;
+        pre_multilingual.migrations = std::borrow::Cow::Owned(
+            crate::migrations::MIGRATOR
+                .iter()
+                .filter(|migration| migration.version <= 13)
+                .cloned()
+                .collect(),
+        );
+        pre_multilingual.run(&store.pool).await.unwrap();
+        let vault = VaultId::new();
+        let file = FileId::new();
+        let memory = MemoryId::new();
+        let revision = RevisionId::new();
+        let job = VaultId::new();
+        insert_vault(&store, vault, "multilingual-upgrade").await;
+        sqlx::query(
+            "INSERT INTO file_entries
+             (id, vault_id, path, entry_type, current_revision, content_hash,
+              size, modified_at, created_at, updated_at)
+             VALUES (?, ?, '_mcp-vault/memory/records/keep.md', 'file', 2,
+                     'sha256:canonical', 17, 2, 1, 2)",
+        )
+        .bind(file.to_string())
+        .bind(vault.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO file_revisions
+             (id, vault_id, file_id, revision, operation, path_after,
+              content_hash, size, actor_type, source_plane, created_at)
+             VALUES (?, ?, ?, 2, 'replace',
+                     '_mcp-vault/memory/records/keep.md', 'sha256:canonical',
+                     17, 'system', 'system', 2)",
+        )
+        .bind(revision.to_string())
+        .bind(vault.to_string())
+        .bind(file.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO memories
+             (id, vault_id, memory_type, status, content, normalized_content,
+              content_hash, importance, confidence, origin, revision,
+              canonical_file_id, canonical_path, canonical_revision,
+              extraction_json, created_at, updated_at)
+             VALUES (?, ?, 'decision', 'active', 'Keep canonical memory',
+                     'keep canonical memory', 'sha256:memory', 0.8, 0.9,
+                     'explicit_admin', 4, ?,
+                     '_mcp-vault/memory/records/keep.md', 2, '{}', 1, 2)",
+        )
+        .bind(memory.to_string())
+        .bind(vault.to_string())
+        .bind(file.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO memory_fts
+             (vault_id, memory_id, content, normalized_content, entities, tags)
+             VALUES (?, ?, 'Keep canonical memory', 'keep canonical memory', '', '')",
+        )
+        .bind(vault.to_string())
+        .bind(memory.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO jobs
+             (id, vault_id, job_type, dedup_key, payload_json, status,
+              max_attempts, available_at, created_at, updated_at)
+             VALUES (?, ?, 'index.rebuild', 'keep-existing-job', '{}',
+                     'queued', 3, 1, 1, 1)",
+        )
+        .bind(job.to_string())
+        .bind(vault.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        store.migrate().await.unwrap();
+
+        let memory_row: (String, i64, String, i64) = sqlx::query_as(
+            "SELECT content, revision, canonical_file_id, canonical_revision
+             FROM memories WHERE vault_id = ? AND id = ?",
+        )
+        .bind(vault.to_string())
+        .bind(memory.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            memory_row,
+            ("Keep canonical memory".to_owned(), 4, file.to_string(), 2)
+        );
+        let revision_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM file_revisions WHERE vault_id = ? AND file_id = ?",
+        )
+        .bind(vault.to_string())
+        .bind(file.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(revision_count, 1);
+        let job_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE vault_id = ? AND id = ?")
+                .bind(vault.to_string())
+                .bind(job.to_string())
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(job_count, 1);
+        let retrieval_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM memory_retrieval_metadata")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(retrieval_count, 0);
+        let fts_row: (String, String) = sqlx::query_as(
+            "SELECT aliases, search_terms FROM memory_fts
+             WHERE vault_id = ? AND memory_id = ?",
+        )
+        .bind(vault.to_string())
+        .bind(memory.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(fts_row, (String::new(), "keep canonical memory".to_owned()));
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 14);
     }
 
     #[tokio::test]

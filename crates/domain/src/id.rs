@@ -113,6 +113,7 @@ typed_uuid_id!(EmbeddingId, "embedding ID");
 typed_uuid_id!(MemoryCandidateId, "memory candidate ID");
 typed_uuid_id!(MemoryRawId, "raw memory ID");
 typed_uuid_id!(MemoryConsolidationId, "memory consolidation ID");
+typed_uuid_id!(MemoryRetrievalProposalId, "memory retrieval proposal ID");
 typed_uuid_id!(MemorySourceId, "memory source ID");
 typed_uuid_id!(MemoryRelationId, "memory relation ID");
 typed_uuid_id!(BackupId, "backup ID");

@@ -499,8 +499,11 @@ When configured:
 - memory extraction and semantic recall.
 
 Semantic projections are versioned by provider, model, prompt, and content hash.
-The current note embedding projection uses deterministic bounded overlapping
-chunks derived from the current note projection. Durable jobs contain only
+The current note embedding projection uses deterministic `text-v2` overlapping
+chunks derived from the current note projection. The complete input, including
+bounded path/title/heading context, is capped at 2,048 UTF-8 bytes and snapped
+at character boundaries; it does not assume one Unicode scalar equals one
+Provider token. Durable jobs contain only
 Vault-scoped source references and hashes; the Index service resolves text at
 execution and excludes stale hashes. A missing `embedding_note` binding
 degrades note retrieval to FTS without affecting canonical writes.
@@ -531,13 +534,15 @@ explicit remember or note change
     → prepared-proposal and revision-snapshot validation
     → canonical semantic Markdown materialization
     → projection and embedding
+    → asynchronous multilingual retrieval metadata
 ```
 
 ### Query path
 
 ```text
 recall request
-    → durable-memory lexical/vector/entity/topic candidate generation
+    → normalized OR terms and persisted multilingual-alias candidates
+    → object-scoped durable-memory vector/entity/topic candidates
     → ordinary-note lexical/vector cue generation
     → Vault/status/temporal filtering
     → rank fusion and diversity
@@ -581,6 +586,33 @@ committed Vault-scoped memory FTS/entity/tag/recent/vector projections and
 defaults to omitting sources. It also delegates ordinary-note cues to the Index
 application service; those cues require Vault read permission and never acquire
 memory lifecycle or canonical memory Markdown.
+
+Phase 1 `memory-stage1-v5` writes raw memory and source summaries in the note's
+primary language. Phase 2 `memory-consolidation-v7` uses the supporting raw
+memory language for creates and retains a current memory's language for
+updates. These prompt changes do not advance the destructive prerelease
+pipeline generation.
+
+After a new memory or body change commits, `memory.enrich_retrieval` uses the
+existing `memory_consolidation` binding to generate bounded aliases for the
+source language, `zh-Hans`, and `en`. Existing records enter that paid path only
+after explicit Admin admission. The job passes request-local indexes rather
+than durable IDs to the Provider and persists a fully validated proposal before
+applying individual items. Exact current note sources may authorize an
+equivalence-preserving source-language rewrite through Vault Core; unavailable
+sources never authorize a body rewrite. Alias failure is isolated from the
+already committed memory.
+
+`memory_fts` stores canonical text, aliases, and deterministic NFKC-normalized
+Latin tokens/Han bigrams. Recall submits at most 64 escaped OR terms, never
+translates a query online, and reports incomplete multilingual coverage. Vector
+search filters the existing `memory` or `note` object type (where `note` rows
+are deterministic note chunks) before the bounded vector candidate pool.
+The Index service validates current note chunk hashes, keeps only the highest
+non-negative cosine chunk per File ID, and then applies the final note Top-K.
+Duplicate chunks neither add score nor advance another note's semantic rank.
+Non-negative cosine similarity is multiplied into the reciprocal-rank
+contribution; negative hits are discarded.
 
 Note provenance stores stable File ID, path, and evidence revision in both the
 projection and canonical memory Markdown. The rebuildable
@@ -678,6 +710,14 @@ VectorIndex implementation. Provider definitions are global operational
 configuration; model bindings resolve a Vault override before a global
 default. Embeddings and vectors remain derived, Vault-partitioned state with
 an exact SQLite fallback.
+
+Embedding job identities contain a project-owned projection version. A chunk
+contract repair therefore admits a new current-model job rather than reusing a
+terminal incompatible job. Binding `embedding_note` or `embedding_memory`
+schedules missing current-model projections; memory vectors are reconstructed
+directly from current active/stale/superseded memory and never require semantic
+re-extraction. Workers persist stable redacted Provider error codes and Admin
+exposes only model ID, homogeneous source type, and source count as job detail.
 
 Provider configuration edits and deletions remain Provider application
 operations. PATCH uses an optimistic Provider revision and keeps an existing

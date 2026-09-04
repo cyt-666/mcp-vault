@@ -44,7 +44,11 @@ validated canonical artifacts through Vault Core
     MEMORY.md + memory_summary.md + per-record Markdown
     │
     ▼
-Vault-scoped memory projections and LLM-free recall
+Vault-scoped memory projections
+    │
+    ├── asynchronous source/zh-Hans/en retrieval metadata
+    ▼
+LLM-free recall
 ```
 
 Phase 1 never writes final `memories` or final memory FTS rows. Phase 2 never
@@ -78,12 +82,20 @@ non-empty output to the exact source file ID, path, revision, and normalized
 whole-note hash. If a Provider omits only `rollout_summary` while returning a
 valid string `raw_memory`, MCP Vault copies that semantic text verbatim as the
 summary and reruns the complete three-field schema validation. This bounded
-repair never accepts an empty or ambiguous object.
+repair never accepts an empty or ambiguous object. `rollout_slug` is optional
+display metadata rather than source identity: a safe ASCII slug is retained,
+while an empty, oversized, or unsafe value is discarded without rejecting valid
+`raw_memory` and `rollout_summary`.
 
 `raw_memory` is semantic model output and is allowed to differ from the source
 wording. It is not final global memory. If the note contains no durable input,
 Phase 1 stores `no_output` with empty semantic fields so an unchanged note is
 not billed again.
+
+`memory-stage1-v5` requires `raw_memory` and `rollout_summary` to use the
+note's primary natural language while preserving paths, code, versions,
+numbers, URLs, UUIDs, and product names. This prompt-only language contract
+does not advance `MEMORY_PIPELINE_GENERATION`; only new or changed notes use it.
 
 ### 3.2 Explicit remember input
 
@@ -183,6 +195,12 @@ changes before the first action is also rejected and regenerated on the next
 attempt; once any proposal marker exists, recovery retains the proposal and
 finishes its partial apply instead of abandoning written state.
 
+`memory-consolidation-v7` writes a new memory in the primary language of its
+supporting raw inputs. An update keeps the current memory's language unless a
+newer explicit user input intentionally changes it. This keeps canonical
+memory concise and single-language rather than storing a duplicated bilingual
+body.
+
 ## 5. Canonical artifacts
 
 All final mutations go through Vault Core managed operations:
@@ -274,13 +292,45 @@ There is no human-review candidate lifecycle in the normal architecture.
 Legacy `memory_candidates` rows are removed by the pipeline cutover and are not
 exposed by Admin or MCP.
 
+### 6.1 Multilingual retrieval metadata and source-language repair
+
+Each active, stale, or superseded memory may have one current
+`memory_retrieval_metadata` row bound to its exact `content_hash` and retrieval
+profile hash. A ready row contains a validated BCP-47 source language and one
+to eight aliases for the source language, `zh-Hans`, and `en`; duplicate target
+languages are merged. Every alias is at most 128 UTF-8 bytes. Control
+characters, invalid languages, oversized terms, and secret-shaped output fail
+closed. Aliases are rebuildable search projections, are not returned by
+recall, and never become fact content, provenance, evidence, or confidence.
+
+`memory.enrich_retrieval` reuses the `memory_consolidation` model and accepts at
+most eight memories per request. The Provider sees only request-local indexes.
+The service validates the complete output and persists
+`memory_retrieval_proposals` before applying any item. The applied-prefix cursor
+and exact memory revision/content snapshot make restart recovery idempotent and
+avoid a second paid call after partial application.
+
+New or body-changed memories enter this job automatically after their canonical
+commit. Existing memory enters only through the authenticated Admin backfill.
+When current source health and a bounded Vault Core read prove a note source,
+the proposal may rewrite an older translated body equivalently into the
+source's primary language. It preserves identity, type, lifecycle, reason,
+sources, relations, validity, and every technical literal, and creates an
+ordinary managed-file revision. If the source is deleted, ambiguous, changed,
+or otherwise unverifiable, the body and lifecycle remain untouched,
+`source_language` is `und`, and only `zh-Hans`/`en` aliases are applied. A
+failed rewrite retains the original body, stores a
+stable warning with the ready alias projection, and never rolls the memory
+back.
+
 ## 7. Recall
 
 ```text
 recall request
     → Vault/status/temporal filters
+    → escaped OR terms over content/aliases/deterministic search terms
     → memory FTS/entity/tag/recent candidates
-    → optional stored memory vectors
+    → optional object-scoped stored memory vectors
     → ordinary-note lexical/vector cues when vault:read is allowed
     → rank fusion and diversity
     → token-budgeted memories + related_notes
@@ -294,6 +344,28 @@ explicitly include stale/superseded/archived records. Recall never waits for
 pending Stage 1 work and never performs a live consolidation call.
 `include_sources` defaults to `false`; `get_memory` and memory resources provide
 provenance detail.
+
+Recall normalizes the query with NFKC, lowercase, and punctuation boundaries,
+keeps at most 64 unique terms, retains Latin/digit runs of at least two
+characters, and emits overlapping bigrams for contiguous Han text. The terms
+are safely quoted and ORed, so an unrelated natural-language word no longer
+makes the whole lexical query miss. Memory and note vectors are filtered by
+object type before Top-K. Non-negative cosine similarity scales the semantic
+rank contribution; negative hits are discarded and there is no positive hard
+threshold.
+
+The response includes `retrieval_coverage`. If aliases do not cover every
+eligible current content/profile pair, recall returns all existing candidates
+and adds `multilingual_alias_coverage_incomplete` to `degraded`. It never
+translates a query or calls a generative model at request time, including when
+the embedding role is missing or unavailable.
+
+Durable-memory vectors remain a separate rebuildable projection. Selecting a
+new `embedding_memory` model or using the Admin memory-vector rebuild action
+enumerates current active, stale, and superseded memory, removes stale rows for
+that selected model, and admits reference-only `embedding.rebuild` jobs. Memory
+bodies are bounded for the embedding input but are never rewritten, and the
+operation does not invoke either memory generation phase.
 
 An MCP Host still decides when to call recall. Discovery instructions,
 `vault://memory/context`, deterministic low-latency output, and the distinct
@@ -340,6 +412,11 @@ attachments are untouched and are the only regeneration input. If Phase 1 is
 not configured, periodic reconciliation retains the pending marker and admits
 the fresh job after configuration becomes ready.
 
+Migration 0014 is deliberately additive to canonical knowledge and does not
+advance the memory pipeline generation. It adds retrieval metadata/proposals
+and rebuilds derived FTS only. Existing bodies change only after a separately
+confirmed Admin backfill and remain restorable through normal history.
+
 ## 10. Jobs and observability
 
 Persistent job types are:
@@ -347,6 +424,7 @@ Persistent job types are:
 ```text
 memory.extract
 memory.consolidate
+memory.enrich_retrieval
 memory.reset_pipeline
 memory.revalidate
 memory.source_reconcile
@@ -372,6 +450,13 @@ credentials, or authorization headers. A generated-output failure never
 partially commits its global proposal. Generated bookkeeping failures use the
 job's bounded retry budget; Provider/configuration failures retain their
 existing retryability policy.
+
+`memory.enrich_retrieval` reports enriched, source-language-rewritten,
+rewrite-skipped, remaining, and proposal-reuse counts. It checks cancellation
+between eight-item batches. Generated-output failures retain stable codes but
+not Provider text; retry resumes failed rows or a persisted prepared proposal.
+Startup and periodic reconciliation re-admit only rows already marked pending;
+they never admit uncovered historical memory as an implicit paid backfill.
 
 For local Provider debugging, run `scripts/debug/phase2-replay.sh data`. The
 script creates a temporary SQLite/Vault/history/secret copy, rewrites the copied
@@ -416,3 +501,7 @@ bindings. Admin considers the complete pipeline ready only when automatic
 memory is enabled, Provider policy allows calls, and both effective models and
 Providers are enabled. Their failures, costs, timeouts, progress, and retry
 domains remain separate.
+
+Multilingual retrieval enrichment adds no third role. It reuses the effective
+`memory_consolidation` binding, while its job, prompt version, validation,
+proposal, progress, and failure domain remain independent from Phase 2.

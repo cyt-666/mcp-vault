@@ -10,14 +10,15 @@ use mcp_vault_domain::{
     Actor, MemoryConsolidationId, MemoryId, MemoryRawId, MemorySourceId, ModelId, ProviderId,
     Revision, SourcePlane, VaultContext, VaultId, VaultPath, VaultSlug, WritePrecondition,
 };
+use mcp_vault_indexer::IndexService;
 use mcp_vault_memory::{
     ExtractionPolicy, ExtractionSourceMode, MEMORY_PIPELINE_GENERATION, MemoryOrigin,
     MemoryService, MemorySourceInput, MemoryStatus, MemoryType, MemoryUpdateInput, MemoryView,
     NoteExtractionOptions, RecallContext, RecallRequest, RememberInput,
 };
 use mcp_vault_providers::{
-    ModelCapabilities, ModelInput, ModelSettings, ProviderInput, ProviderKind, ProviderMode,
-    ProviderService, ProviderSettings,
+    EmbeddingSourceRef, ModelCapabilities, ModelInput, ModelSettings, ProviderInput, ProviderKind,
+    ProviderMode, ProviderService, ProviderSettings,
 };
 use mcp_vault_state::{
     MemoryBundle, MemoryConsolidationProposalRecord, MemoryFilter, MemoryRecord,
@@ -35,6 +36,12 @@ async fn fake_extraction(
     Json(request): Json<serde_json::Value>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if request["model"] == "fake-consolidator" {
+        if request["messages"][0]["content"]
+            .as_str()
+            .is_some_and(|prompt| prompt.contains("search-only multilingual metadata"))
+        {
+            return fake_retrieval_response(&request);
+        }
         return fake_consolidation_response(&request);
     }
     let call = calls.fetch_add(1, Ordering::SeqCst);
@@ -83,7 +90,170 @@ async fn fake_extraction(
 async fn fake_consolidation(
     Json(request): Json<serde_json::Value>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if request["messages"][0]["content"]
+        .as_str()
+        .is_some_and(|prompt| prompt.contains("search-only multilingual metadata"))
+    {
+        return fake_retrieval_response(&request);
+    }
     fake_consolidation_response(&request)
+}
+
+async fn counted_fake_consolidation(
+    AxumState(calls): AxumState<Arc<AtomicUsize>>,
+    Json(request): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    calls.fetch_add(1, Ordering::SeqCst);
+    if request["messages"][0]["content"]
+        .as_str()
+        .is_some_and(|prompt| prompt.contains("search-only multilingual metadata"))
+    {
+        return fake_retrieval_response(&request);
+    }
+    fake_consolidation_response(&request)
+}
+
+async fn bounded_fake_embeddings(
+    Json(request): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(inputs) = request["input"].as_array() else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "embedding input array missing"})),
+        );
+    };
+    if inputs
+        .iter()
+        .any(|input| input.as_str().is_none_or(|input| input.len() > 2_048))
+    {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({"error": "embedding input too large"})),
+        );
+    }
+    let data = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, _)| json!({"index": index, "embedding": [1.0, 0.0]}))
+        .collect::<Vec<_>>();
+    (StatusCode::OK, Json(json!({"data": data})))
+}
+
+async fn ranked_note_embeddings(
+    Json(request): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(inputs) = request["input"].as_array() else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "embedding input array missing"})),
+        );
+    };
+    let data = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            let input = input.as_str().unwrap_or_default().to_ascii_lowercase();
+            let vector =
+                if input.trim() == "abstract semantic lookup" || input.contains("/dominant.md") {
+                    json!([1.0, 0.0])
+                } else if input.contains("/runner-up.md") {
+                    json!([0.98, 0.2])
+                } else if input.contains("/third-place.md") {
+                    json!([0.95, 0.31])
+                } else if input.contains("/negative.md") {
+                    json!([-1.0, 0.0])
+                } else {
+                    json!([0.0, 1.0])
+                };
+            json!({"index": index, "embedding": vector})
+        })
+        .collect::<Vec<_>>();
+    (StatusCode::OK, Json(json!({"data": data})))
+}
+
+fn fake_retrieval_response(request: &serde_json::Value) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(user) = request["messages"]
+        .as_array()
+        .and_then(|messages| messages.last())
+        .and_then(|message| message["content"].as_str())
+    else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "missing retrieval input"})),
+        );
+    };
+    let Some(payload) = user
+        .strip_prefix("<untrusted_retrieval_inputs>\n")
+        .and_then(|value| value.strip_suffix("\n</untrusted_retrieval_inputs>"))
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+    else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "invalid retrieval input"})),
+        );
+    };
+    let items = payload["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|item| {
+            let source_text = item["source_samples"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|sample| sample["content"].as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let chinese = source_text
+                .chars()
+                .any(|character| matches!(character as u32, 0x3400..=0x9FFF));
+            let rewrite_allowed = item["rewrite_allowed"].as_bool() == Some(true);
+            let source_language = if !rewrite_allowed {
+                "und"
+            } else if chinese {
+                "zh-Hans"
+            } else {
+                "en"
+            };
+            let current = item["current_content"].as_str().unwrap_or_default();
+            let rewritten = if rewrite_allowed && chinese {
+                Some(if current == "The project uses Rust v1.94." {
+                    "项目后续统一使用 Rust v1.94。".to_owned()
+                } else if current == "The service uses Go v1.23." {
+                    "服务后续统一使用 Go v1.23。".to_owned()
+                } else {
+                    current.to_owned()
+                })
+            } else {
+                None
+            };
+            let (chinese_aliases, english_aliases) = if current.contains("Go v1.23") {
+                (
+                    vec!["服务统一使用 Go", "Go 技术决策"],
+                    vec!["service uses Go", "Go technical decision"],
+                )
+            } else {
+                (
+                    vec!["项目统一使用 Rust", "Rust 技术决策"],
+                    vec!["project uses Rust", "Rust technical decision"],
+                )
+            };
+            json!({
+                "memory_index": item["memory_index"],
+                "source_language": source_language,
+                "rewritten_content": rewritten,
+                "aliases": [
+                    {"language": "zh-Hans", "terms": chinese_aliases},
+                    {"language": "en", "terms": english_aliases}
+                ]
+            })
+        })
+        .collect::<Vec<_>>();
+    let content = json!({"items": items}).to_string();
+    (
+        StatusCode::OK,
+        Json(json!({"choices": [{"message": {"content": content}}]})),
+    )
 }
 
 fn fake_consolidation_response(
@@ -238,6 +408,68 @@ async fn configure_fake_consolidation(state: &StateStore, context: &VaultContext
     let provider = providers
         .create_provider(ProviderInput {
             name: format!("fake-consolidation-{}", context.id()),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: url::Url::parse(&format!("http://{address}/v1/")).unwrap(),
+            settings: ProviderSettings::default(),
+            enabled: true,
+            secret: None,
+        })
+        .await
+        .unwrap();
+    let model = providers
+        .register_model(ModelInput {
+            provider_id: provider.id,
+            external_model_id: "fake-consolidator".to_owned(),
+            capabilities: ModelCapabilities {
+                structured_output: true,
+                ..ModelCapabilities::default()
+            },
+            settings: ModelSettings::default(),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    providers
+        .bind_model(
+            Some(context),
+            "memory_consolidation",
+            model.id,
+            json!({}),
+            None,
+        )
+        .await
+        .unwrap();
+}
+
+async fn configure_counted_fake_consolidation(
+    state: &StateStore,
+    context: &VaultContext,
+    calls: Arc<AtomicUsize>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/v1/chat/completions", post(counted_fake_consolidation))
+                .with_state(calls),
+        )
+        .await
+        .unwrap();
+    });
+    let auth = AuthService::new(
+        state.auth(),
+        MasterKeyRing::from_bytes(1, &[7_u8; 32]).unwrap(),
+    );
+    let providers = ProviderService::new(state.clone(), auth);
+    providers
+        .set_provider_mode(context, ProviderMode::LocalOnly, None)
+        .await
+        .unwrap();
+    let provider = providers
+        .create_provider(ProviderInput {
+            name: format!("counted-consolidation-{}", context.id()),
             kind: ProviderKind::OpenAiCompatible,
             base_url: url::Url::parse(&format!("http://{address}/v1/")).unwrap(),
             settings: ProviderSettings::default(),
@@ -544,6 +776,702 @@ async fn remember_is_idempotent_materialized_and_recalled_lexically() {
             .iter()
             .any(|reason| reason == "semantic_provider_unavailable")
     );
+}
+
+#[tokio::test]
+async fn existing_memory_vectors_are_scheduled_without_reextracting_and_use_bounded_input() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, service) = fixture(&state, &directory, "memory-vector-backfill").await;
+    let (other, other_core, other_service) =
+        fixture(&state, &directory, "memory-vector-backfill-other").await;
+    let content =
+        "长期中文记忆需要在切换向量模型后直接重建，而不重新执行阶段一或阶段二。".repeat(200);
+    let finalized = remember_and_consolidate(
+        &service,
+        &context,
+        &core,
+        RememberInput {
+            content,
+            memory_type: MemoryType::Decision,
+            origin: MemoryOrigin::ExplicitAgent,
+            ..RememberInput::default()
+        },
+    )
+    .await;
+    let original_revision = finalized.memory.revision;
+    remember_and_consolidate(
+        &other_service,
+        &other,
+        &other_core,
+        RememberInput {
+            content: "另一个 Vault 的记忆不能进入当前向量任务。".to_owned(),
+            memory_type: MemoryType::Constraint,
+            origin: MemoryOrigin::ExplicitAgent,
+            ..RememberInput::default()
+        },
+    )
+    .await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/v1/embeddings", post(bounded_fake_embeddings)),
+        )
+        .await
+        .unwrap();
+    });
+    let providers = ProviderService::new(
+        state.clone(),
+        AuthService::new(
+            state.auth(),
+            MasterKeyRing::from_bytes(1, &[7_u8; 32]).unwrap(),
+        ),
+    );
+    let provider = providers
+        .create_provider(ProviderInput {
+            name: "bounded-memory-embedding".to_owned(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: url::Url::parse(&format!("http://{address}/v1/")).unwrap(),
+            settings: ProviderSettings::default(),
+            enabled: true,
+            secret: None,
+        })
+        .await
+        .unwrap();
+    let model = providers
+        .register_model(ModelInput {
+            provider_id: provider.id,
+            external_model_id: "bounded-embedding".to_owned(),
+            capabilities: ModelCapabilities {
+                embeddings: true,
+                dimension: Some(2),
+                ..ModelCapabilities::default()
+            },
+            settings: ModelSettings::default(),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    providers
+        .bind_model(
+            Some(&context),
+            "embedding_memory",
+            model.id,
+            json!({}),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let report = service.schedule_memory_embeddings(&context).await.unwrap();
+    assert_eq!(report.eligible, 1);
+    assert_eq!(report.current, 0);
+    assert_eq!(report.queued, 1);
+    assert_eq!(report.jobs, 1);
+    assert_eq!(report.model_id, Some(model.id.to_string()));
+
+    let jobs = state
+        .jobs()
+        .list(&context, None, Some("embedding.rebuild"), 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].payload["projection_version"], 2);
+    let sources =
+        serde_json::from_value::<Vec<EmbeddingSourceRef>>(jobs[0].payload["sources"].clone())
+            .unwrap();
+    assert_eq!(sources[0].chunk_key, "body-v2");
+    assert!(
+        state
+            .jobs()
+            .list(&other, None, Some("embedding.rebuild"), 10, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let other_status = other_service.embedding_status(&other).await.unwrap();
+    assert_eq!(other_status.eligible, 1);
+    assert!(!other_status.configured);
+    assert_eq!(
+        service
+            .reembed_sources(&context, model.id, &sources)
+            .await
+            .unwrap(),
+        1
+    );
+
+    let status = service.embedding_status(&context).await.unwrap();
+    assert_eq!(status.eligible, 1);
+    assert_eq!(status.current, 1);
+    assert_eq!(status.stale, 0);
+    assert!(status.blockers.is_empty());
+    assert_eq!(
+        service
+            .get(&context, finalized.memory.id)
+            .await
+            .unwrap()
+            .revision,
+        original_revision
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn recall_related_notes_aggregate_long_note_chunks_before_top_k() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, service) = fixture(&state, &directory, "related-note-ranking").await;
+    let dominant_body = format!(
+        "# Dominant\n\n{}",
+        "One long note must occupy one related-note slot. ".repeat(2_200)
+    );
+    for (path, body) in [
+        ("ranking/dominant.md", dominant_body.as_str()),
+        ("ranking/runner-up.md", "# Runner up\n\nSecond note."),
+        ("ranking/third-place.md", "# Third place\n\nThird note."),
+        ("ranking/negative.md", "# Negative\n\nUnrelated note."),
+    ] {
+        core.create_bytes(
+            &context,
+            &VaultPath::parse(path).unwrap(),
+            body.as_bytes(),
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/v1/embeddings", post(ranked_note_embeddings)),
+        )
+        .await
+        .unwrap();
+    });
+    let providers = ProviderService::new(
+        state.clone(),
+        AuthService::new(
+            state.auth(),
+            MasterKeyRing::from_bytes(1, &[44_u8; 32]).unwrap(),
+        ),
+    );
+    providers
+        .set_provider_mode(&context, ProviderMode::LocalOnly, None)
+        .await
+        .unwrap();
+    let provider = providers
+        .create_provider(ProviderInput {
+            name: "related-note-ranking".to_owned(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: url::Url::parse(&format!("http://{address}/v1/")).unwrap(),
+            settings: ProviderSettings::default(),
+            enabled: true,
+            secret: None,
+        })
+        .await
+        .unwrap();
+    let model = providers
+        .register_model(ModelInput {
+            provider_id: provider.id,
+            external_model_id: "ranked-notes".to_owned(),
+            capabilities: ModelCapabilities {
+                embeddings: true,
+                dimension: Some(2),
+                ..ModelCapabilities::default()
+            },
+            settings: ModelSettings::default(),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    providers
+        .bind_model(Some(&context), "embedding_note", model.id, json!({}), None)
+        .await
+        .unwrap();
+    let index = IndexService::with_provider_service(state.clone(), providers);
+    index.rebuild_vault(&core, &context).await.unwrap();
+    let schedule = index.schedule_note_embeddings(&context).await.unwrap();
+    assert!(schedule.source_chunks > 50);
+    for job in state
+        .jobs()
+        .list(&context, None, Some("embedding.rebuild"), 10, 0)
+        .await
+        .unwrap()
+    {
+        let sources =
+            serde_json::from_value::<Vec<EmbeddingSourceRef>>(job.payload["sources"].clone())
+                .unwrap();
+        index
+            .reembed_note_sources(&context, model.id, &sources)
+            .await
+            .unwrap();
+    }
+
+    let result = service
+        .recall(
+            &context,
+            RecallRequest {
+                query: "abstract semantic lookup".to_owned(),
+                include_related_notes: true,
+                max_results: 5,
+                max_related_notes: 3,
+                max_tokens: 3_000,
+                ..RecallRequest::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.related_notes.len(), 3);
+    assert_eq!(result.available_related_note_count, 3);
+    assert_eq!(result.related_notes[0].path.as_str(), "ranking/dominant.md");
+    assert_eq!(
+        result.related_notes[1].path.as_str(),
+        "ranking/runner-up.md"
+    );
+    assert_eq!(
+        result.related_notes[2].path.as_str(),
+        "ranking/third-place.md"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn multilingual_aliases_rewrite_in_source_language_and_recall_offline_both_ways() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, service) = fixture(&state, &directory, "multilingual-recall").await;
+    let source = core
+        .create_bytes(
+            &context,
+            &VaultPath::parse("notes/技术决策.md").unwrap(),
+            "项目决定后续统一使用 Rust v1.94。".as_bytes(),
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let finalized = remember_and_consolidate(
+        &service,
+        &context,
+        &core,
+        RememberInput {
+            content: "The project uses Rust v1.94.".to_owned(),
+            memory_type: MemoryType::Decision,
+            sources: vec![MemorySourceInput {
+                source_type: "note".to_owned(),
+                note_file_id: Some(source.file.id),
+                note_path: Some(source.file.path.clone()),
+                note_revision: Some(source.file.current_revision),
+                start_line: Some(1),
+                end_line: Some(1),
+                ..MemorySourceInput::default()
+            }],
+            origin: MemoryOrigin::Extracted,
+            ..RememberInput::default()
+        },
+    )
+    .await;
+    assert_eq!(finalized.memory.content, "The project uses Rust v1.94.");
+    let canonical_path = finalized.memory.canonical_path.clone().unwrap();
+    let history_before = core.history(&context, &canonical_path).await.unwrap().len();
+    let uncovered = service
+        .recall(
+            &context,
+            RecallRequest {
+                query: "project uses Rust".to_owned(),
+                include_related_notes: false,
+                max_results: 10,
+                max_tokens: 500,
+                ..RecallRequest::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(uncovered.memories.len(), 1);
+    assert_eq!(uncovered.retrieval_coverage.eligible, 1);
+    assert_eq!(uncovered.retrieval_coverage.current, 0);
+    assert!(
+        uncovered
+            .degraded
+            .iter()
+            .any(|reason| reason == "multilingual_alias_coverage_incomplete")
+    );
+
+    let report = service.enrich_retrieval(&context, &core).await.unwrap();
+    assert_eq!(report.enriched, 1);
+    assert_eq!(report.rewritten, 1);
+    let updated = service.get(&context, finalized.memory.id).await.unwrap();
+    assert_eq!(updated.content, "项目后续统一使用 Rust v1.94。");
+    assert_eq!(updated.id, finalized.memory.id);
+    assert_eq!(updated.memory_type, MemoryType::Decision);
+    assert_eq!(updated.status, MemoryStatus::Active);
+    assert!(updated.revision > finalized.memory.revision);
+    assert_eq!(updated.importance, finalized.memory.importance);
+    assert_eq!(updated.confidence, finalized.memory.confidence);
+    assert_eq!(updated.valid_from, finalized.memory.valid_from);
+    assert_eq!(updated.valid_to, finalized.memory.valid_to);
+    assert_eq!(updated.tags, finalized.memory.tags);
+    assert_eq!(updated.entities, finalized.memory.entities);
+    assert_eq!(updated.sources, finalized.memory.sources);
+    assert_eq!(updated.relations, finalized.memory.relations);
+    assert_eq!(
+        core.history(&context, &canonical_path).await.unwrap().len(),
+        history_before + 1
+    );
+
+    for query in [
+        "以后项目使用什么语言",
+        "which language does the project use",
+    ] {
+        let recalled = service
+            .recall(
+                &context,
+                RecallRequest {
+                    query: query.to_owned(),
+                    include_related_notes: false,
+                    max_results: 10,
+                    max_tokens: 500,
+                    ..RecallRequest::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(recalled.memories.len(), 1, "query={query}");
+        assert_eq!(recalled.memories[0].id, finalized.memory.id);
+        assert!(
+            recalled
+                .degraded
+                .iter()
+                .any(|reason| reason == "semantic_provider_unconfigured")
+        );
+        assert!(
+            !recalled
+                .degraded
+                .iter()
+                .any(|reason| { reason == "multilingual_alias_coverage_incomplete" })
+        );
+    }
+    let coverage = service.retrieval_coverage(&context).await.unwrap();
+    assert_eq!(coverage.eligible, 1);
+    assert_eq!(coverage.current, 1);
+    assert_eq!(coverage.pending, 0);
+}
+
+#[tokio::test]
+async fn unavailable_source_adds_aliases_without_rewriting_or_changing_lifecycle() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, service) = fixture(&state, &directory, "alias-only").await;
+    let source = core
+        .create_bytes(
+            &context,
+            &VaultPath::parse("notes/不可用来源.md").unwrap(),
+            "项目决定后续统一使用 Rust v1.94。".as_bytes(),
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let finalized = remember_and_consolidate(
+        &service,
+        &context,
+        &core,
+        RememberInput {
+            content: "The project uses Rust v1.94.".to_owned(),
+            memory_type: MemoryType::Decision,
+            sources: vec![MemorySourceInput {
+                source_type: "note".to_owned(),
+                note_file_id: Some(source.file.id),
+                note_path: Some(source.file.path.clone()),
+                note_revision: Some(source.file.current_revision),
+                ..MemorySourceInput::default()
+            }],
+            origin: MemoryOrigin::Extracted,
+            ..RememberInput::default()
+        },
+    )
+    .await;
+    let source_id = state
+        .memory()
+        .list_sources(&context, finalized.memory.id)
+        .await
+        .unwrap()[0]
+        .id;
+    state
+        .memory()
+        .upsert_source_health(
+            &context,
+            &MemorySourceHealthRecord {
+                vault_id: context.id(),
+                source_id,
+                state: MemorySourceHealthState::Deleted,
+                resolved_file_id: None,
+                resolved_path: None,
+                checked_revision: None,
+                verified_content_hash: None,
+                reason: Some("source_deleted".to_owned()),
+                last_event_id: None,
+                checked_at: Some(1),
+                updated_at: 1,
+            },
+        )
+        .await
+        .unwrap();
+    let before = state
+        .memory()
+        .set_status_with_reason(
+            &context,
+            finalized.memory.id,
+            "stale",
+            Some("source_unavailable"),
+            Some(finalized.memory.revision),
+        )
+        .await
+        .unwrap();
+
+    let report = service.enrich_retrieval(&context, &core).await.unwrap();
+    assert_eq!(report.enriched, 1);
+    assert_eq!(report.rewritten, 0);
+    let after = service.get(&context, finalized.memory.id).await.unwrap();
+    assert_eq!(after.content, before.content);
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.status, MemoryStatus::Stale);
+    assert_eq!(after.status_reason.as_deref(), Some("source_unavailable"));
+    assert_eq!(after.sources.len(), 1);
+    let metadata = state
+        .memory()
+        .get_retrieval_metadata(&context, finalized.memory.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(metadata.status, "ready");
+    assert_eq!(metadata.source_language.as_deref(), Some("und"));
+    assert!(metadata.aliases_text.contains("项目统一使用 Rust"));
+}
+
+#[tokio::test]
+async fn retrieval_recovers_persisted_proposal_without_a_second_provider_call() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, service) = fixture(&state, &directory, "retrieval-recovery").await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    configure_counted_fake_consolidation(&state, &context, calls.clone()).await;
+    let source = core
+        .create_bytes(
+            &context,
+            &VaultPath::parse("notes/恢复.md").unwrap(),
+            "项目决定后续统一使用 Rust v1.94。".as_bytes(),
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let first = remember_and_consolidate(
+        &service,
+        &context,
+        &core,
+        RememberInput {
+            content: "The project uses Rust v1.94.".to_owned(),
+            sources: vec![MemorySourceInput {
+                source_type: "note".to_owned(),
+                note_file_id: Some(source.file.id),
+                note_path: Some(source.file.path.clone()),
+                note_revision: Some(source.file.current_revision),
+                ..MemorySourceInput::default()
+            }],
+            origin: MemoryOrigin::Extracted,
+            ..RememberInput::default()
+        },
+    )
+    .await;
+    let second_source = core
+        .create_bytes(
+            &context,
+            &VaultPath::parse("notes/恢复-第二条.md").unwrap(),
+            "服务决定后续统一使用 Go v1.23。".as_bytes(),
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    remember_and_consolidate(
+        &service,
+        &context,
+        &core,
+        RememberInput {
+            content: "The service uses Go v1.23.".to_owned(),
+            sources: vec![MemorySourceInput {
+                source_type: "note".to_owned(),
+                note_file_id: Some(second_source.file.id),
+                note_path: Some(second_source.file.path.clone()),
+                note_revision: Some(second_source.file.current_revision),
+                ..MemorySourceInput::default()
+            }],
+            origin: MemoryOrigin::Extracted,
+            ..RememberInput::default()
+        },
+    )
+    .await;
+    calls.store(0, Ordering::SeqCst);
+    let profile_hash = service
+        .retrieval_coverage(&context)
+        .await
+        .unwrap()
+        .profile_hash;
+    let candidates = state
+        .memory()
+        .list_retrieval_candidates(&context, &profile_hash, 8)
+        .await
+        .unwrap();
+    assert_eq!(candidates.len(), 2);
+    let blocked = service.get(&context, candidates[1].id).await.unwrap();
+    let canonical = context.content_root().join(
+        blocked
+            .canonical_path
+            .as_ref()
+            .expect("canonical memory path")
+            .as_str(),
+    );
+    let backup = canonical.with_extension("md.recovery-test");
+    tokio::fs::rename(&canonical, &backup).await.unwrap();
+    tokio::fs::create_dir(&canonical).await.unwrap();
+
+    let failed = service.enrich_retrieval(&context, &core).await.unwrap_err();
+    assert_eq!(failed.code(), "memory_core_error");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let prepared = state
+        .memory()
+        .latest_prepared_retrieval_proposal(&context)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(prepared.applied_count, 1);
+
+    tokio::fs::remove_dir(&canonical).await.unwrap();
+    tokio::fs::rename(&backup, &canonical).await.unwrap();
+    let recovered = service.enrich_retrieval(&context, &core).await.unwrap();
+    assert!(recovered.reused_proposal);
+    assert_eq!(recovered.enriched, 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        service.retrieval_coverage(&context).await.unwrap().current,
+        2
+    );
+    assert_eq!(
+        service
+            .get(&context, first.memory.id)
+            .await
+            .unwrap()
+            .content,
+        "项目后续统一使用 Rust v1.94。"
+    );
+    assert!(
+        state
+            .memory()
+            .latest_prepared_retrieval_proposal(&context)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn retrieval_snapshot_conflict_never_overwrites_newer_memory_content() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let (context, core, service) = fixture(&state, &directory, "retrieval-conflict").await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    configure_counted_fake_consolidation(&state, &context, calls.clone()).await;
+    let source = core
+        .create_bytes(
+            &context,
+            &VaultPath::parse("notes/并发.md").unwrap(),
+            "项目决定后续统一使用 Rust v1.94。".as_bytes(),
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    let finalized = remember_and_consolidate(
+        &service,
+        &context,
+        &core,
+        RememberInput {
+            content: "The project uses Rust v1.94.".to_owned(),
+            sources: vec![MemorySourceInput {
+                source_type: "note".to_owned(),
+                note_file_id: Some(source.file.id),
+                note_path: Some(source.file.path.clone()),
+                note_revision: Some(source.file.current_revision),
+                ..MemorySourceInput::default()
+            }],
+            origin: MemoryOrigin::Extracted,
+            ..RememberInput::default()
+        },
+    )
+    .await;
+    calls.store(0, Ordering::SeqCst);
+    let canonical = context.content_root().join(
+        finalized
+            .memory
+            .canonical_path
+            .as_ref()
+            .expect("canonical memory path")
+            .as_str(),
+    );
+    let backup = canonical.with_extension("md.conflict-test");
+    tokio::fs::rename(&canonical, &backup).await.unwrap();
+    tokio::fs::create_dir(&canonical).await.unwrap();
+    assert!(service.enrich_retrieval(&context, &core).await.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    tokio::fs::remove_dir(&canonical).await.unwrap();
+    tokio::fs::rename(&backup, &canonical).await.unwrap();
+
+    let newer = service
+        .update(
+            &context,
+            &core,
+            finalized.memory.id,
+            finalized.memory.revision,
+            MemoryUpdateInput {
+                content: Some("The project now uses Go v1.23.".to_owned()),
+                ..MemoryUpdateInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    let conflict = service.enrich_retrieval(&context, &core).await.unwrap();
+    assert_eq!(conflict.snapshot_conflicts, 1);
+    assert_eq!(conflict.remaining, 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let retained = service.get(&context, finalized.memory.id).await.unwrap();
+    assert_eq!(retained.content, newer.content);
+    assert_eq!(retained.revision, newer.revision);
 }
 
 #[tokio::test]

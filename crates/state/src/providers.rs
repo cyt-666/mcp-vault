@@ -942,9 +942,11 @@ impl ProviderRepository {
         &self,
         context: &VaultContext,
         model_id: ModelId,
+        object_type: &str,
         dimension: u32,
         limit: u32,
     ) -> Result<Vec<VectorCandidate>, StateError> {
+        validate_label(object_type, "embedding object type")?;
         if limit == 0 || limit > MAX_VECTOR_LIMIT || dimension == 0 {
             return Err(StateError::InvalidInput("vector query page is invalid"));
         }
@@ -956,11 +958,13 @@ impl ProviderRepository {
              FROM embedding_records e
              JOIN embedding_vectors v
                ON v.vault_id = e.vault_id AND v.embedding_id = e.id
-             WHERE e.vault_id = ? AND e.model_id = ? AND e.dimension = ?
+             WHERE e.vault_id = ? AND e.model_id = ? AND e.object_type = ?
+               AND e.dimension = ?
              ORDER BY e.id ASC LIMIT ?",
         )
         .bind(context.id().to_string())
         .bind(model_id.to_string())
+        .bind(object_type)
         .bind(i64::from(dimension))
         .bind(i64::from(limit))
         .fetch_all(&self.pool)

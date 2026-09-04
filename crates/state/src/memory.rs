@@ -3,15 +3,17 @@
 //! Canonical memory Markdown is written by Vault Core. This module owns only
 //! the authoritative operational projection and rebuildable search metadata.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
+use unicode_normalization::UnicodeNormalization;
 
 use mcp_vault_domain::{
     FileId, MemoryCandidateId, MemoryConsolidationId, MemoryId, MemoryRawId, MemoryRelationId,
-    MemorySourceId, ModelId, ProviderId, Revision, VaultContext, VaultId, VaultPath,
+    MemoryRetrievalProposalId, MemorySourceId, ModelId, ProviderId, Revision, VaultContext,
+    VaultId, VaultPath,
 };
 
 use crate::{StateError, now_millis};
@@ -343,6 +345,77 @@ pub struct MemorySearchHit {
     pub memory: MemoryRecord,
     /// SQLite FTS rank, normalized by the caller.
     pub rank: f64,
+}
+
+/// Derived multilingual search metadata for one exact memory body.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemoryRetrievalMetadataRecord {
+    /// Vault isolation boundary.
+    pub vault_id: VaultId,
+    /// Owning durable memory.
+    pub memory_id: MemoryId,
+    /// Exact canonical content hash covered by this projection.
+    pub content_hash: String,
+    /// Provider/model/prompt/language profile hash.
+    pub profile_hash: String,
+    /// Validated BCP-47 primary source language, or `und` when unverifiable.
+    pub source_language: Option<String>,
+    /// Bounded structured language/alias groups.
+    pub aliases: Value,
+    /// Flattened aliases used only by the FTS projection.
+    pub aliases_text: String,
+    /// Deterministic normalized lexical terms used by FTS.
+    pub search_terms: String,
+    /// Pending, ready, or failed.
+    pub status: String,
+    /// Stable redacted failure code.
+    pub last_error: Option<String>,
+    /// Successful generation time.
+    pub generated_at: Option<i64>,
+    /// Last projection update time.
+    pub updated_at: i64,
+}
+
+/// Coverage of current multilingual metadata over recallable memory states.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MemoryRetrievalCoverage {
+    /// Active, stale, and superseded memories considered by backfill.
+    pub eligible: u64,
+    /// Ready rows matching the current content and retrieval profile.
+    pub current: u64,
+    /// Rows missing current generated metadata.
+    pub pending: u64,
+    /// Current-profile rows with a terminal generated-output failure.
+    pub failed: u64,
+}
+
+/// Validated multilingual proposal persisted before canonical rewrites.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemoryRetrievalProposalRecord {
+    /// Stable proposal identity.
+    pub id: MemoryRetrievalProposalId,
+    /// Vault isolation boundary.
+    pub vault_id: VaultId,
+    /// Exact hash of the request-local snapshot and retrieval profile.
+    pub input_hash: String,
+    /// Server-owned memory IDs/revisions/content hashes for recovery.
+    pub snapshot: Value,
+    /// Validated proposal, never logged by default.
+    pub proposal: Value,
+    /// Internal model identity.
+    pub model_id: ModelId,
+    /// Internal Provider identity.
+    pub provider_id: ProviderId,
+    /// Retrieval-enrichment prompt version.
+    pub prompt_version: String,
+    /// Prepared, applied, or rejected.
+    pub status: String,
+    /// Number of items durably applied from the front of the batch.
+    pub applied_count: u32,
+    /// Preparation time.
+    pub created_at: i64,
+    /// Successful completion time.
+    pub applied_at: Option<i64>,
 }
 
 /// Durable explicit-command idempotency mapping.
@@ -698,6 +771,38 @@ struct ConsolidationProposalRow {
 }
 
 #[derive(Debug, FromRow)]
+struct RetrievalMetadataRow {
+    vault_id: String,
+    memory_id: String,
+    content_hash: String,
+    profile_hash: String,
+    source_language: Option<String>,
+    aliases_json: String,
+    aliases_text: String,
+    search_terms: String,
+    status: String,
+    last_error: Option<String>,
+    generated_at: Option<i64>,
+    updated_at: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct RetrievalProposalRow {
+    id: String,
+    vault_id: String,
+    input_hash: String,
+    snapshot_json: String,
+    proposal_json: String,
+    model_id: String,
+    provider_id: String,
+    prompt_version: String,
+    status: String,
+    applied_count: i64,
+    created_at: i64,
+    applied_at: Option<i64>,
+}
+
+#[derive(Debug, FromRow)]
 struct ConsolidationStateRow {
     vault_id: String,
     generation: i64,
@@ -954,8 +1059,28 @@ impl MemoryRepository {
             .filter(|value| !value.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
+        let retrieval = sqlx::query_as::<_, (String, String)>(
+            "SELECT aliases_text, search_terms
+             FROM memory_retrieval_metadata
+             WHERE vault_id = ? AND memory_id = ? AND content_hash = ?
+               AND status = 'ready'",
+        )
+        .bind(&vault_id)
+        .bind(&memory_id)
+        .bind(&bundle.memory.content_hash)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let (aliases, search_terms) = retrieval.unwrap_or_else(|| {
+            (
+                String::new(),
+                memory_search_terms([bundle.memory.content.as_str()], 4096),
+            )
+        });
         sqlx::query(
-            "INSERT INTO memory_fts\n             (vault_id, memory_id, content, normalized_content, entities, tags)\n             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO memory_fts
+             (vault_id, memory_id, content, normalized_content, entities, tags,
+              aliases, search_terms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&vault_id)
         .bind(&memory_id)
@@ -963,6 +1088,8 @@ impl MemoryRepository {
         .bind(&bundle.memory.normalized_content)
         .bind(entities)
         .bind(tags)
+        .bind(aliases)
+        .bind(search_terms)
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -1151,7 +1278,7 @@ impl MemoryRepository {
         limit: u32,
     ) -> Result<Vec<MemorySearchHit>, StateError> {
         validate_page(limit, 0, MAX_MEMORY_LIMIT)?;
-        if fts_query.is_empty() || fts_query.len() > 4096 {
+        if fts_query.is_empty() || fts_query.len() > 16 * 1024 {
             return Err(StateError::InvalidInput("memory FTS query is invalid"));
         }
         let mut query = QueryBuilder::<Sqlite>::new(
@@ -1270,6 +1397,30 @@ impl MemoryRepository {
         .bind(context.id().to_string())
         .bind(source_type)
         .bind(source_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(stage1_output_from_row).transpose()
+    }
+
+    /// Return one Phase 1 output by its Vault-scoped durable identity.
+    pub async fn get_stage1_output_by_id(
+        &self,
+        context: &VaultContext,
+        id: MemoryRawId,
+    ) -> Result<Option<MemoryStage1OutputRecord>, StateError> {
+        self.ensure_vault_context(context).await?;
+        let row = sqlx::query_as::<_, Stage1OutputRow>(
+            "SELECT id, vault_id, source_type, source_key, source_file_id,
+                    source_path, source_revision, profile_hash, pipeline_version,
+                    prompt_version, raw_memory, source_summary, source_slug,
+                    evidence_json, metadata_json, output_hash, status, generated_at, updated_at,
+                    usage_count, last_usage, selected_for_phase2,
+                    selected_for_phase2_hash, selected_for_phase2_at
+             FROM memory_stage1_outputs
+             WHERE vault_id = ? AND id = ?",
+        )
+        .bind(context.id().to_string())
+        .bind(id.to_string())
         .fetch_optional(&self.pool)
         .await?;
         row.map(stage1_output_from_row).transpose()
@@ -2175,6 +2326,10 @@ impl MemoryRepository {
                 .execute(&mut *transaction)
                 .await?
                 .rows_affected();
+        sqlx::query("DELETE FROM memory_retrieval_proposals WHERE vault_id = ?")
+            .bind(&vault_id)
+            .execute(&mut *transaction)
+            .await?;
         let stage1_outputs = sqlx::query("DELETE FROM memory_stage1_outputs WHERE vault_id = ?")
             .bind(&vault_id)
             .execute(&mut *transaction)
@@ -2473,6 +2628,536 @@ impl MemoryRepository {
             .ok_or(StateError::InvalidInput("memory update disappeared"))
     }
 
+    /// Return multilingual retrieval metadata for one memory.
+    pub async fn get_retrieval_metadata(
+        &self,
+        context: &VaultContext,
+        memory_id: MemoryId,
+    ) -> Result<Option<MemoryRetrievalMetadataRecord>, StateError> {
+        self.ensure_vault_context(context).await?;
+        let row = sqlx::query_as::<_, RetrievalMetadataRow>(
+            "SELECT vault_id, memory_id, content_hash, profile_hash,
+                    source_language, aliases_json, aliases_text, search_terms,
+                    status, last_error, generated_at, updated_at
+             FROM memory_retrieval_metadata
+             WHERE vault_id = ? AND memory_id = ?",
+        )
+        .bind(context.id().to_string())
+        .bind(memory_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(retrieval_metadata_from_row).transpose()
+    }
+
+    /// Count current multilingual coverage for active and historical recall states.
+    pub async fn retrieval_coverage(
+        &self,
+        context: &VaultContext,
+        profile_hash: &str,
+    ) -> Result<MemoryRetrievalCoverage, StateError> {
+        self.ensure_vault_context(context).await?;
+        if profile_hash.is_empty() || profile_hash.len() > 128 {
+            return Err(StateError::InvalidInput(
+                "memory retrieval profile hash is invalid",
+            ));
+        }
+        let (eligible, current, failed) = sqlx::query_as::<_, (i64, i64, i64)>(
+            "SELECT
+                COUNT(*),
+                COALESCE(SUM(CASE
+                    WHEN r.status = 'ready' AND r.content_hash = m.content_hash
+                     AND r.profile_hash = ? THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE
+                    WHEN r.status = 'failed' AND r.content_hash = m.content_hash
+                     AND r.profile_hash = ? THEN 1 ELSE 0 END), 0)
+             FROM memories m
+             LEFT JOIN memory_retrieval_metadata r
+               ON r.vault_id = m.vault_id AND r.memory_id = m.id
+             WHERE m.vault_id = ?
+               AND m.status IN ('active', 'stale', 'superseded')",
+        )
+        .bind(profile_hash)
+        .bind(profile_hash)
+        .bind(context.id().to_string())
+        .fetch_one(&self.pool)
+        .await?;
+        let eligible = u64::try_from(eligible)
+            .map_err(|_| StateError::InvalidInput("memory retrieval count is invalid"))?;
+        let current = u64::try_from(current)
+            .map_err(|_| StateError::InvalidInput("memory retrieval count is invalid"))?;
+        let failed = u64::try_from(failed)
+            .map_err(|_| StateError::InvalidInput("memory retrieval count is invalid"))?;
+        Ok(MemoryRetrievalCoverage {
+            eligible,
+            current,
+            failed,
+            pending: eligible.saturating_sub(current).saturating_sub(failed),
+        })
+    }
+
+    /// List deterministic memories explicitly admitted for retrieval enrichment.
+    pub async fn list_retrieval_candidates(
+        &self,
+        context: &VaultContext,
+        profile_hash: &str,
+        limit: u32,
+    ) -> Result<Vec<MemoryRecord>, StateError> {
+        self.ensure_vault_context(context).await?;
+        validate_page(limit, 0, MAX_MEMORY_LIMIT)?;
+        let rows = sqlx::query_as::<_, MemoryRow>(
+            "SELECT m.id, m.vault_id, m.memory_type, m.status, m.status_reason,
+                    m.status_changed_at, m.content, m.normalized_content,
+                    m.content_hash, m.importance, m.confidence, m.origin,
+                    m.revision, m.canonical_file_id, m.canonical_path,
+                    m.canonical_revision, m.valid_from, m.valid_to,
+                    m.extraction_json, m.created_at, m.updated_at,
+                    m.last_recalled_at, m.recall_count
+             FROM memories m
+             JOIN memory_retrieval_metadata r
+               ON r.vault_id = m.vault_id AND r.memory_id = m.id
+             WHERE m.vault_id = ?
+               AND m.status IN ('active', 'stale', 'superseded')
+               AND r.status = 'pending'
+               AND r.content_hash = m.content_hash
+               AND r.profile_hash = ?
+             ORDER BY m.updated_at ASC, m.id ASC
+             LIMIT ?",
+        )
+        .bind(context.id().to_string())
+        .bind(profile_hash)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_memory).collect()
+    }
+
+    /// Count explicitly admitted current-profile rows still awaiting work.
+    pub async fn retrieval_pending_count(
+        &self,
+        context: &VaultContext,
+        profile_hash: &str,
+    ) -> Result<u64, StateError> {
+        self.ensure_vault_context(context).await?;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM memories m
+             JOIN memory_retrieval_metadata r
+               ON r.vault_id = m.vault_id AND r.memory_id = m.id
+             WHERE m.vault_id = ?
+               AND m.status IN ('active', 'stale', 'superseded')
+               AND r.status = 'pending' AND r.content_hash = m.content_hash
+               AND r.profile_hash = ?",
+        )
+        .bind(context.id().to_string())
+        .bind(profile_hash)
+        .fetch_one(&self.pool)
+        .await?;
+        u64::try_from(count)
+            .map_err(|_| StateError::InvalidInput("memory retrieval count is invalid"))
+    }
+
+    /// Explicitly admit every uncovered recallable memory for Admin backfill.
+    pub async fn mark_retrieval_backfill_pending(
+        &self,
+        context: &VaultContext,
+        profile_hash: &str,
+    ) -> Result<u64, StateError> {
+        self.ensure_vault_context(context).await?;
+        validate_retrieval_keys("sha256:backfill", profile_hash)?;
+        let now = now_millis()?;
+        let result = sqlx::query(
+            "INSERT INTO memory_retrieval_metadata
+             (vault_id, memory_id, content_hash, profile_hash, source_language,
+              aliases_json, aliases_text, search_terms, status, last_error,
+              generated_at, updated_at)
+             SELECT m.vault_id, m.id, m.content_hash, ?, NULL,
+                    '[]', '', '', 'pending', NULL, NULL, ?
+             FROM memories m
+             LEFT JOIN memory_retrieval_metadata r
+               ON r.vault_id = m.vault_id AND r.memory_id = m.id
+             WHERE m.vault_id = ?
+               AND m.status IN ('active', 'stale', 'superseded')
+               AND (r.memory_id IS NULL OR r.status != 'ready'
+                    OR r.content_hash != m.content_hash OR r.profile_hash != ?)
+               AND true
+             ON CONFLICT(vault_id, memory_id) DO UPDATE SET
+              content_hash = excluded.content_hash,
+              profile_hash = excluded.profile_hash,
+              source_language = NULL,
+              aliases_json = '[]', aliases_text = '', search_terms = '',
+              status = 'pending', last_error = NULL, generated_at = NULL,
+              updated_at = excluded.updated_at",
+        )
+        .bind(profile_hash)
+        .bind(now)
+        .bind(context.id().to_string())
+        .bind(profile_hash)
+        .execute(&self.pool)
+        .await?;
+        self.rebuild_fts(context).await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Re-admit only current failed rows when an operator retries the same job.
+    pub async fn retry_failed_retrieval_metadata(
+        &self,
+        context: &VaultContext,
+        profile_hash: &str,
+    ) -> Result<u64, StateError> {
+        self.ensure_vault_context(context).await?;
+        let result = sqlx::query(
+            "UPDATE memory_retrieval_metadata AS r
+             SET status = 'pending', last_error = NULL, updated_at = ?
+             WHERE r.vault_id = ? AND r.profile_hash = ? AND r.status = 'failed'
+               AND EXISTS (
+                   SELECT 1 FROM memories m
+                   WHERE m.vault_id = r.vault_id AND m.id = r.memory_id
+                     AND m.content_hash = r.content_hash
+                     AND m.status IN ('active', 'stale', 'superseded')
+               )",
+        )
+        .bind(now_millis()?)
+        .bind(context.id().to_string())
+        .bind(profile_hash)
+        .execute(&self.pool)
+        .await?;
+        self.rebuild_fts(context).await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Mark one exact memory/profile pair pending before Provider work.
+    pub async fn mark_retrieval_pending(
+        &self,
+        context: &VaultContext,
+        memory_id: MemoryId,
+        content_hash: &str,
+        profile_hash: &str,
+    ) -> Result<(), StateError> {
+        self.ensure_vault_context(context).await?;
+        validate_retrieval_keys(content_hash, profile_hash)?;
+        let result = sqlx::query(
+            "INSERT INTO memory_retrieval_metadata
+             (vault_id, memory_id, content_hash, profile_hash, source_language,
+              aliases_json, aliases_text, search_terms, status, last_error,
+              generated_at, updated_at)
+             VALUES (?, ?, ?, ?, NULL, '[]', '', '', 'pending', NULL, NULL, ?)
+             ON CONFLICT(vault_id, memory_id) DO UPDATE SET
+              content_hash = excluded.content_hash,
+              profile_hash = excluded.profile_hash,
+              source_language = NULL,
+              aliases_json = '[]', aliases_text = '', search_terms = '',
+              status = 'pending', last_error = NULL, generated_at = NULL,
+              updated_at = excluded.updated_at",
+        )
+        .bind(context.id().to_string())
+        .bind(memory_id.to_string())
+        .bind(content_hash)
+        .bind(profile_hash)
+        .bind(now_millis()?)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StateError::InvalidInput(
+                "memory retrieval metadata was not marked pending",
+            ));
+        }
+        self.refresh_memory_fts(context, memory_id).await
+    }
+
+    /// Store validated multilingual aliases for one exact memory body.
+    pub async fn upsert_retrieval_metadata(
+        &self,
+        context: &VaultContext,
+        metadata: &MemoryRetrievalMetadataRecord,
+    ) -> Result<MemoryRetrievalMetadataRecord, StateError> {
+        self.ensure_vault_context(context).await?;
+        validate_retrieval_metadata(context, metadata)?;
+        sqlx::query(
+            "INSERT INTO memory_retrieval_metadata
+             (vault_id, memory_id, content_hash, profile_hash, source_language,
+              aliases_json, aliases_text, search_terms, status, last_error,
+              generated_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?)
+             ON CONFLICT(vault_id, memory_id) DO UPDATE SET
+              content_hash = excluded.content_hash,
+              profile_hash = excluded.profile_hash,
+              source_language = excluded.source_language,
+              aliases_json = excluded.aliases_json,
+              aliases_text = excluded.aliases_text,
+              search_terms = excluded.search_terms,
+              status = 'ready', last_error = excluded.last_error,
+              generated_at = excluded.generated_at,
+              updated_at = excluded.updated_at",
+        )
+        .bind(context.id().to_string())
+        .bind(metadata.memory_id.to_string())
+        .bind(&metadata.content_hash)
+        .bind(&metadata.profile_hash)
+        .bind(metadata.source_language.as_deref())
+        .bind(serde_json::to_string(&metadata.aliases)?)
+        .bind(&metadata.aliases_text)
+        .bind(&metadata.search_terms)
+        .bind(metadata.last_error.as_deref())
+        .bind(metadata.generated_at)
+        .bind(metadata.updated_at)
+        .execute(&self.pool)
+        .await?;
+        self.refresh_memory_fts(context, metadata.memory_id).await?;
+        self.get_retrieval_metadata(context, metadata.memory_id)
+            .await?
+            .ok_or(StateError::InvalidInput(
+                "memory retrieval metadata disappeared",
+            ))
+    }
+
+    /// Record a stable failed enrichment outcome without retaining Provider text.
+    pub async fn fail_retrieval_metadata(
+        &self,
+        context: &VaultContext,
+        memory_id: MemoryId,
+        content_hash: &str,
+        profile_hash: &str,
+        error_code: &str,
+    ) -> Result<(), StateError> {
+        self.ensure_vault_context(context).await?;
+        validate_retrieval_keys(content_hash, profile_hash)?;
+        if error_code.is_empty() || error_code.len() > 128 {
+            return Err(StateError::InvalidInput(
+                "memory retrieval error code is invalid",
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO memory_retrieval_metadata
+             (vault_id, memory_id, content_hash, profile_hash, source_language,
+              aliases_json, aliases_text, search_terms, status, last_error,
+              generated_at, updated_at)
+             VALUES (?, ?, ?, ?, NULL, '[]', '', '', 'failed', ?, NULL, ?)
+             ON CONFLICT(vault_id, memory_id) DO UPDATE SET
+              content_hash = excluded.content_hash,
+              profile_hash = excluded.profile_hash,
+              source_language = NULL,
+              aliases_json = '[]', aliases_text = '', search_terms = '',
+              status = 'failed', last_error = excluded.last_error,
+              generated_at = NULL, updated_at = excluded.updated_at",
+        )
+        .bind(context.id().to_string())
+        .bind(memory_id.to_string())
+        .bind(content_hash)
+        .bind(profile_hash)
+        .bind(error_code)
+        .bind(now_millis()?)
+        .execute(&self.pool)
+        .await?;
+        self.refresh_memory_fts(context, memory_id).await
+    }
+
+    /// Return a retrieval proposal for one exact prepared input hash.
+    pub async fn get_retrieval_proposal_by_input(
+        &self,
+        context: &VaultContext,
+        input_hash: &str,
+    ) -> Result<Option<MemoryRetrievalProposalRecord>, StateError> {
+        self.ensure_vault_context(context).await?;
+        let row = sqlx::query_as::<_, RetrievalProposalRow>(
+            "SELECT id, vault_id, input_hash, snapshot_json, proposal_json,
+                    model_id, provider_id, prompt_version, status,
+                    applied_count, created_at, applied_at
+             FROM memory_retrieval_proposals
+             WHERE vault_id = ? AND input_hash = ?",
+        )
+        .bind(context.id().to_string())
+        .bind(input_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(retrieval_proposal_from_row).transpose()
+    }
+
+    /// Return the newest prepared multilingual proposal for crash recovery.
+    pub async fn latest_prepared_retrieval_proposal(
+        &self,
+        context: &VaultContext,
+    ) -> Result<Option<MemoryRetrievalProposalRecord>, StateError> {
+        self.ensure_vault_context(context).await?;
+        let row = sqlx::query_as::<_, RetrievalProposalRow>(
+            "SELECT id, vault_id, input_hash, snapshot_json, proposal_json,
+                    model_id, provider_id, prompt_version, status,
+                    applied_count, created_at, applied_at
+             FROM memory_retrieval_proposals
+             WHERE vault_id = ? AND status = 'prepared'
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(context.id().to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(retrieval_proposal_from_row).transpose()
+    }
+
+    /// Persist one fully validated multilingual proposal before applying it.
+    pub async fn insert_retrieval_proposal(
+        &self,
+        context: &VaultContext,
+        proposal: &MemoryRetrievalProposalRecord,
+    ) -> Result<MemoryRetrievalProposalRecord, StateError> {
+        self.ensure_vault_context(context).await?;
+        if proposal.vault_id != context.id()
+            || proposal.status != "prepared"
+            || proposal.input_hash.is_empty()
+            || proposal.input_hash.len() > 128
+            || proposal.prompt_version.is_empty()
+            || proposal.prompt_version.len() > 128
+            || serde_json::to_vec(&proposal.snapshot)?.len() > 2 * 1024 * 1024
+            || serde_json::to_vec(&proposal.proposal)?.len() > 2 * 1024 * 1024
+        {
+            return Err(StateError::InvalidInput(
+                "memory retrieval proposal is invalid",
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO memory_retrieval_proposals
+             (id, vault_id, input_hash, snapshot_json, proposal_json, model_id,
+              provider_id, prompt_version, status, applied_count, created_at,
+              applied_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'prepared', 0, ?, NULL)
+             ON CONFLICT(vault_id, input_hash) DO NOTHING",
+        )
+        .bind(proposal.id.to_string())
+        .bind(context.id().to_string())
+        .bind(&proposal.input_hash)
+        .bind(serde_json::to_string(&proposal.snapshot)?)
+        .bind(serde_json::to_string(&proposal.proposal)?)
+        .bind(proposal.model_id.to_string())
+        .bind(proposal.provider_id.to_string())
+        .bind(&proposal.prompt_version)
+        .bind(proposal.created_at)
+        .execute(&self.pool)
+        .await?;
+        self.get_retrieval_proposal_by_input(context, &proposal.input_hash)
+            .await?
+            .ok_or(StateError::InvalidInput(
+                "memory retrieval proposal was not saved",
+            ))
+    }
+
+    /// Persist the applied prefix after each idempotent multilingual item.
+    pub async fn advance_retrieval_proposal(
+        &self,
+        context: &VaultContext,
+        proposal_id: MemoryRetrievalProposalId,
+        applied_count: u32,
+    ) -> Result<(), StateError> {
+        self.ensure_vault_context(context).await?;
+        let result = sqlx::query(
+            "UPDATE memory_retrieval_proposals
+             SET applied_count = ?
+             WHERE vault_id = ? AND id = ? AND status = 'prepared'
+               AND applied_count <= ?",
+        )
+        .bind(i64::from(applied_count))
+        .bind(context.id().to_string())
+        .bind(proposal_id.to_string())
+        .bind(i64::from(applied_count))
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StateError::InvalidInput(
+                "memory retrieval proposal progress conflict",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Mark a fully applied multilingual proposal complete.
+    pub async fn complete_retrieval_proposal(
+        &self,
+        context: &VaultContext,
+        proposal_id: MemoryRetrievalProposalId,
+    ) -> Result<(), StateError> {
+        self.ensure_vault_context(context).await?;
+        let result = sqlx::query(
+            "UPDATE memory_retrieval_proposals
+             SET status = 'applied', applied_at = ?
+             WHERE vault_id = ? AND id = ? AND status = 'prepared'",
+        )
+        .bind(now_millis()?)
+        .bind(context.id().to_string())
+        .bind(proposal_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StateError::InvalidInput(
+                "memory retrieval proposal completion conflict",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Reject an obsolete prepared multilingual proposal before any apply.
+    pub async fn reject_retrieval_proposal(
+        &self,
+        context: &VaultContext,
+        proposal_id: MemoryRetrievalProposalId,
+    ) -> Result<bool, StateError> {
+        self.ensure_vault_context(context).await?;
+        let result = sqlx::query(
+            "UPDATE memory_retrieval_proposals SET status = 'rejected'
+             WHERE vault_id = ? AND id = ? AND status = 'prepared'",
+        )
+        .bind(context.id().to_string())
+        .bind(proposal_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Rebuild one FTS row from canonical projection plus current aliases.
+    async fn refresh_memory_fts(
+        &self,
+        context: &VaultContext,
+        memory_id: MemoryId,
+    ) -> Result<(), StateError> {
+        self.ensure_vault_context(context).await?;
+        let vault_id = context.id().to_string();
+        let memory_key = memory_id.to_string();
+        let bundle = self.get_bundle(context, memory_id).await?;
+        let metadata = self.get_retrieval_metadata(context, memory_id).await?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DELETE FROM memory_fts WHERE vault_id = ? AND memory_id = ?")
+            .bind(&vault_id)
+            .bind(&memory_key)
+            .execute(&mut *transaction)
+            .await?;
+        if let Some(bundle) = bundle {
+            let entities = bundle.entities.join(" ");
+            let tags = bundle.tags.join(" ");
+            let current_metadata = metadata.as_ref().filter(|metadata| {
+                metadata.status == "ready" && metadata.content_hash == bundle.memory.content_hash
+            });
+            let aliases = current_metadata.map_or("", |metadata| metadata.aliases_text.as_str());
+            let search_terms = current_metadata.map_or_else(
+                || memory_search_terms([bundle.memory.content.as_str()], 4096),
+                |metadata| metadata.search_terms.clone(),
+            );
+            sqlx::query(
+                "INSERT INTO memory_fts
+                 (vault_id, memory_id, content, normalized_content, entities, tags,
+                  aliases, search_terms)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&vault_id)
+            .bind(&memory_key)
+            .bind(&bundle.memory.content)
+            .bind(&bundle.memory.normalized_content)
+            .bind(entities)
+            .bind(tags)
+            .bind(aliases)
+            .bind(search_terms)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Mark recall statistics without touching canonical Markdown.
     pub async fn mark_recalled(
         &self,
@@ -2505,12 +3190,56 @@ impl MemoryRepository {
             .bind(&vault_id)
             .execute(&mut *transaction)
             .await?;
-        sqlx::query(
-            "INSERT INTO memory_fts\n             (vault_id, memory_id, content, normalized_content, entities, tags)\n             SELECT m.vault_id, m.id, m.content, m.normalized_content,\n                    COALESCE((SELECT group_concat(normalized_entity, ' ')\n                              FROM memory_entities e\n                              WHERE e.vault_id = m.vault_id AND e.memory_id = m.id), ''),\n                    COALESCE((SELECT group_concat(normalized_tag, ' ')\n                              FROM memory_tags t\n                              WHERE t.vault_id = m.vault_id AND t.memory_id = m.id), '')\n             FROM memories m WHERE m.vault_id = ?",
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                Option<String>,
+            ),
+        >(
+            "SELECT m.id, m.content, m.normalized_content,
+                    COALESCE((SELECT group_concat(normalized_entity, ' ')
+                              FROM memory_entities e
+                              WHERE e.vault_id = m.vault_id AND e.memory_id = m.id), ''),
+                    COALESCE((SELECT group_concat(normalized_tag, ' ')
+                              FROM memory_tags t
+                              WHERE t.vault_id = m.vault_id AND t.memory_id = m.id), ''),
+                    COALESCE(r.aliases_text, ''), r.search_terms
+             FROM memories m
+             LEFT JOIN memory_retrieval_metadata r
+               ON r.vault_id = m.vault_id AND r.memory_id = m.id
+              AND r.content_hash = m.content_hash AND r.status = 'ready'
+             WHERE m.vault_id = ?
+             ORDER BY m.id ASC",
         )
         .bind(&vault_id)
-        .execute(&mut *transaction)
+        .fetch_all(&mut *transaction)
         .await?;
+        for (memory_id, content, normalized, entities, tags, aliases, stored_terms) in rows {
+            let search_terms = stored_terms
+                .unwrap_or_else(|| memory_search_terms([content.as_str(), aliases.as_str()], 4096));
+            sqlx::query(
+                "INSERT INTO memory_fts
+                 (vault_id, memory_id, content, normalized_content, entities,
+                  tags, aliases, search_terms)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&vault_id)
+            .bind(memory_id)
+            .bind(content)
+            .bind(normalized)
+            .bind(entities)
+            .bind(tags)
+            .bind(aliases)
+            .bind(search_terms)
+            .execute(&mut *transaction)
+            .await?;
+        }
         transaction.commit().await?;
         Ok(())
     }
@@ -3196,6 +3925,130 @@ fn validate_page(limit: u32, offset: u32, max: u32) -> Result<(), StateError> {
     Ok(())
 }
 
+/// Build bounded deterministic lexical terms for memory FTS and recall queries.
+///
+/// Latin/digit runs remain whole tokens. Contiguous Han text emits overlapping
+/// bigrams so an unspaced paraphrase can share useful local terms. Output uses
+/// only alphanumeric token characters and spaces and is therefore safe to quote
+/// into a caller-owned FTS expression.
+pub fn memory_search_terms<'a>(values: impl IntoIterator<Item = &'a str>, limit: usize) -> String {
+    if limit == 0 {
+        return String::new();
+    }
+    const STOP_WORDS: &[&str] = &[
+        "a",
+        "an",
+        "and",
+        "are",
+        "did",
+        "do",
+        "does",
+        "for",
+        "how",
+        "in",
+        "is",
+        "of",
+        "on",
+        "or",
+        "please",
+        "the",
+        "to",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "why",
+        "with",
+        "什么",
+        "为何",
+        "为什么",
+        "如何",
+        "怎么",
+        "是否",
+        "这个",
+        "那个",
+        "请问",
+    ];
+
+    let mut terms = Vec::new();
+    let mut seen = HashSet::new();
+    let push_term = |term: String, terms: &mut Vec<String>, seen: &mut HashSet<String>| {
+        if !term.is_empty()
+            && !STOP_WORDS.contains(&term.as_str())
+            && seen.insert(term.clone())
+            && terms.len() < limit
+        {
+            terms.push(term);
+        }
+    };
+
+    for value in values {
+        let normalized = value
+            .nfkc()
+            .flat_map(char::to_lowercase)
+            .collect::<String>();
+        let mut word = String::new();
+        let mut han = Vec::new();
+        let flush_word =
+            |word: &mut String, terms: &mut Vec<String>, seen: &mut HashSet<String>| {
+                if word.chars().count() >= 2 {
+                    push_term(std::mem::take(word), terms, seen);
+                } else {
+                    word.clear();
+                }
+            };
+        let flush_han =
+            |han: &mut Vec<char>, terms: &mut Vec<String>, seen: &mut HashSet<String>| {
+                match han.len() {
+                    0 => {}
+                    1 => push_term(han[0].to_string(), terms, seen),
+                    _ => {
+                        for pair in han.windows(2) {
+                            push_term(pair.iter().collect(), terms, seen);
+                            if terms.len() >= limit {
+                                break;
+                            }
+                        }
+                    }
+                }
+                han.clear();
+            };
+
+        for character in normalized.chars() {
+            if is_han(character) {
+                flush_word(&mut word, &mut terms, &mut seen);
+                han.push(character);
+            } else if character.is_alphanumeric() {
+                flush_han(&mut han, &mut terms, &mut seen);
+                word.push(character);
+            } else {
+                flush_word(&mut word, &mut terms, &mut seen);
+                flush_han(&mut han, &mut terms, &mut seen);
+            }
+            if terms.len() >= limit {
+                break;
+            }
+        }
+        flush_word(&mut word, &mut terms, &mut seen);
+        flush_han(&mut han, &mut terms, &mut seen);
+        if terms.len() >= limit {
+            break;
+        }
+    }
+    terms.join(" ")
+}
+
+fn is_han(value: char) -> bool {
+    matches!(
+        value as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2FA1F
+    )
+}
+
 fn normalize_term(value: &str) -> String {
     value.trim().chars().flat_map(char::to_lowercase).collect()
 }
@@ -3387,6 +4240,171 @@ fn row_to_candidate(row: CandidateRow) -> Result<MemoryCandidateRecord, StateErr
     })
 }
 
+fn retrieval_metadata_from_row(
+    row: RetrievalMetadataRow,
+) -> Result<MemoryRetrievalMetadataRecord, StateError> {
+    Ok(MemoryRetrievalMetadataRecord {
+        vault_id: VaultId::parse(&row.vault_id)?,
+        memory_id: MemoryId::parse(&row.memory_id)?,
+        content_hash: row.content_hash,
+        profile_hash: row.profile_hash,
+        source_language: row.source_language,
+        aliases: serde_json::from_str(&row.aliases_json)?,
+        aliases_text: row.aliases_text,
+        search_terms: row.search_terms,
+        status: row.status,
+        last_error: row.last_error,
+        generated_at: row.generated_at,
+        updated_at: row.updated_at,
+    })
+}
+
+fn retrieval_proposal_from_row(
+    row: RetrievalProposalRow,
+) -> Result<MemoryRetrievalProposalRecord, StateError> {
+    Ok(MemoryRetrievalProposalRecord {
+        id: MemoryRetrievalProposalId::parse(&row.id)?,
+        vault_id: VaultId::parse(&row.vault_id)?,
+        input_hash: row.input_hash,
+        snapshot: serde_json::from_str(&row.snapshot_json)?,
+        proposal: serde_json::from_str(&row.proposal_json)?,
+        model_id: ModelId::parse(&row.model_id)?,
+        provider_id: ProviderId::parse(&row.provider_id)?,
+        prompt_version: row.prompt_version,
+        status: row.status,
+        applied_count: u32::try_from(row.applied_count)
+            .map_err(|_| StateError::InvalidInput("memory retrieval applied count is invalid"))?,
+        created_at: row.created_at,
+        applied_at: row.applied_at,
+    })
+}
+
+fn validate_retrieval_keys(content_hash: &str, profile_hash: &str) -> Result<(), StateError> {
+    if content_hash.is_empty()
+        || content_hash.len() > 128
+        || profile_hash.is_empty()
+        || profile_hash.len() > 128
+    {
+        return Err(StateError::InvalidInput(
+            "memory retrieval metadata key is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_retrieval_metadata(
+    context: &VaultContext,
+    metadata: &MemoryRetrievalMetadataRecord,
+) -> Result<(), StateError> {
+    validate_retrieval_keys(&metadata.content_hash, &metadata.profile_hash)?;
+    let source_language = metadata
+        .source_language
+        .as_deref()
+        .filter(|language| valid_language_tag_shape(language));
+    let aliases_text = validate_retrieval_aliases(&metadata.aliases, source_language)?;
+    if metadata.vault_id != context.id()
+        || metadata.status != "ready"
+        || source_language.is_none()
+        || serde_json::to_vec(&metadata.aliases)?.len() > 16 * 1024
+        || metadata.aliases_text != aliases_text
+        || metadata.aliases_text.len() > 16 * 1024
+        || metadata.search_terms.len() > 128 * 1024
+        || metadata
+            .search_terms
+            .chars()
+            .any(|character| character.is_control() && !character.is_whitespace())
+        || metadata.last_error.as_ref().is_some_and(|error| {
+            error.is_empty() || error.len() > 128 || error.chars().any(char::is_control)
+        })
+        || metadata.generated_at.is_none()
+    {
+        return Err(StateError::InvalidInput(
+            "memory retrieval metadata is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_language_tag_shape(value: &str) -> bool {
+    let mut parts = value.split('-');
+    let Some(primary) = parts.next() else {
+        return false;
+    };
+    (2..=8).contains(&primary.len())
+        && primary
+            .chars()
+            .all(|character| character.is_ascii_alphabetic())
+        && parts.all(|part| {
+            (1..=8).contains(&part.len())
+                && part
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric())
+        })
+}
+
+fn validate_retrieval_aliases(
+    aliases: &Value,
+    source_language: Option<&str>,
+) -> Result<String, StateError> {
+    let groups = aliases.as_array().ok_or(StateError::InvalidInput(
+        "memory retrieval aliases are invalid",
+    ))?;
+    let source_language = source_language.ok_or(StateError::InvalidInput(
+        "memory retrieval aliases are invalid",
+    ))?;
+    let mut required = [source_language, "zh-Hans", "en"]
+        .into_iter()
+        .filter(|language| *language != "und")
+        .collect::<HashSet<_>>();
+    let mut seen_languages = HashSet::new();
+    let mut flattened = Vec::new();
+    for group in groups {
+        let language = group
+            .get("language")
+            .and_then(Value::as_str)
+            .filter(|language| valid_language_tag_shape(language))
+            .ok_or(StateError::InvalidInput(
+                "memory retrieval aliases are invalid",
+            ))?;
+        if !required.remove(language) || !seen_languages.insert(language) {
+            return Err(StateError::InvalidInput(
+                "memory retrieval aliases are invalid",
+            ));
+        }
+        let terms = group
+            .get("terms")
+            .and_then(Value::as_array)
+            .filter(|terms| !terms.is_empty() && terms.len() <= 8)
+            .ok_or(StateError::InvalidInput(
+                "memory retrieval aliases are invalid",
+            ))?;
+        let mut seen_terms = HashSet::new();
+        for term in terms {
+            let term = term.as_str().ok_or(StateError::InvalidInput(
+                "memory retrieval aliases are invalid",
+            ))?;
+            if term.trim() != term
+                || term.is_empty()
+                || term.len() > 128
+                || term.chars().any(char::is_control)
+                || term.contains("[REDACTED_SECRET]")
+                || !seen_terms.insert(term.to_lowercase())
+            {
+                return Err(StateError::InvalidInput(
+                    "memory retrieval aliases are invalid",
+                ));
+            }
+            flattened.push(term);
+        }
+    }
+    if !required.is_empty() {
+        return Err(StateError::InvalidInput(
+            "memory retrieval aliases are invalid",
+        ));
+    }
+    Ok(flattened.join(" "))
+}
+
 fn validate_stage1_output(
     context: &VaultContext,
     output: &MemoryStage1OutputRecord,
@@ -3516,4 +4534,27 @@ fn consolidation_state_from_row(
         regeneration_pending: row.regeneration_pending != 0,
         updated_at: row.updated_at,
     })
+}
+
+#[cfg(test)]
+mod multilingual_search_tests {
+    use super::memory_search_terms;
+
+    #[test]
+    fn search_terms_cover_unspaced_han_and_natural_language_noise() {
+        let terms = memory_search_terms(["请问以后项目统一使用 Rust v1.94 吗？"], 64);
+        assert!(terms.contains("以后"));
+        assert!(terms.contains("项目"));
+        assert!(terms.contains("统一"));
+        assert!(terms.contains("rust"));
+        assert!(terms.contains("v1"));
+        assert!(terms.contains("94"));
+        assert!(!terms.contains("请问"));
+    }
+
+    #[test]
+    fn search_terms_are_deduplicated_and_bounded() {
+        assert_eq!(memory_search_terms(["Rust rust RUST"], 64), "rust");
+        assert_eq!(memory_search_terms(["甲乙丙丁"], 2), "甲乙 乙丙");
+    }
 }

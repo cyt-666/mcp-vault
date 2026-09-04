@@ -2,7 +2,7 @@
 
 Accepted ADRs are binding unless superseded by a later ADR.
 
-The current sequence includes ADR-0022. ADR-0013 keeps ADR-0007 durable memories
+The current sequence includes ADR-0025. ADR-0013 keeps ADR-0007 durable memories
 canonical and provenanced while allowing `recall` to return separately typed,
 rebuildable ordinary-note cues. ADR-0014 replaced model self-score/routine
 review defaults with exact evidence and autonomous promotion. ADR-0015 retains
@@ -36,6 +36,20 @@ temporary-file hard-link exception.
 ADR-0022 replaces one-time memory-source repair with continuous exact source
 health, fail-closed normal recall, event-ordered reconciliation, and repeatable
 Vault-scoped audits.
+
+ADR-0023 keeps canonical memory in its source language and adds persisted,
+rebuildable source/`zh-Hans`/`en` retrieval metadata, explicit historical
+backfill, CJK-aware lexical recall, and object-scoped vector ranking without a
+query-time LLM call.
+
+ADR-0024 replaces character-count note-vector chunks with a versioned bounded
+UTF-8 input envelope, preserves redacted Provider failure categories, and
+requires current-model note and memory vector scheduling without re-running
+memory extraction.
+
+ADR-0025 aggregates current note chunks by File ID before the final note Top-K,
+uses only the highest non-negative cosine per note, and makes that cosine scale
+the existing reciprocal-rank contribution.
 
 Status values:
 

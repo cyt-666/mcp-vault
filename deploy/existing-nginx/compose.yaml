@@ -1,6 +1,6 @@
 services:
   mcp-vault:
-    image: mcp-vault:0.1.17
+    image: mcp-vault:0.1.21
     platform: linux/amd64
     pull_policy: never
     # GUI-managed NAS bind mounts are commonly owned by a host-only UID.

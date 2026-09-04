@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 
 use mcp_vault_domain::{
-    ActorId, DomainError, MemoryConsolidationId, MemoryRawId, ModelId, ProviderId, Revision,
-    VaultContext, VaultId, VaultSlug, WritePrecondition,
+    ActorId, DomainError, MemoryConsolidationId, MemoryId, MemoryRawId, MemoryRetrievalProposalId,
+    ModelId, ProviderId, Revision, VaultContext, VaultId, VaultSlug, WritePrecondition,
 };
 use mcp_vault_state::{
-    MemoryConsolidationProposalRecord, MemoryStage1OutputRecord, StateStore, VaultAvailability,
-    VaultRepository, VaultStatus,
+    MemoryBundle, MemoryConsolidationProposalRecord, MemoryFilter, MemoryRecord,
+    MemoryRetrievalMetadataRecord, MemoryRetrievalProposalRecord, MemoryStage1OutputRecord,
+    StateStore, VaultAvailability, VaultRepository, VaultStatus, memory_search_terms,
 };
 use serde_json::json;
 
@@ -476,5 +477,212 @@ async fn two_phase_memory_state_is_vault_scoped_and_commits_idempotently() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn multilingual_retrieval_metadata_and_fts_are_strictly_vault_scoped() {
+    let store = store().await;
+    let first = context("first-retrieval", "/srv/first-retrieval");
+    let second = context("second-retrieval", "/srv/second-retrieval");
+    insert(&store.vaults(), &first).await;
+    insert(&store.vaults(), &second).await;
+    let repository = store.memory();
+    let bundle = |vault_id, id, content: &str, hash: &str| MemoryBundle {
+        memory: MemoryRecord {
+            id,
+            vault_id,
+            memory_type: "decision".to_owned(),
+            status: "active".to_owned(),
+            status_reason: None,
+            status_changed_at: None,
+            content: content.to_owned(),
+            normalized_content: content.to_lowercase(),
+            content_hash: hash.to_owned(),
+            importance: 0.8,
+            confidence: 0.9,
+            origin: "explicit_admin".to_owned(),
+            revision: Revision::new(1),
+            canonical_file_id: None,
+            canonical_path: None,
+            canonical_revision: None,
+            valid_from: None,
+            valid_to: None,
+            extraction: json!({}),
+            created_at: 1,
+            updated_at: 1,
+            last_recalled_at: None,
+            recall_count: 0,
+        },
+        sources: Vec::new(),
+        entities: Vec::new(),
+        tags: Vec::new(),
+        relations: Vec::new(),
+    };
+    let first_id = MemoryId::new();
+    let second_id = MemoryId::new();
+    repository
+        .replace_bundle(
+            &first,
+            &bundle(first.id(), first_id, "项目使用 Rust", "hash-first"),
+            None,
+        )
+        .await
+        .unwrap();
+    repository
+        .replace_bundle(
+            &second,
+            &bundle(second.id(), second_id, "另一个项目", "hash-second"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repository
+            .retrieval_coverage(&first, "profile-v1")
+            .await
+            .unwrap()
+            .pending,
+        1
+    );
+    repository
+        .mark_retrieval_backfill_pending(&first, "profile-v1")
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .retrieval_pending_count(&first, "profile-v1")
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        repository
+            .retrieval_pending_count(&second, "profile-v1")
+            .await
+            .unwrap(),
+        0
+    );
+    let aliases = json!([
+        {"language": "zh-Hans", "terms": ["项目使用 Rust"]},
+        {"language": "en", "terms": ["project uses Rust"]}
+    ]);
+    let aliases_text = "项目使用 Rust project uses Rust";
+    repository
+        .upsert_retrieval_metadata(
+            &first,
+            &MemoryRetrievalMetadataRecord {
+                vault_id: first.id(),
+                memory_id: first_id,
+                content_hash: "hash-first".to_owned(),
+                profile_hash: "profile-v1".to_owned(),
+                source_language: Some("zh-Hans".to_owned()),
+                aliases,
+                aliases_text: aliases_text.to_owned(),
+                search_terms: memory_search_terms(["项目使用 Rust", aliases_text], 4096),
+                status: "ready".to_owned(),
+                last_error: None,
+                generated_at: Some(2),
+                updated_at: 2,
+            },
+        )
+        .await
+        .unwrap();
+
+    let first_hits = repository
+        .search_fts(&first, "\"project\"", &MemoryFilter::default(), 10)
+        .await
+        .unwrap();
+    let second_hits = repository
+        .search_fts(&second, "\"project\"", &MemoryFilter::default(), 10)
+        .await
+        .unwrap();
+    assert_eq!(first_hits.len(), 1);
+    assert_eq!(first_hits[0].memory.id, first_id);
+    assert!(second_hits.is_empty());
+    assert!(
+        repository
+            .get_retrieval_metadata(&second, first_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let proposal_id = MemoryRetrievalProposalId::new();
+    repository
+        .insert_retrieval_proposal(
+            &first,
+            &MemoryRetrievalProposalRecord {
+                id: proposal_id,
+                vault_id: first.id(),
+                input_hash: "sha256:first-retrieval-input".to_owned(),
+                snapshot: json!([]),
+                proposal: json!({"version": 1, "items": []}),
+                model_id: ModelId::new(),
+                provider_id: ProviderId::new(),
+                prompt_version: "memory-retrieval-v1".to_owned(),
+                status: "prepared".to_owned(),
+                applied_count: 0,
+                created_at: 3,
+                applied_at: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        repository
+            .get_retrieval_proposal_by_input(&second, "sha256:first-retrieval-input")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let first_job = store
+        .jobs()
+        .enqueue_singleton(
+            &first,
+            "memory.enrich_retrieval",
+            "same-retrieval-job-key",
+            &json!({"profile_hash": "profile-v1"}),
+            0,
+            3,
+            4,
+        )
+        .await
+        .unwrap();
+    let second_job = store
+        .jobs()
+        .enqueue_singleton(
+            &second,
+            "memory.enrich_retrieval",
+            "same-retrieval-job-key",
+            &json!({"profile_hash": "profile-v1"}),
+            0,
+            3,
+            4,
+        )
+        .await
+        .unwrap();
+    assert_ne!(first_job.id, second_job.id);
+    assert_eq!(
+        store
+            .jobs()
+            .find_active_by_type(&first, "memory.enrich_retrieval")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        first_job.id
+    );
+    assert_eq!(
+        store
+            .jobs()
+            .find_active_by_type(&second, "memory.enrich_retrieval")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        second_job.id
     );
 }

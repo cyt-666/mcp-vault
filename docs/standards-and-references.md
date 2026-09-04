@@ -209,6 +209,8 @@ Primary request-contract references:
 - Zhipu structured output and OpenAI compatibility:
   https://docs.bigmodel.cn/cn/guide/capabilities/struct-output
   https://docs.bigmodel.cn/cn/guide/develop/openai/introduction
+- Zhipu `embedding-3` request, dimension, batch, and per-input limits:
+  https://docs.bigmodel.cn/api-reference/模型-api/文本嵌入
 - Moonshot/Kimi Chat and platform overview:
   https://platform.kimi.ai/docs/api/chat
   https://platform.kimi.ai/docs/api/overview
