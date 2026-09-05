@@ -337,7 +337,7 @@ async fn settings_require_a_registered_vault_context() {
 }
 
 #[tokio::test]
-async fn two_phase_memory_state_is_vault_scoped_and_commits_idempotently() {
+async fn legacy_two_phase_rows_remain_vault_scoped_for_v2_1_migration() {
     let store = store().await;
     let first = context("first-memory", "/srv/first-memory");
     let second = context("second-memory", "/srv/second-memory");
@@ -481,7 +481,7 @@ async fn two_phase_memory_state_is_vault_scoped_and_commits_idempotently() {
 }
 
 #[tokio::test]
-async fn multilingual_retrieval_metadata_and_fts_are_strictly_vault_scoped() {
+async fn legacy_retrieval_rows_remain_vault_scoped_for_backup_migration() {
     let store = store().await;
     let first = context("first-retrieval", "/srv/first-retrieval");
     let second = context("second-retrieval", "/srv/second-retrieval");

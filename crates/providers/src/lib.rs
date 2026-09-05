@@ -26,7 +26,7 @@ pub use policy::{
 };
 pub use service::{
     EMBEDDING_PROJECTION_VERSION, EmbeddingInput, EmbeddingService, EmbeddingSourceResolver,
-    ModelInput, ProviderInput, ProviderModeState, ProviderService,
+    ModelInput, ProviderInput, ProviderModeState, ProviderService, embedding_input_hash,
 };
 pub use transport::{
     AuthStyle, JsonResponse, ProviderTransport, RequestOptions, endpoint_url, retryable_status,

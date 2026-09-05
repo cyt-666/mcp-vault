@@ -35,7 +35,7 @@ use crate::{
 /// Bump this when source chunk identity or resolution changes incompatibly so
 /// a corrected rebuild does not reuse a terminal job created by an older
 /// projection.
-pub const EMBEDDING_PROJECTION_VERSION: u32 = 2;
+pub const EMBEDDING_PROJECTION_VERSION: u32 = 3;
 
 const PROVIDER_SECRET_PURPOSE: &str = "provider-api-key";
 const PROVIDER_SECRET_OWNER: &str = "provider";
@@ -724,6 +724,26 @@ pub struct EmbeddingService {
 }
 
 impl EmbeddingService {
+    /// Return the stable fingerprint of the complete configuration that can
+    /// affect vectors produced by one model. Secrets are deliberately absent.
+    pub async fn profile_hash(&self, model_id: ModelId) -> Result<String, ProviderError> {
+        let model = self
+            .provider
+            .state
+            .providers()
+            .get_model(model_id)
+            .await?
+            .ok_or(ProviderError::NotFound)?;
+        let provider = self
+            .provider
+            .state
+            .providers()
+            .get_provider(model.provider_id)
+            .await?
+            .ok_or(ProviderError::NotFound)?;
+        Ok(embedding_profile_hash(&provider, &model))
+    }
+
     /// Generate and persist a batch of source embeddings.
     pub async fn embed_and_store(
         &self,
@@ -731,6 +751,21 @@ impl EmbeddingService {
         model_id: ModelId,
         inputs: &[EmbeddingInput],
     ) -> Result<Vec<EmbeddingRecord>, ProviderError> {
+        let prepared = self.prepare_embeddings(context, model_id, inputs).await?;
+        let mut records = Vec::with_capacity(prepared.len());
+        for (record, vector) in prepared {
+            self.vector.upsert(context, &record, &vector).await?;
+            records.push(record);
+        }
+        Ok(records)
+    }
+
+    async fn prepare_embeddings(
+        &self,
+        context: &VaultContext,
+        model_id: ModelId,
+        inputs: &[EmbeddingInput],
+    ) -> Result<Vec<(EmbeddingRecord, Vec<f32>)>, ProviderError> {
         if inputs.is_empty() || inputs.len() > 128 {
             return Err(ProviderError::InvalidConfiguration(
                 "embedding input batch is invalid",
@@ -741,20 +776,28 @@ impl EmbeddingService {
                 "embedding input is too large",
             ));
         }
+        let model = self
+            .provider
+            .state
+            .providers()
+            .get_model(model_id)
+            .await?
+            .ok_or(ProviderError::NotFound)?;
+        let provider = self
+            .provider
+            .state
+            .providers()
+            .get_provider(model.provider_id)
+            .await?
+            .ok_or(ProviderError::NotFound)?;
+        let profile_hash = embedding_profile_hash(&provider, &model);
         let result = self
             .provider
             .embed(
                 context,
                 model_id,
                 &EmbeddingRequest {
-                    model: self
-                        .provider
-                        .state
-                        .providers()
-                        .get_model(model_id)
-                        .await?
-                        .ok_or(ProviderError::NotFound)?
-                        .external_model_id,
+                    model: model.external_model_id.clone(),
                     inputs: inputs.iter().map(|input| input.text.clone()).collect(),
                 },
             )
@@ -764,19 +807,25 @@ impl EmbeddingService {
                 "embedding result count does not match input count",
             ));
         }
-        let model = self
-            .provider
-            .state
-            .providers()
-            .get_model(model_id)
-            .await?
-            .ok_or(ProviderError::NotFound)?;
         let provider_id = model.provider_id;
         let dimension = result
             .vectors
             .first()
             .map(|vector| vector.len() as u32)
             .ok_or(ProviderError::InvalidResponse("embedding result is empty"))?;
+        if dimension == 0
+            || result.vectors.iter().any(|vector| {
+                let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+                vector.len() != dimension as usize
+                    || vector.iter().any(|value| !value.is_finite())
+                    || !norm.is_finite()
+                    || norm <= f32::EPSILON
+            })
+        {
+            return Err(ProviderError::InvalidResponse(
+                "embedding result contains an invalid vector",
+            ));
+        }
         let mut records = Vec::with_capacity(inputs.len());
         for (input, vector) in inputs.iter().zip(result.vectors) {
             let now = now_millis();
@@ -790,6 +839,8 @@ impl EmbeddingService {
                 model_id,
                 dimension,
                 content_hash: input.source.content_hash.clone(),
+                profile_hash: profile_hash.clone(),
+                input_hash: embedding_input_hash(&profile_hash, &input.source, &input.text),
                 vector_backend_key: format!(
                     "{}:{}:{}:{}",
                     context.id(),
@@ -800,8 +851,7 @@ impl EmbeddingService {
                 created_at: now,
                 updated_at: now,
             };
-            self.vector.upsert(context, &record, &vector).await?;
-            records.push(record);
+            records.push((record, vector));
         }
         Ok(records)
     }
@@ -828,7 +878,20 @@ impl EmbeddingService {
         if inputs.is_empty() {
             return Ok(Vec::new());
         }
-        self.embed_and_store(context, model_id, &inputs).await
+        let prepared = self.prepare_embeddings(context, model_id, &inputs).await?;
+        let mut records = Vec::with_capacity(prepared.len());
+        for ((record, vector), input) in prepared.into_iter().zip(&inputs) {
+            let still_current = resolver
+                .resolve_source(context, &input.source)
+                .await?
+                .is_some_and(|text| text == input.text);
+            if !still_current {
+                continue;
+            }
+            self.vector.upsert(context, &record, &vector).await?;
+            records.push(record);
+        }
+        Ok(records)
     }
 
     /// Search one Vault/model/object-type/dimension partition for raw candidates.
@@ -926,6 +989,61 @@ impl EmbeddingService {
     ) -> Result<u64, ProviderError> {
         self.vector.delete_model(context, model_id).await
     }
+
+    /// Remove every derived embedding for one exact current source object.
+    /// This is model-agnostic so deleting/replacing canonical content cannot
+    /// leave an older model/profile partition online.
+    pub async fn delete_object_vectors(
+        &self,
+        context: &VaultContext,
+        object_type: &str,
+        object_id: &str,
+    ) -> Result<u64, ProviderError> {
+        self.vector
+            .delete_object(context, object_type, object_id)
+            .await
+    }
+}
+
+/// Hash the exact input and its stable source/preparation identity under one
+/// embedding profile. Callers can recompute this without invoking a model.
+pub fn embedding_input_hash(profile_hash: &str, source: &EmbeddingSourceRef, text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mcp-vault-embedding-input-v1\0");
+    hasher.update(profile_hash.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(source.object_type.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(source.chunk_key.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(source.content_hash.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(text.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn embedding_profile_hash(provider: &ProviderRecord, model: &ModelRecord) -> String {
+    let value = json!({
+        "contract": "mcp-vault-embedding-profile-v1",
+        "projection_version": EMBEDDING_PROJECTION_VERSION,
+        "provider": {
+            "id": provider.id,
+            "type": provider.provider_type,
+            "base_url": provider.base_url,
+            "settings": provider.settings,
+            "revision": provider.revision.value(),
+        },
+        "model": {
+            "id": model.id,
+            "external_model_id": model.external_model_id,
+            "capabilities": model.capabilities,
+            "settings": model.settings,
+            "revision": model.revision.value(),
+        }
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(value.to_string().as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 fn adapter_for(kind: ProviderKind) -> Box<dyn ProviderAdapter> {

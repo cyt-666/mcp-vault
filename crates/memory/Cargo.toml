@@ -21,6 +21,7 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+unicode-normalization = { workspace = true }
 yaml-rust = "=0.4.5"
 
 [lints]

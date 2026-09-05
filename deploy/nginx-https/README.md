@@ -9,7 +9,7 @@ Unpack the deployment archive beside the image archive, then enter its
 directory:
 
 ```bash
-tar -xzf mcp-vault-nginx-https-0.1.21.tar.gz
+tar -xzf mcp-vault-nginx-https-0.2.1.tar.gz
 cd nginx-https
 ```
 
@@ -18,8 +18,8 @@ cd nginx-https
 Load the image archive from the parent directory:
 
 ```bash
-docker load --input ../mcp-vault-0.1.21-linux-amd64.tar
-docker image inspect mcp-vault:0.1.21 --format '{{.Os}}/{{.Architecture}} {{.Id}}'
+docker load --input ../mcp-vault-0.2.1-linux-amd64.tar
+docker image inspect mcp-vault:0.2.1 --format '{{.Os}}/{{.Architecture}} {{.Id}}'
 ```
 
 The result must report `linux/amd64`.

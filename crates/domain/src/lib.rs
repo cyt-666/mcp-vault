@@ -18,10 +18,10 @@ pub use error::{DomainError, PathError};
 pub use id::{
     AdminSessionId, AdminUserId, BackupId, CredentialId, EmbeddingId, EventId, FileId, IdentityId,
     JobId, MemoryCandidateId, MemoryConsolidationId, MemoryId, MemoryRawId, MemoryRelationId,
-    MemoryRetrievalProposalId, MemorySourceId, ModelId, OAuthAccessTokenId,
-    OAuthAuthorizationCodeId, OAuthAuthorizationRequestId, OAuthClientId, OAuthGrantId,
-    OAuthIssuerId, OAuthLocalUserId, OAuthRefreshTokenId, OAuthTokenFamilyId, OperationId,
-    ProviderId, RevisionId, ScanId, SecretId, VaultId,
+    MemoryRetrievalProposalId, MemorySetId, MemorySetSnapshotId, MemorySourceId, ModelId,
+    OAuthAccessTokenId, OAuthAuthorizationCodeId, OAuthAuthorizationRequestId, OAuthClientId,
+    OAuthGrantId, OAuthIssuerId, OAuthLocalUserId, OAuthRefreshTokenId, OAuthTokenFamilyId,
+    OperationId, ProviderId, RevisionId, ScanId, SecretId, VaultId,
 };
 pub use maintenance::{MaintenanceGate, MaintenanceMode, MaintenanceOperationGuard};
 pub use path::{

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use mcp_vault_domain::{FileId, JobId, MemoryId, MemoryRawId, Revision, VaultPath};
+use mcp_vault_domain::{FileId, MemoryId, MemorySetId, Revision, VaultPath};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -70,82 +70,35 @@ impl TryFrom<&str> for MemoryType {
     }
 }
 
-/// Lifecycle state visible to callers.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryStatus {
-    /// Legacy prerelease candidate projection retained for migration parsing.
-    Candidate,
-    /// Eligible for normal recall and canonical Markdown.
-    Active,
-    /// Replaced by a newer memory.
-    Superseded,
-    /// No current source supports the proposition.
-    Stale,
-    /// Intentionally inactive but retained.
-    Archived,
-    /// Legacy/manual rejected lifecycle value retained for compatibility.
-    Rejected,
-    /// Invalid managed Markdown excluded from recall.
-    Quarantined,
-}
-
-impl MemoryStatus {
-    /// Stable database label.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Candidate => "candidate",
-            Self::Active => "active",
-            Self::Superseded => "superseded",
-            Self::Stale => "stale",
-            Self::Archived => "archived",
-            Self::Rejected => "rejected",
-            Self::Quarantined => "quarantined",
-        }
-    }
-}
-
-impl TryFrom<&str> for MemoryStatus {
-    type Error = ();
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "candidate" => Ok(Self::Candidate),
-            "active" => Ok(Self::Active),
-            "superseded" => Ok(Self::Superseded),
-            "stale" => Ok(Self::Stale),
-            "archived" => Ok(Self::Archived),
-            "rejected" => Ok(Self::Rejected),
-            "quarantined" => Ok(Self::Quarantined),
-            _ => Err(()),
-        }
-    }
-}
-
 /// Origin of a durable memory.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryOrigin {
-    /// Consolidated from model-distilled note sources.
-    Extracted,
     /// Explicit Agent assertion.
     ExplicitAgent,
     /// Explicit Admin assertion.
     ExplicitAdmin,
-    /// Reconciled direct managed Markdown edit.
-    DirectMarkdown,
     /// Imported memory record.
     Import,
+}
+
+/// Current-memory ownership. Ownership controls replacement and deletion; it
+/// is not inferred from the presence of a source reference.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryOwnership {
+    /// Direct memory with its own canonical Markdown record.
+    Explicit,
+    /// Item in the one current set owned by a source note.
+    NoteDerived,
 }
 
 impl MemoryOrigin {
     /// Stable database label.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Extracted => "extracted",
             Self::ExplicitAgent => "explicit_agent",
             Self::ExplicitAdmin => "explicit_admin",
-            Self::DirectMarkdown => "direct_markdown",
             Self::Import => "import",
         }
     }
@@ -161,7 +114,7 @@ pub enum ExtractionSourceMode {
     Automatic,
 }
 
-/// Vault-scoped automatic Phase 1 extraction policy.
+/// Vault-scoped current-set extraction policy.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct ExtractionPolicy {
@@ -170,7 +123,7 @@ pub struct ExtractionPolicy {
     /// Serialized source-admission mode; legacy marker modes migrate to automatic.
     pub source_mode: ExtractionSourceMode,
     /// Legacy compatibility field retained for prerelease Admin payloads.
-    /// Phase 1 v3 derives whole-source provenance locally and ignores it.
+    /// Current extraction derives whole-source provenance locally and ignores it.
     #[serde(alias = "max_candidates_per_note")]
     pub max_evidence_per_note: u32,
     /// Total deadline for one structured note-extraction request.
@@ -217,12 +170,14 @@ pub struct ExtractionReadiness {
 pub struct NoteExtractionResult {
     /// Whether the current note passed local bounds and reached the provider.
     pub source_admitted: bool,
-    /// Whether Phase 1 stored a non-empty consolidation-ready raw memory.
-    pub raw_memory_staged: bool,
-    /// Whether Phase 1 successfully decided that the source has no memory input.
-    pub no_output: bool,
+    /// Whether a successful call atomically published an empty current set.
+    pub empty_set_published: bool,
     /// True when an unchanged note/profile was skipped before a Provider call.
     pub already_evaluated: bool,
+    /// Number of current items atomically published for the source.
+    pub items_published: u32,
+    /// Whether a prepared exact snapshot was reused after interruption.
+    pub reused_prepared_snapshot: bool,
 }
 
 /// Per-call behavior for automatic note extraction.
@@ -230,59 +185,6 @@ pub struct NoteExtractionResult {
 pub struct NoteExtractionOptions {
     /// Re-evaluate a current successful note/profile at explicit operator cost.
     pub include_evaluated: bool,
-}
-
-/// Outcome of reconciling one required fresh pipeline regeneration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PipelineRegenerationAdmission {
-    /// The Vault does not require a fresh regeneration.
-    NotPending,
-    /// One or both memory model phases are not ready yet.
-    AwaitingConfiguration,
-    /// Another extraction currently owns the singleton slot.
-    AwaitingOtherExtraction,
-    /// A current-generation fresh extraction exists and pending state cleared.
-    Admitted,
-}
-
-/// Outcome of one committed Phase 2 global-memory consolidation.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct MemoryConsolidationReport {
-    /// Dirty Phase 1 inputs consumed by this generation.
-    pub raw_inputs: u32,
-    /// New semantic final memories created.
-    pub created: u32,
-    /// Existing semantic memories updated.
-    pub updated: u32,
-    /// Existing memories archived or superseded.
-    pub retired: u32,
-    /// Raw inputs intentionally discarded as low-signal/temporary.
-    pub discarded: u32,
-    /// Monotonic committed global-memory generation.
-    pub generation: u64,
-    /// Whether a crash-safe prepared proposal was reused without another model call.
-    pub reused_proposal: bool,
-}
-
-/// Current multilingual retrieval coverage for one Vault.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct MemoryRetrievalCoverageView {
-    /// Stable retrieval metadata contract version.
-    pub prompt_version: String,
-    /// Hash of the alias targets, prompt contract, and lexical profile.
-    pub profile_hash: String,
-    /// Languages generated for each memory after source-language deduplication.
-    pub target_languages: Vec<String>,
-    /// Active, stale, and superseded memories eligible for backfill.
-    pub eligible: u64,
-    /// Current metadata matching exact memory content.
-    pub current: u64,
-    /// Missing or explicitly pending metadata.
-    pub pending: u64,
-    /// Current content whose latest enrichment failed.
-    pub failed: u64,
-    /// Maximum eight-item Provider batches required for uncovered memory.
-    pub estimated_batches: u64,
 }
 
 /// Current durable-memory vector projection status for one Vault/model binding.
@@ -296,12 +198,52 @@ pub struct MemoryEmbeddingStatusView {
     pub model_id: Option<String>,
     /// Provider-visible model identifier.
     pub external_model_id: Option<String>,
-    /// Active, stale, and superseded memories eligible for vector projection.
+    /// Exact provider/model/input profile that current vectors must match.
+    pub profile_hash: Option<String>,
+    /// Current memories eligible for vector projection.
     pub eligible: u64,
     /// Current-model vectors matching exact current memory content.
     pub current: u64,
-    /// Current-model vector rows that do not match the current projection.
+    /// Selected-model vector rows that no longer match a current object/input.
     pub stale: u64,
+    /// Stable redacted readiness blockers.
+    pub blockers: Vec<String>,
+}
+
+/// Imported result of an explicitly authorized real-model retrieval
+/// calibration. The setting is Vault-scoped and tied to one exact embedding
+/// profile; changing model/input/chunk configuration invalidates it.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct MemorySemanticCalibration {
+    /// Exact embedding profile evaluated by the report.
+    pub embedding_profile_hash: String,
+    /// Minimum raw cosine that admitted a semantic-only candidate.
+    pub min_cosine: f64,
+    /// Labeled queries with at least one acceptable answer.
+    pub answered_queries: u32,
+    /// Labeled no-answer queries, including hard lexical negatives.
+    pub unanswered_queries: u32,
+    /// Observed Recall@5 on the unchanged evaluation split.
+    pub recall_at_5: f64,
+    /// Observed false-return rate for no-answer queries.
+    pub no_answer_false_return_rate: f64,
+    /// Hash of the external, separately retained real-model report.
+    pub report_hash: String,
+    /// Evaluation completion time as Unix milliseconds.
+    pub evaluated_at: i64,
+}
+
+/// Current semantic-admission configuration and why it is or is not active.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct MemorySemanticCalibrationView {
+    /// Effective embedding profile, when a model binding is ready.
+    pub effective_profile_hash: Option<String>,
+    /// Persisted calibration, even when it became stale after reconfiguration.
+    pub calibration: Option<MemorySemanticCalibration>,
+    /// Optimistic settings revision.
+    pub revision: Option<Revision>,
+    /// Whether semantic-only admission is currently enabled.
+    pub active: bool,
     /// Stable redacted readiness blockers.
     pub blockers: Vec<String>,
 }
@@ -325,97 +267,46 @@ pub struct MemoryEmbeddingScheduleReport {
     pub external_model_id: Option<String>,
 }
 
-/// Outcome of one bounded multilingual retrieval-enrichment batch.
+/// Content-free outcome of the explicitly authorized v2.1 legacy migration.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct MemoryRetrievalEnrichmentReport {
-    /// Memories present in the prepared batch.
-    pub processed: u32,
-    /// Metadata rows made current.
-    pub enriched: u32,
-    /// Canonical bodies equivalently rewritten into source language.
-    pub rewritten: u32,
-    /// Items kept in their existing language because safe rewrite was unavailable.
-    pub rewrite_skipped: u32,
-    /// Items re-admitted because their revision/content snapshot changed.
-    pub snapshot_conflicts: u32,
-    /// Remaining explicitly admitted rows after this batch.
-    pub remaining: u64,
-    /// Whether a persisted proposal avoided a second Provider call.
-    pub reused_proposal: bool,
+pub struct MemoryV2MigrationResult {
+    /// Legacy rows inspected by the immediately preceding preflight.
+    pub legacy_total: u64,
+    /// Historical lifecycle rows kept outside the current model.
+    pub historical: u64,
+    /// Reliable active explicit rows selected for preservation.
+    pub safe_explicit: u64,
+    /// Explicit rows newly materialized with their original IDs.
+    pub migrated_explicit: u64,
+    /// Explicit rows already present in the v2.1 current model.
+    pub already_current: u64,
+    /// Active note-derived rows that must be regenerated from current notes.
+    pub note_derived: u64,
+    /// Ambiguous or unsupported IDs left for operator resolution.
+    pub unresolved_ids: Vec<String>,
+    /// True only when no active legacy row still needs an ownership decision.
+    pub completed: bool,
+    /// Legacy rows were retained for backup/audit and never deleted automatically.
+    pub legacy_rows_deleted: bool,
 }
 
-/// Outcome of one idempotent historical memory-source repair pass.
+/// Exact outcomes of reconciling one current source-owned memory set.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct MemorySourceRepairReport {
-    /// Canonical memory records rewritten with current source metadata.
-    pub memories_rewritten: u64,
-    /// Phase 1 source rows rebound to their current paths/revisions.
-    pub stage1_sources_rebound: u64,
-    /// Note sources whose current readable file identity cannot be proven.
-    pub unresolved_note_sources: u64,
-    /// Active extracted memories made stale because no support remains.
-    pub memories_marked_stale: u64,
-}
-
-/// Exact outcomes of one event-driven source reconciliation pass.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct MemorySourceReconcileReport {
-    /// Final-memory note sources checked.
-    pub final_sources_checked: u64,
-    /// Sources proven current without changing File ID.
+pub struct CurrentSourceReconcileReport {
+    /// Current source-owned sets checked for this stable File ID.
+    pub sources_checked: u64,
+    /// Sets already aligned with the current path, revision, and content hash.
     pub current: u64,
-    /// Sources rebound to one uniquely proven current File ID.
-    pub rebound: u64,
-    /// Sources whose stable file no longer contains the evidence.
+    /// Sets whose navigation metadata moved with the same stable File ID and hash.
+    pub moved: u64,
+    /// Sets hidden immediately because their source content hash changed.
     pub changed: u64,
-    /// Sources whose stable file is tombstoned.
+    /// Sets removed because their source file was deleted.
     pub deleted: u64,
-    /// Sources for which no current identity can be proven.
-    pub missing: u64,
-    /// Sources for which exact identity is not unique.
-    pub ambiguous: u64,
-    /// Memories newly made stale by unavailable note evidence.
-    pub memories_staled: u64,
-    /// Source-unavailable memories reactivated by exact proof.
-    pub memories_reactivated: u64,
-    /// Stage 1 rows rebound to current source metadata.
-    pub stage1_rebound: u64,
-    /// Stage 1 rows withdrawn after source loss.
-    pub stage1_withdrawn: u64,
-    /// Individual sources/memories that could not be processed safely.
-    pub errors: u64,
-}
-
-/// One durable page of the repeatable source audit.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct MemorySourceAuditPage {
-    /// Per-page exact reconciliation outcomes.
-    pub report: MemorySourceReconcileReport,
-    /// Last committed final source identity.
-    pub cursor: Option<String>,
-    /// Whether every final and Stage 1 source has been examined.
-    pub complete: bool,
-}
-
-/// Result of one destructive prerelease memory-pipeline cutover.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct MemoryPipelineResetReport {
-    /// Whether the current pipeline generation already completed cleanup.
-    pub already_completed: bool,
-    /// Managed memory Markdown files removed through Vault Core.
-    pub removed_managed_files: u64,
-    /// Final memory projections removed.
-    pub cleared_memories: u64,
-    /// Phase 1 source outputs removed.
-    pub cleared_stage1_outputs: u64,
-    /// Candidate projections removed.
-    pub cleared_candidates: u64,
-    /// Consolidation proposals removed.
-    pub cleared_proposals: u64,
-    /// Managed-file diagnostics removed.
-    pub cleared_diagnostics: u64,
-    /// Derived memory embedding records removed.
-    pub cleared_embeddings: u64,
+    /// Items hidden by a source content change until the replacement set publishes.
+    pub memories_hidden: u64,
+    /// Items removed together with a deleted source-owned set.
+    pub memories_removed: u64,
 }
 
 /// Provenance input supplied by an explicit command or extraction validator.
@@ -447,11 +338,11 @@ pub struct RememberInput {
     /// Atomic proposition body.
     pub content: String,
     /// Memory type.
-    pub memory_type: MemoryType,
-    /// Importance in [0, 1].
-    pub importance: f64,
-    /// Confidence in [0, 1].
-    pub confidence: f64,
+    pub memory_type: Option<MemoryType>,
+    /// Optional importance in [0, 1]. Omission stays omission.
+    pub importance: Option<f64>,
+    /// Optional confidence in [0, 1]. Omission stays omission.
+    pub confidence: Option<f64>,
     /// Optional validity start timestamp.
     pub valid_from: Option<i64>,
     /// Optional validity end timestamp.
@@ -462,8 +353,6 @@ pub struct RememberInput {
     pub entities: Vec<String>,
     /// Provenance sources.
     pub sources: Vec<MemorySourceInput>,
-    /// Optional explicit supersession target.
-    pub supersedes: Option<MemoryId>,
     /// Explicit command idempotency key.
     pub idempotency_key: Option<String>,
     /// Origin, normally explicit_agent for this command.
@@ -476,15 +365,14 @@ impl Default for RememberInput {
     fn default() -> Self {
         Self {
             content: String::new(),
-            memory_type: MemoryType::Fact,
-            importance: 0.5,
-            confidence: 0.5,
+            memory_type: None,
+            importance: None,
+            confidence: None,
             valid_from: None,
             valid_to: None,
             tags: Vec::new(),
             entities: Vec::new(),
             sources: Vec::new(),
-            supersedes: None,
             idempotency_key: None,
             origin: MemoryOrigin::ExplicitAgent,
             extraction: Value::Object(Default::default()),
@@ -516,8 +404,6 @@ pub struct RecallRequest {
     pub valid_at: Option<i64>,
     /// Minimum importance.
     pub min_importance: f64,
-    /// Include stale/superseded/archived/rejected history.
-    pub include_historical: bool,
     /// Return provenance sources.
     pub include_sources: bool,
     /// Return score breakdown.
@@ -540,7 +426,6 @@ impl Default for RecallRequest {
             types: Vec::new(),
             valid_at: None,
             min_importance: 0.0,
-            include_historical: false,
             include_sources: false,
             include_score_breakdown: false,
             include_related_notes: true,
@@ -552,16 +437,12 @@ impl Default for RecallRequest {
 }
 
 /// Result of explicit remember.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RememberResult {
-    /// staged for consolidation or an idempotent prior staging result.
+    /// Stored or an idempotent prior storage result.
     pub outcome: String,
-    /// Final memory when returned by a legacy read path; staging returns none.
+    /// Immediately current explicit memory.
     pub memory: Option<MemoryView>,
-    /// Phase 1 raw-memory input identity.
-    pub raw_memory_id: Option<MemoryRawId>,
-    /// Admitted Phase 2 job identity.
-    pub consolidation_job_id: Option<JobId>,
 }
 
 /// Revision-aware durable memory update.
@@ -569,12 +450,12 @@ pub struct RememberResult {
 pub struct MemoryUpdateInput {
     /// Replacement body, when supplied.
     pub content: Option<String>,
-    /// Replacement type, when supplied.
-    pub memory_type: Option<MemoryType>,
+    /// Replacement type. Outer omission preserves; explicit null clears.
+    pub memory_type: Option<Option<MemoryType>>,
     /// Replacement importance.
-    pub importance: Option<f64>,
+    pub importance: Option<Option<f64>>,
     /// Replacement confidence.
-    pub confidence: Option<f64>,
+    pub confidence: Option<Option<f64>>,
     /// Replacement validity start.
     pub valid_from: Option<Option<i64>>,
     /// Replacement validity end.
@@ -591,20 +472,20 @@ pub struct MemoryView {
     /// Stable identity.
     pub id: MemoryId,
     /// Type.
-    pub memory_type: MemoryType,
-    /// Lifecycle status.
-    pub status: MemoryStatus,
-    /// Machine-readable lifecycle reason, when one applies.
+    pub memory_type: Option<MemoryType>,
+    /// Direct or note-derived ownership.
+    pub ownership: MemoryOwnership,
+    /// Owning source set for note-derived memories.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub status_reason: Option<String>,
+    pub note_set_id: Option<MemorySetId>,
     /// Optimistic memory metadata revision.
     pub revision: Revision,
     /// Atomic body.
     pub content: String,
     /// Importance.
-    pub importance: f64,
+    pub importance: Option<f64>,
     /// Confidence.
-    pub confidence: f64,
+    pub confidence: Option<f64>,
     /// Temporal validity.
     pub valid_from: Option<i64>,
     /// Temporal end.
@@ -619,12 +500,23 @@ pub struct MemoryView {
     pub entities: Vec<String>,
     /// Provenance.
     pub sources: Vec<MemorySourceView>,
-    /// Relations.
-    pub relations: Vec<MemoryRelationView>,
     /// Score when returned from recall.
     pub score: Option<f64>,
     /// Optional score components.
     pub score_breakdown: Option<BTreeMap<String, f64>>,
+}
+
+/// Privacy-preserving result of deleting the only current copy of a memory.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ForgetResult {
+    /// Stable identity that was removed.
+    pub id: MemoryId,
+    /// Always true on success.
+    pub deleted: bool,
+    /// Ownership that determined deletion behavior.
+    pub ownership: MemoryOwnership,
+    /// Derived-item deletion pauses automatic extraction for its source.
+    pub source_extraction_paused: bool,
 }
 
 /// Compact provenance output.
@@ -644,26 +536,6 @@ pub struct MemorySourceView {
     pub start_line: Option<u32>,
     /// End line.
     pub end_line: Option<u32>,
-    /// Derived source-health state for note sources.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub health: Option<String>,
-    /// Bounded source-health diagnostic reason.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub health_reason: Option<String>,
-    /// Last exact evidence-check timestamp.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub checked_at: Option<i64>,
-}
-
-/// Compact relation output.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct MemoryRelationView {
-    /// Relation type.
-    pub relation_type: String,
-    /// Related memory identity.
-    pub memory_id: MemoryId,
-    /// Relation confidence.
-    pub confidence: f64,
 }
 
 /// Recall result with degradation and budget state.
@@ -673,6 +545,10 @@ pub struct RecallResult {
     pub memories: Vec<MemoryView>,
     /// Selected rebuildable ordinary-note cues.
     pub related_notes: Vec<RelatedNoteView>,
+    /// Unique durable-memory candidates considered before relevance gating.
+    pub candidate_memory_count: u32,
+    /// Durable-memory candidates admitted by the relevance gate.
+    pub relevant_memory_count: u32,
     /// Total eligible memory and note candidates before truncation.
     pub available_result_count: u32,
     /// Eligible durable memories before truncation.
@@ -683,8 +559,8 @@ pub struct RecallResult {
     pub truncated: bool,
     /// Stable degradation codes.
     pub degraded: Vec<String>,
-    /// Current offline multilingual retrieval coverage.
-    pub retrieval_coverage: MemoryRetrievalCoverageView,
+    /// Versioned hash of lexical, chunking, and semantic-admission policy.
+    pub retrieval_profile_hash: String,
 }
 
 /// A rebuildable cue that points an Agent back to canonical note source.

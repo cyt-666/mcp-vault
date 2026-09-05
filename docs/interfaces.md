@@ -494,6 +494,11 @@ heading     # reserved; currently returns unsupported_selection
 byte_range  # reserved; currently returns unsupported_selection
 ```
 
+`read_note` rejects the reserved managed namespace for both current and
+explicit historical revisions. Managed memory is readable only through the
+current-memory tools/resources, so a known canonical path cannot bypass
+forgetting or source invalidation.
+
 Output:
 
 - path, selected revision, content hash, and size;
@@ -534,12 +539,15 @@ Scope: `memory:read`.
 
 The complete schema and ranking behavior are in `memory-system.md`.
 
-Input includes query, optional current project/entities/topics, type filters, time range, importance threshold, result and token budgets, and source/score options.
+Input includes query, optional current project/entities/topics, kind filters,
+validity point, importance threshold, result/token budgets, and source/score
+options. There is no historical flag.
 
 Output keeps two collections distinct:
 
-- `memories`: atomic durable memories with status, confidence, importance,
-  temporal validity, provenance, relations, and scores;
+- `memories`: current atomic durable memories with ownership, optional kind,
+  confidence/importance/validity, provenance, calibrated score, and optional
+  score components;
 - `related_notes`: note cues with stable file ID, current readable path, the
   analyzed revision, title, bounded matching snippet, tags/topics/headings,
   score, and resource URI. Before a rebuild, path may already reflect a move
@@ -550,12 +558,13 @@ The caller may bound it independently with `max_related_notes`. A cue is not an
 accepted fact; the Agent reads the canonical note before relying on exact
 details.
 
-The response also contains read-only `retrieval_coverage` with
-`prompt_version`, `profile_hash`, target languages, `eligible`, `current`,
-`pending`, `failed`, and `estimated_batches`. When current alias coverage is incomplete, recall
-still returns existing lexical/vector/context results and includes
-`multilingual_alias_coverage_incomplete` in `degraded`. Recall never translates
-the query or invokes a generative model.
+The response also contains `candidate_memory_count`,
+`relevant_memory_count`, `available_memory_count`,
+`available_related_note_count`, `available_result_count`, `truncated`,
+`degraded`, and `retrieval_profile_hash`. `score` is a calibrated fusion value;
+`semantic_cosine`, when requested, is a separate raw component. Recall may
+return an empty array, skips complete objects that exceed the remaining budget,
+and never translates the query or invokes a generative model.
 
 ### 6.8 `get_memory`
 
@@ -565,12 +574,13 @@ Scope: `memory:read`.
 
 Input: memory ID.
 
-For a note source, `file_id` and `revision` identify the durable evidence while
-`path` is resolved from the current active file. A moved source therefore
-returns its new readable path. A deleted or unresolved source returns `path:
-null`; it never advertises a known-unreadable historical path as current.
+For a note source, `file_id`, exact source hash, and set eligibility identify
+current evidence while `path` is resolved from the current active file. A move
+therefore returns its new path without generation. A changed/deleted source's
+old item behaves as not found.
 
-Output includes canonical Markdown path/revision, all sources, lifecycle, relations, and resource links.
+Output includes ownership, canonical Markdown path/revision, and current
+sources. A known legacy/deleted/historical ID returns not found.
 
 ### 6.9 `list_memories`
 
@@ -580,11 +590,9 @@ Scope: `memory:read`.
 
 Filters:
 
-- type;
-- lifecycle status;
+- kind;
 - tag/entity;
 - current active source path;
-- validity time;
 - limit/cursor.
 
 ### 6.10 `create_note`
@@ -673,6 +681,8 @@ Default is `trash` where configured. Permanent deletion still retains revision h
 Scope: `vault:history`.
 
 Returns revision metadata and optional bounded diffs. It does not return every full historical blob by default.
+Reserved managed paths are rejected even with `vault:history`; this permission
+does not turn retained recovery history into model-readable memory.
 
 ### 6.15 `restore_note_revision`
 
@@ -682,7 +692,7 @@ Restoration creates a new current revision; it never rewinds revision numbers.
 
 ### 6.16 `remember`
 
-Purpose: stage an explicit sourced memory input for background consolidation.
+Purpose: directly store an independently owned explicit current memory.
 
 Scope: `memory:write`.
 
@@ -690,7 +700,7 @@ Input:
 
 ```json
 {
-  "type": "decision",
+  "memory_type": "decision",
   "content": "The Admin Console must remain LAN-only.",
   "importance": 0.95,
   "valid_from": "2026-08-19T00:00:00Z",
@@ -701,32 +711,42 @@ Input:
 }
 ```
 
-Output is truthful about the asynchronous boundary:
+Optional kind, importance, confidence, validity, tags, entities, and source
+metadata remain omitted when the caller omits them. Output is immediately
+current:
 
 ```json
 {
-  "outcome": "staged",
-  "memory": null,
-  "raw_memory_id": "...",
-  "consolidation_job_id": "..."
+  "outcome": "stored",
+  "memory": {
+    "id": "...",
+    "ownership": "explicit",
+    "revision": 1,
+    "content": "The Admin Console must remain LAN-only."
+  }
 }
 ```
 
-Recall changes only after the referenced Phase 2 job commits. Reusing an
-idempotency key with the same input returns the existing raw identity; using it
-with different input is rejected.
+No model is called. Reusing an idempotency key with identical input returns the
+same memory; using it with different input is rejected.
 
 ### 6.17 `update_memory`
 
 Scope: `memory:manage`.
 
-Requires expected canonical revision. It can edit content/metadata, add sources, or explicitly mark supersession.
+Requires the expected item revision and applies only to explicit memory. It can
+set content/kind/metadata fields; note-derived content is changed through its
+source note. There is no supersession operation.
 
 ### 6.18 `forget_memory`
 
 Scope: `memory:manage`.
 
-Default action is archive. Permanent deletion must be explicit and audited.
+Requires the expected item revision and deletes the current memory. Explicit
+memory loses its canonical current file. Note-derived deletion rewrites its
+owning set without the item and pauses automatic extraction for that source.
+The response contains deletion metadata, not the deleted body. There is no
+archive/restore mode.
 
 ## 7. MCP resources
 
@@ -751,7 +771,11 @@ Resource lists and reads:
 - include revision/cache metadata;
 - never enumerate another Vault.
 
-`vault://memory/context` is compact and contains only high-importance active projects, current decisions, stable preferences, constraints, and recent progress within a token budget.
+Both memory resources are backed only by `memory_current_items` eligibility.
+`vault://memory/{memory_id}` returns not found for replaced, deleted,
+source-invalidated, or legacy IDs even when the caller has Vault history
+permission. `vault://memory/context` is a compact budgeted projection of
+relevant current items; it never reads legacy summaries or raw artifacts.
 
 Tools remain available because not all MCP hosts automatically include resources.
 
@@ -1078,20 +1102,18 @@ POST   /api/v1/index/rebuild
 GET    /api/v1/index/nodes
 
 GET    /api/v1/memories
+POST   /api/v1/memories
 GET    /api/v1/memories/{id}
 PATCH  /api/v1/memories/{id}
 DELETE /api/v1/memories/{id}?expected_revision={revision}
-POST   /api/v1/memories/{id}/archive
-POST   /api/v1/memories/{id}/restore
-POST   /api/v1/memories/merge
 GET    /api/v1/memory/extraction
 PUT    /api/v1/memory/extraction
 POST   /api/v1/memory/extraction/run
-POST   /api/v1/memory/extraction/restart
-GET    /api/v1/memory/source-health
-POST   /api/v1/memory/source-health/audit
-GET    /api/v1/memory/retrieval
-POST   /api/v1/memory/retrieval/backfill
+POST   /api/v1/memory/extraction/sources/{file_id}/resume
+POST   /api/v1/memory/migration/preflight
+POST   /api/v1/memory/migration/execute
+GET    /api/v1/memory/embeddings
+POST   /api/v1/memory/embeddings/rebuild
 
 GET    /api/v1/jobs
 GET    /api/v1/jobs/overview
@@ -1114,202 +1136,58 @@ POST   /api/v1/maintenance/recover
 `oauth_authorization_server_metadata_url` derived from the configured public
 data origin; no value is derived from an untrusted request `Host` header.
 
-Memory archive and restore accept
-`{"expected_revision": <current revision>}`. Permanent deletion uses the
-required `expected_revision` query parameter so generic HTTP clients do not
-need a DELETE request body. All three operations are authenticated,
-Origin/CSRF checked, Vault-scoped, revision-aware, and audited. Permanent
-deletion removes the current managed Markdown and memory projection; retained
-file history and backup artifacts remain governed by their own retention
-policies.
+#### Current memory Admin contract (normative v2.1)
 
-`GET /api/v1/memory/source-health` returns separate final-source,
-affected-memory, Stage 1, and distinct-File-ID counts plus a bounded paginated
-detail list. `health` may filter
-`unverified|current|content_changed|deleted|identity_missing|identity_ambiguous`.
-`POST /api/v1/memory/source-health/audit` admits a new generation-keyed paged
-audit; a prior completed audit does not permanently suppress it.
+`POST /memories` directly creates an explicit current memory and returns the
+same `RememberResult` shape as MCP. `PATCH /memories/{id}` requires
+`expected_revision` in the JSON body and applies only to explicit memory.
+Omitted optional patch fields preserve their value; a JSON `null` explicitly
+clears kind, importance, confidence, or validity, and an empty array clears
+tags/entities. `DELETE` always deletes current state. A note-derived deletion
+returns `source_extraction_paused: true` after atomically rewriting its set.
 
-`GET /api/v1/vaults/{vault_slug}/memory/retrieval` returns the fixed target
-languages, current retrieval prompt/profile version, exact
-`eligible|current|pending|failed|estimated_batches` coverage, and any active
-`memory.enrich_retrieval` job. The profile hash covers the prompt, target
-languages, and deterministic lexical profile. `POST
-.../memory/retrieval/backfill` is a
-state-changing Admin operation protected by the existing session, Origin,
-CSRF, and selected-Vault boundary. It explicitly admits uncovered active,
-stale, and superseded memory and returns the durable job. The bundled UI
-requires confirmation and warns about backup and Provider cost before calling
-it. Historical unscoped aliases retain the same legacy-default behavior.
+`GET /memory/extraction` returns `contract:
+"current_source_owned_sets_v2_1"`, typed policy/revision, one extraction
+`readiness`, and the one-call/full-set/fail-closed behavior summary. `POST
+/memory/extraction/run` accepts `include_evaluated`; `true` is an explicit
+cost-bearing forced re-evaluation. `POST
+/memory/extraction/sources/{file_id}/resume` requires
+`expected_set_revision`, clears only the source pause, and queues a forced
+current-set extraction.
 
-Memory output adds optional `status_reason`. Each note `MemorySourceView` adds
-optional `health`, `health_reason`, and `checked_at`. Its `path` is the current
-navigable path only and is null for unavailable evidence; `revision` remains the
-evidence revision. Existing MCP request structures are unchanged.
+Migration is an authenticated state change. Preflight returns only counts,
+ambiguous IDs, and a content-free digest, never memory bodies. The confirmation
+hash binds every legacy field consumed by migration, is rechecked under the
+per-Vault write lock, and becomes stale even when content changes without
+changing classification counts. Execute requires exact confirmation
+`MIGRATE_MEMORY_V2_1`, preserves reliably classified explicit IDs, reports
+mixed/unsupported rows, does not delete legacy rows, and may enqueue full note
+regeneration when the extraction model is ready.
 
-The extraction policy returned by `GET /api/v1/memory/extraction` and accepted
-by `PUT` contains `enabled`, fixed `source_mode: "automatic"`,
-and `request_timeout_seconds`. `max_evidence_per_note` and legacy
-`max_candidates_per_note` remain accepted/returned as prerelease compatibility
-fields but do not affect Phase 1 v5. `explicit_only` and `all_notes` are source-
-mode migration aliases. Source admission does not depend on note frontmatter,
-tags, paths, or folders, and there are no model-score threshold fields.
+Memory embedding status/rebuild validates exact current object content,
+profile, prepared-input hash, model, dimension, and projection version. Jobs
+carry reference metadata rather than memory bodies.
 
-The status response separates `phase1_readiness` and `phase2_readiness`, adds a
-combined `readiness`, Stage 1 `total|ready|no_output|withdrawn|pending` counts,
-and redacted consolidation generation/success/cutover state. The complete manual
-pipeline requires both `memory_extraction` and `memory_consolidation` bindings.
-Cutover state reports `pipeline_generation` and `regeneration_pending`; startup
-and periodic admission clear the latter only after a current-generation fresh
-Phase 1 full-Vault job exists.
+#### Superseded prerelease memory API notes (non-normative)
 
-The Phase 1 Provider root is:
-
-```json
-{
-  "raw_memory": "...",
-  "rollout_summary": "...",
-  "rollout_slug": "..."
-}
-```
-
-An empty result uses empty semantic strings and `rollout_slug: null`. Local code
-derives the note file/path/revision and normalized whole-source hash; the model
-never returns evidence coordinates. Phase 1 does not write final memory. When a
-Provider returns valid `raw_memory` but omits only `rollout_summary`, the adapter
-may copy the already returned `raw_memory` string into that auxiliary field and
-then rerun the complete three-field schema validation. It does not repair an
-empty object or invent source provenance.
-
-`POST /memory/extraction/run` accepts optional
-`{"include_evaluated": false}`. The default skips current successful Stage 1
-coverage before a Provider call; `true` includes unchanged notes. It returns
-the active `memory.extract` job with `admission: "existing"` instead of creating
-a duplicate, or a queued job with `admission: "queued"`. Phase 1 automatically
-admits the singleton `memory.consolidate` follow-up. If a required fresh
-regeneration is pending, saving the final ready extraction policy/model binding
-immediately admits its singleton full-Vault job; the run endpoint may perform
-the same admission and return that job rather than rejecting the operator until
-the five-minute reconciliation loop runs. The compatibility restart
-endpoint cancels non-running Phase 1 work and admits a full re-extraction; it no
-longer clears or exposes candidate review state.
-
-`GET /api/v1/index/status` returns ordinary Markdown/FTS coverage separately
-from `note_semantic`: effective `embedding_note` model, current/expected chunk
-counts, stale vectors, coverage ratio, and stable readiness blockers. A missing
-semantic binding is not an index failure because lexical retrieval remains
-operational. A completed `index.rebuild` is not a completed
-`embedding.rebuild`; clients must use semantic coverage and vector job state.
-`POST /api/v1/vaults/{vault_slug}/index/embeddings/rebuild` uses the existing
-Admin session, Origin, and CSRF boundary to prune obsolete selected-model note
-vectors and admit only missing current `text-v2` source references. It returns
-`source_chunks`, `queued_chunks`, `pruned_vectors`, and `jobs`; no note body is
-returned or stored in the job payload.
-
-`GET /api/v1/vaults/{vault_slug}/memory/embeddings` returns the effective
-`embedding_memory` model, Provider-mode readiness, eligible/current/stale
-counts, and stable blockers. `POST
-/api/v1/vaults/{vault_slug}/memory/embeddings/rebuild` is protected by the
-existing Admin session, Origin, CSRF, and selected-Vault boundary. It prunes
-obsolete selected-model rows and returns `eligible`, `current`, `queued`,
-`pruned`, `jobs`, and the selected model identifiers after admitting reference-
-only `embedding.rebuild` jobs. It never invokes Phase 1, Phase 2, or canonical
-memory writes.
-
-Embedding job summaries expose only `projection_version`, internal `model_id`,
-homogeneous `source_type`, and `source_count`. They never expose source IDs,
-paths, hashes, input text, Provider response bodies, or credentials. Terminal
-Provider errors retain the existing stable redacted Provider code rather than
-collapsing every failure to `embedding_rebuild_failed`.
-
-Connection info uses the configured canonical data public origin. Without an
-external origin, direct-listener URLs include the actual data bind port; the
-default WebDAV endpoint is
-`http://127.0.0.1:8080/dav/v1/vaults/default/`. Host and Origin allow-lists are
-validation policy and do not silently remove or replace the advertised port.
-
-Provider model discovery is optional. `GET/POST
-/api/v1/providers/{id}/models` lists or manually registers provider-specific
-model IDs and typed capability metadata; refresh uses the provider model-list
-operation when available. Model-role binding remains a separate operation so a
-Base URL or provider display name is never mistaken for a model selection.
-
-Manual registration accepts typed model settings. For an OpenAI-compatible
-generation model, the relevant shape is:
-
-```json
-{
-  "external_model_id": "mimo-v2.5",
-  "capabilities": {
-    "structured_output": true,
-    "context_window": null,
-    "max_output_tokens": null
-  },
-  "settings": {
-    "openai_compatibility_preset": "auto",
-    "openai_structured_output_mode": "auto",
-    "openai_token_limit_field": "auto",
-    "openai_thinking_mode": "auto",
-    "generation_token_limit": null
-  },
-  "enabled": true
-}
-```
-
-Existing `{}` settings mean every axis is `auto`. Compatibility preset values
-are `generic`, `deepseek`, `xiaomi_mimo`, `zhipu_glm`, `moonshot_kimi`,
-`google_gemini`, and `alibaba_qwen`; output modes are
-`strict_json_schema`, `json_object`, and `prompt_only`; token fields are
-`max_tokens` and `max_completion_tokens`; thinking is `enabled` or `disabled`.
-Each enum also accepts `auto`. Nullable `generation_token_limit` is a bounded
-one-call generated-token ceiling. Responses return the stored typed settings
-and revision. Arbitrary headers, secrets, and request bodies are not model
-settings.
-
-`POST /api/v1/providers` accepts first-class `provider_type` values
-`deepseek`, `xiaomi_mimo`, `zhipu_glm`, `moonshot_kimi`, `google_gemini`, and
-`alibaba_qwen` in addition to the existing OpenAI, Anthropic, generic, and
-embedding types. Base URL is the exact API root; suffixes are appended without
-inserting an extra `/v1` into an existing provider path.
-
-`PATCH /api/v1/providers/{id}` accepts the same complete Provider fields plus
-an optional `expected_revision`. `secret: null` preserves the current secret;
-a non-empty secret rotates it. A stale revision returns HTTP 409 with
-`revision_conflict`, and successful edits return the next revision with only a
-masked secret hint.
-
-`DELETE /api/v1/providers/{id}?expected_revision=<revision>` performs one
-Provider lifecycle transaction. The revision query is optional for older
-Admin clients but the bundled console always supplies it. The response is
-redacted and has this shape:
-
-```json
-{
-  "deleted": true,
-  "provider_id": "provider-id",
-  "models_deleted": 2,
-  "bindings_deleted": 1,
-  "embeddings_deleted": 42,
-  "secrets_deleted": 1
-}
-```
-
-Bindings are removed across global and all Vault override scopes. Embedding
-metadata/vectors are derived and removed across their Vault partitions;
-canonical notes, durable memories, job history, and audit history
-are retained. The deletion audit fact stores only these counts.
+Archive/restore/merge, source-health audit, two-phase extraction,
+consolidation, retrieval-backfill, pipeline-reset, and candidate-review routes
+are not registered. Requests receive normal route-not-found behavior. Legacy
+terminal jobs may remain in bounded Admin history and are labeled retired, but
+cannot be retried into an executable handler. Their detailed wire formats are
+preserved only in superseded ADRs and released migrations.
 
 `GET /api/v1/index/status` and the dashboard return `indexed_notes`,
 `total_notes`, and a nullable numeric `coverage_ratio`; the structured
 `coverage` object remains the detailed analyzer/degradation record. A zero-note
 Vault reports an unknown ratio rather than a false `0%` failure.
 
-The extraction endpoint returns the typed policy, optimistic revision, separate
-Phase 1/Phase 2 readiness, raw-input counts, and consolidation generation.
-Manual admission requires extraction enabled, Provider policy enabled, and both
-model roles usable. `GET /api/v1/jobs` accepts optional `status` and exact
-`job_type` filters. Completed jobs project progress ratio `1.0`; unknown
-non-terminal progress remains null.
+The v2.1 extraction endpoint returns the typed policy, optimistic revision, one
+extraction-model readiness object, and explicit one-call/full-set behavior.
+Manual admission requires extraction enabled, Provider policy enabled, and the
+`memory_extraction` role usable. `GET /api/v1/jobs` accepts optional `status`
+and exact `job_type` filters. Completed jobs project progress ratio `1.0`;
+unknown non-terminal progress remains null.
 
 `GET /api/v1/jobs/overview?limit={history_limit}&offset={history_offset}` is the
 Admin operational projection. It returns separate `running`, `queued`,
@@ -1320,19 +1198,17 @@ terminal history cannot hide an older long-running task. Every row remains
 Vault-scoped and uses the same redacted `job_summary` contract as
 `GET /api/v1/jobs`.
 
-Full-Vault Phase 1 reports `phase`, `completed`, `total`, `current_index`,
-`current_path`, `last_completed_path`, `note_started_at`,
-`last_note_elapsed_ms`, `notes_evaluated`, `raw_memories_staged`,
-`phase1_no_output`, `source_policy_skipped`, `already_evaluated_skipped`,
-`source_ingestion_failures`, bounded `source_ingestion_failure_notes`,
-`generated_output_failures`, bounded `generated_output_failure_notes`, and
-nullable `error_code`.
-Phase 2 reports cumulative `completed|total|raw_inputs`,
-`pending_raw_inputs`, `created`, `updated`, `retired`, `discarded`,
-`generation`, and `reused_proposal` while one job drains bounded generations.
-Pipeline reset reports removed managed memory files; cleared final/Stage 1/
-candidate/proposal/diagnostic/vector counts; and fresh-regeneration follow-up
-state.
+Current full-Vault extraction progress reports `phase`, `completed`, `total`,
+`current_index`, `current_path`, `last_completed_path`, `note_started_at`,
+`last_note_elapsed_ms`, `notes_evaluated`, `items_published`,
+`empty_sets_published`, `source_policy_skipped`,
+`already_evaluated_skipped`, `source_ingestion_failures`, bounded
+`source_ingestion_failure_notes`, `generated_output_failures`, bounded
+`generated_output_failure_notes`, and nullable `error_code`.
+`memory.source_reconcile` reports `sources_checked`, `current`, `moved`,
+`changed`, `deleted`, `memories_hidden`, `memories_removed`, and the extraction
+follow-up decision. It does not report lifecycle, Stage 1, or cross-file repair
+state. Obsolete terminal job rows remain raw historical diagnostics only.
 
 Job `details` exposes the non-secret `include_evaluated` mode. Each failure-note
 array retains at most 20 objects containing ordinal, source path, stable error
@@ -1340,7 +1216,9 @@ code, and elapsed time; generated-output diagnostics may additionally contain
 trusted `schema_issue`/`schema_path`. A source-ingestion failure occurs before a
 Provider call and includes missing, unreadable, over-512-KiB, and non-UTF-8
 notes. A generated-output failure occurs after a Provider call and includes
-wire-schema, Stage 1 bounds, and evidence-anchor/source mismatches. Responses
+missing/invalid `memories`, invalid required content, or bounded set-output
+violations. Invalid optional kinds/tags are discarded with a bounded,
+content-free warning rather than discarding valid content. Responses
 and logs never expose arbitrary payloads, note content, prompts, Provider
 response text, or secrets.
 

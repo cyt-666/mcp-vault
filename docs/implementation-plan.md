@@ -382,46 +382,48 @@ Semantic capability is fully optional, observable, and replaceable.
 
 All behavior from `memory-system.md`:
 
-- canonical memory Markdown;
-- projection/schema;
-- staged explicit `remember` admission;
-- Codex-style Phase 1 source distillation and Phase 2 global consolidation;
-- schema/prompt versioning;
-- exact evidence-anchor validation separated from semantic memory content;
-- global dedup/reinforcement, contradiction/supersession, and forgetting;
-- source withdrawal and revision-aware reconsolidation;
-- FTS/vector/entity/topic recall;
-- fusion, temporal behavior, continuity, diversity, budgets;
+- current explicit and one-source-owned-set canonical Markdown;
+- current-only ownership/query schema and projections;
+- immediate explicit `remember` with omitted metadata fidelity;
+- one-call source extraction using `memories[]` and application-owned identity;
+- schema/prompt/profile versioning;
+- exact File-ID/content-hash provenance separated from model content;
+- whole-source-set replacement, source pause/resume, and actual deletion;
+- FTS/vector/entity recall with relevance admission, calibrated semantic
+  evidence, score/cosine separation, and one-object aggregation;
+- continuity boosts applied only after relevance, temporal validity, diversity,
+  and a whole-response budget;
 - memory MCP tools/resources;
 - separately typed ordinary-note recall cues backed by the Index service;
 - Admin application services;
 - rebuild behavior;
-- canonical `MEMORY.md`, `memory_summary.md`, `raw_memories.md`, and
-  `source_summaries/` artifacts through Vault Core;
+- canonical per-explicit and per-source-set files through Vault Core;
 - Vault-level `automatic` source admission with no author-facing note metadata;
   legacy `explicit_only`/`all_notes` settings migrate to this mode;
-- a candidate-free normal path with no score thresholds or human review queue;
+- no candidate inbox, lifecycle state machine, global consolidation, source
+  health engine, or query-time generative model;
 - ordinary article knowledge remains available through `related_notes` while
-  Phase 2 decides which durable semantic state belongs in global memory;
+  source extraction chooses only compact durable propositions;
 - per-note Provider-output failure isolation, redacted schema-path diagnostics,
   bounded consecutive-failure circuit breaking, and paid-work cursor retention;
-- durable Vault/source/revision/profile Stage 1 coverage with successful
-  `no_output`, exact output-hash selection, and `include_evaluated` override;
-- persisted prepared consolidation proposals, one active Phase 2 job per Vault,
-  optimistic snapshot revalidation, idempotent generation commit, and redacted
-  Phase 1/Phase 2 progress;
-- ADR-0017 prerelease cutover that discards old memory/jobs, removes managed
-  memory files through Vault Core, and admits a versioned fresh regeneration;
-- revision-aware Admin archive, restore, and permanent-delete lifecycle actions
-  backed by Vault Core and audit records.
+- durable Vault/source/hash/profile coverage with successful empty sets and an
+  explicit `include_evaluated` override;
+- persisted prepared source snapshots, optimistic source/set revalidation,
+  byte-identical crash adoption, and redacted extraction/reconcile progress;
+- additive migration 0015 with content-free preflight, exact Admin
+  confirmation, safe explicit preservation, note regeneration, and no guessed
+  handling of ambiguous/history rows;
+- source-aware Admin edit/delete/pause/resume actions backed by Vault Core and
+  audit records.
 
 ### Tests
 
 Use the complete acceptance list from `memory-system.md`, plus provider/prompt
 injection, ordinary unmodified-note admission, semantic content differing from
-evidence, Stage 1 no-output/failure continuation, Phase 2 dedup/conflict/
-withdrawal/restart, destructive pipeline cutover/fresh regeneration, lifecycle route concurrency,
-permanent-delete audit, and two-Vault isolation.
+source text, empty-set/failure continuation, source hash/set CAS and restart,
+move-without-model, change/delete fail-closed behavior, delete/pause/resume
+concurrency, actual-delete audit, migration non-mutation, long-chunk coverage,
+retrieval hard negatives, shared budgets, and two-Vault isolation.
 
 ### Acceptance
 

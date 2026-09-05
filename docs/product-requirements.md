@@ -109,54 +109,43 @@ The service MUST make Vault content usable as durable Agent memory.
 It MUST provide:
 
 - proactive-recall instructions through MCP server discovery;
-- `recall` with hybrid ranking and task context;
+- current-only `recall` with relevance-gated hybrid ranking and task context;
 - separately typed related-note cues so an Agent can remember that ordinary
   Vault knowledge exists without promoting article contents to durable facts;
-- `remember` as explicit durable input admission followed by background global
-  consolidation;
-- memory types including preferences, decisions, constraints, facts, projects, progress, events, relationships, and procedures;
-- provenance, confidence, importance, temporal validity, and lifecycle status;
+- direct `remember` for an independently owned explicit memory, without a model
+  or background consolidation step;
+- optional memory kinds, confidence, importance, tags, entities, provenance,
+  and temporal validity, with omitted metadata remaining omitted;
 - Vault-level automatic memory generation from ordinary Markdown without
   requiring note authors to add service-specific markers, tags, or folders;
-- a bounded Phase 1 policy that permits `no_output`, uses the Codex three-field
-  semantic output, and derives source provenance locally;
-- exact source identity/revision/hash checks; model-generated source
-  coordinates or confidence/importance scores MUST NOT be used as trust
-  evidence;
-- rename-stable source identity and a current readable path when the source is
-  active; deletion MUST NOT expose a last-known path as if it were readable;
+- exactly one current memory set owned by each source File ID, replaced in full
+  from one bounded structured generation call shaped as `{memories:[...]}`;
+- exact source identity and full-content-hash eligibility so a changed/deleted
+  source immediately hides its old set, while a same-ID/same-hash move updates
+  navigation without a model call;
 - optional line/heading anchors for explicit or imported provenance, without
   requiring the automatic extraction model to generate them;
-- separate extraction and consolidation model roles, persisted raw-memory
-  staging, schema validation, global deduplication, contradiction resolution,
-  supersession, and forgetting;
-- application-owned final identifiers, evidence attachment, raw-input
-  dispositions, and optimistic revisions; the consolidation model MUST propose
-  semantic decisions rather than own this bookkeeping;
-- autonomous consolidation so ordinary operation never depends on a human
-  review queue or candidate inbox;
-- user inspection, editing, merging, archival, restoration, and
-  revision-aware permanent deletion;
-- canonical Markdown materialization for committed semantic memories and
-  inspectable generated raw/summary layers;
-- source-language `raw_memory`, summaries, and canonical memory bodies rather
-  than silently translating user knowledge to the prompt language;
-- persisted, rebuildable retrieval aliases for the source language,
-  Simplified Chinese, and English so covered memories support offline
-  cross-language lexical recall;
-- automatic alias enrichment for new or body-changed memory, plus an explicit
-  authenticated Admin backfill for existing active, stale, and superseded
-  memory;
-- recall that does not require a live LLM call.
-- direct current-model vector rebuilding for existing durable memory without
-  re-running Phase 1 or Phase 2.
+- application-owned IDs, provenance, revisions, history, canonical paths, and
+  atomic whole-set publication; model output MUST remain an untrusted
+  content/kind/tag proposal;
+- canonical Markdown for every explicit memory and source-owned set;
+- revision-aware explicit updates and physical current deletion rather than a
+  model-visible archive/supersede lifecycle;
+- note-derived item deletion by whole-set rewrite plus automatic-extraction
+  pause until an authenticated explicit resume;
+- recall that never requires a live LLM call and never exposes historical IDs;
+- rebuildable embeddings accepted only for the exact model/profile/content/
+  prepared-input hash, with raw cosine distinguished from calibrated score;
+- complete output budgeting, including the first item, which skips oversized
+  candidates rather than stopping selection;
+- non-destructive authenticated migration preflight and execution: preserve
+  unambiguous explicit IDs, regenerate note-derived rows, and report mixed or
+  unsupported ownership without guessing or auto-deleting legacy data.
 
-While the memory format remains explicitly prerelease, an incompatible
-pipeline-generation upgrade MUST discard old memory jobs/state and regenerate
-only from canonical Vault notes. It MUST NOT run an unversioned old job through
-the new handler. Managed memory files are removed through Vault Core; ordinary
-notes, revisions, Provider settings, audits, backups, and non-memory jobs remain
-out of scope for that cutover.
+The memory domain MUST NOT expose archive, restore, supersede, merge,
+candidate-review, raw-staging, global-consolidation, source-health-audit, or
+historical-recall interfaces. Retained revision history and backups are
+operational recovery data, not a model-readable memory lifecycle.
 
 Related-note cues are derived, rebuildable, revision-bound source pointers and
 require Vault read permission. They are not durable memories and MUST remain
@@ -202,8 +191,8 @@ generation bound remain independent. The generic type MUST NOT infer an API
 dialect from a locally served model name; first-class Provider type, exact
 official host migration, or explicit model configuration selects vendor
 extensions. Regardless of provider-side enforcement, MCP Vault MUST parse and
-validate the returned JSON against its own phase-specific schema before it can
-enter Stage 1 state or a prepared consolidation proposal.
+validate returned JSON against its operation-specific schema before it can
+enter a prepared source-set snapshot or any other durable state.
 For a schema with one required array envelope, a compatibility adapter MAY add
 that envelope only when the returned direct object or array already satisfies
 the complete item schema. It MUST run full root-schema validation afterward and
@@ -276,49 +265,27 @@ when discovery is unavailable, and bind the current Vault's extraction,
 embedding, enrichment, and reranking roles.
 
 Automatic memory MUST be visibly opt-in and event-driven, with durable
-incremental/full note actions, separate Phase 1/Phase 2 readiness, pending raw
-counts, committed generation, and recent job evidence. There is no normal
-candidate-generation or per-result approval control. Admin progress MUST
-distinguish unknown work from zero work and report model-evaluated notes,
-pre-provider skips, raw inputs staged, `no_output`, isolated note failures, and
-Phase 2 create/update/retire/discard outcomes.
-Successful Stage 1 coverage MUST be persisted per Vault/source identity,
-source revision, and effective extraction profile even when the model returns
-`no_output`. Automatic events and manual backfill MUST check that coverage
-before a Provider call. The default manual action processes only new, changed,
-previously failed, or profile-stale notes; an explicit off-by-default option may
-include already evaluated unchanged notes with a clear token-cost warning.
-One malformed generated result MUST NOT abandon the remaining existing-note
-backfill. The service MUST checkpoint that note without replaying its paid
-request, continue later notes, and retain a bounded redacted failure reason;
-repeated consecutive contract failures MAY open a cost-safety circuit.
+incremental/full-note actions, one extraction-model readiness view, current
+explicit/note-derived/paused counts, and recent job evidence. Successful
+coverage is the current source set keyed by Vault, File ID, exact content hash,
+and effective extraction profile, including a valid empty set. Automatic events
+and manual backfill MUST check that coverage before a Provider call. The default
+manual action processes only new, changed, previously failed, or profile-stale
+notes; an explicit off-by-default option may re-evaluate unchanged notes with a
+clear token-cost warning. A malformed result MUST NOT abandon later notes and
+MUST retain only bounded redacted diagnostics.
 
-Source safety MUST NOT depend on automatic-memory or Provider configuration.
-Every file create, update, move, delete, restore, and reconciled external change
-MUST update note-source health before optional extraction admission. A memory
-with note sources MUST have at least one verified current note source to enter
-normal recall, regardless of origin; a source-less explicit Agent/Admin memory
-remains supported. Current health MUST fail closed when the live file hash
-changes, including before background lifecycle work completes.
+Source safety MUST be enforced by current-read repository joins, independently
+of Provider availability. File events MUST reconcile by stable File ID. Exact
+hash mismatch or deletion fails closed immediately; a same-ID/same-hash move
+updates the source path and canonical set without model work. Cross-File-ID,
+filename, semantic/vector, LLM, ambiguous, truncated, and cross-Vault rebinding
+MUST NOT occur.
 
-Cross-File-ID recovery MUST use one unique exact candidate in the same Vault:
-normalized full-note evidence or the same anchored excerpt hash. Filename,
-semantic/vector, LLM, ambiguous, truncated, and cross-Vault matches MUST NOT
-bind. Source-unavailable stale memory MAY reactivate after exact recovery;
-archived and superseded memory MUST NOT reactivate automatically. Unsupported
-memory MUST be retained unless an authenticated explicit deletion occurs.
-
-Admin MUST expose repeatable paged source audits and separate exact counts for
-final sources, affected memories, Stage 1 sources, and distinct File IDs.
-
-Existing-memory multilingual backfill MUST be an explicit Admin action with a
-model-cost and backup warning. A source-language rewrite is permitted only
-when bounded current source samples are verified through Vault Core. It MUST
-preserve identity, lifecycle, provenance, relations, validity, technical
-literals, and normal revision history. Unavailable or ambiguous sources permit
-safe aliases only. A failed alias/rewrite batch MUST NOT roll back canonical
-memory, and normal recall MUST report incomplete alias coverage while returning
-the results it can produce.
+Admin MUST expose current-memory CRUD, extraction status/run, explicit
+source-resume, embedding status/rebuild, and non-destructive migration
+preflight/execute. It MUST NOT expose lifecycle, consolidation, candidate,
+source-health-audit, or retrieval-alias backfill controls.
 
 The Admin UI and Admin API MUST run on a separate listener that is not publicly exposed by default. Network restriction does not replace authentication.
 
@@ -447,11 +414,10 @@ The service is complete for the first release when:
 2. Concurrent writes are detected, revision history is available, and recovery tests pass.
 3. An MCP client can authenticate, discover server instructions, explore the Vault index, search, read, and perform authorized edits.
 4. The MCP implementation passes conformance for supported revisions.
-5. An Agent can `remember` a decision, receive durable staging/job identities,
-   and recall the semantic Markdown memory after Phase 2 commits.
-6. Automatic Phase 1 can verify exact source evidence and Phase 2 can safely
-   consolidate semantic memory without routine human review or model
-   self-score trust.
+5. An Agent can directly `remember` a decision and immediately recall its
+   canonical Markdown-backed current memory without a model call.
+6. Automatic extraction can verify an exact File ID/content hash, validate one
+   complete-set model response, and atomically replace only that source's set.
 7. The owner can configure and test LLM and embedding providers from the LAN-only console.
 8. Provider outages leave WebDAV, file writes, lexical search, and existing memory recall operational.
 9. Indexes can be deleted and rebuilt without loss of canonical knowledge.
@@ -462,5 +428,7 @@ The service is complete for the first release when:
 12. One initializing, disabled, or failed Vault does not prevent Admin or a
     healthy Vault from starting and operating.
 13. Security, migration, crash-recovery, Litmus, MCP conformance, and end-to-end tests pass.
-14. Covered Chinese and English memories can be recalled with either language
-    while the embedding role is unavailable, without a query-time LLM call.
+14. Relevance-gated lexical/entity/vector recall passes the versioned 40-case
+    deterministic corpus, including at least 10 no-answer cases, without a
+    query-time LLM call; the 15-case generation fixture reports subject,
+    condition/negation, support, coverage, type, and duplicate metrics.

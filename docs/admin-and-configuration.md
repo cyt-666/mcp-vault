@@ -640,7 +640,6 @@ Configure global role bindings:
 
 ```text
 memory_extraction
-memory_consolidation
 note_summary
 topic_enrichment
 embedding_note
@@ -654,9 +653,9 @@ missing/stale current note chunks through durable `embedding.rebuild` jobs;
 lexical note recall remains available when it is unbound.
 
 `embedding_memory` powers the durable-memory semantic candidate channel.
-Binding or changing it schedules existing active, stale, and superseded memory
-directly from current projections. This does not invoke extraction,
-consolidation, or canonical writes.
+Binding or changing it schedules current explicit and note-derived memories
+directly from current projections. This does not invoke extraction or
+canonical writes.
 
 The first-release console writes a current-Vault override and displays an
 effective global binding when one exists. Future multi-Vault administration can
@@ -711,21 +710,15 @@ Defined in detail in `memory-system.md`.
 
 The UI includes:
 
-- active/stale/superseded/archived counts;
-- full memory browser;
-- provenance/source metadata on demand;
-- Phase 1/Phase 2 readiness and durable job progress;
-- Stage 1 ready/no-output/pending counts and committed generation;
-- merge and supersession;
-- edit/archive/delete;
-- automatic-memory settings;
-- recall simulator;
-- prompt/provider/pipeline metadata;
-- embedding coverage and failures.
-- selected memory-vector model, current/stale coverage, and a “generate missing
-  vectors” action that does not re-run memory extraction;
-- multilingual retrieval coverage, estimated Provider batches, active job
-  progress, and an explicit existing-memory backfill action.
+- current explicit/note-derived counts and a current-only browser;
+- provenance, owning source, source-set revision, and pause state on demand;
+- one-call extraction readiness and durable job progress;
+- direct explicit create/edit and actual delete;
+- automatic-memory settings and a recall simulator;
+- prompt/provider/profile metadata;
+- migration preflight/apply status;
+- selected memory-vector model, current/stale coverage, failures, and a
+  “generate missing vectors” action that does not re-run memory extraction.
 
 The page explains the distinction between automatically recallable ordinary
 notes and durable memory. Once automatic memory is enabled for the Vault,
@@ -735,72 +728,50 @@ Every ordinary note also remains available in search and `related_notes`
 recall. Legacy `explicit_only` and `all_notes` settings deserialize as aliases
 for the fixed `automatic` mode; the UI exposes no per-note source switch.
 
-Phase 1 asks the extraction model for the Codex three-field object:
-`raw_memory`, `rollout_summary`, and `rollout_slug`. Local code binds the result
-to the current Vault/file/path/revision and normalized whole-source hash; the
-model does not generate evidence text or coordinates. Phase 2 uses the
-separately bound consolidation model to merge, deduplicate, resolve conflicts,
-forget obsolete input, and write final semantic memory. Neither model supplies
-a trust score, and there is no human review queue.
+One structured extraction call returns
+`{"memories":[{"content":"...","kind":"fact","tags":["..."]}]}`.
+Only the array and each non-empty `content` are required. The application
+generates IDs, binds the output to the current Vault/File ID/source hash, and
+atomically replaces that note's complete current set. It does not ask a model
+for lifecycle actions, source coordinates, confidence, importance, or durable
+identifiers, and there is no consolidation role or review queue.
 
-The cross-language card reports source/`zh-Hans`/`en` alias coverage over
-active, stale, and superseded memory. New or body-changed memory is enriched
-asynchronously. Existing memory is not sent automatically on upgrade: the
-operator must confirm a dialog that states the estimated maximum eight-item
-model batches, warns that calls may be billed, and asks for a current backup.
-The action uses `POST /api/v1/vaults/{vault}/memory/retrieval/backfill`; the
-usual Admin session, Origin, CSRF, and selected-Vault checks apply.
-
-The card makes clear that canonical bodies remain in their source language and
-that aliases are rebuildable search metadata. A verifiable historical source
-may permit an equivalent source-language rewrite with a normal revision;
-unavailable sources receive aliases only. Failed or incomplete coverage does
-not disable recall and is displayed separately from canonical memory health.
-
-The two-stage card is explicit about both model roles. Automatic memory is off
-by default. Once enabled, non-managed Markdown create, update, move, and
-restore events admit `memory.extract` durable jobs; successful Phase 1 work
-automatically admits the singleton `memory.consolidate` follow-up. This is
-event-driven, not a periodic LLM scan. Required fresh regeneration is admitted
-immediately after the final policy/model binding becomes ready; the periodic
-reconciliation loop is only a crash-recovery fallback. While regeneration is
-pending but both phases are ready, the manual start button remains enabled
-instead of creating a no-task/no-button dead zone. The card never presents “generate
-candidates” or per-result approval as a user goal. Actions are disabled while
-another memory pipeline job is active; repeated admission returns the active
-job instead of starting a duplicate full-Vault scan.
+Automatic memory is off by default. Once enabled, non-managed Markdown
+create/update events admit `memory.extract`; move/delete/recreate behavior is
+handled first by `memory.source_reconcile`. A same-File-ID move with unchanged
+hash updates navigation without a Provider call. Content change hides the old
+set before regeneration, and source deletion removes the current derived set.
+This is event-driven; periodic reconciliation is only a restart-recovery
+fallback. Repeated full-Vault admission reuses the active job.
 
 The ordinary manual action is “处理新增或有变化的笔记”. A successful evaluation
-is remembered even when it produces zero memories, so unchanged notes under the
-same extraction profile skip the model. An off-by-default checkbox changes the
-action to “重新评估所有现有笔记”; its warning states that unchanged notes will call
-the model again, may produce different semantic raw memory/source summaries,
-and incur additional Token cost. This task option is separate from the
-persisted automatic-memory policy.
+publishes a current source set even when it contains zero memories, so
+unchanged notes under the same extraction profile skip the model. An
+off-by-default checkbox changes the action to “重新评估所有现有笔记”; its warning
+states that unchanged notes will call the model again, may replace their
+current sets, and incur additional Token cost. This task option is separate
+from the persisted automatic-memory policy.
 
 The policy also owns a typed per-note Provider deadline from 30 through 1800
 seconds, defaulting to 300 seconds. The former evidence-anchor limit is retained
 only as a prerelease API compatibility field and is not shown in the UI. There
 are no model self-score threshold controls. The deadline does not lengthen model
-discovery, provider health, consolidation, embedding, or unrelated requests.
+discovery, provider health, embedding, or unrelated requests.
 
-The one-time `memory.reset_pipeline` cutover task is admitted automatically by
-the service, not exposed as a routine destructive UI action. While the project
-is prerelease it discards every old memory and `memory.*` task, removes the old
-managed memory namespace through Vault Core, and starts a new current-generation
-Phase 1 job at note one. The card shows cutover and regeneration-pending state.
-Ordinary source notes, Vault history, existing backups, Provider settings,
-audit facts, and non-memory jobs remain available; old explicit memories are
-not converted.
+Each current-memory card exposes ownership-appropriate actions. Explicit
+records can be edited with an expected revision. Delete is always an actual
+current deletion after confirmation. Deleting one note-derived item rewrites
+its owning set without that item and pauses automatic extraction for that
+source; a separate authenticated, revision-aware resume/regenerate action is
+required. The deleted body is never returned. Vault Core revision history and
+backups follow independent retention policies and are not model-readable
+current memory.
 
-Each long-term-memory card exposes lifecycle actions backed by the Admin API.
-Active memories can be archived; archived, stale, or rejected memories can be
-restored; every memory can be permanently deleted after a destructive-action
-confirmation. Each request carries the displayed revision, refreshes on
-conflict, and records an Admin audit event. Permanent delete removes the
-current managed Markdown and projection; revision history and backups follow
-their independent retention policies and the UI does not present the action as
-an archive that can be restored.
+Upgrade never guesses ownership or deletes prerelease data automatically. The
+page first runs a content-free migration preflight, then requires confirmation
+`MIGRATE_MEMORY_V2_1` before applying safe explicit conversions and scheduling
+note-derived regeneration. Ambiguous/mixed rows stay excluded from current
+reads and remain in the report for operator handling.
 
 ### 13.1 Memory service and runtime boundary
 
@@ -813,32 +784,26 @@ through Vault Core, so managed memory Markdown receives the same atomic-write,
 revision, history, audit, and outbox guarantees as other Core-managed data.
 
 The reserved memory namespace is not an ordinary WebDAV or MCP file path and
-is excluded from note indexing and normal filesystem reconciliation. It remains
-portable Markdown, while Stage 1/final-memory SQLite rows, prepared proposals,
-FTS, entities, relations, and embeddings are operational or rebuildable
-projections.
+is excluded from note indexing and normal filesystem reconciliation. Explicit
+records and one file per note-owned current set remain portable Markdown;
+ownership rows, prepared snapshots, FTS, and embeddings are operational or
+rebuildable projections.
 
 Automatic extraction is admitted as a Vault-scoped durable job containing only
-file identity, path, revision, and pipeline references. The worker rechecks
-the source revision before Stage 1 replacement. Phase 2 persists an untrusted
-prepared proposal, validates all source/base-revision references, and rechecks
-its snapshot before canonical writes and the atomic selection commit.
-`memory.rebuild` and `embedding.rebuild` remain separate jobs; Provider outages
-degrade new extraction/consolidation and semantic search but do not make
-existing lexical recall or canonical Vault writes fail.
-
-`memory.enrich_retrieval` is a separate cancellable-between-batches job that
-reuses `memory_consolidation`. Its progress reports covered, rewritten,
-rewrite-skipped, remaining, and persisted-proposal reuse counts. Cancellation
-does not remove already validated metadata or canonical revisions; retry
-continues from durable pending rows/proposal progress.
+file identity, path, revision, and current profile references. The worker
+persists one validated prepared snapshot, then rechecks File ID, exact source
+hash, pause state, and expected set revision before canonical publication. A
+retry adopts only byte-identical managed output from the same snapshot.
+`embedding.rebuild` is separate; Provider outages degrade new extraction and
+semantic search but do not make existing lexical recall or canonical Vault
+writes fail.
 
 The runtime stores the following Vault-scoped settings through the typed
 configuration API rather than an unvalidated key/value editor:
 
-- automatic-memory enablement, per-note cap/deadline, and schema/prompt version;
+- automatic-memory enablement, per-note deadline, and schema/prompt version;
 - recall weights, result/token budgets, and optional embedding role binding;
-- memory retention, source invalidation, and diagnostic policies.
+- semantic calibration, source pause state, and diagnostic policies.
 
 Changing hard bounds, bindings, or worker concurrency is hot-reloadable when
 the setting schema permits it. Changing an analyzer, embedding model, or
@@ -861,17 +826,18 @@ Display:
 Progress is a projection of measured work, not a fabricated counter. Completed
 jobs display 100% even when a short handler did not publish intermediate units;
 queued/running/failed jobs without a bounded ratio display “未报告”. Structured
-raw progress remains available for diagnostics. Full-Vault Phase 1 extraction
+raw progress remains available for diagnostics. Full-Vault extraction
 publishes a redacted phase, current note path/ordinal, processed/total note
 units, last completed path, per-note elapsed time, model-evaluated count,
-unchanged/pre-Provider skips, raw-input and `no_output` counts, isolated
+unchanged/pre-Provider skips, published-item and empty-set counts, isolated
 generated-output failures, and source-ingestion failures. Each category keeps
 up to 20 bounded redacted note diagnostics. The UI labels source failures as
 “源文件无法处理（模型未调用）” and generated-output/evidence failures as
 “模型输出校验失败（模型已调用）”; it never merges them into “格式或读取跳过”.
-`already_evaluated_skipped` is displayed as “未变化且已处理，跳过模型”. Phase 2 publishes dirty raw-input count,
-created/updated/retired/discarded counts, committed generation, and whether a
-prepared proposal was reused. A mixed Phase 1 result is displayed as
+`already_evaluated_skipped` is displayed as “未变化且已处理，跳过模型”. A
+single-source extraction also reports whether its prepared snapshot was reused.
+Source reconciliation reports checked/current/moved/changed/deleted sources and
+hidden/removed current memories. A mixed extraction result is displayed as
 “完成但有失败” at 100%, with
 the latest failed path, stable Chinese error, and redacted schema category/path.
 It is not displayed as an all-job failure.

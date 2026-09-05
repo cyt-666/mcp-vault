@@ -16,12 +16,11 @@ use std::{
 
 use mcp_vault_backup::{BackupError, BackupService};
 use mcp_vault_domain::{
-    BackupId, EventId, FileId, JobId, MaintenanceGate, MaintenanceOperationGuard, MemorySourceId,
-    ModelId, VaultContext, VaultPath, VaultPathPolicy,
+    BackupId, EventId, FileId, MaintenanceGate, MaintenanceOperationGuard, ModelId, VaultContext,
+    VaultPath, VaultPathPolicy,
 };
 use mcp_vault_memory::{
-    MEMORY_PIPELINE_GENERATION, MemoryError, MemoryService, NoteExtractionOptions,
-    PipelineRegenerationAdmission,
+    MEMORY_CONTRACT_GENERATION, MemoryError, MemoryService, NoteExtractionOptions,
 };
 use mcp_vault_providers::EmbeddingSourceRef;
 use mcp_vault_state::{JobRecord, JobRepository, OutboxEventRecord, OutboxRepository, StateStore};
@@ -572,9 +571,9 @@ impl WorkerSupervisor {
             if job.job_type.starts_with("memory.")
                 && job
                     .payload
-                    .get("pipeline_generation")
+                    .get("memory_contract_generation")
                     .and_then(Value::as_u64)
-                    != Some(u64::from(MEMORY_PIPELINE_GENERATION))
+                    != Some(u64::from(MEMORY_CONTRACT_GENERATION))
             {
                 info!(
                     target: "mcp_vault::jobs",
@@ -950,8 +949,8 @@ fn log_job_progress(
     total: u64,
     current_index: Option<u64>,
     current_path: Option<&VaultPath>,
-    raw_memories_staged: u64,
-    phase1_no_output: u64,
+    items_published: u64,
+    empty_sets_published: u64,
     source_ingestion_failures: u64,
     generated_output_failures: u64,
     notes_evaluated: u64,
@@ -971,8 +970,8 @@ fn log_job_progress(
         completed,
         total,
         current_index = ?current_index,
-        raw_memories_staged,
-        phase1_no_output,
+        items_published,
+        empty_sets_published,
         source_ingestion_failures,
         generated_output_failures,
         notes_evaluated,
@@ -1082,8 +1081,8 @@ pub fn outbox_to_job_handler(state: StateStore, _memory: MemoryService) -> Outbo
                 .as_object_mut()
                 .expect("job payload is an object")
                 .insert(
-                    "pipeline_generation".to_owned(),
-                    json!(MEMORY_PIPELINE_GENERATION),
+                    "memory_contract_generation".to_owned(),
+                    json!(MEMORY_CONTRACT_GENERATION),
                 );
             let result = if let Some(vault_id) = event.vault_id {
                 let vault = state
@@ -1095,32 +1094,14 @@ pub fn outbox_to_job_handler(state: StateStore, _memory: MemoryService) -> Outbo
                 let context = vault
                     .context()
                     .map_err(|_| WorkerFailure::permanent("outbox_vault_context_invalid"))?;
-                let memory_pipeline_ready = state
-                    .memory()
-                    .get_consolidation_state(&context)
-                    .await
-                    .map_err(|_| WorkerFailure::retryable("memory_pipeline_state_unavailable"))?
-                    .is_some_and(|pipeline| {
-                        pipeline.pipeline_generation >= MEMORY_PIPELINE_GENERATION
-                            && !pipeline.regeneration_pending
-                    });
                 let reserved_path = event
                     .payload
                     .get("path")
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|path| path_in_reserved_namespace(&vault.reserved_root, path));
-                let memory_record_path = event
-                    .payload
-                    .get("path")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|path| path_is_memory_record(&vault.reserved_root, path));
                 let is_memory_source_reconcile_event = is_file_event
                     && is_memory_source_reconcile_event_type(&event.event_type)
                     && !reserved_path;
-                let is_memory_projection_event = is_file_event
-                    && memory_pipeline_ready
-                    && is_memory_projection_event_type(&event.event_type)
-                    && memory_record_path;
                 if event.aggregate_type == "file" {
                     state
                         .jobs()
@@ -1152,23 +1133,6 @@ pub fn outbox_to_job_handler(state: StateStore, _memory: MemoryService) -> Outbo
                                 WorkerFailure::retryable(
                                     "memory_source_reconcile_job_admission_failed",
                                 )
-                            })?;
-                    }
-                    if is_memory_projection_event {
-                        state
-                            .jobs()
-                            .enqueue(
-                                &context,
-                                "memory.rebuild",
-                                &format!("vault:{vault_id}:memory-rebuild:{event_id}"),
-                                &memory_payload,
-                                0,
-                                10,
-                                now_millis(),
-                            )
-                            .await
-                            .map_err(|_| {
-                                WorkerFailure::retryable("memory_rebuild_job_admission_failed")
                             })?;
                     }
                 }
@@ -1212,18 +1176,6 @@ fn is_memory_extract_event_type(event_type: &str) -> bool {
 }
 
 fn is_memory_source_reconcile_event_type(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        "FileCreated"
-            | "FileUpdated"
-            | "FileDeleted"
-            | "FileRestored"
-            | "FileMoved"
-            | "external_change"
-    )
-}
-
-fn is_memory_projection_event_type(event_type: &str) -> bool {
     matches!(
         event_type,
         "FileCreated"
@@ -1561,29 +1513,17 @@ pub fn vault_initialize_job_handler(
                     code: "initialize_reconcile_failed",
                 };
             }
-            match state
-                .memory()
-                .set_pipeline_generation_state(&context, MEMORY_PIPELINE_GENERATION, false)
+            if mcp_vault_indexer::IndexService::new(state.clone())
+                .schedule_note_embeddings(&context)
                 .await
+                .is_err()
             {
-                Ok(_) => {
-                    if mcp_vault_indexer::IndexService::new(state.clone())
-                        .schedule_note_embeddings(&context)
-                        .await
-                        .is_err()
-                    {
-                        warn!(
-                            vault_id = %context.id(),
-                            "managed Vault initialization could not schedule optional note embeddings"
-                        );
-                    }
-                    JobOutcome::Complete
-                }
-                Err(_) => JobOutcome::Retry {
-                    delay: Duration::from_secs(5),
-                    code: "initialize_memory_state_failed",
-                },
+                warn!(
+                    vault_id = %context.id(),
+                    "managed Vault initialization could not schedule optional note embeddings"
+                );
             }
+            JobOutcome::Complete
         })
     })
 }
@@ -1761,12 +1701,12 @@ pub fn memory_extract_job_handler(
                 let resume_index = last_completed_path.map_or(0, |last_path| {
                     entries.partition_point(|entry| entry.path.as_str() <= last_path)
                 });
-                let mut raw_memories_staged = previous_progress
-                    .and_then(|progress| progress.get("raw_memories_staged"))
+                let mut items_published = previous_progress
+                    .and_then(|progress| progress.get("items_published"))
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0);
-                let mut phase1_no_output = previous_progress
-                    .and_then(|progress| progress.get("phase1_no_output"))
+                let mut empty_sets_published = previous_progress
+                    .and_then(|progress| progress.get("empty_sets_published"))
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0);
                 let mut source_ingestion_failures = previous_progress
@@ -1834,8 +1774,8 @@ pub fn memory_extract_job_handler(
                             "current_index": null,
                             "current_path": null,
                             "last_completed_path": last_completed_path,
-                            "raw_memories_staged": raw_memories_staged,
-                            "phase1_no_output": phase1_no_output,
+                            "items_published": items_published,
+                            "empty_sets_published": empty_sets_published,
                             "source_ingestion_failures": source_ingestion_failures,
                             "source_ingestion_failure_notes": &source_ingestion_failure_notes,
                             "generated_output_failures": generated_output_failures,
@@ -1868,8 +1808,8 @@ pub fn memory_extract_job_handler(
                     total as u64,
                     None,
                     None,
-                    raw_memories_staged,
-                    phase1_no_output,
+                    items_published,
+                    empty_sets_published,
                     source_ingestion_failures,
                     generated_output_failures,
                     notes_evaluated,
@@ -1896,8 +1836,8 @@ pub fn memory_extract_job_handler(
                                 } else {
                                     Some(entries[index - 1].path.as_str())
                                 },
-                                "raw_memories_staged": raw_memories_staged,
-                                "phase1_no_output": phase1_no_output,
+                                "items_published": items_published,
+                                "empty_sets_published": empty_sets_published,
                                 "source_ingestion_failures": source_ingestion_failures,
                                 "source_ingestion_failure_notes": &source_ingestion_failure_notes,
                                 "generated_output_failures": generated_output_failures,
@@ -1932,8 +1872,8 @@ pub fn memory_extract_job_handler(
                         total as u64,
                         Some(index.saturating_add(1) as u64),
                         Some(&entry.path),
-                        raw_memories_staged,
-                        phase1_no_output,
+                        items_published,
+                        empty_sets_published,
                         source_ingestion_failures,
                         generated_output_failures,
                         notes_evaluated,
@@ -1964,10 +1904,10 @@ pub fn memory_extract_job_handler(
                             } else {
                                 source_policy_skipped = source_policy_skipped.saturating_add(1);
                             }
-                            raw_memories_staged = raw_memories_staged
-                                .saturating_add(u64::from(extraction.raw_memory_staged));
-                            phase1_no_output =
-                                phase1_no_output.saturating_add(u64::from(extraction.no_output));
+                            items_published = items_published
+                                .saturating_add(u64::from(extraction.items_published));
+                            empty_sets_published = empty_sets_published
+                                .saturating_add(u64::from(extraction.empty_set_published));
                         }
                         Err(error) => {
                             let generated_output_diagnostic = match &error {
@@ -2070,8 +2010,8 @@ pub fn memory_extract_job_handler(
                                             } else {
                                                 Some(entries[index - 1].path.as_str())
                                             },
-                                            "raw_memories_staged": raw_memories_staged,
-                                            "phase1_no_output": phase1_no_output,
+                                            "items_published": items_published,
+                                            "empty_sets_published": empty_sets_published,
                                             "source_ingestion_failures": source_ingestion_failures,
                                             "source_ingestion_failure_notes": &source_ingestion_failure_notes,
                                             "generated_output_failures": generated_output_failures,
@@ -2094,8 +2034,8 @@ pub fn memory_extract_job_handler(
                                         total as u64,
                                         Some(index.saturating_add(1) as u64),
                                         Some(&entry.path),
-                                        raw_memories_staged,
-                                        phase1_no_output,
+                                        items_published,
+                                        empty_sets_published,
                                         source_ingestion_failures,
                                         generated_output_failures,
                                         notes_evaluated,
@@ -2134,8 +2074,8 @@ pub fn memory_extract_job_handler(
                                 "current_index": null,
                                 "current_path": null,
                                 "last_completed_path": entry.path.as_str(),
-                                "raw_memories_staged": raw_memories_staged,
-                                "phase1_no_output": phase1_no_output,
+                                "items_published": items_published,
+                                "empty_sets_published": empty_sets_published,
                                 "source_ingestion_failures": source_ingestion_failures,
                                 "source_ingestion_failure_notes": &source_ingestion_failure_notes,
                                 "generated_output_failures": generated_output_failures,
@@ -2169,8 +2109,8 @@ pub fn memory_extract_job_handler(
                         total as u64,
                         None,
                         None,
-                        raw_memories_staged,
-                        phase1_no_output,
+                        items_published,
+                        empty_sets_published,
                         source_ingestion_failures,
                         generated_output_failures,
                         notes_evaluated,
@@ -2181,24 +2121,8 @@ pub fn memory_extract_job_handler(
                     );
                     last_note_elapsed_ms = Some(note_elapsed_ms);
                     if let Some(code) = stop_after_checkpoint {
-                        if enqueue_memory_consolidation(&state, &context, job.id)
-                            .await
-                            .is_err()
-                        {
-                            return JobOutcome::Failed {
-                                code: "memory_consolidation_admission_failed",
-                            };
-                        }
                         return JobOutcome::Failed { code };
                     }
-                }
-                if enqueue_memory_consolidation(&state, &context, job.id)
-                    .await
-                    .is_err()
-                {
-                    return JobOutcome::Failed {
-                        code: "memory_consolidation_admission_failed",
-                    };
                 }
                 JobOutcome::Complete
             } else {
@@ -2237,8 +2161,8 @@ pub fn memory_extract_job_handler(
                             "current_index": 1,
                             "current_path": path.as_str(),
                             "last_completed_path": null,
-                            "raw_memories_staged": 0,
-                            "phase1_no_output": 0,
+                            "items_published": 0,
+                            "empty_sets_published": 0,
                             "source_ingestion_failures": 0,
                             "source_ingestion_failure_notes": [],
                             "generated_output_failures": 0,
@@ -2309,8 +2233,8 @@ pub fn memory_extract_job_handler(
                                     "current_index": null,
                                     "current_path": null,
                                     "last_completed_path": path.as_str(),
-                                    "raw_memories_staged": u64::from(extraction.raw_memory_staged),
-                                    "phase1_no_output": u64::from(extraction.no_output),
+                                    "items_published": u64::from(extraction.items_published),
+                                    "empty_sets_published": u64::from(extraction.empty_set_published),
                                     "source_ingestion_failures": 0,
                                     "source_ingestion_failure_notes": [],
                                     "generated_output_failures": 0,
@@ -2342,8 +2266,8 @@ pub fn memory_extract_job_handler(
                             1,
                             None,
                             None,
-                            u64::from(extraction.raw_memory_staged),
-                            u64::from(extraction.no_output),
+                            u64::from(extraction.items_published),
+                            u64::from(extraction.empty_set_published),
                             0,
                             0,
                             notes_evaluated,
@@ -2352,14 +2276,6 @@ pub fn memory_extract_job_handler(
                             Some(note_elapsed_ms),
                             None,
                         );
-                        if enqueue_memory_consolidation(&state, &context, job.id)
-                            .await
-                            .is_err()
-                        {
-                            return JobOutcome::Failed {
-                                code: "memory_consolidation_admission_failed",
-                            };
-                        }
                         JobOutcome::Complete
                     }
                     Err(error) => {
@@ -2449,8 +2365,8 @@ pub fn memory_extract_job_handler(
                                     "current_index": 1,
                                     "current_path": path.as_str(),
                                     "last_completed_path": null,
-                                    "raw_memories_staged": 0,
-                                    "phase1_no_output": 0,
+                                    "items_published": 0,
+                                    "empty_sets_published": 0,
                                     "source_ingestion_failures": u64::from(source_failure_code.is_some()),
                                     "source_ingestion_failure_notes": &source_ingestion_failure_notes,
                                     "generated_output_failures": u64::from(output_failure),
@@ -2527,1017 +2443,25 @@ const fn memory_output_failure_limit_reached(consecutive_failures: u32) -> bool 
     consecutive_failures >= MAX_CONSECUTIVE_MEMORY_OUTPUT_FAILURES
 }
 
-async fn enqueue_memory_consolidation(
+pub(crate) async fn retire_legacy_memory_jobs(
     state: &StateStore,
     context: &VaultContext,
-    source_job_id: JobId,
 ) -> Result<(), mcp_vault_state::StateError> {
-    ensure_memory_consolidation_job(state, context, "phase1_completed", Some(source_job_id)).await
-}
-
-/// Ensure durable Phase 2 admission whenever persisted dirty Stage 1 inputs
-/// exist. Startup and periodic reconciliation use this to close the small
-/// race where new input arrives while an older singleton job is completing.
-pub(crate) async fn ensure_memory_consolidation_job(
-    state: &StateStore,
-    context: &VaultContext,
-    reason: &'static str,
-    source_job_id: Option<JobId>,
-) -> Result<(), mcp_vault_state::StateError> {
-    let Some(pending_fingerprint) = state.memory().pending_stage1_fingerprint(context).await?
-    else {
-        return Ok(());
-    };
-    if let Some(active_extraction) = state
-        .jobs()
-        .find_active_by_type(context, "memory.extract")
-        .await?
-        && source_job_id != Some(active_extraction.id)
-    {
-        return Ok(());
+    for job_type in [
+        "memory.consolidate",
+        "memory.enrich_retrieval",
+        "memory.reset_pipeline",
+        "memory.revalidate",
+        "memory.audit_sources",
+        "memory.rebuild",
+        "memory.repair_sources",
+    ] {
+        state.jobs().request_cancel_type(context, job_type).await?;
     }
-    let next_generation = state
-        .memory()
-        .get_consolidation_state(context)
-        .await?
-        .map_or(1, |current| current.generation.saturating_add(1));
-    state
-        .jobs()
-        .enqueue_singleton(
-            context,
-            "memory.consolidate",
-            &format!(
-                "vault:{}:memory-consolidate:{next_generation}:pending:{pending_fingerprint}",
-                context.id(),
-            ),
-            &json!({
-                "pipeline_generation": MEMORY_PIPELINE_GENERATION,
-                "reason": reason,
-                "source_job_id": source_job_id,
-                "generation": next_generation,
-                "pending_fingerprint": pending_fingerprint,
-            }),
-            3,
-            5,
-            now_millis(),
-        )
-        .await?;
     Ok(())
 }
 
-/// Ensure one current-generation destructive cutover job exists whenever a
-/// Vault has not completed the prerelease memory pipeline reset.
-pub(crate) async fn ensure_memory_pipeline_reset_job(
-    state: &StateStore,
-    context: &VaultContext,
-) -> Result<Option<JobRecord>, mcp_vault_state::StateError> {
-    if state
-        .memory()
-        .get_consolidation_state(context)
-        .await?
-        .is_some_and(|current| current.pipeline_generation >= MEMORY_PIPELINE_GENERATION)
-    {
-        return Ok(None);
-    }
-    for job_type in [
-        "memory.extract",
-        "memory.consolidate",
-        "memory.enrich_retrieval",
-        "memory.revalidate",
-        "memory.source_reconcile",
-        "memory.audit_sources",
-        "memory.rebuild",
-        "memory.repair_sources",
-    ] {
-        state.jobs().request_cancel_type(context, job_type).await?;
-    }
-    let job = state
-        .jobs()
-        .enqueue_singleton(
-            context,
-            "memory.reset_pipeline",
-            &format!(
-                "vault:{}:memory-reset:g{}:{}",
-                context.id(),
-                MEMORY_PIPELINE_GENERATION,
-                EventId::new()
-            ),
-            &json!({"pipeline_generation": MEMORY_PIPELINE_GENERATION}),
-            7,
-            5,
-            now_millis(),
-        )
-        .await?;
-    Ok(Some(job))
-}
-
-/// Admit one fresh full Phase 1 regeneration after a pipeline cutover.
-pub(crate) async fn ensure_memory_pipeline_regeneration_job(
-    _state: &StateStore,
-    memory: &MemoryService,
-    context: &VaultContext,
-    source_job_id: Option<JobId>,
-) -> Result<PipelineRegenerationAdmission, MemoryError> {
-    memory
-        .ensure_pipeline_regeneration(context, source_job_id)
-        .await
-}
-
-/// Enqueue one repeatable source audit bound to a reconciliation/Admin generation.
-pub(crate) async fn enqueue_memory_source_audit_job(
-    state: &StateStore,
-    context: &VaultContext,
-    generation: &str,
-    reason: &str,
-) -> Result<JobRecord, mcp_vault_state::StateError> {
-    state
-        .jobs()
-        .enqueue(
-            context,
-            "memory.audit_sources",
-            &format!("vault:{}:memory-source-audit:{generation}", context.id()),
-            &json!({
-                "generation": generation,
-                "reason": reason,
-                "page_size": 100,
-                "pipeline_generation": MEMORY_PIPELINE_GENERATION,
-            }),
-            6,
-            10,
-            now_millis(),
-        )
-        .await
-}
-
-async fn quiesce_memory_pipeline_jobs(
-    state: &StateStore,
-    context: &VaultContext,
-) -> Result<bool, mcp_vault_state::StateError> {
-    let mut quiescent = true;
-    for job_type in [
-        "memory.extract",
-        "memory.consolidate",
-        "memory.enrich_retrieval",
-        "memory.revalidate",
-        "memory.source_reconcile",
-        "memory.audit_sources",
-        "memory.rebuild",
-        "memory.repair_sources",
-    ] {
-        state.jobs().request_cancel_type(context, job_type).await?;
-        quiescent &= state
-            .jobs()
-            .find_active_by_type(context, job_type)
-            .await?
-            .is_none();
-    }
-    Ok(quiescent)
-}
-
-/// Execute one Vault-scoped Codex-style Phase 2 consolidation job.
-pub fn memory_consolidate_job_handler(
-    state: StateStore,
-    history_root: std::path::PathBuf,
-    core_runtime: mcp_vault_core::VaultCoreRuntime,
-    memory: MemoryService,
-) -> JobHandler {
-    Arc::new(move |job, shutdown| {
-        let state = state.clone();
-        let history_root = history_root.clone();
-        let core_runtime = core_runtime.clone();
-        let memory = memory.clone();
-        Box::pin(async move {
-            if shutdown.is_cancelled() {
-                return JobOutcome::Cancelled;
-            }
-            let Some(vault_id) = job.vault_id else {
-                return JobOutcome::Failed {
-                    code: "memory_consolidation_vault_missing",
-                };
-            };
-            let vault = match state.vaults().find_by_id(vault_id).await {
-                Ok(Some(vault)) => vault,
-                Ok(None) => {
-                    return JobOutcome::Failed {
-                        code: "memory_consolidation_vault_missing",
-                    };
-                }
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_consolidation_vault_lookup_failed",
-                    };
-                }
-            };
-            let context = match vault.context() {
-                Ok(context) => context,
-                Err(_) => {
-                    return JobOutcome::Failed {
-                        code: "memory_consolidation_context_invalid",
-                    };
-                }
-            };
-            match state
-                .jobs()
-                .find_active_by_type(&context, "memory.extract")
-                .await
-            {
-                Ok(Some(_)) => {
-                    return JobOutcome::Deferred {
-                        delay: Duration::from_secs(15),
-                        code: "memory_consolidation_waiting_for_phase1",
-                    };
-                }
-                Ok(None) => {}
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_consolidation_phase1_state_failed",
-                    };
-                }
-            }
-            let core = match super::core_for_vault(&state, &history_root, &vault, &core_runtime) {
-                Ok(core) => core,
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_consolidation_core_unavailable",
-                    };
-                }
-            };
-            let Some(worker_id) = job.lease_owner.as_deref() else {
-                return JobOutcome::Failed {
-                    code: "memory_consolidation_lease_missing",
-                };
-            };
-            let initial_pending = match state.memory().pending_stage1_count(&context).await {
-                Ok(pending) => pending,
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_consolidation_input_count_failed",
-                    };
-                }
-            };
-            if state
-                .jobs()
-                .update_progress(
-                    job.id,
-                    worker_id,
-                    &json!({
-                        "phase": "consolidating",
-                        "completed": 0,
-                        "total": initial_pending,
-                        "raw_inputs": 0,
-                        "pending_raw_inputs": initial_pending,
-                        "created": 0,
-                        "updated": 0,
-                        "retired": 0,
-                        "discarded": 0,
-                        "error_code": null,
-                    }),
-                )
-                .await
-                .is_err()
-            {
-                return JobOutcome::Retry {
-                    delay: Duration::from_secs(5),
-                    code: "memory_consolidation_progress_failed",
-                };
-            }
-            info!(
-                target: "mcp_vault::jobs",
-                event = "memory_consolidation_progress",
-                job_id = %job.id,
-                vault_id = %context.id(),
-                phase = "consolidating",
-                pending_raw_inputs = initial_pending,
-                "memory consolidation started"
-            );
-            let mut completed = 0_u64;
-            let mut total = initial_pending;
-            let mut created = 0_u64;
-            let mut updated = 0_u64;
-            let mut retired = 0_u64;
-            let mut discarded = 0_u64;
-            let mut generation = match state.memory().get_consolidation_state(&context).await {
-                Ok(current) => current.map_or(0, |current| current.generation),
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_consolidation_state_read_failed",
-                    };
-                }
-            };
-            let mut reused_proposal = false;
-            let mut pending = initial_pending;
-            if pending == 0 {
-                if state
-                    .jobs()
-                    .update_progress(
-                        job.id,
-                        worker_id,
-                        &json!({
-                            "phase": "completed",
-                            "completed": 0,
-                            "total": 0,
-                            "raw_inputs": 0,
-                            "pending_raw_inputs": 0,
-                            "created": 0,
-                            "updated": 0,
-                            "retired": 0,
-                            "discarded": 0,
-                            "generation": generation,
-                            "reused_proposal": false,
-                            "error_code": null,
-                        }),
-                    )
-                    .await
-                    .is_err()
-                {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_consolidation_progress_failed",
-                    };
-                }
-                return JobOutcome::Complete;
-            }
-            while pending > 0 {
-                let report = match tokio::select! {
-                    _ = shutdown.cancelled() => return JobOutcome::Cancelled,
-                    result = memory.consolidate(&context, &core) => result,
-                } {
-                    Ok(report) => report,
-                    Err(error) => return memory_consolidation_error_outcome(error),
-                };
-                if report.raw_inputs == 0 {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(2),
-                        code: "memory_consolidation_no_progress",
-                    };
-                }
-                completed = completed.saturating_add(u64::from(report.raw_inputs));
-                created = created.saturating_add(u64::from(report.created));
-                updated = updated.saturating_add(u64::from(report.updated));
-                retired = retired.saturating_add(u64::from(report.retired));
-                discarded = discarded.saturating_add(u64::from(report.discarded));
-                generation = report.generation;
-                reused_proposal |= report.reused_proposal;
-                pending = match state.memory().pending_stage1_count(&context).await {
-                    Ok(pending) => pending,
-                    Err(_) => {
-                        return JobOutcome::Retry {
-                            delay: Duration::from_secs(5),
-                            code: "memory_consolidation_input_count_failed",
-                        };
-                    }
-                };
-                total = total.max(completed.saturating_add(pending));
-                if state
-                    .jobs()
-                    .update_progress(
-                        job.id,
-                        worker_id,
-                        &json!({
-                            "phase": if pending == 0 { "completed" } else { "consolidating" },
-                            "completed": completed,
-                            "total": total,
-                            "raw_inputs": completed,
-                            "pending_raw_inputs": pending,
-                            "created": created,
-                            "updated": updated,
-                            "retired": retired,
-                            "discarded": discarded,
-                            "generation": generation,
-                            "reused_proposal": reused_proposal,
-                            "error_code": null,
-                        }),
-                    )
-                    .await
-                    .is_err()
-                {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_consolidation_progress_failed",
-                    };
-                }
-                info!(
-                    target: "mcp_vault::jobs",
-                    event = "memory_consolidation_progress",
-                    job_id = %job.id,
-                    vault_id = %context.id(),
-                    phase = if pending == 0 { "completed" } else { "consolidating" },
-                    raw_inputs = completed,
-                    pending_raw_inputs = pending,
-                    created,
-                    updated,
-                    retired,
-                    discarded,
-                    generation,
-                    reused_proposal,
-                    "memory consolidation batch committed"
-                );
-            }
-            JobOutcome::Complete
-        })
-    })
-}
-
-fn memory_consolidation_error_outcome(error: MemoryError) -> JobOutcome {
-    match error {
-        MemoryError::Configuration(code) => JobOutcome::Failed { code },
-        MemoryError::GeneratedOutput(code) => JobOutcome::Retry {
-            delay: Duration::from_secs(5),
-            code,
-        },
-        MemoryError::Provider(error) if error.retryable() => JobOutcome::Retry {
-            delay: Duration::from_secs(10),
-            code: error.code(),
-        },
-        MemoryError::Provider(error) => JobOutcome::Failed { code: error.code() },
-        MemoryError::Conflict => JobOutcome::Retry {
-            delay: Duration::from_secs(2),
-            code: "memory_consolidation_snapshot_changed",
-        },
-        error if error.retryable() => JobOutcome::Retry {
-            delay: Duration::from_secs(10),
-            code: "memory_consolidation_retryable",
-        },
-        MemoryError::InvalidInput(_) | MemoryError::Markdown => JobOutcome::Failed {
-            code: "memory_phase2_prepared_invalid",
-        },
-        _ => JobOutcome::Failed {
-            code: "memory_consolidation_failed",
-        },
-    }
-}
-
-/// Generate persisted multilingual aliases and optional source-language rewrites.
-pub fn memory_retrieval_job_handler(
-    state: StateStore,
-    history_root: std::path::PathBuf,
-    core_runtime: mcp_vault_core::VaultCoreRuntime,
-    memory: MemoryService,
-) -> JobHandler {
-    Arc::new(move |job, shutdown| {
-        let state = state.clone();
-        let history_root = history_root.clone();
-        let core_runtime = core_runtime.clone();
-        let memory = memory.clone();
-        Box::pin(async move {
-            if shutdown.is_cancelled() {
-                return JobOutcome::Cancelled;
-            }
-            let Some(vault_id) = job.vault_id else {
-                return JobOutcome::Failed {
-                    code: "memory_retrieval_vault_missing",
-                };
-            };
-            let vault = match state.vaults().find_by_id(vault_id).await {
-                Ok(Some(vault)) => vault,
-                Ok(None) => {
-                    return JobOutcome::Failed {
-                        code: "memory_retrieval_vault_missing",
-                    };
-                }
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_retrieval_vault_lookup_failed",
-                    };
-                }
-            };
-            let context = match vault.context() {
-                Ok(context) => context,
-                Err(_) => {
-                    return JobOutcome::Failed {
-                        code: "memory_retrieval_context_invalid",
-                    };
-                }
-            };
-            let current_profile_hash = match memory.retrieval_coverage(&context).await {
-                Ok(coverage) => coverage.profile_hash,
-                Err(error) => return memory_retrieval_error_outcome(error),
-            };
-            if job.attempts > 1
-                && state
-                    .memory()
-                    .retry_failed_retrieval_metadata(&context, &current_profile_hash)
-                    .await
-                    .is_err()
-            {
-                return JobOutcome::Retry {
-                    delay: Duration::from_secs(5),
-                    code: "memory_retrieval_retry_admission_failed",
-                };
-            }
-            let core = match super::core_for_vault(&state, &history_root, &vault, &core_runtime) {
-                Ok(core) => core,
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_retrieval_core_unavailable",
-                    };
-                }
-            };
-            let Some(worker_id) = job.lease_owner.as_deref() else {
-                return JobOutcome::Failed {
-                    code: "memory_retrieval_lease_missing",
-                };
-            };
-            let prior_progress = job.progress.as_ref();
-            let mut completed = prior_progress
-                .and_then(|progress| progress.get("enriched"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let mut rewritten = prior_progress
-                .and_then(|progress| progress.get("rewritten"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let mut rewrite_skipped = prior_progress
-                .and_then(|progress| progress.get("rewrite_skipped"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let mut snapshot_conflicts = prior_progress
-                .and_then(|progress| progress.get("snapshot_conflicts"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let mut reused_proposal = prior_progress
-                .and_then(|progress| progress.get("reused_proposal"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let pending = match state
-                .memory()
-                .retrieval_pending_count(&context, &current_profile_hash)
-                .await
-            {
-                Ok(total) => total,
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_retrieval_pending_count_failed",
-                    };
-                }
-            };
-            let mut total = prior_progress
-                .and_then(|progress| progress.get("total"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-                .max(completed.saturating_add(pending));
-            loop {
-                if shutdown.is_cancelled() {
-                    return JobOutcome::Cancelled;
-                }
-                match state.jobs().should_cancel_claimed(job.id, worker_id).await {
-                    Ok(true) => return JobOutcome::Cancelled,
-                    Ok(false) => {}
-                    Err(_) => {
-                        return JobOutcome::Retry {
-                            delay: Duration::from_secs(5),
-                            code: "memory_retrieval_cancel_check_failed",
-                        };
-                    }
-                }
-                let report = match memory.enrich_retrieval(&context, &core).await {
-                    Ok(report) => report,
-                    Err(error) => return memory_retrieval_error_outcome(error),
-                };
-                completed = completed.saturating_add(u64::from(report.enriched));
-                rewritten = rewritten.saturating_add(u64::from(report.rewritten));
-                rewrite_skipped = rewrite_skipped.saturating_add(u64::from(report.rewrite_skipped));
-                snapshot_conflicts =
-                    snapshot_conflicts.saturating_add(u64::from(report.snapshot_conflicts));
-                reused_proposal |= report.reused_proposal;
-                let coverage = match memory.retrieval_coverage(&context).await {
-                    Ok(coverage) => coverage,
-                    Err(error) => return memory_retrieval_error_outcome(error),
-                };
-                total = total.max(completed.saturating_add(report.remaining));
-                if state
-                    .jobs()
-                    .update_progress(
-                        job.id,
-                        worker_id,
-                        &json!({
-                            "phase": if report.remaining == 0 { "completed" } else { "enriching" },
-                            "completed": completed,
-                            "total": total,
-                            "enriched": completed,
-                            "rewritten": rewritten,
-                            "rewrite_skipped": rewrite_skipped,
-                            "snapshot_conflicts": snapshot_conflicts,
-                            "remaining": report.remaining,
-                            "coverage_current": coverage.current,
-                            "coverage_eligible": coverage.eligible,
-                            "profile_hash": current_profile_hash.as_str(),
-                            "reused_proposal": reused_proposal,
-                            "error_code": null,
-                        }),
-                    )
-                    .await
-                    .is_err()
-                {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_retrieval_progress_failed",
-                    };
-                }
-                if report.remaining == 0 {
-                    return JobOutcome::Complete;
-                }
-                if report.snapshot_conflicts != 0 {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(2),
-                        code: "memory_retrieval_snapshot_changed",
-                    };
-                }
-                if report.processed == 0 {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(2),
-                        code: "memory_retrieval_no_progress",
-                    };
-                }
-            }
-        })
-    })
-}
-
-fn memory_retrieval_error_outcome(error: MemoryError) -> JobOutcome {
-    match error {
-        MemoryError::Configuration(code) | MemoryError::GeneratedOutput(code) => {
-            JobOutcome::Failed { code }
-        }
-        MemoryError::Provider(error) if error.retryable() => JobOutcome::Retry {
-            delay: Duration::from_secs(10),
-            code: error.code(),
-        },
-        MemoryError::Provider(error) => JobOutcome::Failed { code: error.code() },
-        MemoryError::Conflict => JobOutcome::Retry {
-            delay: Duration::from_secs(2),
-            code: "memory_retrieval_snapshot_changed",
-        },
-        error if error.retryable() => JobOutcome::Retry {
-            delay: Duration::from_secs(10),
-            code: "memory_retrieval_retryable",
-        },
-        MemoryError::InvalidInput(_) | MemoryError::Markdown => JobOutcome::Failed {
-            code: "memory_retrieval_prepared_invalid",
-        },
-        _ => JobOutcome::Failed {
-            code: "memory_retrieval_failed",
-        },
-    }
-}
-
-/// Execute one destructive prerelease memory-pipeline cutover.
-pub fn memory_reset_pipeline_job_handler(
-    state: StateStore,
-    history_root: std::path::PathBuf,
-    core_runtime: mcp_vault_core::VaultCoreRuntime,
-    memory: MemoryService,
-) -> JobHandler {
-    Arc::new(move |job, shutdown| {
-        let state = state.clone();
-        let history_root = history_root.clone();
-        let core_runtime = core_runtime.clone();
-        let memory = memory.clone();
-        Box::pin(async move {
-            if shutdown.is_cancelled() {
-                return JobOutcome::Cancelled;
-            }
-            let Some(vault_id) = job.vault_id else {
-                return JobOutcome::Failed {
-                    code: "memory_pipeline_reset_vault_missing",
-                };
-            };
-            let vault = match state.vaults().find_by_id(vault_id).await {
-                Ok(Some(vault)) => vault,
-                Ok(None) => {
-                    return JobOutcome::Failed {
-                        code: "memory_pipeline_reset_vault_missing",
-                    };
-                }
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_pipeline_reset_vault_lookup_failed",
-                    };
-                }
-            };
-            let context = match vault.context() {
-                Ok(context) => context,
-                Err(_) => {
-                    return JobOutcome::Failed {
-                        code: "memory_pipeline_reset_context_invalid",
-                    };
-                }
-            };
-            let core = match super::core_for_vault(&state, &history_root, &vault, &core_runtime) {
-                Ok(core) => core,
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_pipeline_reset_core_unavailable",
-                    };
-                }
-            };
-            let Some(worker_id) = job.lease_owner.as_deref() else {
-                return JobOutcome::Failed {
-                    code: "memory_pipeline_reset_lease_missing",
-                };
-            };
-            let reset_complete = match state.memory().get_consolidation_state(&context).await {
-                Ok(current) => current.is_some_and(|current| {
-                    current.pipeline_generation >= MEMORY_PIPELINE_GENERATION
-                }),
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_pipeline_reset_state_read_failed",
-                    };
-                }
-            };
-            if !reset_complete {
-                match quiesce_memory_pipeline_jobs(&state, &context).await {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        let _ = state
-                            .jobs()
-                            .update_progress(
-                                job.id,
-                                worker_id,
-                                &json!({
-                                    "phase": "waiting_for_previous_memory_jobs",
-                                    "completed": 0,
-                                    "total": 1,
-                                    "error_code": "memory_pipeline_reset_waiting_for_jobs",
-                                }),
-                            )
-                            .await;
-                        return JobOutcome::Retry {
-                            delay: Duration::from_secs(2),
-                            code: "memory_pipeline_reset_waiting_for_jobs",
-                        };
-                    }
-                    Err(_) => {
-                        return JobOutcome::Retry {
-                            delay: Duration::from_secs(5),
-                            code: "memory_pipeline_reset_quiesce_failed",
-                        };
-                    }
-                }
-            }
-            if state
-                .jobs()
-                .update_progress(
-                    job.id,
-                    worker_id,
-                    &json!({
-                        "phase": "resetting_memory_pipeline",
-                        "completed": 0,
-                        "total": 1,
-                        "removed_managed_files": 0,
-                        "cleared_memories": 0,
-                        "cleared_stage1_outputs": 0,
-                        "cleared_candidates": 0,
-                        "cleared_proposals": 0,
-                        "cleared_diagnostics": 0,
-                        "cleared_embeddings": 0,
-                        "error_code": null,
-                    }),
-                )
-                .await
-                .is_err()
-            {
-                return JobOutcome::Retry {
-                    delay: Duration::from_secs(5),
-                    code: "memory_pipeline_reset_progress_failed",
-                };
-            }
-            let result = tokio::select! {
-                _ = shutdown.cancelled() => return JobOutcome::Cancelled,
-                result = memory.reset_pipeline(&context, &core) => result,
-            };
-            let report = match result {
-                Ok(report) => report,
-                Err(error) if error.retryable() => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(10),
-                        code: "memory_pipeline_reset_retryable",
-                    };
-                }
-                Err(_) => {
-                    return JobOutcome::Failed {
-                        code: "memory_pipeline_reset_failed",
-                    };
-                }
-            };
-            info!(
-                target: "mcp_vault::jobs",
-                event = "memory_pipeline_reset_progress",
-                job_id = %job.id,
-                vault_id = %context.id(),
-                removed_managed_files = report.removed_managed_files,
-                cleared_memories = report.cleared_memories,
-                cleared_stage1_outputs = report.cleared_stage1_outputs,
-                cleared_candidates = report.cleared_candidates,
-                cleared_proposals = report.cleared_proposals,
-                cleared_diagnostics = report.cleared_diagnostics,
-                cleared_embeddings = report.cleared_embeddings,
-                already_completed = report.already_completed,
-                "prerelease memory pipeline reset prepared fresh regeneration"
-            );
-
-            let followup = match ensure_memory_pipeline_regeneration_job(
-                &state,
-                &memory,
-                &context,
-                Some(job.id),
-            )
-            .await
-            {
-                Ok(PipelineRegenerationAdmission::Admitted) => "phase1_full_regeneration",
-                Ok(PipelineRegenerationAdmission::AwaitingConfiguration) => {
-                    "awaiting_extraction_configuration"
-                }
-                Ok(PipelineRegenerationAdmission::AwaitingOtherExtraction) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(2),
-                        code: "memory_pipeline_reset_waiting_for_extraction",
-                    };
-                }
-                Ok(PipelineRegenerationAdmission::NotPending) => "none",
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(10),
-                        code: "memory_pipeline_regeneration_admission_failed",
-                    };
-                }
-            };
-            if state
-                .jobs()
-                .update_progress(
-                    job.id,
-                    worker_id,
-                    &json!({
-                        "phase": "completed",
-                        "completed": 1,
-                        "total": 1,
-                        "already_completed": report.already_completed,
-                        "removed_managed_files": report.removed_managed_files,
-                        "cleared_memories": report.cleared_memories,
-                        "cleared_stage1_outputs": report.cleared_stage1_outputs,
-                        "cleared_candidates": report.cleared_candidates,
-                        "cleared_proposals": report.cleared_proposals,
-                        "cleared_diagnostics": report.cleared_diagnostics,
-                        "cleared_embeddings": report.cleared_embeddings,
-                        "followup": followup,
-                        "error_code": null,
-                    }),
-                )
-                .await
-                .is_err()
-            {
-                return JobOutcome::Failed {
-                    code: "memory_pipeline_reset_progress_finalize_failed",
-                };
-            }
-            JobOutcome::Complete
-        })
-    })
-}
-
-/// Revalidate extracted memory provenance after a note event.
-pub fn memory_revalidate_job_handler(
-    state: StateStore,
-    history_root: std::path::PathBuf,
-    core_runtime: mcp_vault_core::VaultCoreRuntime,
-    memory: MemoryService,
-) -> JobHandler {
-    Arc::new(move |job, shutdown| {
-        let state = state.clone();
-        let history_root = history_root.clone();
-        let core_runtime = core_runtime.clone();
-        let memory = memory.clone();
-        Box::pin(async move {
-            if shutdown.is_cancelled() {
-                return JobOutcome::Cancelled;
-            }
-            let Some(vault_id) = job.vault_id else {
-                return JobOutcome::Failed {
-                    code: "memory_revalidate_vault_missing",
-                };
-            };
-            let file_id = job
-                .payload
-                .get("aggregate_id")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|value| FileId::parse(value).ok());
-            let Some(file_id) = file_id else {
-                return JobOutcome::Failed {
-                    code: "memory_revalidate_file_missing",
-                };
-            };
-            let vault = match state.vaults().find_by_id(vault_id).await {
-                Ok(Some(vault)) => vault,
-                Ok(None) => {
-                    return JobOutcome::Failed {
-                        code: "memory_revalidate_vault_missing",
-                    };
-                }
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_revalidate_vault_lookup_failed",
-                    };
-                }
-            };
-            let context = match vault.context() {
-                Ok(context) => context,
-                Err(_) => {
-                    return JobOutcome::Failed {
-                        code: "memory_revalidate_context_invalid",
-                    };
-                }
-            };
-            let core = match super::core_for_vault(&state, &history_root, &vault, &core_runtime) {
-                Ok(core) => core,
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_revalidate_core_unavailable",
-                    };
-                }
-            };
-            let event_type = job
-                .payload
-                .get("event_type")
-                .and_then(serde_json::Value::as_str);
-            let deleted = if event_type == Some("FileDeleted") {
-                true
-            } else if event_type == Some("external_change") {
-                match state.files().get_by_id(&context, file_id).await {
-                    Ok(Some(file)) => file.deleted_at.is_some(),
-                    Ok(None) => true,
-                    Err(_) => {
-                        return JobOutcome::Retry {
-                            delay: Duration::from_secs(5),
-                            code: "memory_revalidate_file_lookup_failed",
-                        };
-                    }
-                }
-            } else {
-                false
-            };
-            let revalidated = tokio::select! {
-                _ = shutdown.cancelled() => return JobOutcome::Cancelled,
-                result = memory.invalidate_source(&context, &core, file_id, deleted) => result,
-            };
-            match revalidated {
-                Ok(_) if event_type == Some("FileMoved") => return JobOutcome::Complete,
-                Ok(_) => {}
-                Err(error) if error.retryable() => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(10),
-                        code: "memory_revalidate_retryable",
-                    };
-                }
-                Err(_) => {
-                    return JobOutcome::Failed {
-                        code: "memory_revalidate_failed",
-                    };
-                }
-            }
-            let withdrawn = tokio::select! {
-                _ = shutdown.cancelled() => return JobOutcome::Cancelled,
-                result = memory.withdraw_note_source(&context, file_id) => result,
-            };
-            match withdrawn {
-                Ok(changed) => {
-                    if changed
-                        && enqueue_memory_consolidation(&state, &context, job.id)
-                            .await
-                            .is_err()
-                    {
-                        return JobOutcome::Failed {
-                            code: "memory_consolidation_admission_failed",
-                        };
-                    }
-                    JobOutcome::Complete
-                }
-                Err(error) if error.retryable() => JobOutcome::Retry {
-                    delay: Duration::from_secs(10),
-                    code: "memory_source_withdraw_retryable",
-                },
-                Err(_) => JobOutcome::Failed {
-                    code: "memory_source_withdraw_failed",
-                },
-            }
-        })
-    })
-}
-
-/// Reconcile note provenance before admitting any optional Provider work.
+/// Reconcile one source identity/hash change before optional extraction.
 pub fn memory_source_reconcile_job_handler(
     state: StateStore,
     history_root: std::path::PathBuf,
@@ -3612,13 +2536,7 @@ pub fn memory_source_reconcile_job_handler(
             };
             let report = tokio::select! {
                 _ = shutdown.cancelled() => return JobOutcome::Cancelled,
-                result = memory.reconcile_source_event(
-                    &context,
-                    &core,
-                    file_id,
-                    &event_type,
-                    event_id,
-                ) => result,
+                result = memory.reconcile_current_source_event(&context, &core, file_id) => result,
             };
             let report = match report {
                 Ok(report) => report,
@@ -3635,17 +2553,6 @@ pub fn memory_source_reconcile_job_handler(
                 }
             };
 
-            if report.stage1_withdrawn != 0
-                && enqueue_memory_consolidation(&state, &context, job.id)
-                    .await
-                    .is_err()
-            {
-                return JobOutcome::Retry {
-                    delay: Duration::from_secs(5),
-                    code: "memory_source_reconcile_consolidation_admission_failed",
-                };
-            }
-
             let path = job
                 .payload
                 .get("payload")
@@ -3658,22 +2565,12 @@ pub fn memory_source_reconcile_job_handler(
                 });
             let mut extraction_followup = "not_applicable";
             if should_extract {
-                let pipeline_ready = state
-                    .memory()
-                    .get_consolidation_state(&context)
+                let extraction_ready = memory
+                    .extraction_readiness(&context)
                     .await
                     .ok()
-                    .flatten()
-                    .is_some_and(|pipeline| {
-                        pipeline.pipeline_generation >= MEMORY_PIPELINE_GENERATION
-                            && !pipeline.regeneration_pending
-                    });
-                let enabled = memory
-                    .extraction_policy(&context)
-                    .await
-                    .ok()
-                    .is_some_and(|policy| policy.policy.enabled);
-                if pipeline_ready && enabled {
+                    .is_some_and(|readiness| readiness.ready);
+                if extraction_ready {
                     let dedup_event = event_id
                         .map(|id| id.to_string())
                         .unwrap_or_else(|| job.id.to_string());
@@ -3710,17 +2607,13 @@ pub fn memory_source_reconcile_job_handler(
                         worker_id,
                         &json!({
                             "phase": "completed",
-                            "final_sources_checked": report.final_sources_checked,
+                            "sources_checked": report.sources_checked,
                             "current": report.current,
-                            "rebound": report.rebound,
+                            "moved": report.moved,
                             "changed": report.changed,
                             "deleted": report.deleted,
-                            "missing": report.missing,
-                            "ambiguous": report.ambiguous,
-                            "memories_staled": report.memories_staled,
-                            "memories_reactivated": report.memories_reactivated,
-                            "stage1_rebound": report.stage1_rebound,
-                            "stage1_withdrawn": report.stage1_withdrawn,
+                            "memories_hidden": report.memories_hidden,
+                            "memories_removed": report.memories_removed,
                             "extraction_followup": extraction_followup,
                         }),
                     )
@@ -3737,455 +2630,7 @@ pub fn memory_source_reconcile_job_handler(
     })
 }
 
-/// Rebuild memory projections from managed Markdown.
-pub fn memory_rebuild_job_handler(
-    state: StateStore,
-    history_root: std::path::PathBuf,
-    core_runtime: mcp_vault_core::VaultCoreRuntime,
-    memory: MemoryService,
-) -> JobHandler {
-    Arc::new(move |job, shutdown| {
-        let state = state.clone();
-        let history_root = history_root.clone();
-        let core_runtime = core_runtime.clone();
-        let memory = memory.clone();
-        Box::pin(async move {
-            if shutdown.is_cancelled() {
-                return JobOutcome::Cancelled;
-            }
-            let Some(vault_id) = job.vault_id else {
-                return JobOutcome::Failed {
-                    code: "memory_rebuild_vault_missing",
-                };
-            };
-            let vault = match state.vaults().find_by_id(vault_id).await {
-                Ok(Some(vault)) => vault,
-                Ok(None) => {
-                    return JobOutcome::Failed {
-                        code: "memory_rebuild_vault_missing",
-                    };
-                }
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_rebuild_vault_lookup_failed",
-                    };
-                }
-            };
-            let context = match vault.context() {
-                Ok(context) => context,
-                Err(_) => {
-                    return JobOutcome::Failed {
-                        code: "memory_rebuild_context_invalid",
-                    };
-                }
-            };
-            let core = match super::core_for_vault(&state, &history_root, &vault, &core_runtime) {
-                Ok(core) => core,
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_rebuild_core_unavailable",
-                    };
-                }
-            };
-            let result = tokio::select! {
-                _ = shutdown.cancelled() => return JobOutcome::Cancelled,
-                result = memory.rebuild(&context, &core) => result,
-            };
-            match result {
-                Ok(_) => JobOutcome::Complete,
-                Err(error) if error.retryable() => JobOutcome::Retry {
-                    delay: Duration::from_secs(10),
-                    code: "memory_rebuild_retryable",
-                },
-                Err(_) => JobOutcome::Failed {
-                    code: "memory_rebuild_failed",
-                },
-            }
-        })
-    })
-}
-
-/// Audit final and Stage 1 note provenance in resumable deterministic pages.
-pub fn memory_source_audit_job_handler(
-    state: StateStore,
-    history_root: std::path::PathBuf,
-    core_runtime: mcp_vault_core::VaultCoreRuntime,
-    memory: MemoryService,
-) -> JobHandler {
-    Arc::new(move |job, shutdown| {
-        let state = state.clone();
-        let history_root = history_root.clone();
-        let core_runtime = core_runtime.clone();
-        let memory = memory.clone();
-        Box::pin(async move {
-            let Some(vault_id) = job.vault_id else {
-                return JobOutcome::Failed {
-                    code: "memory_source_audit_vault_missing",
-                };
-            };
-            let Some(generation) = job
-                .payload
-                .get("generation")
-                .and_then(serde_json::Value::as_str)
-            else {
-                return JobOutcome::Failed {
-                    code: "memory_source_audit_generation_missing",
-                };
-            };
-            let vault = match state.vaults().find_by_id(vault_id).await {
-                Ok(Some(vault)) => vault,
-                Ok(None) => {
-                    return JobOutcome::Failed {
-                        code: "memory_source_audit_vault_missing",
-                    };
-                }
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_source_audit_vault_lookup_failed",
-                    };
-                }
-            };
-            let context = match vault.context() {
-                Ok(context) => context,
-                Err(_) => {
-                    return JobOutcome::Failed {
-                        code: "memory_source_audit_context_invalid",
-                    };
-                }
-            };
-            let core = match super::core_for_vault(&state, &history_root, &vault, &core_runtime) {
-                Ok(core) => core,
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_source_audit_core_unavailable",
-                    };
-                }
-            };
-            let mut audit = match state
-                .memory()
-                .start_source_audit(&context, generation)
-                .await
-            {
-                Ok(audit) => audit,
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_source_audit_state_unavailable",
-                    };
-                }
-            };
-            if audit.generation != generation {
-                return JobOutcome::Complete;
-            }
-            if audit.status == "completed" {
-                return JobOutcome::Complete;
-            }
-            let page_size = job
-                .payload
-                .get("page_size")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|value| u32::try_from(value).ok())
-                .filter(|value| (1..=512).contains(value))
-                .unwrap_or(100);
-            let audit_total = match state.memory().source_health_counts(&context).await {
-                Ok(counts) => counts.final_sources,
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_source_audit_counts_unavailable",
-                    };
-                }
-            };
-            let mut counters = audit.counters.clone();
-            loop {
-                if shutdown.is_cancelled() {
-                    let _ = state
-                        .memory()
-                        .update_source_audit(
-                            &context,
-                            generation,
-                            "cancelled",
-                            audit.cursor_source_id,
-                            &counters,
-                        )
-                        .await;
-                    return JobOutcome::Cancelled;
-                }
-                let page = memory
-                    .audit_source_page(&context, &core, audit.cursor_source_id, page_size, None)
-                    .await;
-                let page = match page {
-                    Ok(page) => page,
-                    Err(error) if error.retryable() => {
-                        return JobOutcome::Retry {
-                            delay: Duration::from_secs(10),
-                            code: "memory_source_audit_retryable",
-                        };
-                    }
-                    Err(_) => {
-                        let _ = state
-                            .memory()
-                            .update_source_audit(
-                                &context,
-                                generation,
-                                "failed",
-                                audit.cursor_source_id,
-                                &counters,
-                            )
-                            .await;
-                        return JobOutcome::Failed {
-                            code: "memory_source_audit_failed",
-                        };
-                    }
-                };
-                merge_source_audit_counters(&mut counters, &page.report);
-                if page.complete {
-                    let pending_stage1 = match state.memory().pending_stage1_count(&context).await {
-                        Ok(count) => count,
-                        Err(_) => {
-                            return JobOutcome::Retry {
-                                delay: Duration::from_secs(5),
-                                code: "memory_source_audit_stage1_count_failed",
-                            };
-                        }
-                    };
-                    if pending_stage1 != 0
-                        && enqueue_memory_consolidation(&state, &context, job.id)
-                            .await
-                            .is_err()
-                    {
-                        return JobOutcome::Retry {
-                            delay: Duration::from_secs(5),
-                            code: "memory_source_audit_consolidation_admission_failed",
-                        };
-                    }
-                }
-                let cursor = page
-                    .cursor
-                    .as_deref()
-                    .and_then(|value| MemorySourceId::parse(value).ok())
-                    .or(audit.cursor_source_id);
-                let status = if page.complete {
-                    "completed"
-                } else {
-                    "running"
-                };
-                audit = match state
-                    .memory()
-                    .update_source_audit(&context, generation, status, cursor, &counters)
-                    .await
-                {
-                    Ok(audit) => audit,
-                    Err(_) => {
-                        return JobOutcome::Retry {
-                            delay: Duration::from_secs(5),
-                            code: "memory_source_audit_checkpoint_failed",
-                        };
-                    }
-                };
-                if let Some(worker_id) = job.lease_owner.as_deref()
-                    && state
-                        .jobs()
-                        .update_progress(
-                            job.id,
-                            worker_id,
-                            &json!({
-                                "phase": if page.complete && counters
-                                    .get("errors")
-                                    .and_then(serde_json::Value::as_u64)
-                                    .unwrap_or(0) != 0 {
-                                    "completed_with_errors"
-                                } else if page.complete {
-                                    "completed"
-                                } else {
-                                    "auditing_sources"
-                                },
-                                "generation": generation,
-                                "cursor_source_id": audit.cursor_source_id,
-                                "completed": counters
-                                    .get("final_sources_checked")
-                                    .and_then(serde_json::Value::as_u64)
-                                    .unwrap_or(0),
-                                "total": audit_total,
-                                "complete": page.complete,
-                                "counts": counters,
-                            }),
-                        )
-                        .await
-                        .is_err()
-                {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_source_audit_progress_failed",
-                    };
-                }
-                if page.complete {
-                    return JobOutcome::Complete;
-                }
-            }
-        })
-    })
-}
-
-fn merge_source_audit_counters(
-    counters: &mut serde_json::Value,
-    report: &mcp_vault_memory::MemorySourceReconcileReport,
-) {
-    let Some(object) = counters.as_object_mut() else {
-        *counters = json!({});
-        return merge_source_audit_counters(counters, report);
-    };
-    for (key, value) in [
-        ("final_sources_checked", report.final_sources_checked),
-        ("current", report.current),
-        ("rebound", report.rebound),
-        ("changed", report.changed),
-        ("deleted", report.deleted),
-        ("missing", report.missing),
-        ("ambiguous", report.ambiguous),
-        ("memories_staled", report.memories_staled),
-        ("memories_reactivated", report.memories_reactivated),
-        ("stage1_rebound", report.stage1_rebound),
-        ("stage1_withdrawn", report.stage1_withdrawn),
-        ("errors", report.errors),
-    ] {
-        let current = object
-            .get(key)
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        object.insert(key.to_owned(), json!(current.saturating_add(value)));
-    }
-}
-
-/// Repair stable note-source identities and current paths without Provider work.
-pub fn memory_source_repair_job_handler(
-    state: StateStore,
-    history_root: std::path::PathBuf,
-    core_runtime: mcp_vault_core::VaultCoreRuntime,
-    memory: MemoryService,
-) -> JobHandler {
-    Arc::new(move |job, shutdown| {
-        let state = state.clone();
-        let history_root = history_root.clone();
-        let core_runtime = core_runtime.clone();
-        let memory = memory.clone();
-        Box::pin(async move {
-            if shutdown.is_cancelled() {
-                return JobOutcome::Cancelled;
-            }
-            let Some(vault_id) = job.vault_id else {
-                return JobOutcome::Failed {
-                    code: "memory_source_repair_vault_missing",
-                };
-            };
-            let vault = match state.vaults().find_by_id(vault_id).await {
-                Ok(Some(vault)) => vault,
-                Ok(None) => {
-                    return JobOutcome::Failed {
-                        code: "memory_source_repair_vault_missing",
-                    };
-                }
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_source_repair_vault_lookup_failed",
-                    };
-                }
-            };
-            let context = match vault.context() {
-                Ok(context) => context,
-                Err(_) => {
-                    return JobOutcome::Failed {
-                        code: "memory_source_repair_context_invalid",
-                    };
-                }
-            };
-            let core = match super::core_for_vault(&state, &history_root, &vault, &core_runtime) {
-                Ok(core) => core,
-                Err(_) => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(5),
-                        code: "memory_source_repair_core_unavailable",
-                    };
-                }
-            };
-            let Some(worker_id) = job.lease_owner.as_deref() else {
-                return JobOutcome::Failed {
-                    code: "memory_source_repair_lease_missing",
-                };
-            };
-            if state
-                .jobs()
-                .update_progress(
-                    job.id,
-                    worker_id,
-                    &json!({
-                        "phase": "repairing_memory_sources",
-                        "completed": 0,
-                        "memories_rewritten": 0,
-                        "stage1_sources_rebound": 0,
-                        "unresolved_note_sources": 0,
-                        "memories_marked_stale": 0,
-                    }),
-                )
-                .await
-                .is_err()
-            {
-                return JobOutcome::Retry {
-                    delay: Duration::from_secs(5),
-                    code: "memory_source_repair_progress_failed",
-                };
-            }
-            let result = tokio::select! {
-                _ = shutdown.cancelled() => return JobOutcome::Cancelled,
-                result = memory.repair_source_paths(&context, &core) => result,
-            };
-            match result {
-                Ok(report) => {
-                    let completed = report
-                        .memories_rewritten
-                        .saturating_add(report.stage1_sources_rebound);
-                    if state
-                        .jobs()
-                        .update_progress(
-                            job.id,
-                            worker_id,
-                            &json!({
-                                "phase": "completed",
-                                "completed": completed,
-                                "memories_rewritten": report.memories_rewritten,
-                                "stage1_sources_rebound": report.stage1_sources_rebound,
-                                "unresolved_note_sources": report.unresolved_note_sources,
-                                "memories_marked_stale": report.memories_marked_stale,
-                            }),
-                        )
-                        .await
-                        .is_err()
-                    {
-                        return JobOutcome::Retry {
-                            delay: Duration::from_secs(5),
-                            code: "memory_source_repair_progress_failed",
-                        };
-                    }
-                    JobOutcome::Complete
-                }
-                Err(error) if error.retryable() => JobOutcome::Retry {
-                    delay: Duration::from_secs(10),
-                    code: "memory_source_repair_retryable",
-                },
-                Err(_) => JobOutcome::Failed {
-                    code: "memory_source_repair_failed",
-                },
-            }
-        })
-    })
-}
-
-/// Handle reference-only embedding rebuilds for note chunks or memory bodies.
+/// Rebuild current note or memory embedding chunks.
 pub fn embedding_job_handler(
     state: StateStore,
     index: mcp_vault_indexer::IndexService,
@@ -4331,6 +2776,7 @@ fn path_in_reserved_namespace(root: &VaultPath, raw_path: &str) -> bool {
         .is_ok_and(|policy| policy.is_reserved(&path))
 }
 
+#[cfg(test)]
 fn path_is_memory_record(root: &VaultPath, raw_path: &str) -> bool {
     let Ok(path) = VaultPath::parse(raw_path) else {
         return false;
@@ -4376,34 +2822,28 @@ mod tests {
     };
 
     use super::{
-        Cancellation, JobHandler, JobOutcome, OutboxHandler, PipelineRegenerationAdmission,
-        WorkerConfig, WorkerFailure, WorkerStatus, WorkerSupervisor,
-        enqueue_memory_source_audit_job, ensure_memory_consolidation_job,
-        ensure_memory_pipeline_regeneration_job, index_rebuild_job_handler,
-        memory_consolidate_job_handler, memory_consolidation_error_outcome,
-        memory_embedding_error_outcome, memory_extract_error_outcome, memory_extract_job_handler,
-        memory_output_failure_limit_reached, memory_retrieval_job_handler,
-        memory_source_reconcile_job_handler, note_embedding_error_outcome, now_millis,
-        outbox_event_job_handler, outbox_to_job_handler, path_is_memory_record,
-        quiesce_memory_pipeline_jobs, redacted_path_hash, vault_initialize_job_handler,
+        Cancellation, JobHandler, JobOutcome, OutboxHandler, WorkerConfig, WorkerFailure,
+        WorkerStatus, WorkerSupervisor, index_rebuild_job_handler, memory_embedding_error_outcome,
+        memory_extract_error_outcome, memory_extract_job_handler,
+        memory_output_failure_limit_reached, memory_source_reconcile_job_handler,
+        note_embedding_error_outcome, now_millis, outbox_event_job_handler, outbox_to_job_handler,
+        path_is_memory_record, redacted_path_hash, vault_initialize_job_handler,
     };
     use axum::{Json, Router, extract::State as AxumState, routing::post};
     use mcp_vault_auth::{AuthService, MasterKeyRing};
     use mcp_vault_core::{ManagedVaultService, VaultCore, VaultCoreRuntime};
     use mcp_vault_domain::{
-        Actor, EventId, FileId, MaintenanceGate, MemoryRawId, Revision, SourcePlane, VaultContext,
-        VaultId, VaultPath, VaultPathPolicy, VaultSlug, WritePrecondition,
+        Actor, EventId, FileId, MaintenanceGate, Revision, SourcePlane, VaultContext, VaultId,
+        VaultPath, VaultPathPolicy, VaultSlug, WritePrecondition,
     };
     use mcp_vault_memory::{
-        ExtractionPolicy, MEMORY_PIPELINE_GENERATION, MemoryError, MemoryService,
+        ExtractionPolicy, MEMORY_CONTRACT_GENERATION, MemoryError, MemoryService,
     };
     use mcp_vault_providers::{
         ModelCapabilities, ModelInput, ModelSettings, ProviderError, ProviderInput, ProviderKind,
         ProviderMode, ProviderService, ProviderSettings,
     };
-    use mcp_vault_state::{
-        JobStatus, MemoryStage1OutputRecord, OutboxEventRecord, StateStore, VaultStatus,
-    };
+    use mcp_vault_state::{JobStatus, OutboxEventRecord, StateStore, VaultStatus};
     use mcp_vault_storage_fs::StorageOptions;
     use serde_json::{Value, json};
     use tokio::{
@@ -4417,14 +2857,6 @@ mod tests {
             MasterKeyRing::from_bytes(1, &[8_u8; 32]).unwrap(),
         );
         MemoryService::new(state.clone(), auth)
-    }
-
-    async fn mark_pipeline_current(state: &StateStore, context: &VaultContext) {
-        state
-            .memory()
-            .set_pipeline_generation_state(context, MEMORY_PIPELINE_GENERATION, false)
-            .await
-            .unwrap();
     }
 
     fn test_outbox_handler(state: &StateStore) -> OutboxHandler {
@@ -4467,16 +2899,6 @@ mod tests {
             "completed"
         );
         assert!(state.index().status(&context).await.unwrap().is_some());
-        assert_eq!(
-            state
-                .memory()
-                .get_consolidation_state(&context)
-                .await
-                .unwrap()
-                .unwrap()
-                .pipeline_generation,
-            MEMORY_PIPELINE_GENERATION
-        );
     }
 
     #[tokio::test]
@@ -4571,96 +2993,15 @@ mod tests {
         AxumState(calls): AxumState<Arc<AtomicUsize>>,
         Json(request): Json<Value>,
     ) -> Json<Value> {
-        if request["model"] == "fake-consolidation" {
-            if request["messages"][0]["content"]
-                .as_str()
-                .is_some_and(|prompt| prompt.contains("search-only multilingual metadata"))
-            {
-                let user = request["messages"]
-                    .as_array()
-                    .and_then(|messages| messages.last())
-                    .and_then(|message| message["content"].as_str())
-                    .unwrap();
-                let payload = user
-                    .strip_prefix("<untrusted_retrieval_inputs>\n")
-                    .and_then(|value| value.strip_suffix("\n</untrusted_retrieval_inputs>"))
-                    .and_then(|value| serde_json::from_str::<Value>(value).ok())
-                    .unwrap();
-                let items = payload["items"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|item| {
-                        json!({
-                            "memory_index": item["memory_index"],
-                            "source_language": "en",
-                            "rewritten_content": null,
-                            "aliases": [
-                                {"language": "en", "terms": ["durable decision"]},
-                                {"language": "zh-Hans", "terms": ["持久决策"]}
-                            ]
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                return Json(json!({
-                    "choices": [{
-                        "message": {"content": json!({"items": items}).to_string()},
-                        "finish_reason": "stop"
-                    }]
-                }));
-            }
-            let user = request["messages"]
-                .as_array()
-                .and_then(|messages| messages.last())
-                .and_then(|message| message["content"].as_str())
-                .unwrap();
-            let payload = user
-                .strip_prefix("<untrusted_memory_state>\n")
-                .and_then(|value| value.strip_suffix("\n</untrusted_memory_state>"))
-                .and_then(|value| serde_json::from_str::<Value>(value).ok())
-                .unwrap();
-            let dirty = payload["dirty_inputs"].as_array().unwrap();
-            let raw_memories = payload["raw_memories"].as_array().unwrap();
-            let current = payload["current_memories"].as_array().unwrap();
-            let mut actions = Vec::new();
-            for item in dirty {
-                let input_index = item["input_index"].as_u64().unwrap();
-                let raw = raw_memories
-                    .iter()
-                    .find(|raw| raw["input_index"].as_u64() == Some(input_index))
-                    .unwrap();
-                let existing = current.first();
-                actions.push(json!({
-                    "operation": if existing.is_some() { "update" } else { "create" },
-                    "memory_index": existing.map_or(Value::Null, |memory| {
-                        memory["memory_index"].clone()
-                    }),
-                    "content": raw["raw_memory"],
-                    "memory_type": "decision",
-                    "input_indexes": [input_index],
-                    "supersedes_memory_indexes": []
-                }));
-            }
-            return Json(json!({
-                "choices": [{
-                    "message": {"content": json!({
-                        "memory_summary": "Durable decisions from test notes.",
-                        "actions": actions,
-                        "discarded_input_indexes": [],
-                    }).to_string()},
-                    "finish_reason": "stop"
-                }]
-            }));
-        }
         let call = calls.fetch_add(1, Ordering::SeqCst);
         let content = if call == 0 {
-            r#"{"rollout_summary":"First summary","rollout_slug":"first","raw_memory":"The first note records a durable decision.","evidence":[]}"#
+            r#"{"memories":[{"content":"The first note records a durable decision.","kind":"decision"}],"unexpected":"reject"}"#
         } else if call == 1 {
-            r#"{"rollout_slug":"second","raw_memory":"The second note records a durable decision."}"#
+            r#"{"memories":[{"content":"The second note records a durable decision.","kind":"decision","tags":["test"]}]}"#
         } else if call == 2 || call == 3 {
-            r#"{"rollout_summary":"First summary","rollout_slug":"first","raw_memory":"The first note records a durable decision."}"#
+            r#"{"memories":[{"content":"The first note records a durable decision.","kind":"decision"}]}"#
         } else {
-            r#"{"rollout_summary":"Second summary","rollout_slug":"second","raw_memory":"The second note records a durable decision."}"#
+            r#"{"memories":[{"content":"The second note records a durable decision.","kind":"decision"}]}"#
         };
         assert_eq!(request["model"], "fake-extraction");
         Json(json!({
@@ -4670,7 +3011,6 @@ mod tests {
             }]
         }))
     }
-
     #[test]
     fn memory_extraction_jobs_preserve_redacted_provider_error_codes() {
         assert_eq!(
@@ -4724,27 +3064,6 @@ mod tests {
     }
 
     #[test]
-    fn memory_consolidation_jobs_preserve_local_generated_output_codes() {
-        assert_eq!(
-            memory_consolidation_error_outcome(MemoryError::GeneratedOutput(
-                "memory_phase2_memory_index_invalid",
-            )),
-            JobOutcome::Retry {
-                delay: Duration::from_secs(5),
-                code: "memory_phase2_memory_index_invalid",
-            }
-        );
-        assert_eq!(
-            memory_consolidation_error_outcome(MemoryError::InvalidInput(
-                "prepared proposal is invalid",
-            )),
-            JobOutcome::Failed {
-                code: "memory_phase2_prepared_invalid",
-            }
-        );
-    }
-
-    #[test]
     fn one_model_output_failure_does_not_open_the_batch_circuit() {
         assert!(!memory_output_failure_limit_reached(1));
         assert!(!memory_output_failure_limit_reached(2));
@@ -4776,298 +3095,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconciliation_waits_for_unrelated_extraction_before_phase2_admission() {
-        let directory = tempfile::tempdir().unwrap();
-        let state = StateStore::connect_and_migrate("sqlite::memory:")
-            .await
-            .unwrap();
-        let context = VaultContext::new(
-            VaultId::new(),
-            VaultSlug::new("phase-boundary").unwrap(),
-            directory.path().join("content"),
-            Revision::ZERO,
-        )
-        .unwrap();
-        state
-            .vaults()
-            .insert(&context, "Phase boundary", VaultStatus::Active)
-            .await
-            .unwrap();
-        state
-            .memory()
-            .upsert_stage1_output(
-                &context,
-                &MemoryStage1OutputRecord {
-                    id: MemoryRawId::new(),
-                    vault_id: context.id(),
-                    source_type: "explicit_agent".to_owned(),
-                    source_key: "phase-boundary-input".to_owned(),
-                    source_file_id: None,
-                    source_path: None,
-                    source_revision: None,
-                    profile_hash: "test-profile".to_owned(),
-                    pipeline_version: MEMORY_PIPELINE_GENERATION,
-                    prompt_version: "test".to_owned(),
-                    raw_memory: "A durable pending input.".to_owned(),
-                    source_summary: "A durable pending input.".to_owned(),
-                    source_slug: Some("pending-input".to_owned()),
-                    evidence: json!([{
-                        "source_type": "explicit_agent",
-                        "source_file_id": null,
-                        "source_path": null,
-                        "source_revision": null,
-                        "start_line": null,
-                        "end_line": null,
-                        "excerpt_hash": null
-                    }]),
-                    metadata: json!({}),
-                    output_hash: "phase-boundary-hash".to_owned(),
-                    status: "ready".to_owned(),
-                    generated_at: 1,
-                    updated_at: 1,
-                    usage_count: 0,
-                    last_usage: None,
-                    selected_for_phase2: false,
-                    selected_for_phase2_hash: None,
-                    selected_for_phase2_at: None,
-                },
-            )
-            .await
-            .unwrap();
-        let extraction = state
-            .jobs()
-            .enqueue(
-                &context,
-                "memory.extract",
-                "test:active-extraction",
-                &json!({"scope": "all"}),
-                0,
-                5,
-                now_millis(),
-            )
-            .await
-            .unwrap();
-
-        ensure_memory_consolidation_job(&state, &context, "reconciliation", None)
-            .await
-            .unwrap();
-        assert!(
-            state
-                .jobs()
-                .find_active_by_type(&context, "memory.consolidate")
-                .await
-                .unwrap()
-                .is_none()
-        );
-
-        ensure_memory_consolidation_job(&state, &context, "phase1_completed", Some(extraction.id))
-            .await
-            .unwrap();
-        assert!(
-            state
-                .jobs()
-                .find_active_by_type(&context, "memory.consolidate")
-                .await
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    #[tokio::test]
-    async fn new_pending_batch_is_not_shadowed_by_legacy_terminal_phase2_job() {
-        let directory = tempfile::tempdir().unwrap();
-        let state = StateStore::connect_and_migrate("sqlite::memory:")
-            .await
-            .unwrap();
-        let context = VaultContext::new(
-            VaultId::new(),
-            VaultSlug::new("terminal-phase2-dedup").unwrap(),
-            directory.path().join("content"),
-            Revision::ZERO,
-        )
-        .unwrap();
-        state
-            .vaults()
-            .insert(&context, "Terminal Phase 2 dedup", VaultStatus::Active)
-            .await
-            .unwrap();
-        state
-            .memory()
-            .upsert_stage1_output(
-                &context,
-                &MemoryStage1OutputRecord {
-                    id: MemoryRawId::new(),
-                    vault_id: context.id(),
-                    source_type: "explicit_agent".to_owned(),
-                    source_key: "new-pending-batch".to_owned(),
-                    source_file_id: None,
-                    source_path: None,
-                    source_revision: None,
-                    profile_hash: "test-profile".to_owned(),
-                    pipeline_version: MEMORY_PIPELINE_GENERATION,
-                    prompt_version: "test".to_owned(),
-                    raw_memory: "A newly extracted pending input.".to_owned(),
-                    source_summary: "A newly extracted pending input.".to_owned(),
-                    source_slug: Some("new-pending-input".to_owned()),
-                    evidence: json!([]),
-                    metadata: json!({}),
-                    output_hash: "new-pending-output-hash".to_owned(),
-                    status: "ready".to_owned(),
-                    generated_at: 1,
-                    updated_at: 1,
-                    usage_count: 0,
-                    last_usage: None,
-                    selected_for_phase2: false,
-                    selected_for_phase2_hash: None,
-                    selected_for_phase2_at: None,
-                },
-            )
-            .await
-            .unwrap();
-
-        let legacy = state
-            .jobs()
-            .enqueue(
-                &context,
-                "memory.consolidate",
-                &format!("vault:{}:memory-consolidate:1", context.id()),
-                &json!({"generation": 1}),
-                3,
-                1,
-                now_millis(),
-            )
-            .await
-            .unwrap();
-        let mut claimed = state
-            .jobs()
-            .claim_batch(
-                "legacy-terminal-worker",
-                now_millis(),
-                now_millis() + 60_000,
-                1,
-            )
-            .await
-            .unwrap();
-        assert_eq!(claimed.remove(0).id, legacy.id);
-        state
-            .jobs()
-            .fail_permanently(legacy.id, "legacy-terminal-worker", "legacy_phase2_failed")
-            .await
-            .unwrap();
-
-        ensure_memory_consolidation_job(&state, &context, "phase1_completed", None)
-            .await
-            .unwrap();
-        let admitted = state
-            .jobs()
-            .find_active_by_type(&context, "memory.consolidate")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_ne!(admitted.id, legacy.id);
-        assert!(admitted.dedup_key.contains(":pending:sha256:"));
-
-        ensure_memory_consolidation_job(&state, &context, "periodic_recovery", None)
-            .await
-            .unwrap();
-        assert_eq!(
-            state
-                .jobs()
-                .find_active_by_type(&context, "memory.consolidate")
-                .await
-                .unwrap()
-                .unwrap()
-                .id,
-            admitted.id
-        );
-    }
-
-    #[tokio::test]
-    async fn claimed_phase2_defers_without_spending_attempts_while_phase1_is_active() {
-        let directory = tempfile::tempdir().unwrap();
-        let state = StateStore::connect_and_migrate("sqlite::memory:")
-            .await
-            .unwrap();
-        let context = VaultContext::new(
-            VaultId::new(),
-            VaultSlug::new("phase2-deferred").unwrap(),
-            directory.path().join("content"),
-            Revision::ZERO,
-        )
-        .unwrap();
-        state
-            .vaults()
-            .insert(&context, "Phase 2 deferred", VaultStatus::Active)
-            .await
-            .unwrap();
-        state
-            .jobs()
-            .enqueue(
-                &context,
-                "memory.extract",
-                "test:phase1-active",
-                &json!({"scope": "all"}),
-                0,
-                5,
-                now_millis(),
-            )
-            .await
-            .unwrap();
-        let phase2 = state
-            .jobs()
-            .enqueue(
-                &context,
-                "memory.consolidate",
-                "test:phase2-deferred",
-                &json!({"pipeline_generation": MEMORY_PIPELINE_GENERATION}),
-                10,
-                5,
-                now_millis(),
-            )
-            .await
-            .unwrap();
-        let now = now_millis();
-        let mut claimed = state
-            .jobs()
-            .claim_batch("phase2-deferred-worker", now, now.saturating_add(60_000), 1)
-            .await
-            .unwrap();
-        assert_eq!(claimed[0].id, phase2.id);
-        let outcome = memory_consolidate_job_handler(
-            state.clone(),
-            directory.path().join("history"),
-            Default::default(),
-            test_memory_service(&state),
-        )(claimed.remove(0), Cancellation::default())
-        .await;
-        assert_eq!(
-            outcome,
-            JobOutcome::Deferred {
-                delay: Duration::from_secs(15),
-                code: "memory_consolidation_waiting_for_phase1",
-            }
-        );
-
-        state
-            .jobs()
-            .release_claimed(
-                phase2.id,
-                "phase2-deferred-worker",
-                now.saturating_add(15_000),
-            )
-            .await
-            .unwrap();
-        let deferred = state
-            .jobs()
-            .get(&context, phase2.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(deferred.status, JobStatus::Queued);
-        assert_eq!(deferred.attempts, 0);
-    }
-
-    #[tokio::test]
     async fn file_events_admit_source_reconciliation_before_optional_extraction() {
         let directory = tempfile::tempdir().unwrap();
         let state = StateStore::connect_and_migrate("sqlite::memory:")
@@ -5085,7 +3112,6 @@ mod tests {
             .insert(&context, "Legacy event", VaultStatus::Active)
             .await
             .unwrap();
-        mark_pipeline_current(&state, &context).await;
         let memory = test_memory_service(&state);
         memory
             .set_extraction_policy(
@@ -5136,8 +3162,8 @@ mod tests {
             .unwrap();
         assert_eq!(reconciliation_jobs.len(), 1);
         assert_eq!(
-            reconciliation_jobs[0].payload["pipeline_generation"],
-            MEMORY_PIPELINE_GENERATION
+            reconciliation_jobs[0].payload["memory_contract_generation"],
+            MEMORY_CONTRACT_GENERATION
         );
 
         state
@@ -5209,7 +3235,6 @@ mod tests {
             .insert(&context, "Move event", VaultStatus::Active)
             .await
             .unwrap();
-        mark_pipeline_current(&state, &context).await;
         let memory = test_memory_service(&state);
         memory
             .set_extraction_policy(
@@ -5256,123 +3281,6 @@ mod tests {
             state
                 .jobs()
                 .list(&context, None, Some("memory.source_reconcile"), 10, 0)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn source_audit_admission_is_repeatable_by_vault_generation() {
-        let directory = tempfile::tempdir().unwrap();
-        let state = StateStore::connect_and_migrate("sqlite::memory:")
-            .await
-            .unwrap();
-        let context = VaultContext::new(
-            VaultId::new(),
-            VaultSlug::new("source-repair").unwrap(),
-            PathBuf::from(directory.path()).join("content"),
-            Revision::ZERO,
-        )
-        .unwrap();
-        state
-            .vaults()
-            .insert(&context, "Source repair", VaultStatus::Active)
-            .await
-            .unwrap();
-        state
-            .memory()
-            .set_pipeline_generation_state(&context, MEMORY_PIPELINE_GENERATION, true)
-            .await
-            .unwrap();
-
-        let first = enqueue_memory_source_audit_job(&state, &context, "generation-1", "test")
-            .await
-            .unwrap();
-        let duplicate = enqueue_memory_source_audit_job(&state, &context, "generation-1", "test")
-            .await
-            .unwrap();
-        assert_eq!(duplicate.id, first.id);
-        let next = enqueue_memory_source_audit_job(&state, &context, "generation-2", "test")
-            .await
-            .unwrap();
-        assert_ne!(next.id, first.id);
-        assert_eq!(first.payload["generation"], "generation-1");
-        assert_eq!(
-            state
-                .jobs()
-                .list(&context, None, Some("memory.audit_sources"), 10, 0)
-                .await
-                .unwrap()
-                .len(),
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn pipeline_cutover_blocks_memory_event_jobs_until_reset_completes() {
-        let state = StateStore::connect_and_migrate("sqlite::memory:")
-            .await
-            .unwrap();
-        let context = VaultContext::new(
-            VaultId::new(),
-            VaultSlug::new("pipeline-cutover-event").unwrap(),
-            "/srv/pipeline-cutover-event".into(),
-            Revision::ZERO,
-        )
-        .unwrap();
-        state
-            .vaults()
-            .insert(&context, "Pipeline cutover event", VaultStatus::Active)
-            .await
-            .unwrap();
-        let memory = test_memory_service(&state);
-        memory
-            .set_extraction_policy(
-                &context,
-                ExtractionPolicy {
-                    enabled: true,
-                    ..ExtractionPolicy::default()
-                },
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        let event = OutboxEventRecord {
-            id: EventId::new(),
-            vault_id: Some(context.id()),
-            event_type: "FileUpdated".to_owned(),
-            aggregate_type: "file".to_owned(),
-            aggregate_id: FileId::new().to_string(),
-            payload: json!({"operation": "replace", "path": "note.md"}),
-            created_at: 1,
-            available_at: 1,
-            claimed_by: None,
-            claimed_until: None,
-            delivered_at: None,
-            attempts: 0,
-            last_error: None,
-            dead_lettered: false,
-            dead_letter_reason: None,
-        };
-        outbox_to_job_handler(state.clone(), memory)(event)
-            .await
-            .unwrap();
-
-        assert!(
-            state
-                .jobs()
-                .list(&context, None, Some("memory.extract"), 10, 0)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(
-            state
-                .jobs()
-                .list(&context, None, Some("index.rebuild"), 10, 0)
                 .await
                 .unwrap()
                 .len(),
@@ -5671,115 +3579,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipeline_reset_waits_for_running_extraction_and_cancels_queued_memory_work() {
-        let state = StateStore::connect_and_migrate("sqlite::memory:")
-            .await
-            .unwrap();
-        let context = VaultContext::new(
-            VaultId::new(),
-            VaultSlug::new("legacy-reset-quiescence").unwrap(),
-            "/srv/legacy-reset-quiescence".into(),
-            Revision::ZERO,
-        )
-        .unwrap();
-        state
-            .vaults()
-            .insert(&context, "Legacy reset quiescence", VaultStatus::Active)
-            .await
-            .unwrap();
-        let extraction = state
-            .jobs()
-            .enqueue(
-                &context,
-                "memory.extract",
-                "legacy:old-extraction",
-                &json!({"scope": "all"}),
-                0,
-                5,
-                0,
-            )
-            .await
-            .unwrap();
-        let now = now_millis();
-        state
-            .jobs()
-            .claim_batch("legacy-worker", now, now.saturating_add(60_000), 1)
-            .await
-            .unwrap();
-        let consolidation = state
-            .jobs()
-            .enqueue(
-                &context,
-                "memory.consolidate",
-                "legacy:old-consolidation",
-                &json!({}),
-                0,
-                5,
-                0,
-            )
-            .await
-            .unwrap();
-        let retrieval = state
-            .jobs()
-            .enqueue(
-                &context,
-                "memory.enrich_retrieval",
-                "legacy:old-retrieval-enrichment",
-                &json!({}),
-                0,
-                5,
-                0,
-            )
-            .await
-            .unwrap();
-
-        assert!(
-            !quiesce_memory_pipeline_jobs(&state, &context)
-                .await
-                .unwrap()
-        );
-        let extraction = state
-            .jobs()
-            .get(&context, extraction.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(extraction.status, JobStatus::Running);
-        assert!(extraction.cancel_requested);
-        assert_eq!(
-            state
-                .jobs()
-                .get(&context, consolidation.id)
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            JobStatus::Cancelled
-        );
-        assert_eq!(
-            state
-                .jobs()
-                .get(&context, retrieval.id)
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            JobStatus::Cancelled
-        );
-
-        state
-            .jobs()
-            .cancel_claimed(extraction.id, "legacy-worker")
-            .await
-            .unwrap();
-        assert!(
-            quiesce_memory_pipeline_jobs(&state, &context)
-                .await
-                .unwrap()
-        );
-    }
-
-    #[tokio::test]
     async fn obsolete_memory_job_with_old_cursor_is_discarded_before_handler_call() {
         let state = StateStore::connect_and_migrate("sqlite::memory:")
             .await
@@ -5992,7 +3791,6 @@ mod tests {
             .insert(&context, "Mixed extraction", VaultStatus::Active)
             .await
             .unwrap();
-        mark_pipeline_current(&state, &context).await;
         let core_runtime = mcp_vault_core::VaultCoreRuntime::default();
         let history_root = PathBuf::from(directory.path()).join("history");
         let core = VaultCore::new(
@@ -6081,29 +3879,6 @@ mod tests {
             )
             .await
             .unwrap();
-        let consolidation_model = providers
-            .register_model(ModelInput {
-                provider_id: provider.id,
-                external_model_id: "fake-consolidation".to_owned(),
-                capabilities: ModelCapabilities {
-                    structured_output: true,
-                    ..ModelCapabilities::default()
-                },
-                settings: ModelSettings::default(),
-                enabled: true,
-            })
-            .await
-            .unwrap();
-        providers
-            .bind_model(
-                Some(&context),
-                "memory_consolidation",
-                consolidation_model.id,
-                json!({}),
-                None,
-            )
-            .await
-            .unwrap();
         let memory = MemoryService::with_provider_service(state.clone(), providers);
         memory
             .set_extraction_policy(
@@ -6124,7 +3899,7 @@ mod tests {
                 "memory.extract",
                 "test:mixed-extraction:all",
                 &json!({
-                    "pipeline_generation": MEMORY_PIPELINE_GENERATION,
+                    "memory_contract_generation": MEMORY_CONTRACT_GENERATION,
                     "scope": "all",
                     "reason": "test",
                 }),
@@ -6164,7 +3939,7 @@ mod tests {
         assert_eq!(progress["notes_evaluated"], 2);
         assert_eq!(progress["generated_output_failures"], 1);
         assert_eq!(progress["source_ingestion_failures"], 1);
-        assert_eq!(progress["raw_memories_staged"], 1);
+        assert_eq!(progress["items_published"], 1);
         assert_eq!(
             progress["generated_output_failure_notes"][0]["path"],
             "a.md"
@@ -6189,95 +3964,27 @@ mod tests {
             progress["source_ingestion_failure_notes"][0]["error_code"],
             "memory_source_not_utf8"
         );
-        assert!(
-            state
-                .memory()
-                .get_stage1_output(&context, "note", &source_files[0].id.to_string())
-                .await
-                .unwrap()
-                .is_none()
-        );
-        let second_output = state
-            .memory()
-            .get_stage1_output(&context, "note", &source_files[1].id.to_string())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(second_output.source_summary, second_output.raw_memory);
-        assert!(
-            state
-                .memory()
-                .get_stage1_output(&context, "note", &source_files[2].id.to_string())
-                .await
-                .unwrap()
-                .is_none()
-        );
-        state.jobs().complete(job.id, "mixed-worker").await.unwrap();
-        let now = now_millis();
-        let mut consolidation_jobs = state
-            .jobs()
-            .claim_batch("consolidation-worker", now, now.saturating_add(60_000), 1)
+        let current = memory
+            .list(&context, Vec::new(), None, None, None, 20, 0)
             .await
             .unwrap();
-        let consolidation_job = consolidation_jobs.remove(0);
-        assert_eq!(consolidation_job.job_type, "memory.consolidate");
-        let consolidation_id = consolidation_job.id;
-        let consolidation_outcome = memory_consolidate_job_handler(
-            state.clone(),
-            history_root.clone(),
-            core_runtime.clone(),
-            memory.clone(),
-        )(consolidation_job, Cancellation::default())
-        .await;
-        assert_eq!(consolidation_outcome, JobOutcome::Complete);
-        let consolidation_progress = state
-            .jobs()
-            .get(&context, consolidation_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .progress
-            .unwrap();
-        assert_eq!(consolidation_progress["phase"], "completed");
-        assert_eq!(consolidation_progress["created"], 1);
-        assert_eq!(consolidation_progress["generation"], 1);
-        assert_eq!(state.memory().counts(&context).await.unwrap().active, 1);
-        state
-            .jobs()
-            .complete(consolidation_id, "consolidation-worker")
-            .await
-            .unwrap();
-        let retrieval_job = state
-            .jobs()
-            .find_active_by_type(&context, "memory.enrich_retrieval")
-            .await
-            .unwrap()
-            .unwrap();
-        let now = now_millis();
-        let claimed_retrieval = state
-            .jobs()
-            .claim_batch("retrieval-worker", now, now.saturating_add(60_000), 1)
-            .await
-            .unwrap()
-            .remove(0);
-        assert_eq!(claimed_retrieval.id, retrieval_job.id);
-        let retrieval_outcome = memory_retrieval_job_handler(
-            state.clone(),
-            history_root.clone(),
-            core_runtime.clone(),
-            memory.clone(),
-        )(claimed_retrieval, Cancellation::default())
-        .await;
-        assert_eq!(retrieval_outcome, JobOutcome::Complete);
+        assert_eq!(current.len(), 1);
         assert_eq!(
-            memory.retrieval_coverage(&context).await.unwrap().current,
-            1
+            current[0].content,
+            "The second note records a durable decision."
         );
-        state
-            .jobs()
-            .complete(retrieval_job.id, "retrieval-worker")
-            .await
-            .unwrap();
+        assert_eq!(current[0].sources[0].file_id, Some(source_files[1].id));
+        state.jobs().complete(job.id, "mixed-worker").await.unwrap();
+        for obsolete_job_type in ["memory.consolidate", "memory.enrich_retrieval"] {
+            assert!(
+                state
+                    .jobs()
+                    .find_active_by_type(&context, obsolete_job_type)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
 
         let incremental = state
             .jobs()
@@ -6286,7 +3993,7 @@ mod tests {
                 "memory.extract",
                 "test:mixed-extraction:incremental",
                 &json!({
-                    "pipeline_generation": MEMORY_PIPELINE_GENERATION,
+                    "memory_contract_generation": MEMORY_CONTRACT_GENERATION,
                     "scope": "all",
                     "include_evaluated": false,
                 }),
@@ -6328,12 +4035,6 @@ mod tests {
             .complete(incremental.id, "incremental-worker")
             .await
             .unwrap();
-        state
-            .jobs()
-            .request_cancel_type(&context, "memory.consolidate")
-            .await
-            .unwrap();
-
         let forced = state
             .jobs()
             .enqueue(
@@ -6341,7 +4042,7 @@ mod tests {
                 "memory.extract",
                 "test:mixed-extraction:forced",
                 &json!({
-                    "pipeline_generation": MEMORY_PIPELINE_GENERATION,
+                    "memory_contract_generation": MEMORY_CONTRACT_GENERATION,
                     "scope": "all",
                     "include_evaluated": true,
                 }),
@@ -6379,384 +4080,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn consolidation_worker_drains_more_than_one_bounded_phase2_batch() {
-        let directory = tempfile::tempdir().unwrap();
-        let state = StateStore::connect_and_migrate("sqlite::memory:")
-            .await
-            .unwrap();
-        let context = VaultContext::new(
-            VaultId::new(),
-            VaultSlug::new("consolidation-batches").unwrap(),
-            directory.path().join("content"),
-            Revision::ZERO,
-        )
-        .unwrap();
-        state
-            .vaults()
-            .insert(&context, "Consolidation batches", VaultStatus::Active)
-            .await
-            .unwrap();
-        let history_root = directory.path().join("history");
-        let core_runtime = mcp_vault_core::VaultCoreRuntime::default();
-
-        let calls = Arc::new(AtomicUsize::new(0));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let provider_server = tokio::spawn({
-            let calls = calls.clone();
-            async move {
-                axum::serve(
-                    listener,
-                    Router::new()
-                        .route("/v1/chat/completions", post(mixed_extraction_response))
-                        .with_state(calls),
-                )
-                .await
-                .unwrap();
-            }
-        });
-        let auth = AuthService::new(
-            state.auth(),
-            MasterKeyRing::from_bytes(1, &[8_u8; 32]).unwrap(),
-        );
-        let providers = ProviderService::new(state.clone(), auth);
-        providers
-            .set_provider_mode(&context, ProviderMode::LocalOnly, None)
-            .await
-            .unwrap();
-        let provider = providers
-            .create_provider(ProviderInput {
-                name: "batched-consolidation".to_owned(),
-                kind: ProviderKind::OpenAiCompatible,
-                base_url: url::Url::parse(&format!("http://{address}/v1/")).unwrap(),
-                settings: ProviderSettings::default(),
-                enabled: true,
-                secret: None,
-            })
-            .await
-            .unwrap();
-        let model = providers
-            .register_model(ModelInput {
-                provider_id: provider.id,
-                external_model_id: "fake-consolidation".to_owned(),
-                capabilities: ModelCapabilities {
-                    structured_output: true,
-                    ..ModelCapabilities::default()
-                },
-                settings: ModelSettings::default(),
-                enabled: true,
-            })
-            .await
-            .unwrap();
-        providers
-            .bind_model(
-                Some(&context),
-                "memory_consolidation",
-                model.id,
-                json!({}),
-                None,
-            )
-            .await
-            .unwrap();
-        let memory = MemoryService::with_provider_service(state.clone(), providers);
-        for index in 0..257_u32 {
-            state
-                .memory()
-                .upsert_stage1_output(
-                    &context,
-                    &MemoryStage1OutputRecord {
-                        id: MemoryRawId::new(),
-                        vault_id: context.id(),
-                        source_type: "explicit_agent".to_owned(),
-                        source_key: format!("batch-source-{index}"),
-                        source_file_id: None,
-                        source_path: None,
-                        source_revision: None,
-                        profile_hash: "batch-test".to_owned(),
-                        pipeline_version: 8,
-                        prompt_version: "batch-test".to_owned(),
-                        raw_memory: format!("Durable batched decision {index}."),
-                        source_summary: format!("Summary {index}."),
-                        source_slug: Some(format!("batch-{index}")),
-                        evidence: json!([{
-                            "source_type": "explicit_agent",
-                            "source_file_id": null,
-                            "source_path": null,
-                            "source_revision": null,
-                            "start_line": null,
-                            "end_line": null,
-                            "excerpt_hash": null
-                        }]),
-                        metadata: json!({"memory_type": "decision"}),
-                        output_hash: format!("batch-output-{index}"),
-                        status: "ready".to_owned(),
-                        generated_at: i64::from(index),
-                        updated_at: i64::from(index),
-                        usage_count: 0,
-                        last_usage: None,
-                        selected_for_phase2: false,
-                        selected_for_phase2_hash: None,
-                        selected_for_phase2_at: None,
-                    },
-                )
-                .await
-                .unwrap();
-        }
-        let job = state
-            .jobs()
-            .enqueue(
-                &context,
-                "memory.consolidate",
-                "test:memory-consolidate:multiple-batches",
-                &json!({
-                    "pipeline_generation": MEMORY_PIPELINE_GENERATION,
-                    "reason": "test",
-                }),
-                0,
-                5,
-                now_millis(),
-            )
-            .await
-            .unwrap();
-        let now = now_millis();
-        let mut claimed = state
-            .jobs()
-            .claim_batch("batch-worker", now, now.saturating_add(600_000), 1)
-            .await
-            .unwrap();
-        let outcome =
-            memory_consolidate_job_handler(state.clone(), history_root, core_runtime, memory)(
-                claimed.remove(0),
-                Cancellation::default(),
-            )
-            .await;
-        assert_eq!(outcome, JobOutcome::Complete);
-        assert_eq!(
-            state.memory().pending_stage1_count(&context).await.unwrap(),
-            0
-        );
-        let progress = state
-            .jobs()
-            .get(&context, job.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .progress
-            .unwrap();
-        assert_eq!(progress["phase"], "completed");
-        assert_eq!(progress["raw_inputs"], 257);
-        assert_eq!(progress["generation"], 2);
-        assert_eq!(progress["created"], 256);
-        assert_eq!(progress["updated"], 1);
-        provider_server.abort();
-    }
-
-    #[tokio::test]
-    async fn pipeline_regeneration_is_fresh_after_delayed_phase1_configuration() {
-        let directory = tempfile::tempdir().unwrap();
-        let state = StateStore::connect_and_migrate("sqlite::memory:")
-            .await
-            .unwrap();
-        let context = VaultContext::new(
-            VaultId::new(),
-            VaultSlug::new("delayed-legacy-reextract").unwrap(),
-            directory.path().join("content"),
-            Revision::ZERO,
-        )
-        .unwrap();
-        state
-            .vaults()
-            .insert(&context, "Delayed re-extract", VaultStatus::Active)
-            .await
-            .unwrap();
-        let core = VaultCore::new(
-            state.clone(),
-            directory.path().join("history"),
-            VaultPathPolicy::default(),
-            StorageOptions::default(),
-            Default::default(),
-        );
-        let auth = AuthService::new(
-            state.auth(),
-            MasterKeyRing::from_bytes(1, &[8_u8; 32]).unwrap(),
-        );
-        let providers = ProviderService::new(state.clone(), auth);
-        let memory = MemoryService::with_provider_service(state.clone(), providers.clone());
-        memory.reset_pipeline(&context, &core).await.unwrap();
-        assert_eq!(
-            ensure_memory_pipeline_regeneration_job(&state, &memory, &context, None)
-                .await
-                .unwrap(),
-            PipelineRegenerationAdmission::AwaitingConfiguration
-        );
-        assert!(
-            state
-                .memory()
-                .get_consolidation_state(&context)
-                .await
-                .unwrap()
-                .unwrap()
-                .regeneration_pending
-        );
-
-        providers
-            .set_provider_mode(&context, ProviderMode::LocalOnly, None)
-            .await
-            .unwrap();
-        let provider = providers
-            .create_provider(ProviderInput {
-                name: "delayed-extraction".to_owned(),
-                kind: ProviderKind::OpenAiCompatible,
-                base_url: url::Url::parse("http://127.0.0.1:1/v1/").unwrap(),
-                settings: ProviderSettings::default(),
-                enabled: true,
-                secret: None,
-            })
-            .await
-            .unwrap();
-        let model = providers
-            .register_model(ModelInput {
-                provider_id: provider.id,
-                external_model_id: "delayed-model".to_owned(),
-                capabilities: ModelCapabilities {
-                    structured_output: true,
-                    ..ModelCapabilities::default()
-                },
-                settings: ModelSettings::default(),
-                enabled: true,
-            })
-            .await
-            .unwrap();
-        providers
-            .bind_model(
-                Some(&context),
-                "memory_extraction",
-                model.id,
-                json!({}),
-                None,
-            )
-            .await
-            .unwrap();
-        providers
-            .bind_model(
-                Some(&context),
-                "memory_consolidation",
-                model.id,
-                json!({}),
-                None,
-            )
-            .await
-            .unwrap();
-        memory
-            .set_extraction_policy(
-                &context,
-                ExtractionPolicy {
-                    enabled: true,
-                    ..ExtractionPolicy::default()
-                },
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        let previous = state
-            .jobs()
-            .enqueue(
-                &context,
-                "memory.extract",
-                "test:pre-reset-extraction",
-                &json!({
-                    "pipeline_generation": MEMORY_PIPELINE_GENERATION,
-                    "scope": "all",
-                    "include_evaluated": false,
-                    "reason": "pre_reset_version",
-                }),
-                100,
-                5,
-                now_millis(),
-            )
-            .await
-            .unwrap();
-        let now = now_millis();
-        let claimed = state
-            .jobs()
-            .claim_batch("pre-reset-worker", now, now.saturating_add(60_000), 1)
-            .await
-            .unwrap();
-        assert_eq!(claimed.first().map(|job| job.id), Some(previous.id));
-        state
-            .jobs()
-            .update_progress(
-                previous.id,
-                "pre-reset-worker",
-                &json!({
-                    "phase": "extracting_note",
-                    "completed": 57,
-                    "total": 178,
-                    "last_completed_path": "notes/057.md",
-                }),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            ensure_memory_pipeline_regeneration_job(&state, &memory, &context, None)
-                .await
-                .unwrap(),
-            PipelineRegenerationAdmission::AwaitingOtherExtraction
-        );
-        assert!(
-            state
-                .memory()
-                .get_consolidation_state(&context)
-                .await
-                .unwrap()
-                .unwrap()
-                .regeneration_pending
-        );
-        state
-            .jobs()
-            .request_cancel(&context, previous.id)
-            .await
-            .unwrap();
-        state
-            .jobs()
-            .cancel_claimed(previous.id, "pre-reset-worker")
-            .await
-            .unwrap();
-        assert_eq!(
-            ensure_memory_pipeline_regeneration_job(&state, &memory, &context, None)
-                .await
-                .unwrap(),
-            PipelineRegenerationAdmission::Admitted
-        );
-        assert!(
-            !state
-                .memory()
-                .get_consolidation_state(&context)
-                .await
-                .unwrap()
-                .unwrap()
-                .regeneration_pending
-        );
-        let job = state
-            .jobs()
-            .find_active_by_type(&context, "memory.extract")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(job.payload["scope"], "all");
-        assert_eq!(job.payload["include_evaluated"], false);
-        assert_eq!(job.payload["fresh_start"], true);
-        assert_eq!(job.payload["reason"], "pipeline_cutover");
-        assert_eq!(
-            job.payload["pipeline_generation"],
-            MEMORY_PIPELINE_GENERATION
-        );
-        assert_ne!(job.id, previous.id);
-        assert!(job.progress.is_none());
-    }
-
-    #[tokio::test]
     async fn production_file_event_handlers_drain_generic_and_redundant_jobs() {
         let directory = tempfile::tempdir().unwrap();
         let state = StateStore::connect_and_migrate("sqlite::memory:")
@@ -6774,7 +4097,6 @@ mod tests {
             .insert(&context, "Drain test", VaultStatus::Active)
             .await
             .unwrap();
-        mark_pipeline_current(&state, &context).await;
         let maintenance = MaintenanceGate::new();
         let core_runtime = mcp_vault_core::VaultCoreRuntime::new(maintenance.clone());
         let history_root = PathBuf::from(directory.path()).join("history");
@@ -6819,7 +4141,7 @@ mod tests {
                 "memory.extract",
                 "test:memory-extract:all",
                 &json!({
-                    "pipeline_generation": MEMORY_PIPELINE_GENERATION,
+                    "memory_contract_generation": MEMORY_CONTRACT_GENERATION,
                     "scope": "all",
                     "reason": "test_backfill",
                 }),
@@ -6895,20 +4217,23 @@ mod tests {
             .list(&context, None, None, 10, 0)
             .await
             .unwrap();
-        assert_eq!(jobs.len(), 5);
+        assert_eq!(jobs.len(), 4);
         assert!(
             jobs.iter()
                 .all(|job| matches!(job.status, JobStatus::Completed | JobStatus::Failed))
         );
-        let extraction = jobs
-            .iter()
-            .find(|job| job.job_type == "memory.extract" && job.id != backfill.id)
-            .unwrap();
-        assert_eq!(extraction.status, JobStatus::Failed);
-        assert_eq!(
-            extraction.last_error.as_deref(),
-            Some("memory_extraction_model_unbound")
-        );
+        assert!(jobs.iter().all(|job| {
+            !matches!(
+                job.job_type.as_str(),
+                "memory.consolidate"
+                    | "memory.enrich_retrieval"
+                    | "memory.reset_pipeline"
+                    | "memory.revalidate"
+                    | "memory.audit_sources"
+                    | "memory.rebuild"
+                    | "memory.repair_sources"
+            )
+        }));
         let backfill = jobs.iter().find(|job| job.id == backfill.id).unwrap();
         assert_eq!(backfill.status, JobStatus::Failed);
         let progress = backfill.progress.as_ref().unwrap();
@@ -6918,7 +4243,7 @@ mod tests {
         assert_eq!(progress["current_index"], 1);
         assert_eq!(progress["current_path"], "note.md");
         assert!(progress["last_completed_path"].is_null());
-        assert_eq!(progress["raw_memories_staged"], 0);
+        assert_eq!(progress["items_published"], 0);
         assert_eq!(progress["source_ingestion_failures"], 0);
         assert_eq!(progress["generated_output_failures"], 0);
         assert_eq!(progress["error_code"], "memory_extraction_model_unbound");

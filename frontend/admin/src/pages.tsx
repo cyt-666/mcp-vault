@@ -67,8 +67,8 @@ export function Dashboard({ data, onNavigate }: { data: JsonObject | null; onNav
         />
         <Metric
           label="长期记忆"
-          value={numberValue(memory.active)}
-          detail={`${numberValue(memory.pending_consolidation)} 条原始输入等待整理`}
+          value={numberValue(memory.current)}
+          detail={`显式 ${numberValue(memory.explicit)} · 笔记派生 ${numberValue(memory.note_derived)}`}
         />
         <Metric label="后台任务" value={numberValue(jobs.pending)} detail="等待或正在执行" />
         <Metric label="索引覆盖率" value={formatPercent(index.coverage_ratio)} detail={`${numberValue(index.indexed_notes)} / ${numberValue(index.total_notes)} 篇已索引`} />
@@ -424,7 +424,7 @@ const patScopeOptions = [
   { value: 'vault:history', label: '历史版本', detail: '查看和恢复历史版本' },
   { value: 'memory:read', label: '读取记忆', detail: '召回长期上下文' },
   { value: 'memory:write', label: '写入记忆', detail: '创建显式长期记忆' },
-  { value: 'memory:manage', label: '管理记忆', detail: '归档、合并或删除记忆' },
+  { value: 'memory:manage', label: '管理记忆', detail: '更新或删除当前记忆' },
 ];
 
 const patPresets = [
@@ -963,7 +963,6 @@ function ProviderPage({ data, notify, onRefresh }: { data: JsonObject | null; no
 
 const modelRoles = [
   { value: 'memory_extraction', label: '自动生成长期记忆', detail: '从普通 Markdown 原文中识别并保存真正耐久的信息' },
-  { value: 'memory_consolidation', label: '记忆整理', detail: '合并重复记忆并处理生命周期' },
   { value: 'note_summary', label: '笔记摘要', detail: '生成可重建的笔记摘要' },
   { value: 'topic_enrichment', label: '主题增强', detail: '辅助主题和知识结构分析' },
   { value: 'embedding_note', label: '笔记向量', detail: '让搜索和 recall 能按语义想起普通笔记' },
@@ -1408,44 +1407,35 @@ function noteSemanticBlockerLabel(code: string): string {
 function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; notify: Notify; onRefresh: () => void }) {
   const [memories, setMemories] = useState(() => arrayRecords(data?.memories));
   const extraction = asRecord(data?.extraction);
-  const sourceHealth = asRecord(data?.source_health);
-  const retrieval = asRecord(data?.retrieval);
   const embedding = asRecord(data?.embedding);
   const memoryJobs = arrayRecords(data?.memory_jobs);
   const [memoryActionId, setMemoryActionId] = useState('');
+  const [newContent, setNewContent] = useState('');
+  const [newKind, setNewKind] = useState('');
+  const [creating, setCreating] = useState(false);
 
   useEffect(() => setMemories(arrayRecords(data?.memories)), [data?.memories]);
 
-  async function changeMemory(memory: JsonObject, action: 'archive' | 'restore' | 'delete') {
+  async function deleteMemory(memory: JsonObject) {
     const id = stringValue(memory.id, '');
     const revision = numberValue(memory.revision);
     if (!id || revision <= 0) {
       notify('记忆 ID 或 revision 无效，请刷新后重试。', 'danger');
       return;
     }
-    if (action === 'delete') {
-      const content = stringValue(memory.content, '这条记忆').slice(0, 120);
-      if (!window.confirm(`确定永久删除这条长期记忆吗？\n\n${content}\n\n当前规范 Markdown 和记忆投影会删除；修订历史或备份仍按保留策略存在。此操作不能通过“恢复”按钮撤销。`)) return;
-    }
+    const content = stringValue(memory.content, '这条记忆').slice(0, 120);
+    const derived = stringValue(memory.ownership) === 'note_derived';
+    const consequence = derived
+      ? '这会重写该来源的当前记忆集合，并暂停该来源的自动提取，直到管理员明确恢复。'
+      : '当前规范 Markdown 和记忆投影都会删除。';
+    if (!window.confirm(`确定删除这条当前记忆吗？\n\n${content}\n\n${consequence}\n修订历史或备份仍按保留策略存在，但模型接口无法读取。`)) return;
     setMemoryActionId(id);
     try {
-      let updated: JsonObject | null = null;
-      if (action === 'delete') {
-        await adminApi.request(`/memories/${encodeURIComponent(id)}?expected_revision=${revision}`, { method: 'DELETE' });
-      } else {
-        updated = asRecord(await adminApi.request(`/memories/${encodeURIComponent(id)}/${action}`, {
-          method: 'POST',
-          body: { expected_revision: revision },
-        }));
-      }
-      setMemories((current) => action === 'delete'
-        ? current.filter((item) => stringValue(item.id) !== id)
-        : current.map((item) => stringValue(item.id) === id
-          ? (updated && Object.keys(updated).length > 0
-              ? updated
-              : { ...item, status: action === 'archive' ? 'archived' : 'active', revision: revision + 1 })
-          : item));
-      notify(action === 'archive' ? '长期记忆已归档，不再参与正常召回。' : action === 'restore' ? '长期记忆已恢复。' : '长期记忆已永久删除。');
+      const result = asRecord(await adminApi.request(`/memories/${encodeURIComponent(id)}?expected_revision=${revision}`, { method: 'DELETE' }));
+      setMemories((current) => current.filter((item) => stringValue(item.id) !== id));
+      notify(booleanValue(result.source_extraction_paused)
+        ? '派生记忆已删除；该来源的自动提取已暂停。'
+        : '显式记忆已删除。');
       onRefresh();
     } catch (error: unknown) {
       notify(formatRequestError(error), 'danger');
@@ -1454,13 +1444,53 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
     }
   }
 
+  async function createMemory(event: FormEvent) {
+    event.preventDefault();
+    if (!newContent.trim()) return;
+    setCreating(true);
+    try {
+      const result = asRecord(await adminApi.request('/memories', {
+        method: 'POST',
+        body: {
+          content: newContent.trim(),
+          kind: newKind || null,
+          idempotency_key: crypto.randomUUID(),
+        },
+      }));
+      const memory = asRecord(result.memory);
+      if (Object.keys(memory).length > 0) setMemories((current) => [memory, ...current]);
+      setNewContent('');
+      setNewKind('');
+      notify('显式记忆已直接保存，不需要模型整理。');
+      onRefresh();
+    } catch (error: unknown) {
+      notify(formatRequestError(error), 'danger');
+    } finally {
+      setCreating(false);
+    }
+  }
+
   return (
     <div className="page-stack">
-      <Notice tone="info">照常写笔记即可，不需要添加特殊标记或逐条审核。系统先从每篇笔记提炼带来源的原始记忆，再在后台合并、去重和处理冲突；只有整理后的语义内容会进入长期记忆。</Notice>
+      <Notice tone="info">每篇来源笔记只拥有一套当前记忆。内容变化会立即让旧集合退出读取；移动不会调用模型。显式记忆则直接保存，不经过提取或整理。</Notice>
       <MemoryExtractionPanel data={extraction} jobs={memoryJobs} notify={notify} onRefresh={onRefresh} />
-      <MemoryRetrievalPanel data={retrieval} notify={notify} onRefresh={onRefresh} />
       <MemoryEmbeddingPanel data={embedding} notify={notify} onRefresh={onRefresh} />
-      <MemorySourceHealthPanel data={sourceHealth} notify={notify} onRefresh={onRefresh} />
+      <Panel title="添加显式记忆" eyebrow="直接写入" description="可选类型只是元数据；服务不会补造重要性、置信度或来源。">
+        <form className="compact-form" onSubmit={(event) => void createMemory(event)}>
+          <label>内容<textarea required rows={4} value={newContent} onChange={(event) => setNewContent(event.target.value)} /></label>
+          <label>类型（可选）
+            <select value={newKind} onChange={(event) => setNewKind(event.target.value)}>
+              <option value="">不指定</option>
+              <option value="fact">事实</option>
+              <option value="decision">决定</option>
+              <option value="preference">偏好</option>
+              <option value="constraint">约束</option>
+              <option value="project">项目</option>
+            </select>
+          </label>
+          <div className="button-row"><button className="primary-button" disabled={creating || !newContent.trim()} type="submit">{creating ? '正在保存…' : '保存当前记忆'}</button></div>
+        </form>
+      </Panel>
       <Panel title={`长期记忆（${memories.length}）`} eyebrow="有来源的上下文" description="默认召回不调用在线模型。">
         {memories.length === 0 ? (
           <EmptyState title="还没有长期记忆" detail="Agent 主动记住或系统从普通笔记自动识别出的耐久信息会出现在这里。" />
@@ -1468,11 +1498,11 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
           <div className="record-list">
             {memories.map((memory) => {
               const sources = arrayRecords(memory.sources);
+              const derived = stringValue(memory.ownership) === 'note_derived';
               return (
                 <article className="record-item record-item--stack" key={stringValue(memory.id)}>
-                  <div className="record-title"><strong>{stringValue(memory.content, '无内容')}</strong><StatusBadge tone={statusTone(memory.status)}>{statusLabel(memory.status)}</StatusBadge></div>
-                  <p>{memoryTypeLabel(memory.memory_type)} · 记忆文件 <code>{stringValue(memory.canonical_path)}</code></p>
-                  {stringValue(memory.status_reason, '') ? <small>状态原因：{memoryStatusReasonLabel(memory.status_reason)}</small> : null}
+                  <div className="record-title"><strong>{stringValue(memory.content, '无内容')}</strong><StatusBadge tone={derived ? 'neutral' : 'success'}>{derived ? '笔记派生' : '显式'}</StatusBadge></div>
+                  <p>{memory.memory_type ? memoryTypeLabel(memory.memory_type) : '未指定类型'} · 规范文件 <code>{stringValue(memory.canonical_path)}</code></p>
                   <small>最近更新 {formatTime(memory.updated_at)}</small>
                   {sources.length > 0 ? (
                     <details className="disclosure memory-source-details">
@@ -1491,9 +1521,7 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
                     </details>
                   ) : <small>来源：已认证的显式记忆输入。</small>}
                   <div className="button-row">
-                    {stringValue(memory.status) === 'active' ? <button aria-label={`归档长期记忆 ${stringValue(memory.id)}`} className="secondary-button" disabled={memoryActionId === stringValue(memory.id)} type="button" onClick={() => void changeMemory(memory, 'archive')}>归档</button> : null}
-                    {['archived', 'stale', 'rejected'].includes(stringValue(memory.status)) ? <button aria-label={`恢复长期记忆 ${stringValue(memory.id)}`} className="secondary-button" disabled={memoryActionId === stringValue(memory.id)} type="button" onClick={() => void changeMemory(memory, 'restore')}>恢复</button> : null}
-                    <button aria-label={`永久删除长期记忆 ${stringValue(memory.id)}`} className="danger-button" disabled={memoryActionId === stringValue(memory.id)} type="button" onClick={() => void changeMemory(memory, 'delete')}>永久删除</button>
+                    <button aria-label={`删除当前记忆 ${stringValue(memory.id)}`} className="danger-button" disabled={memoryActionId === stringValue(memory.id)} type="button" onClick={() => void deleteMemory(memory)}>删除</button>
                   </div>
                 </article>
               );
@@ -1538,7 +1566,7 @@ function MemoryEmbeddingPanel({ data, notify, onRefresh }: { data: JsonObject; n
         <SummaryRow label="覆盖情况" value={`${current} / ${eligible} 条`} />
         <SummaryRow label="过期向量" value={`${stale} 条`} />
       </div>
-      {!configured ? <Notice tone="info">在“AI 服务”中绑定“记忆向量”模型后即可生成；跨语言别名检索仍可独立工作。</Notice> : null}
+      {!configured ? <Notice tone="info">在“AI 服务”中绑定“记忆向量”模型后即可生成；未生成向量时，具有明确词法或实体证据的结果仍可检索。</Notice> : null}
       {configured && blockers.length > 0 ? <Notice tone="warning">记忆语义召回尚未完全就绪：{blockers.map(memoryEmbeddingBlockerLabel).join('；')}。</Notice> : null}
       {configured && blockers.length === 0 ? <Notice tone="success">当前可召回记忆均已有所选模型的语义向量。</Notice> : null}
     </Panel>
@@ -1556,53 +1584,6 @@ function memoryEmbeddingBlockerLabel(code: string): string {
     embedding_coverage_incomplete: '仍有记忆等待生成向量',
   };
   return labels[code] ?? code;
-}
-
-function MemoryRetrievalPanel({ data, notify, onRefresh }: { data: JsonObject; notify: Notify; onRefresh: () => void }) {
-  const coverage = asRecord(data.coverage);
-  const activeJob = asRecord(data.active_job);
-  const [submitting, setSubmitting] = useState(false);
-  const eligible = numberValue(coverage.eligible);
-  const current = numberValue(coverage.current);
-  const pending = numberValue(coverage.pending);
-  const failed = numberValue(coverage.failed);
-  const estimatedBatches = numberValue(coverage.estimated_batches);
-  const profileVersion = stringValue(coverage.prompt_version, 'memory-retrieval-v1');
-  const active = ['queued', 'running', 'retry_wait'].includes(stringValue(activeJob.status));
-  const targetLanguages = Array.isArray(coverage.target_languages)
-    ? coverage.target_languages.map(String).join(' · ')
-    : 'source · zh-Hans · en';
-
-  async function runBackfill() {
-    if (!window.confirm(`确定回填现有记忆的跨语言检索信息吗？\n\n待覆盖 ${Math.max(0, eligible - current)} 条，预计最多 ${estimatedBatches} 次批量模型调用，这些调用可能产生费用。可验证来源的旧英文正文会等义改回来源语言，并产生可恢复修订；请先确认已有可用备份。`)) return;
-    setSubmitting(true);
-    try {
-      const job = asRecord(await adminApi.request('/memory/retrieval/backfill', { method: 'POST' }));
-      notify(`跨语言回填任务 ${truncateId(stringValue(job.id))} 已提交。`);
-      onRefresh();
-    } catch (error: unknown) {
-      notify(formatRequestError(error), 'danger');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <Panel
-      title="跨语言检索"
-      eyebrow="离线召回覆盖"
-      description="记忆正文保持来源语言；来源语、简体中文和英文别名作为可重建检索投影保存，recall 不会为翻译再调用在线模型。"
-      actions={<button className="secondary-button" disabled={submitting || active || eligible === current} type="button" onClick={() => void runBackfill()}>{submitting ? '正在提交…' : active ? '回填正在运行' : '回填现有记忆'}</button>}
-    >
-      <div className="summary-list">
-        <SummaryRow label="目标语言" value={targetLanguages} mono />
-        <SummaryRow label="检索配置档" value={profileVersion} mono />
-        <SummaryRow label="覆盖情况" value={`${current} / ${eligible} 条（待处理 ${pending} · 失败 ${failed}）`} />
-        <SummaryRow label="预计模型批次" value={`${estimatedBatches} 次（每批最多 8 条）`} />
-      </div>
-      {current < eligible ? <Notice tone="warning">覆盖尚未完成。recall 会继续返回现有词法/向量结果，并明确报告跨语言别名覆盖不完整。</Notice> : <Notice tone="success">当前可召回状态的记忆均已具备离线跨语言检索信息。</Notice>}
-    </Panel>
-  );
 }
 
 function memorySourceTypeLabel(value: unknown): string {
@@ -1628,99 +1609,12 @@ function memorySourceLocation(source: JsonObject): string {
   if (startLine > 0) parts.push(endLine > startLine ? `第 ${startLine}–${endLine} 行` : `第 ${startLine} 行`);
   const heading = Array.isArray(source.heading) ? source.heading.map(String).filter(Boolean).join(' › ') : '';
   if (heading) parts.push(`标题 ${heading}`);
-  const health = stringValue(source.health, '');
-  if (health) parts.push(`健康：${memorySourceHealthLabel(health)}`);
   return parts.join(' · ') || '已认证的显式输入（无笔记行号）';
-}
-
-function memoryStatusReasonLabel(value: unknown): string {
-  const reason = stringValue(value);
-  const labels: Record<string, string> = {
-    source_unavailable: '没有可验证的当前来源笔记，已退出正常召回',
-    source_retired: '来源变化已由记忆整理归档',
-    superseded_by_consolidation: '已被更新的长期记忆替代',
-    manual_archive: '由管理员或 Agent 明确归档',
-    superseded: '已合并到另一条长期记忆',
-  };
-  return labels[reason] ?? reason;
-}
-
-function memorySourceHealthLabel(value: unknown): string {
-  const health = stringValue(value, 'unverified');
-  const labels: Record<string, string> = {
-    current: '当前有效',
-    unverified: '尚未核验',
-    content_changed: '内容已变化',
-    deleted: '来源文件已删除',
-    identity_missing: '无法确认当前文件身份',
-    identity_ambiguous: '存在多个精确候选',
-  };
-  return labels[health] ?? health;
-}
-
-function MemorySourceHealthPanel({ data, notify, onRefresh }: { data: JsonObject; notify: Notify; onRefresh: () => void }) {
-  const [submitting, setSubmitting] = useState(false);
-  const summary = asRecord(data.summary);
-  const finalSources = asRecord(summary.final_sources);
-  const memories = asRecord(summary.memories);
-  const stage1 = asRecord(summary.stage1);
-  const audit = asRecord(data.audit);
-  const sources = arrayRecords(data.sources);
-
-  async function runAudit() {
-    setSubmitting(true);
-    try {
-      const job = asRecord(await adminApi.request('/memory/source-health/audit', { method: 'POST' }));
-      notify(`来源健康审计任务 ${truncateId(stringValue(job.id))} 已提交。`);
-      onRefresh();
-    } catch (error: unknown) {
-      notify(formatRequestError(error), 'danger');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <Panel
-      title="来源健康"
-      eyebrow="持续核验"
-      description="文件创建、更新、移动、删除和恢复都会先核验记忆来源；无法证明的记忆会保留用于审计，但不会进入正常召回。"
-      actions={<button className="secondary-button" disabled={submitting} type="button" onClick={() => void runAudit()}>{submitting ? '正在提交…' : '重新审计全部来源'}</button>}
-    >
-      <div className="summary-list">
-        <SummaryRow label="最终记忆来源" value={`${numberValue(finalSources.total)} 条（有效 ${numberValue(finalSources.current)} · 重绑 ${numberValue(finalSources.rebound)} · 内容变化 ${numberValue(finalSources.changed)} · 删除 ${numberValue(finalSources.deleted)} · 缺失 ${numberValue(finalSources.missing)} · 歧义 ${numberValue(finalSources.ambiguous)} · 未核验 ${numberValue(finalSources.unverified)}）`} />
-        <SummaryRow label="受影响记忆" value={`${numberValue(memories.affected)} 条（保持 active ${numberValue(memories.active)} · 来源失效 stale ${numberValue(memories.stale)}）`} />
-        <SummaryRow label="阶段一来源" value={`${numberValue(stage1.total)} 条（当前 ${numberValue(stage1.current)} · 已撤回 ${numberValue(stage1.withdrawn)} · 孤立 ${numberValue(stage1.orphaned)}）`} />
-        <SummaryRow label="不同文件身份" value={`${numberValue(summary.distinct_file_ids)} 个 FileId`} />
-      </div>
-      {numberValue(finalSources.unverified) > 0 ? <Notice tone="warning">首次审计尚未覆盖所有来源。未核验的笔记依赖型记忆会暂时退出正常召回。</Notice> : null}
-      {Object.keys(audit).length > 0 ? <small>最近审计：{stringValue(audit.status, '未知')} · 更新于 {formatTime(audit.updated_at)} · 代次 <code>{truncateId(stringValue(audit.generation))}</code></small> : <small>尚未记录完整来源审计。</small>}
-      {sources.length > 0 ? (
-        <details className="disclosure memory-source-details">
-          <summary>查看来源健康明细样例（{sources.length}）</summary>
-          <div className="record-list">
-            {sources.map((source) => (
-              <article className="record-item record-item--stack" key={stringValue(source.source_id)}>
-                <div className="record-title"><strong>{memorySourceHealthLabel(source.health)}</strong><StatusBadge tone={stringValue(source.health) === 'current' ? 'success' : stringValue(source.health) === 'unverified' ? 'neutral' : 'warning'}>{memorySourceHealthLabel(source.health)}</StatusBadge></div>
-                <p>来源笔记 <code>{stringValue(source.current_path, stringValue(source.recorded_path, '当前路径不可用'))}</code></p>
-                <small>记忆 {truncateId(stringValue(source.memory_id))} · 来源 {truncateId(stringValue(source.source_id))} · 证据修订 {numberValue(source.evidence_revision)}</small>
-                {stringValue(source.health_reason, '') ? <small>原因：{stringValue(source.health_reason)}</small> : null}
-              </article>
-            ))}
-          </div>
-        </details>
-      ) : null}
-    </Panel>
-  );
 }
 
 function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonObject; jobs: JsonObject[]; notify: Notify; onRefresh: () => void }) {
   const policy = asRecord(data.policy);
   const readiness = asRecord(data.readiness);
-  const phase1Readiness = asRecord(data.phase1_readiness);
-  const phase2Readiness = asRecord(data.phase2_readiness);
-  const stage1 = asRecord(data.stage1);
-  const consolidation = asRecord(data.consolidation);
   const blockers = Array.isArray(readiness.blockers) ? readiness.blockers.map(String) : [];
   const [enabled, setEnabled] = useState(booleanValue(policy.enabled));
   const [requestTimeoutSeconds, setRequestTimeoutSeconds] = useState(numberValue(policy.request_timeout_seconds, 300));
@@ -1757,8 +1651,8 @@ function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonOb
           expected_revision: typeof data.revision === 'number' ? data.revision : null,
         },
       });
-      setOperationMessage({ text: '两阶段记忆设置已保存。', tone: 'success' });
-      notify('两阶段记忆设置已保存。');
+      setOperationMessage({ text: '当前集合提取设置已保存。', tone: 'success' });
+      notify('当前集合提取设置已保存。');
       setDirty(false);
       onRefresh();
     } catch (error: unknown) {
@@ -1768,7 +1662,7 @@ function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonOb
 
   async function processExistingNotes(includeEvaluated: boolean) {
     const prompt = includeEvaluated
-      ? '确定重新提取全部现有笔记吗？未修改且已经成功提取的笔记也会再次调用提取模型，然后由整理模型重新合并；这会增加 Token 消耗。'
+      ? '确定重新提取全部现有笔记吗？未修改且已成功提取的笔记也会再次调用一次提取模型，并整体替换各自的当前集合；这会增加 Token 消耗。'
       : '确定处理新增、内容有变化、配置有变化或上次失败的笔记吗？未变化且已经成功提取的笔记不会再次调用模型。';
     if (!window.confirm(prompt)) return;
     setBusy(true);
@@ -1783,8 +1677,8 @@ function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonOb
       const text = reused
         ? `已有记忆任务 ${truncateId(jobId)} 正在执行，没有重复创建。`
         : includeEvaluated
-          ? `任务 ${truncateId(jobId)} 已开始重新提取全部笔记，提取完成后会自动整理。`
-          : `任务 ${truncateId(jobId)} 已开始处理新增或变化的笔记，提取完成后会自动整理。`;
+          ? `任务 ${truncateId(jobId)} 已开始重新提取全部笔记。`
+          : `任务 ${truncateId(jobId)} 已开始处理新增或变化的笔记。`;
       setOperationMessage({ text, tone: 'success' });
       notify(text);
       onRefresh();
@@ -1795,36 +1689,29 @@ function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonOb
     } finally { setBusy(false); }
   }
 
-  const pipelineReady = booleanValue(readiness.ready);
-  const configurationReady = booleanValue(phase1Readiness.ready) && booleanValue(phase2Readiness.ready);
-  const regenerationPending = booleanValue(consolidation.regeneration_pending);
+  const configurationReady = booleanValue(readiness.ready);
   return (
     <Panel
-      title="两阶段长期记忆"
-      eyebrow="先提取 · 再整理"
-      description="阶段一逐篇提炼原始记忆，并由本地绑定笔记来源修订；阶段二在 Vault 范围内合并、去重、处理冲突，并写入最终语义记忆。"
-      actions={<StatusBadge tone={pipelineReady ? 'success' : 'warning'}>{pipelineReady ? '可以运行' : configurationReady && regenerationPending ? '准备重新生成' : '尚未就绪'}</StatusBadge>}
+      title="笔记当前记忆集合"
+      eyebrow="一次提取 · 整体替换"
+      description="每篇笔记一次模型调用，返回该来源的完整当前集合；服务校验后以 File ID 和内容哈希原子发布。"
+      actions={<StatusBadge tone={configurationReady ? 'success' : 'warning'}>{configurationReady ? '可以运行' : '尚未就绪'}</StatusBadge>}
     >
       <div className="compact-form">
         <div className="choice-group">
-          <Choice checked={enabled} label="自动处理笔记变更" detail="笔记新建或更新后自动执行阶段一，并在后台触发阶段二整理" onChange={() => { setEnabled((value) => !value); setDirty(true); }} />
+          <Choice checked={enabled} label="自动处理笔记变更" detail="笔记新建或内容变化后，生成并整体替换该来源的当前集合" onChange={() => { setEnabled((value) => !value); setDirty(true); }} />
         </div>
         <div className="button-row">
           <button className="secondary-button" disabled={busy || !dirty} type="button" onClick={() => void save()}>{busy ? '正在保存…' : '保存设置'}</button>
         </div>
       </div>
-      <Notice tone="info">提取模型不负责返回证据行号；服务会把原始记忆绑定到当前笔记及其修订。最终记忆是模型归纳后的简短语义，阶段二会自动决定保留、合并、更新或遗忘，不存在“待审核候选”，也不需要人工逐条确认。</Notice>
+      <Notice tone="info">模型只返回 content、可选 kind 和 tags。ID、来源、规范 Markdown、历史和原子发布均由服务负责；来源内容一变，旧集合立即不可读。</Notice>
       {operationMessage ? <Notice tone={operationMessage.tone}>{operationMessage.text}</Notice> : null}
       <div className="summary-list">
-        <SummaryRow label="阶段一 · 提取模型" value={stringValue(phase1Readiness.external_model_id, '未绑定')} mono />
-        <SummaryRow label="阶段二 · 整理模型" value={stringValue(phase2Readiness.external_model_id, '未绑定')} mono />
-        <SummaryRow label="已处理笔记来源" value={`${numberValue(stage1.total)}（有原始记忆 ${numberValue(stage1.ready)} · 无需记忆 ${numberValue(stage1.no_output)}）`} />
-        <SummaryRow label="等待整理的原始输入" value={numberValue(stage1.pending)} />
-        <SummaryRow label="已提交全局记忆版本" value={numberValue(consolidation.generation)} />
-        <SummaryRow label="最近整理完成" value={formatTime(consolidation.last_success_at)} />
+        <SummaryRow label="提取模型" value={stringValue(readiness.external_model_id, '未绑定')} mono />
+        <SummaryRow label="每篇模型调用" value="1 次" />
+        <SummaryRow label="发布方式" value="按来源完整集合原子替换" />
       </div>
-      {numberValue(consolidation.pipeline_generation) < 1 ? <Notice tone="warning">旧版记忆系统正在整体作废并清理；普通 Vault 笔记不会删除，清理完成后会从第 1 篇重新提取。</Notice> : null}
-      {numberValue(consolidation.pipeline_generation) >= 1 && regenerationPending ? <Notice tone="warning">旧版记忆和任务已清理；配置就绪后会立即创建全量任务，也可以点击下方按钮立即触发。</Notice> : null}
       {blockers.length > 0 ? <Notice tone="warning">{blockers.map(extractionBlockerLabel).join('；')}。</Notice> : null}
       <details className="disclosure">
         <summary>高级设置</summary>
@@ -1833,7 +1720,7 @@ function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonOb
         </div>
       </details>
       <div className="button-row">
-        <button className="primary-button" disabled={busy || Boolean(activeJob) || !enabled || !configurationReady} type="button" onClick={() => void processExistingNotes(false)}>{activeJob ? `任务执行中 · ${jobProgressLabel(activeJob)}` : regenerationPending ? '立即开始全量生成' : '处理新增或变化的笔记'}</button>
+        <button className="primary-button" disabled={busy || Boolean(activeJob) || !enabled || !configurationReady} type="button" onClick={() => void processExistingNotes(false)}>{activeJob ? `任务执行中 · ${jobProgressLabel(activeJob)}` : '处理新增或变化的笔记'}</button>
         <button className="secondary-button" disabled={busy || Boolean(activeJob) || !enabled || !configurationReady} type="button" onClick={() => void processExistingNotes(true)}>重新提取全部笔记</button>
       </div>
       {visibleJobs.length > 0 ? (
@@ -1859,20 +1746,13 @@ function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonOb
 
 function extractionBlockerLabel(code: string): string {
   const labels: Record<string, string> = {
-    memory_pipeline_reset_pending: '新版记忆系统正在清理旧数据并准备从头生成',
-    memory_pipeline_regeneration_pending: '新版记忆系统正在创建必须的全量重新提取任务',
     extraction_disabled: '尚未启用自动记忆',
     provider_mode_disabled: 'AI 数据发送策略仍为禁用',
-    model_binding_missing: '尚未绑定阶段一“记忆提取”模型',
-    model_missing: '阶段一绑定的模型记录不存在',
-    model_disabled: '阶段一绑定的模型已停用',
-    provider_missing: '阶段一模型所属 AI 服务不存在',
-    provider_disabled: '阶段一模型所属 AI 服务已停用',
-    consolidation_model_binding_missing: '尚未绑定阶段二“记忆整理”模型',
-    consolidation_model_missing: '阶段二绑定的模型记录不存在',
-    consolidation_model_disabled: '阶段二绑定的模型已停用',
-    consolidation_provider_missing: '阶段二模型所属 AI 服务不存在',
-    consolidation_provider_disabled: '阶段二模型所属 AI 服务已停用',
+    model_binding_missing: '尚未绑定“记忆提取”模型',
+    model_missing: '绑定的提取模型记录不存在',
+    model_disabled: '绑定的提取模型已停用',
+    provider_missing: '提取模型所属 AI 服务不存在',
+    provider_disabled: '提取模型所属 AI 服务已停用',
   };
   return labels[code] ?? code;
 }
@@ -1903,9 +1783,7 @@ function JobsPage({ data, notify, onRefresh }: { data: JsonObject | null; notify
       <div className="record-list">
         {jobs.map((job) => {
           const status = stringValue(job.status, 'unknown');
-          const jobType = stringValue(job.job_type);
-          const protectedWhileRunning = status === 'running' && ['memory.consolidate', 'memory.reset_pipeline'].includes(jobType);
-          const cancellable = ['queued', 'running', 'retry_wait'].includes(status) && !protectedWhileRunning;
+          const cancellable = ['queued', 'running', 'retry_wait'].includes(status);
           return (
             <article className="record-item" key={stringValue(job.id)}>
               <div className="record-main">
@@ -1996,8 +1874,8 @@ function jobProgressDetail(job: JsonObject): string {
   const total = numberValue(progress.total);
   const currentIndex = numberValue(progress.current_index);
   const currentPath = stringValue(progress.current_path, '');
-  const rawMemoriesStaged = numberValue(progress.raw_memories_staged);
-  const phase1NoOutput = numberValue(progress.phase1_no_output);
+  const itemsPublished = numberValue(progress.items_published);
+  const emptySetsPublished = numberValue(progress.empty_sets_published);
   const sourceIngestionFailures = numberValue(progress.source_ingestion_failures);
   const sourceIngestionFailureNotes = arrayRecords(progress.source_ingestion_failure_notes);
   const generatedOutputFailures = numberValue(progress.generated_output_failures);
@@ -2005,37 +1883,11 @@ function jobProgressDetail(job: JsonObject): string {
   const notesEvaluated = numberValue(progress.notes_evaluated);
   const sourcePolicySkipped = numberValue(progress.source_policy_skipped);
   const alreadyEvaluatedSkipped = numberValue(progress.already_evaluated_skipped);
-  const created = numberValue(progress.created);
-  const updated = numberValue(progress.updated);
-  const retired = numberValue(progress.retired);
-  const discarded = numberValue(progress.discarded);
-  const pendingRawInputs = numberValue(progress.pending_raw_inputs);
-  const generation = numberValue(progress.generation);
-  const memoriesRewritten = numberValue(progress.memories_rewritten);
-  const stage1SourcesRebound = numberValue(progress.stage1_sources_rebound);
-  const unresolvedNoteSources = numberValue(progress.unresolved_note_sources);
-  const memoriesMarkedStale = numberValue(progress.memories_marked_stale);
   const noteStartedAt = numberValue(progress.note_started_at);
   const lastNoteElapsedMs = numberValue(progress.last_note_elapsed_ms);
-  const sourceCounts = asRecord(progress.counts);
-  const auditedSources = numberValue(sourceCounts.final_sources_checked);
-  const sourceErrors = numberValue(sourceCounts.errors);
-  const enriched = numberValue(progress.enriched);
-  const rewrittenForLanguage = numberValue(progress.rewritten);
-  const retrievalRemaining = numberValue(progress.remaining);
 
   let detail: string;
-  if (phase === 'consolidating') {
-    detail = `正在整理原始记忆：已处理 ${completed} / ${total || completed + pendingRawInputs} 条${pendingRawInputs > 0 ? `，仍待 ${pendingRawInputs} 条` : ''}`;
-  } else if (phase === 'enriching') {
-    detail = `正在生成跨语言检索信息：已完成 ${enriched} 条${retrievalRemaining > 0 ? `，仍待 ${retrievalRemaining} 条` : ''}`;
-  } else if (phase === 'repairing_memory_sources') {
-    detail = '正在核对历史记忆的文件身份和当前路径';
-  } else if (phase === 'auditing_sources') {
-    detail = `正在持续核验记忆来源：已处理 ${auditedSources} 条最终来源`;
-  } else if (phase === 'resetting_memory_pipeline') {
-    detail = '正在清空旧版记忆系统';
-  } else if (phase === 'extracting_note') {
+  if (phase === 'extracting_note') {
     detail = `正在处理第 ${currentIndex || completed + 1} / ${total || 1} 篇${currentPath ? `：${currentPath}` : ''}`;
   } else if (phase === 'waiting_retry' || phase === 'failed') {
     detail = `第 ${currentIndex || completed + 1} / ${total || 1} 篇未完成${currentPath ? `：${currentPath}` : ''}`;
@@ -2043,18 +1895,8 @@ function jobProgressDetail(job: JsonObject): string {
     detail = `已处理 ${completed} / ${total} 篇，因连续模型输出错误暂停`;
   } else if (phase === 'enumerated') {
     detail = `已发现 ${total} 篇 Markdown，准备开始`;
-  } else if (phase === 'completed' && stringValue(job.job_type) === 'memory.consolidate') {
-    detail = `已完成第 ${generation} 版全局记忆整理`;
-  } else if (phase === 'completed' && stringValue(job.job_type) === 'memory.reset_pipeline') {
-    detail = '旧版记忆和任务已作废，准备从头生成';
-  } else if (phase === 'completed' && stringValue(job.job_type) === 'memory.repair_sources') {
-    detail = `已重写 ${memoriesRewritten} 条记忆来源，更新 ${stage1SourcesRebound} 条阶段一来源`;
-  } else if (phase === 'completed' && stringValue(job.job_type) === 'memory.enrich_retrieval') {
-    detail = `跨语言检索回填完成：覆盖 ${enriched} 条，等义改写 ${rewrittenForLanguage} 条`;
-  } else if (['completed', 'completed_with_errors'].includes(phase) && stringValue(job.job_type) === 'memory.audit_sources') {
-    detail = `来源审计完成：核验 ${auditedSources} 条最终来源${sourceErrors > 0 ? `，${sourceErrors} 条未能安全处理` : ''}`;
   } else if (phase === 'completed' && stringValue(job.job_type) === 'memory.source_reconcile') {
-    detail = `文件事件来源协调完成：核验 ${numberValue(progress.final_sources_checked)} 条最终来源`;
+    detail = `来源协调完成：检查 ${numberValue(progress.sources_checked)} 个当前集合`;
   } else if (phase === 'note_completed' || phase === 'completed' || phase === 'completed_with_errors') {
     detail = `已处理 ${completed} / ${total} 篇`;
   } else if (stringValue(job.job_type) === 'embedding.rebuild' && stringValue(details.source_type, '')) {
@@ -2077,16 +1919,10 @@ function jobProgressDetail(job: JsonObject): string {
     outcomes.push(`本篇耗时 ${formatJobDuration(lastNoteElapsedMs)}`);
   }
   if (notesEvaluated > 0) outcomes.push(`模型处理 ${notesEvaluated} 篇`);
-  if (rawMemoriesStaged > 0) outcomes.push(`提炼原始记忆 ${rawMemoriesStaged} 篇`);
-  if (phase1NoOutput > 0) outcomes.push(`无需形成记忆 ${phase1NoOutput} 篇`);
+  if (itemsPublished > 0) outcomes.push(`发布当前记忆 ${itemsPublished} 条`);
+  if (emptySetsPublished > 0) outcomes.push(`发布空集合 ${emptySetsPublished} 篇`);
   if (sourcePolicySkipped > 0) outcomes.push(`处理前跳过 ${sourcePolicySkipped} 篇`);
   if (alreadyEvaluatedSkipped > 0) outcomes.push(`未变化且已处理，跳过模型 ${alreadyEvaluatedSkipped} 篇`);
-  if (created > 0) outcomes.push(`新增长期记忆 ${created} 条`);
-  if (updated > 0) outcomes.push(`更新长期记忆 ${updated} 条`);
-  if (retired > 0) outcomes.push(`归档或替代 ${retired} 条`);
-  if (discarded > 0) outcomes.push(`丢弃低价值原始输入 ${discarded} 条`);
-  if (memoriesMarkedStale > 0) outcomes.push(`标记失效记忆 ${memoriesMarkedStale} 条`);
-  if (unresolvedNoteSources > 0) outcomes.push(`仍有 ${unresolvedNoteSources} 条来源无法证明当前文件身份`);
   if (sourceIngestionFailures > 0) outcomes.push(`源文件无法处理 ${sourceIngestionFailures} 篇（模型未调用）`);
   const latestSourceFailure = sourceIngestionFailureNotes.length > 0
     ? sourceIngestionFailureNotes[sourceIngestionFailureNotes.length - 1]
@@ -2108,14 +1944,8 @@ function jobProgressDetail(job: JsonObject): string {
     const schemaDetail = schemaIssue ? `（${schemaViolationLabel(schemaIssue, schemaPath)}）` : '';
     outcomes.push(`最近模型输出问题 ${failurePath}：${jobErrorLabel(errorCode)}${schemaDetail}`);
   }
-  if (numberValue(progress.removed_managed_files) > 0) outcomes.push(`删除旧版托管记忆文件 ${numberValue(progress.removed_managed_files)} 个`);
-  if (numberValue(progress.cleared_memories) > 0) outcomes.push(`清空旧版长期记忆 ${numberValue(progress.cleared_memories)} 条`);
-  if (numberValue(progress.cleared_stage1_outputs) > 0) outcomes.push(`清空旧版原始记忆 ${numberValue(progress.cleared_stage1_outputs)} 条`);
-  if (booleanValue(details.include_evaluated)) outcomes.push('任务模式：重新提取全部笔记');
-  if (phase === 'completed' && total === 0 && stringValue(job.job_type) === 'memory.extract') outcomes.push('没有 Markdown 笔记');
   return outcomes.length > 0 ? `${detail} · ${outcomes.join(' · ')}` : detail;
 }
-
 function schemaViolationLabel(issue: string, path: string): string {
   const location = path || '返回对象';
   const labels: Record<string, string> = {
@@ -2401,15 +2231,15 @@ function jobTypeLabel(value: unknown): string {
     'vault.reconcile': 'Vault 重新扫描',
     'index.rebuild': '重建知识索引',
     'outbox.event': '文件事件处理',
-    'memory.extract': '阶段一：提取原始记忆',
-    'memory.consolidate': '阶段二：整理长期记忆',
-    'memory.enrich_retrieval': '跨语言记忆检索回填',
-    'memory.reset_pipeline': '重置记忆系统',
-    'memory.revalidate': '记忆来源校验',
-    'memory.source_reconcile': '协调记忆来源',
-    'memory.audit_sources': '审计记忆来源健康',
-    'memory.rebuild': '重建记忆投影',
-    'memory.repair_sources': '修复历史记忆来源',
+    'memory.extract': '生成来源当前记忆集合',
+    'memory.consolidate': '旧版记忆任务（已退役）',
+    'memory.enrich_retrieval': '旧版记忆任务（已退役）',
+    'memory.reset_pipeline': '旧版记忆任务（已退役）',
+    'memory.revalidate': '旧版记忆任务（已退役）',
+    'memory.source_reconcile': '协调当前记忆来源',
+    'memory.audit_sources': '旧版记忆任务（已退役）',
+    'memory.rebuild': '旧版记忆任务（已退役）',
+    'memory.repair_sources': '旧版记忆任务（已退役）',
     'embedding.rebuild': '重建语义向量',
     'backup.create': '创建备份',
     'backup.verify': '验证备份',
@@ -2439,12 +2269,12 @@ function auditActionLabel(value: unknown): string {
     'admin.model_binding.updated': '更新模型用途',
     'admin.memory_extraction.updated': '更新自动记忆设置',
     'admin.memory_extraction.queued': '处理现有笔记',
-    'admin.memory_extraction.restarted': '重置并重新处理自动记忆',
+    'admin.memory_extraction.restarted': '旧版自动记忆重启（已退役）',
     'admin.memory.updated': '编辑长期记忆',
-    'admin.memory.archived': '归档长期记忆',
-    'admin.memory.restored': '恢复长期记忆',
-    'admin.memory.deleted': '永久删除长期记忆',
-    'admin.memory_source_audit.queued': '提交记忆来源健康审计',
+    'admin.memory.archived': '旧版记忆归档（已退役）',
+    'admin.memory.restored': '旧版记忆恢复（已退役）',
+    'admin.memory.deleted': '删除长期记忆',
+    'admin.memory_source_audit.queued': '旧版来源审计（已退役）',
     'admin.index.rebuild_queued': '提交索引重建',
     'admin.backup.created': '创建备份',
     'admin.restore.requested': '请求恢复',

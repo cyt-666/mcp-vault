@@ -18,6 +18,7 @@ use crate::{
     auth::AuthStateRepository,
     background::{JobRepository, OutboxRepository, ScanCheckpointRepository},
     backups::BackupRepository,
+    current_memory::CurrentMemoryRepository,
     error::{IntegrityReport, StateError},
     files::FileStateRepository,
     index::IndexRepository,
@@ -113,9 +114,14 @@ impl StateStore {
         IndexRepository::new(self.pool.clone())
     }
 
-    /// Return Vault-scoped durable memory and candidate operations.
+    /// Return prerelease memory operations for v2.1 migration/backup only.
     pub fn memory(&self) -> MemoryRepository {
         MemoryRepository::new(self.pool.clone())
+    }
+
+    /// Return current-only, source-owned durable-memory operations.
+    pub fn current_memory(&self) -> CurrentMemoryRepository {
+        CurrentMemoryRepository::new(self.pool.clone())
     }
 
     /// Return provider/model/binding/embedding repository operations.
@@ -544,6 +550,13 @@ mod tests {
             "memory_retrieval_metadata",
             "memory_retrieval_proposals",
             "memory_fts",
+            "memory_note_sets",
+            "memory_current_items",
+            "memory_current_sources",
+            "memory_current_idempotency",
+            "memory_current_fts",
+            "memory_note_set_snapshots",
+            "memory_v2_migration_state",
             "audit_log",
             "backups",
             "notes",
@@ -560,7 +573,7 @@ mod tests {
         let report = store.integrity_check().await.unwrap();
         assert!(report.integrity_ok);
         assert_eq!(report.foreign_key_violations, 0);
-        assert_eq!(report.migration_version, 14);
+        assert_eq!(report.migration_version, 15);
         assert!(store.foreign_keys_enabled().await.unwrap());
     }
 
@@ -682,7 +695,7 @@ mod tests {
         }
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 14);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 15);
     }
 
     #[tokio::test]
@@ -724,7 +737,7 @@ mod tests {
         assert!(jwks.is_none());
         assert_eq!(enabled, 0);
         assert!(store.has_table("installation_key_checks").await.unwrap());
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 14);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 15);
     }
 
     #[tokio::test]
@@ -775,7 +788,7 @@ mod tests {
         assert_eq!(store.integrity_check().await.unwrap().migration_version, 10);
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 14);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 15);
     }
 
     #[tokio::test]
@@ -931,7 +944,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(pipeline_column, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 14);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 15);
     }
 
     #[tokio::test]
@@ -993,7 +1006,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(retained, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 14);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 15);
     }
 
     #[tokio::test]
@@ -1078,7 +1091,7 @@ mod tests {
         .unwrap();
         assert_eq!(reason.as_deref(), Some("source_unavailable"));
         assert_eq!(changed_at, Some(20));
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 14);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 15);
     }
 
     #[tokio::test]
@@ -1216,7 +1229,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(fts_row, (String::new(), "keep canonical memory".to_owned()));
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 14);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 15);
     }
 
     #[tokio::test]

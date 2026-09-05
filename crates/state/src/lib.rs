@@ -7,6 +7,7 @@ mod audit;
 mod auth;
 mod background;
 mod backups;
+mod current_memory;
 mod error;
 mod files;
 mod index;
@@ -30,6 +31,12 @@ pub use background::{
     ScanCheckpointRecord, ScanCheckpointRepository, ScanStatus,
 };
 pub use backups::{BackupRecord, BackupRepository, BackupStatus};
+pub use current_memory::{
+    CurrentExplicitReservation, CurrentMemoryBundle, CurrentMemoryCounts, CurrentMemoryFilter,
+    CurrentMemoryOwnership, CurrentMemoryRecord, CurrentMemoryRepository, CurrentMemorySearchHit,
+    CurrentMemorySourceRecord, MemoryNoteSetRecord, MemoryNoteSetSnapshotRecord,
+    MemoryV2MigrationPreflight,
+};
 pub use error::{IntegrityReport, StateError};
 pub use files::{
     CommitHook, CommitHookPhase, CommitMutationInput, EntryType, FileOperation, FileRecord,

@@ -762,112 +762,52 @@ unindexed filter columns; it is always replaceable from the canonical notes.
 
 ## 13. Memory schema
 
-The complete memory schema is defined in `memory-system.md`. At minimum it includes:
+The normative v2.1 schema is defined in `memory-system.md` and migration 0015.
+It contains:
 
-- canonical memories;
-- multiple provenance sources;
-- sourced Phase 1 raw outputs and no-output coverage;
-- prepared Phase 2 proposals and committed consolidation generations;
-- entities, tags, and relations;
-- FTS and multilingual retrieval projections;
-- embeddings;
-- lifecycle and temporal validity;
-- recall statistics.
+- `memory_current_items`: explicit and note-derived current projections, with
+  no lifecycle column;
+- `memory_current_sources`: Vault-scoped provenance for current items;
+- `memory_note_sets`: exactly one complete current set per source File ID,
+  including exact source hash/revision, set revision, pause flag, canonical
+  file identity, and extraction profile;
+- `memory_note_set_snapshots`: one prepared whole-set proposal per source for
+  filesystem/SQLite crash recovery;
+- `memory_current_idempotency` and
+  `memory_current_explicit_reservations`: completed and pre-write explicit
+  command identities;
+- `memory_current_fts`: a rebuildable current-only FTS5 projection;
+- existing embedding rows, accepted only with current content/profile/input
+  hashes.
 
-Memory queries always include `vault_id`.
+An explicit item has its own canonical file metadata and no set ID. A
+note-derived item has a set ID/ordinal and uses its set's canonical Markdown.
+Repository eligibility joins exact live canonical revisions; note-derived rows
+also join a live source File ID with the stored full-content hash. Every child
+key and query includes `vault_id`.
 
-Note-source identity is stable across rename: `memory_sources.note_file_id`
-binds the source to `file_entries.id`, `note_revision` identifies the evidence,
-and `note_path` retains the evidence binding. Canonical memory Markdown mirrors
-the stable identity in optional `sources[].file_id`. Runtime output exposes a
-path only when source health proves a current readable file.
+The v2.1 canonical namespace is:
 
-Migration `0013_continuous_memory_source_health.sql` adds optional
-`memories.status_reason`/`status_changed_at`, the Vault-scoped derived
-`memory_source_health` table, and the latest repeatable audit cursor/result.
-Health state is one of `unverified|current|content_changed|deleted|identity_missing|identity_ambiguous`.
-Current rows include resolved File ID/path, checked revision, verified raw file
-hash, event, reason, and timestamps. Legacy note sources are inserted as
-`unverified`; legacy stale rows receive `source_unavailable` so exact first-
-audit recovery can reactivate them safely.
+```text
+memory/current/explicit/{memory_id}.md
+memory/current/sources/{source_file_id}.md
+```
 
-Migration `0014_multilingual_memory_retrieval.sql` adds two Vault-scoped,
-rebuildable structures:
+Legacy `memories`, source-health, raw/stage, consolidation, relation,
+candidate, diagnostic, and retrieval-alias tables remain only as
+non-destructive migration input. They are not joined by current get/list/
+recall/resource/embedding resolution. Migration classification is recorded in
+`memory_v2_migration_state`; it never contains memory bodies in its report.
 
-- `memory_retrieval_metadata`, keyed by `(vault_id, memory_id)`, binds aliases
-  to the exact canonical `content_hash` and retrieval `profile_hash`. A ready
-  row stores the validated source language, bounded structured aliases,
-  flattened alias text, deterministic search terms, timestamps, and an
-  optional stable rewrite warning. Pending/failed rows carry no Provider text.
-- `memory_retrieval_proposals` stores the server-owned snapshot and fully
-  validated prepared proposal before any canonical rewrite. Its applied-prefix
-  counter makes partial application resumable without repeating the Provider
-  call.
+### 13.1 Superseded prerelease schema (non-normative)
 
-The same migration recreates derived `memory_fts` with `aliases` and
-`search_terms` fields. Application rebuilds emit NFKC/case/punctuation-
-normalized Latin terms and overlapping Han bigrams; aliases are never part of
-the canonical memory content hash, source evidence, or duplicate identity.
-
-Migration `0007_memory_state.sql` owns final `memories`, `memory_sources`,
-`memory_entities`, `memory_tags`, `memory_relations`, legacy
-`memory_candidates`, explicit-command idempotency, diagnostics, and the
-rebuildable `memory_fts` projection. `memory_candidates` is retained only as an
-obsolete prerelease schema and is cleared by migration 0011; current Admin/MCP paths
-do not create, review, or promote candidate rows. Composite foreign keys
-include `(vault_id, memory_id)` or `(vault_id, file_id)` wherever a row
-references another Vault-owned object.
-Active and archived memory Markdown is materialized under the reserved
-managed namespace through explicit Vault Core methods; its `file_entries` and
-`file_revisions` rows are hidden from ordinary protocol paths and excluded
-from reconciliation delete inference.
-
-The Vault-scoped extraction setting includes fixed `source_mode: "automatic"`
-and a per-note timeout. `max_evidence_per_note` and
-`max_candidates_per_note` deserialize for prerelease compatibility but are not
-part of the Phase 1 v5 model contract. Legacy `explicit_only` and `all_notes`
-inputs remain source-mode aliases. No author-facing note metadata or score
-threshold controls source admission.
-
-Migration `0010_codex_two_phase_memory.sql` adds the Codex-style operational
-state:
-
-- `memory_stage1_outputs`: one current Vault/source row with source identity,
-  optional note revision, extraction profile/prompt/pipeline, redacted semantic
-  raw memory and rollout-derived source summary, locally derived whole-source
-  provenance JSON, admission metadata,
-  output hash, `ready|no_output|withdrawn`, and exact Phase 2 selection state;
-- `memory_consolidation_proposals`: one prepared/applied/rejected untrusted
-  proposal per Vault/input hash, including model/Provider/prompt identity,
-  exact raw/current-memory snapshot metadata, locally captured base revisions,
-  and the validated Phase 2 output;
-- `memory_consolidation_state`: committed generation, compact summary, last
-  input/proposal, success time, current `pipeline_generation`, and the durable
-  post-cutover `regeneration_pending` admission flag;
-- a partial unique index that permits at most one queued/running/retry-wait
-  `memory.consolidate` job per Vault.
-
-`memory_source_health` is derived and may be rebuilt. `status_reason`, final
-provenance, and lifecycle remain part of the durable projection and canonical
-Markdown. Replacing a memory bundle upserts stable source IDs and deletes only
-removed sources so an unrelated metadata update cannot erase verified health.
-
-Stage 1 evidence JSON contains source type, file ID/path/revision, optional line
-range, and excerpt hash; exact model quotations are not persisted. Generated
-raw/summary/final strings are best-effort secret-redacted before storage.
-`profile_hash` covers output-affecting policy, prompt/pipeline, binding, model,
-and Provider configuration. A valid `no_output` is successful coverage. A
-failed call does not replace the current output.
-
-Phase 2 input selection and generation advancement are separate. The prepared
-proposal is persisted before Vault Core writes. `commit_consolidation` marks the
-proposal applied, selects exact `(raw_id, output_hash)` pairs, increments usage,
-and advances the Vault generation in one SQLite transaction. The commit is
-idempotent for an already applied proposal/input hash. Prepared proposals also
-provide the recovery identity for byte-identical managed-file adoption after a
-file-write/projection-commit interruption. Permanent final-memory
-deletion removes the current projection and managed current file while Vault
-Core history and backup retention remain independent.
+Older migrations created lifecycle, raw/stage, consolidation, relation,
+source-health, diagnostic, and retrieval-alias tables. They remain intact as
+non-destructive migration/backup input, but no current repository query joins
+them. Migration 0015 classifies legacy rows per Vault and records only a
+content-free report; it never turns ambiguous multi-source output into a
+current owner by guesswork. These tables can be retired only by a separately
+authorized future retention procedure.
 
 ## 14. Provider and model configuration
 
@@ -915,7 +855,6 @@ Roles:
 
 ```text
 memory_extraction
-memory_consolidation
 note_summary
 topic_enrichment
 embedding_note
@@ -947,6 +886,8 @@ CREATE TABLE embedding_records (
     model_id TEXT NOT NULL,
     dimension INTEGER NOT NULL,
     content_hash TEXT NOT NULL,
+    profile_hash TEXT NOT NULL,
+    input_hash TEXT NOT NULL,
     vector_backend_key TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     UNIQUE(vault_id, object_type, object_id, chunk_key, model_id)
@@ -955,7 +896,12 @@ CREATE TABLE embedding_records (
 
 A pinned `sqlite-vec` backend may be used, but it remains behind the project interface because the extension is pre-1.0. Provide a deterministic exact-cosine fallback for development, recovery, and small installations.
 
-Never mix dimensions or models in one similarity query.
+Never mix dimensions, models, profiles, or prepared-input hashes in one
+similarity query. `content_hash` identifies the source object state;
+`input_hash` separately identifies the exact prefixed/chunked text actually
+sent to the embedding model. `profile_hash` covers the non-secret provider,
+model, dimension, endpoint/settings/capabilities, task/prefix/chunk rules, and
+projection version.
 
 Similarity queries also require an exact object type before Top-K selection.
 The current values are `memory` and `note`; each `note` row represents one
@@ -1049,10 +995,9 @@ artifact.
 | FTS | Note projection or files | Yes |
 | Embeddings | Canonical text + model configuration | Yes |
 | Topic projections | Files + taxonomy + provider config | Yes |
-| Stage 1 SQLite projection | Managed raw/source-summary artifacts + source notes | Yes |
-| Phase 2/query projection | Canonical memory artifacts | Yes |
-| Multilingual memory aliases/proposals | Canonical memory + verified sources + Provider config | Yes |
-| Active memory Markdown | Canonical memory files | No; must be preserved |
+| Current memory SQLite/FTS projection | Current canonical memory/set Markdown + exact source metadata | Yes |
+| Legacy Phase 1/Phase 2/source-health rows | Migration backup only | Not part of current runtime |
+| Current explicit/set Markdown | Canonical memory files/source notes | Explicit must be preserved; note sets can be regenerated |
 | Credentials and settings | Operational DB | No |
 | Revisions/history | Operational DB + blob store | No |
 | Audit | Operational DB | No |
@@ -1065,6 +1010,11 @@ artifact.
 - Keep migrations forward-only.
 - A migration that changes canonical managed Markdown requires an idempotent filesystem migrator with journal and dry-run support.
 - Provider/model changes schedule new derived work; they do not rewrite source notes.
+
+Migrations 0006-0014 below are immutable release history. Their prerelease
+memory tables and jobs are not the current runtime contract; ADR-0026 and
+migration 0015 define the active current-only model.
+
 - Migration 0006 upgrades provider/model configuration and adds rebuildable
   provider health and Vault-scoped embedding/vector state.
 - Migration 0007 adds the Vault-scoped final-memory projection, legacy
@@ -1090,4 +1040,9 @@ artifact.
   rebuilds only the derived memory FTS. It does not rewrite existing canonical
   memory; an authenticated Admin starts any historical body/alias backfill
   after taking a backup.
+- Migration 0015 adds the current-only explicit/source-set schema, prepared
+  whole-set snapshots, explicit idempotency reservations, non-destructive
+  migration preflight state, and exact embedding profile/input hashes. Legacy
+  rows are retained and never auto-promoted or deleted; an authenticated Admin
+  explicitly preflights and executes migration.
 - Every migration must preserve Vault IDs and credential bindings.

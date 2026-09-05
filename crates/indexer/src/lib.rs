@@ -17,8 +17,8 @@ use comrak::{
 use mcp_vault_core::{VaultCore, VaultError};
 use mcp_vault_domain::{FileId, ModelId, Revision, VaultContext, VaultId, VaultPath};
 use mcp_vault_providers::{
-    EmbeddingRequest, EmbeddingSourceRef, EmbeddingSourceResolver, ProviderError, ProviderMode,
-    ProviderService,
+    EmbeddingInput, EmbeddingRequest, EmbeddingSourceRef, EmbeddingSourceResolver, ProviderError,
+    ProviderMode, ProviderService, embedding_input_hash,
 };
 use mcp_vault_state::{
     EntryType, FileRecord, HeadingProjectionInput, IndexMembershipProjectionInput,
@@ -33,7 +33,7 @@ use tokio::io::AsyncReadExt;
 use yaml_rust::{Yaml, YamlLoader};
 
 /// Current projection schema version.
-pub const ANALYZER_VERSION: u32 = 1;
+pub const ANALYZER_VERSION: u32 = 2;
 /// Maximum canonical Markdown payload analyzed in one request/job.
 pub const MAX_NOTE_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum frontmatter/taxonomy payload decoded as YAML.
@@ -53,10 +53,16 @@ pub const NOTE_EMBEDDING_MAX_INPUT_BYTES: usize = 2_048;
 pub const NOTE_EMBEDDING_CONTEXT_MAX_BYTES: usize = 512;
 /// Approximate UTF-8 byte overlap retained between adjacent semantic chunks.
 pub const NOTE_EMBEDDING_CHUNK_OVERLAP_BYTES: usize = 256;
-/// Maximum semantic chunks derived from one bounded note projection.
-pub const MAX_NOTE_EMBEDDING_CHUNKS: usize = 128;
+/// Tail window searched for a paragraph/line/sentence boundary before a hard
+/// byte cut. Keeping this below the overlap-adjusted safety margin preserves
+/// the complete 8 MiB coverage bound.
+const NOTE_EMBEDDING_BOUNDARY_LOOKBACK_BYTES: usize = 192;
+/// Maximum chunks required to cover the complete supported 8 MiB note input.
+/// This is a safety assertion, not a sampling cap: supported notes are never
+/// represented by sparse head/middle/tail samples.
+pub const MAX_NOTE_EMBEDDING_CHUNKS: usize = 8_192;
 /// Derived note-vector chunk profile encoded into every source key.
-pub const NOTE_EMBEDDING_CHUNK_PROFILE: &str = "text-v2";
+pub const NOTE_EMBEDDING_CHUNK_PROFILE: &str = "text-v3";
 /// Maximum raw note-vector rows considered before current-note aggregation.
 const MAX_NOTE_VECTOR_CANDIDATES: u32 = 10_000;
 
@@ -247,6 +253,7 @@ struct NoteEmbeddingChunk {
 struct CurrentNoteEmbeddingChunk {
     snippet: String,
     content_hash: String,
+    input_hash: String,
 }
 
 /// Analyze one Markdown payload without touching the filesystem or database.
@@ -269,6 +276,8 @@ pub fn analyze_markdown(
 
     let mut options = Options::default();
     options.extension.front_matter_delimiter = Some("---".to_owned());
+    options.extension.table = true;
+    options.extension.tasklist = true;
     options.extension.wikilinks_title_after_pipe = true;
     options.extension.wikilinks_title_before_pipe = true;
     options.parse.escaped_char_spans = true;
@@ -837,11 +846,21 @@ fn append_inline_text<'a>(node: &'a AstNode<'a>, output: &mut String) {
 }
 
 fn plain_text<'a>(root: &'a AstNode<'a>) -> String {
-    let mut output = String::new();
+    let mut blocks = Vec::new();
     for child in root.children() {
-        append_plain_text(child, &mut output);
+        let mut block = String::new();
+        append_plain_text(child, &mut block);
+        let block = block
+            .lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !block.is_empty() {
+            blocks.push(block);
+        }
     }
-    output.split_whitespace().collect::<Vec<_>>().join(" ")
+    blocks.join("\n\n")
 }
 
 fn append_plain_text<'a>(node: &'a AstNode<'a>, output: &mut String) {
@@ -861,12 +880,14 @@ fn append_plain_text<'a>(node: &'a AstNode<'a>, output: &mut String) {
             }
         }
     }
-    let is_block = matches!(
-        node.data.borrow().value,
-        NodeValue::Paragraph | NodeValue::Heading(_)
-    );
-    if is_block {
-        output.push(' ');
+    match node.data.borrow().value {
+        NodeValue::TableCell => output.push_str(" | "),
+        NodeValue::Paragraph
+        | NodeValue::Heading(_)
+        | NodeValue::Item(_)
+        | NodeValue::CodeBlock(_)
+        | NodeValue::TableRow(_) => output.push('\n'),
+        _ => {}
     }
 }
 
@@ -1187,16 +1208,28 @@ impl IndexService {
         else {
             return Ok(NoteEmbeddingScheduleReport::default());
         };
-        let sources = self.note_embedding_sources(context).await?;
+        let inputs = self.note_embedding_inputs(context).await?;
+        let sources = inputs
+            .iter()
+            .map(|input| input.source.clone())
+            .collect::<Vec<_>>();
+        let profile_hash = providers
+            .embeddings()
+            .profile_hash(binding.model_id)
+            .await?;
         let existing = self
             .note_embedding_metadata(context, binding.model_id)
             .await?;
-        let current = sources
+        let current = inputs
             .iter()
-            .map(|source| {
+            .map(|input| {
+                let source = &input.source;
                 (
                     (source.object_id.clone(), source.chunk_key.clone()),
-                    source.content_hash.clone(),
+                    (
+                        source.content_hash.clone(),
+                        embedding_input_hash(&profile_hash, source, &input.text),
+                    ),
                 )
             })
             .collect::<HashMap<_, _>>();
@@ -1206,14 +1239,15 @@ impl IndexService {
         };
         for embedding in &existing {
             let key = (embedding.object_id.clone(), embedding.chunk_key.clone());
-            if current
-                .get(&key)
-                .is_none_or(|content_hash| content_hash != &embedding.content_hash)
-                && self
-                    .state
-                    .providers()
-                    .delete_embedding(context, embedding.id)
-                    .await?
+            if current.get(&key).is_none_or(|(content_hash, input_hash)| {
+                content_hash != &embedding.content_hash
+                    || input_hash != &embedding.input_hash
+                    || embedding.profile_hash != profile_hash
+            }) && self
+                .state
+                .providers()
+                .delete_embedding(context, embedding.id)
+                .await?
             {
                 report.pruned_vectors = report.pruned_vectors.saturating_add(1);
             }
@@ -1223,15 +1257,25 @@ impl IndexService {
             .map(|embedding| {
                 (
                     (embedding.object_id, embedding.chunk_key),
-                    embedding.content_hash,
+                    (
+                        embedding.content_hash,
+                        embedding.profile_hash,
+                        embedding.input_hash,
+                    ),
                 )
             })
             .collect::<HashMap<_, _>>();
         let missing = sources
             .into_iter()
             .filter(|source| {
-                existing.get(&(source.object_id.clone(), source.chunk_key.clone()))
-                    != Some(&source.content_hash)
+                let expected = current.get(&(source.object_id.clone(), source.chunk_key.clone()));
+                existing
+                    .get(&(source.object_id.clone(), source.chunk_key.clone()))
+                    .is_none_or(|(content_hash, stored_profile, input_hash)| {
+                        expected.is_none_or(|(expected_content, expected_input)| {
+                            content_hash != expected_content || input_hash != expected_input
+                        }) || stored_profile != &profile_hash
+                    })
             })
             .collect::<Vec<_>>();
         report.queued_chunks = u64::try_from(missing.len()).unwrap_or(u64::MAX);
@@ -1250,7 +1294,11 @@ impl IndexService {
         &self,
         context: &VaultContext,
     ) -> Result<NoteSemanticStatus, IndexError> {
-        let sources = self.note_embedding_sources(context).await?;
+        let inputs = self.note_embedding_inputs(context).await?;
+        let sources = inputs
+            .iter()
+            .map(|input| input.source.clone())
+            .collect::<Vec<_>>();
         let mut status = NoteSemanticStatus {
             source_chunks: u64::try_from(sources.len()).unwrap_or(u64::MAX),
             ..NoteSemanticStatus::default()
@@ -1282,16 +1330,32 @@ impl IndexService {
             return Ok(status);
         };
         status.external_model_id = Some(model.external_model_id);
-        let current = sources
-            .into_iter()
-            .map(|source| ((source.object_id, source.chunk_key), source.content_hash))
+        let profile_hash = providers
+            .embeddings()
+            .profile_hash(binding.model_id)
+            .await?;
+        let current = inputs
+            .iter()
+            .map(|input| {
+                let source = &input.source;
+                (
+                    (source.object_id.clone(), source.chunk_key.clone()),
+                    (
+                        source.content_hash.clone(),
+                        embedding_input_hash(&profile_hash, source, &input.text),
+                    ),
+                )
+            })
             .collect::<HashMap<_, _>>();
         for embedding in self
             .note_embedding_metadata(context, binding.model_id)
             .await?
         {
             let key = (embedding.object_id, embedding.chunk_key);
-            if current.get(&key) == Some(&embedding.content_hash) {
+            if current.get(&key)
+                == Some(&(embedding.content_hash.clone(), embedding.input_hash.clone()))
+                && embedding.profile_hash == profile_hash
+            {
                 status.indexed_chunks = status.indexed_chunks.saturating_add(1);
             } else {
                 status.stale_vectors = status.stale_vectors.saturating_add(1);
@@ -1362,6 +1426,13 @@ impl IndexService {
             degraded.push("semantic_model_missing".to_owned());
             return Ok(());
         };
+        let profile_hash = match providers.embeddings().profile_hash(binding.model_id).await {
+            Ok(profile_hash) => profile_hash,
+            Err(_) => {
+                degraded.push("semantic_profile_unavailable".to_owned());
+                return Ok(());
+            }
+        };
         let embedding = match providers
             .embed(
                 context,
@@ -1413,6 +1484,7 @@ impl IndexService {
             degraded.push("semantic_index_empty".to_owned());
             return Ok(());
         }
+        let vector_candidate_limit_reached = vector_hits.len() >= vector_candidate_limit as usize;
         let mut current_chunks =
             HashMap::<FileId, HashMap<String, CurrentNoteEmbeddingChunk>>::new();
         let mut selected_notes = HashSet::<FileId>::new();
@@ -1446,9 +1518,19 @@ impl IndexService {
                             .into_iter()
                             .map(|chunk| {
                                 (
-                                    chunk.key,
+                                    chunk.key.clone(),
                                     CurrentNoteEmbeddingChunk {
                                         snippet: chunk.snippet,
+                                        input_hash: embedding_input_hash(
+                                            &profile_hash,
+                                            &EmbeddingSourceRef {
+                                                object_type: "note".to_owned(),
+                                                object_id: file_id.to_string(),
+                                                chunk_key: chunk.key.clone(),
+                                                content_hash: chunk.content_hash.clone(),
+                                            },
+                                            &chunk.text,
+                                        ),
                                         content_hash: chunk.content_hash,
                                     },
                                 )
@@ -1463,7 +1545,10 @@ impl IndexService {
             let Some(chunk) = chunks.get(&hit.embedding.chunk_key) else {
                 continue;
             };
-            if chunk.content_hash != hit.embedding.content_hash {
+            if chunk.content_hash != hit.embedding.content_hash
+                || chunk.input_hash != hit.embedding.input_hash
+                || hit.embedding.profile_hash != profile_hash
+            {
                 continue;
             }
             let snippet = chunk.snippet.clone();
@@ -1514,13 +1599,29 @@ impl IndexService {
         if saw_non_negative_candidate && current_note_vectors == 0 {
             degraded.push("semantic_note_index_empty_or_stale".to_owned());
         }
+        if vector_candidate_limit_reached {
+            degraded.push("semantic_candidate_limit_reached".to_owned());
+        }
         Ok(())
     }
 
+    #[cfg(test)]
     async fn note_embedding_sources(
         &self,
         context: &VaultContext,
     ) -> Result<Vec<EmbeddingSourceRef>, IndexError> {
+        Ok(self
+            .note_embedding_inputs(context)
+            .await?
+            .into_iter()
+            .map(|input| input.source)
+            .collect())
+    }
+
+    async fn note_embedding_inputs(
+        &self,
+        context: &VaultContext,
+    ) -> Result<Vec<EmbeddingInput>, IndexError> {
         let mut offset = 0_u32;
         let mut output = Vec::new();
         loop {
@@ -1533,11 +1634,14 @@ impl IndexService {
             }
             for source in page.iter() {
                 output.extend(note_embedding_chunks(source).into_iter().map(|chunk| {
-                    EmbeddingSourceRef {
-                        object_type: "note".to_owned(),
-                        object_id: source.file_id.to_string(),
-                        chunk_key: chunk.key,
-                        content_hash: chunk.content_hash,
+                    EmbeddingInput {
+                        source: EmbeddingSourceRef {
+                            object_type: "note".to_owned(),
+                            object_id: source.file_id.to_string(),
+                            chunk_key: chunk.key,
+                            content_hash: chunk.content_hash,
+                        },
+                        text: chunk.text,
                     }
                 }));
             }
@@ -1856,9 +1960,9 @@ fn note_matches_scope(note: &NoteSearchRecord, scope: &NoteRetrievalScope) -> bo
 }
 
 fn note_embedding_chunks(source: &NoteEmbeddingSourceRecord) -> Vec<NoteEmbeddingChunk> {
-    let context = note_embedding_context(source);
     let body = source.plain_text.trim();
     if body.is_empty() {
+        let context = note_embedding_context(source, None);
         if context.is_empty() {
             return Vec::new();
         }
@@ -1873,61 +1977,104 @@ fn note_embedding_chunks(source: &NoteEmbeddingSourceRecord) -> Vec<NoteEmbeddin
         }];
     }
 
-    let prefix = if context.is_empty() {
-        String::new()
-    } else {
-        format!("{context}\n\n")
-    };
-    let body_limit = NOTE_EMBEDDING_MAX_INPUT_BYTES.saturating_sub(prefix.len());
-    debug_assert!(body_limit > NOTE_EMBEDDING_CHUNK_OVERLAP_BYTES);
-    let step = body_limit.saturating_sub(NOTE_EMBEDDING_CHUNK_OVERLAP_BYTES);
-    let natural_count = if body.len() <= body_limit {
-        1
-    } else {
-        body.len()
-            .saturating_sub(NOTE_EMBEDDING_CHUNK_OVERLAP_BYTES)
-            .div_ceil(step)
-    };
-    let chunk_count = natural_count.min(MAX_NOTE_EMBEDDING_CHUNKS);
-    let max_start = body.len().saturating_sub(body_limit);
-    (0..chunk_count)
-        .map(|ordinal| {
-            let target_start = if natural_count <= MAX_NOTE_EMBEDDING_CHUNKS {
-                ordinal.saturating_mul(step).min(max_start)
-            } else if chunk_count <= 1 {
-                0
-            } else {
-                max_start.saturating_mul(ordinal) / (chunk_count - 1)
-            };
-            let start = ceil_char_boundary(body, target_start);
-            let end = floor_char_boundary(body, start.saturating_add(body_limit).min(body.len()));
-            let body_chunk = &body[start..end];
-            let text = format!("{prefix}{body_chunk}");
-            debug_assert!(text.len() <= NOTE_EMBEDDING_MAX_INPUT_BYTES);
-            NoteEmbeddingChunk {
-                key: format!("{NOTE_EMBEDDING_CHUNK_PROFILE}:{ordinal:04}"),
-                text: text.clone(),
-                snippet: body_chunk.chars().take(280).collect(),
-                content_hash: content_hash(&text),
-            }
-        })
-        .collect()
+    let heading_offsets = local_heading_offsets(body, &source.headings);
+    let mut chunks = Vec::new();
+    let mut start = 0_usize;
+    while start < body.len() {
+        let body_limit = NOTE_EMBEDDING_MAX_INPUT_BYTES
+            .saturating_sub(NOTE_EMBEDDING_CONTEXT_MAX_BYTES)
+            .saturating_sub(2);
+        debug_assert!(body_limit > NOTE_EMBEDDING_CHUNK_OVERLAP_BYTES);
+        let hard_end = floor_char_boundary(body, start.saturating_add(body_limit).min(body.len()));
+        let end = preferred_semantic_chunk_end(body, start, hard_end);
+        let local_heading = heading_offsets
+            .iter()
+            .rev()
+            .find(|(offset, _)| *offset <= end)
+            .map(|(_, heading)| heading.as_str());
+        let context = note_embedding_context(source, local_heading);
+        let prefix = if context.is_empty() {
+            String::new()
+        } else {
+            format!("{context}\n\n")
+        };
+        let body_chunk = &body[start..end];
+        let text = format!("{prefix}{body_chunk}");
+        debug_assert!(text.len() <= NOTE_EMBEDDING_MAX_INPUT_BYTES);
+        let ordinal = chunks.len();
+        chunks.push(NoteEmbeddingChunk {
+            key: format!("{NOTE_EMBEDDING_CHUNK_PROFILE}:{ordinal:04}"),
+            text: text.clone(),
+            snippet: body_chunk.chars().take(280).collect(),
+            content_hash: content_hash(&text),
+        });
+        if end == body.len() {
+            break;
+        }
+        start = ceil_char_boundary(body, end.saturating_sub(NOTE_EMBEDDING_CHUNK_OVERLAP_BYTES));
+        debug_assert!(chunks.len() < MAX_NOTE_EMBEDDING_CHUNKS);
+    }
+    chunks
 }
 
-fn note_embedding_context(source: &NoteEmbeddingSourceRecord) -> String {
+fn preferred_semantic_chunk_end(body: &str, start: usize, hard_end: usize) -> usize {
+    if hard_end == body.len() {
+        return hard_end;
+    }
+    let lookback_start = ceil_char_boundary(
+        body,
+        hard_end.saturating_sub(NOTE_EMBEDDING_BOUNDARY_LOOKBACK_BYTES),
+    )
+    .max(start);
+    let tail = &body[lookback_start..hard_end];
+    let boundary = tail
+        .rfind("\n\n")
+        .map(|offset| offset + 2)
+        .or_else(|| tail.rfind('\n').map(|offset| offset + 1))
+        .or_else(|| {
+            tail.char_indices()
+                .rev()
+                .find(|(_, character)| {
+                    matches!(character, '。' | '！' | '？' | '.' | '!' | '?' | ';' | '；')
+                })
+                .map(|(offset, character)| offset + character.len_utf8())
+        })
+        .or_else(|| {
+            tail.char_indices()
+                .rev()
+                .find(|(_, character)| character.is_whitespace())
+                .map(|(offset, character)| offset + character.len_utf8())
+        });
+    boundary
+        .map(|offset| lookback_start.saturating_add(offset))
+        .filter(|candidate| *candidate > start)
+        .unwrap_or(hard_end)
+}
+
+fn local_heading_offsets(body: &str, headings: &[String]) -> Vec<(usize, String)> {
+    let mut offsets = Vec::new();
+    let mut cursor = 0_usize;
+    for heading in headings {
+        let Some(relative) = body[cursor..].find(heading) else {
+            continue;
+        };
+        let offset = cursor.saturating_add(relative);
+        offsets.push((offset, heading.clone()));
+        cursor = offset.saturating_add(heading.len()).min(body.len());
+    }
+    offsets
+}
+
+fn note_embedding_context(
+    source: &NoteEmbeddingSourceRecord,
+    local_heading: Option<&str>,
+) -> String {
     let mut lines = vec![format!("Path: {}", source.path.as_str())];
     if let Some(title) = source.title.as_deref() {
         lines.push(format!("Title: {title}"));
     }
-    if !source.headings.is_empty() {
-        let headings = source
-            .headings
-            .iter()
-            .take(32)
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(" > ");
-        lines.push(format!("Headings: {headings}"));
+    if let Some(heading) = local_heading {
+        lines.push(format!("Heading: {heading}"));
     }
     truncate_utf8_bytes(&lines.join("\n"), NOTE_EMBEDDING_CONTEXT_MAX_BYTES).to_owned()
 }
@@ -2397,33 +2544,73 @@ mod tests {
     }
 
     #[test]
-    fn note_embedding_chunks_are_bounded_deterministic_and_cover_the_tail() {
+    fn markdown_projection_preserves_heading_paragraph_list_code_and_table_adjacency() {
+        let analyzed = analyze_markdown(
+            mcp_vault_domain::FileId::new(),
+            VaultId::new(),
+            VaultPath::parse("notes/deploy.md").unwrap(),
+            Revision::new(1),
+            "sha256:structured",
+            "# Deploy\n\nUse these values.\n\n- region: cn\n- mode: safe\n\n```toml\nretry = 3\nmode = \"safe\"\n```\n\n| Name | Value |\n| --- | --- |\n| region | cn |\n",
+        )
+        .unwrap();
+
+        let text = analyzed.note.plain_text;
+        assert!(text.contains("Deploy\n\nUse these values."));
+        assert!(text.contains("region: cn\nmode: safe"));
+        assert!(text.contains("retry = 3\nmode = \"safe\""));
+        assert!(text.contains("Name | Value |\nregion | cn |"));
+    }
+
+    #[test]
+    fn note_embedding_chunks_prefer_nearby_paragraph_boundaries_without_losing_tail() {
+        let first_paragraph = "A".repeat(1_450);
+        let tail = "tail marker ".repeat(80);
+        let source = NoteEmbeddingSourceRecord {
+            file_id: mcp_vault_domain::FileId::new(),
+            path: VaultPath::parse("notes/paragraphs.md").unwrap(),
+            revision: Revision::new(1),
+            title: Some("Paragraphs".to_owned()),
+            headings: vec!["Paragraphs".to_owned()],
+            plain_text: format!("{first_paragraph}\n\n{tail}"),
+            analyzed_content_hash: "sha256:paragraphs".to_owned(),
+        };
+
+        let chunks = note_embedding_chunks(&source);
+        assert!(chunks.len() > 1);
+        assert!(chunks.first().unwrap().text.ends_with("\n\n"));
+        assert!(chunks.last().unwrap().text.ends_with(tail.trim_end()));
+    }
+
+    #[test]
+    fn note_embedding_chunks_are_bounded_deterministic_and_fully_cover_past_128() {
         let repeated = "边界🙂abc";
+        let body = format!(
+            "Head Section {} Middle Marker {} Tail Section Tail Marker",
+            repeated.repeat(NOTE_EMBEDDING_MAX_INPUT_BYTES * 70 / repeated.len()),
+            repeated.repeat(NOTE_EMBEDDING_MAX_INPUT_BYTES * 70 / repeated.len()),
+        );
         let source = NoteEmbeddingSourceRecord {
             file_id: mcp_vault_domain::FileId::new(),
             path: VaultPath::parse("notes/long.md").unwrap(),
             revision: Revision::new(2),
             title: Some("Long note".to_owned()),
-            headings: vec!["Start".to_owned(), "End".to_owned()],
-            plain_text: repeated.repeat(
-                NOTE_EMBEDDING_MAX_INPUT_BYTES * (MAX_NOTE_EMBEDDING_CHUNKS + 5) / repeated.len(),
-            ),
+            headings: vec!["Head Section".to_owned(), "Tail Section".to_owned()],
+            plain_text: body,
             analyzed_content_hash: "sha256:canonical".to_owned(),
         };
         let first = note_embedding_chunks(&source);
         let second = note_embedding_chunks(&source);
         assert_eq!(first, second);
-        assert_eq!(first.len(), MAX_NOTE_EMBEDDING_CHUNKS);
+        assert!(first.len() > 128);
+        assert!(first.len() < MAX_NOTE_EMBEDDING_CHUNKS);
         assert_eq!(
             first.first().unwrap().key,
             format!("{NOTE_EMBEDDING_CHUNK_PROFILE}:0000")
         );
         assert_eq!(
             first.last().unwrap().key,
-            format!(
-                "{NOTE_EMBEDDING_CHUNK_PROFILE}:{:04}",
-                MAX_NOTE_EMBEDDING_CHUNKS - 1
-            )
+            format!("{NOTE_EMBEDDING_CHUNK_PROFILE}:{:04}", first.len() - 1)
         );
         assert!(
             first
@@ -2432,6 +2619,21 @@ mod tests {
         );
         assert!(first.iter().all(|chunk| chunk.text.is_char_boundary(0)));
         assert!(!first.last().unwrap().snippet.is_empty());
+        assert!(first.first().unwrap().text.contains("Head Section"));
+        assert!(
+            first
+                .iter()
+                .any(|chunk| chunk.text.contains("Middle Marker"))
+        );
+        assert!(first.last().unwrap().text.contains("Tail Marker"));
+        assert!(first.last().unwrap().text.contains("Heading: Tail Section"));
+        assert!(
+            !first
+                .first()
+                .unwrap()
+                .text
+                .contains("Heading: Tail Section")
+        );
         assert!(
             first
                 .last()

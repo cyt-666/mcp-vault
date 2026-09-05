@@ -2,7 +2,7 @@
 
 Accepted ADRs are binding unless superseded by a later ADR.
 
-The current sequence includes ADR-0025. ADR-0013 keeps ADR-0007 durable memories
+The current sequence includes ADR-0026. ADR-0013 keeps ADR-0007 durable memories
 canonical and provenanced while allowing `recall` to return separately typed,
 rebuildable ordinary-note cues. ADR-0014 replaced model self-score/routine
 review defaults with exact evidence and autonomous promotion. ADR-0015 retains
@@ -50,6 +50,14 @@ memory extraction.
 ADR-0025 aggregates current note chunks by File ID before the final note Top-K,
 uses only the highest non-negative cosine per note, and makes that cosine scale
 the existing reciprocal-rank contribution.
+
+ADR-0026 replaces the two-phase global consolidation, model-readable lifecycle
+history, destructive pipeline resets, and continuous source-health graph with
+current source-owned memory sets plus direct explicit memory. Forgetting is
+deletion, note sets replace atomically under File-ID/hash/set-revision checks,
+and all query paths are current-only. It retains canonical Markdown,
+provenance, multilingual aliases, LLM-free recall, and object-scoped vector
+validation while adding relevance, chunk-coverage, and budget requirements.
 
 Status values:
 

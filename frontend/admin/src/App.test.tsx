@@ -76,17 +76,10 @@ describe('Admin 管理界面', () => {
       }
       if (path === '/vaults/default/dashboard') return { ready: true };
       if (path === '/vaults/default/memories?limit=50') return { memories: [] };
-      if (path === '/vaults/default/memory/source-health?limit=50') {
-        return { summary: {}, sources: [], audit: null };
-      }
       if (path === '/vaults/default/memory/extraction') {
         return {
           policy: { enabled: true, source_mode: 'automatic', max_evidence_per_note: 3 },
-          readiness: { ready: true, blockers: [] },
-          phase1_readiness: { ready: true, blockers: [], external_model_id: 'extract-model' },
-          phase2_readiness: { ready: true, blockers: [], external_model_id: 'consolidate-model' },
-          stage1: { total: 2, ready: 1, no_output: 0, pending: 1 },
-          consolidation: { generation: 0, pipeline_generation: 1 },
+          readiness: { ready: true, blockers: [], external_model_id: 'extract-model' },
         };
       }
       if (path === '/vaults/default/jobs/overview?limit=50') {
@@ -301,8 +294,8 @@ describe('Admin 管理界面', () => {
                   total: 228,
                   current_index: 1,
                   current_path: 'projects/current.md',
-                  raw_memories_staged: 0,
-                  phase1_no_output: 0,
+                  items_published: 0,
+                  empty_sets_published: 0,
                   source_ingestion_failures: 0,
                   generated_output_failures: 0,
                 },
@@ -325,7 +318,7 @@ describe('Admin 管理界面', () => {
                 attempts: 0,
                 max_attempts: 10,
                 details: {
-                  projection_version: 2,
+                  projection_version: 3,
                   model_id: '01a066c8-7710-72d1-9699-5f37819fae27',
                   source_type: 'note',
                   source_count: 37,
@@ -335,18 +328,19 @@ describe('Admin 管理界面', () => {
             retry_wait: [],
             history: [
               {
-                id: '019d-source-repair-job',
-                job_type: 'memory.repair_sources',
+                id: '019d-source-reconcile-job',
+                job_type: 'memory.source_reconcile',
                 status: 'completed',
                 attempts: 1,
                 max_attempts: 10,
                 progress: {
                   phase: 'completed',
-                  completed: 5,
-                  memories_rewritten: 3,
-                  stage1_sources_rebound: 2,
-                  unresolved_note_sources: 1,
-                  memories_marked_stale: 1,
+                  sources_checked: 1,
+                  current: 0,
+                  moved: 1,
+                  changed: 0,
+                  deleted: 0,
+                  memories_hidden: 0,
                 },
               },
               {
@@ -380,7 +374,7 @@ describe('Admin 管理界面', () => {
                     path: 'notes/bad.md',
                     error_code: 'provider_schema_invalid',
                     schema_issue: 'required_property_missing',
-                    schema_path: '$.evidence',
+                    schema_path: '$.memories[0].content',
                   }],
                 },
               },
@@ -420,17 +414,16 @@ describe('Admin 管理界面', () => {
     expect(container.textContent).toContain('重建知识索引');
     expect(container.textContent).toContain('重建语义向量');
     expect(container.textContent).toContain('生成 37 个笔记分块向量');
-    expect(container.textContent).toContain('投影 v2');
+    expect(container.textContent).toContain('投影 v3');
     expect(container.textContent).toContain('正在执行（1）');
     expect(container.textContent).toContain('等待执行（1595）');
     expect(container.textContent).toContain('已结束历史（显示 4 / 共 4）');
     expect(container.textContent).toContain('等待中');
     expect(container.textContent).toContain('进度 25%');
     expect(container.textContent).toContain('进度 100%');
-    expect(container.textContent).toContain('阶段一：提取原始记忆');
-    expect(container.textContent).toContain('修复历史记忆来源');
-    expect(container.textContent).toContain('已重写 3 条记忆来源，更新 2 条阶段一来源');
-    expect(container.textContent).toContain('仍有 1 条来源无法证明当前文件身份');
+    expect(container.textContent).toContain('生成来源当前记忆集合');
+    expect(container.textContent).toContain('协调当前记忆来源');
+    expect(container.textContent).toContain('来源协调完成：检查 1 个当前集合');
     expect(container.textContent).toContain('正在处理第 1 / 228 篇：projects/current.md');
     expect(container.textContent).toContain('上次尝试：AI 服务已接受请求，但响应正文读取失败');
     expect(container.textContent).toContain('完成但有失败');
@@ -438,7 +431,7 @@ describe('Admin 管理界面', () => {
     expect(container.textContent).toContain('最近源文件问题 notes/binary.md：笔记不是 UTF-8 文本');
     expect(container.textContent).toContain('模型输出校验失败 1 篇（模型已调用）');
     expect(container.textContent).toContain('最近模型输出问题 notes/bad.md');
-    expect(container.textContent).toContain('缺少必填字段 $.evidence');
+    expect(container.textContent).toContain('缺少必填字段 $.memories[0].content');
     expect(container.textContent).toContain('已处理 3 / 178 篇，因连续模型输出错误暂停');
     expect(container.textContent).not.toContain('已完成进度 0%');
     expect(container.textContent).toContain('高级：查看原始响应');
@@ -458,7 +451,7 @@ describe('Admin 管理界面', () => {
             vault: { name: 'default', status: 'active' },
             files: { notes: 178, attachments: 0, entries: 178 },
             index: { indexed_notes: 178, total_notes: 178, coverage_ratio: 1, coverage: { complete: true } },
-            memory: { active: 0, pending_consolidation: 0 },
+            memory: { current: 0, explicit: 0, note_derived: 0 },
             jobs: { pending: 0 },
             providers: [],
           }}
@@ -755,25 +748,15 @@ describe('Admin 管理界面', () => {
     expect(jobErrorLabel('provider_schema_invalid')).toContain('返回了 JSON');
     expect(jobErrorLabel('memory_extract_output_failure_limit')).toContain('连续 3 次');
     expect(jobErrorLabel('memory_source_too_large')).toContain('512 KiB');
-    expect(jobErrorLabel('memory_phase1_slug_invalid')).toContain('升级后重试');
-    expect(jobErrorLabel('memory_phase1_evidence_anchor_invalid')).toContain('超出笔记范围');
-    expect(jobErrorLabel('memory_phase2_memory_index_invalid')).toContain('不存在的记忆序号');
-    expect(jobErrorLabel('memory_phase2_input_index_invalid')).toContain('原始记忆序号');
-    expect(jobErrorLabel('memory_phase2_input_undispositioned')).toContain('既未使用也未明确丢弃');
-    expect(jobErrorLabel('memory_phase2_prepared_invalid')).toContain('无法安全恢复');
-    expect(jobErrorLabel('memory_consolidation_waiting_for_phase1')).toContain('不会消耗重试次数');
-    expect(jobErrorLabel('memory_retrieval_alias_too_long')).toContain('128 字节');
-    expect(jobErrorLabel('memory_retrieval_alias_secret')).toContain('疑似包含秘密');
+    expect(jobErrorLabel('memory_set_too_many_items')).toContain('每篇笔记上限');
+    expect(jobErrorLabel('memory_set_item_invalid')).toContain('记忆内容');
+    expect(jobErrorLabel('memory_set_snapshot_hash_mismatch')).toContain('来源内容不一致');
+    expect(jobErrorLabel('memory_source_reconcile_progress_failed')).toContain('协调结果');
+    expect(jobErrorLabel('memory_phase2_prepared_invalid')).toContain('旧版记忆任务已退役');
   });
 
-  it('跨语言检索面板显示覆盖和付费提示并经确认后启动回填', async () => {
-    const request = vi.spyOn(adminApi, 'request').mockResolvedValue({
-      id: 'retrieval-job-1',
-      job_type: 'memory.enrich_retrieval',
-      status: 'queued',
-    });
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
-    const onRefresh = vi.fn();
+  it('旧版检索回填数据不会重新暴露在当前记忆页面', async () => {
+    const request = vi.spyOn(adminApi, 'request');
     const container = document.createElement('div');
     const root = createRoot(container);
     await act(async () =>
@@ -784,11 +767,7 @@ describe('Admin 管理界面', () => {
             memories: [],
             extraction: {
               policy: { enabled: true, source_mode: 'automatic' },
-              readiness: { ready: true, blockers: [] },
-              phase1_readiness: { ready: true, blockers: [] },
-              phase2_readiness: { ready: true, blockers: [] },
-              stage1: { total: 0, ready: 0, no_output: 0, pending: 0 },
-              consolidation: { generation: 1, pipeline_generation: 2 },
+              readiness: { ready: true, blockers: [], external_model_id: 'extract-model' },
             },
             retrieval: {
               coverage: {
@@ -804,28 +783,16 @@ describe('Admin 管理界面', () => {
             },
             memory_jobs: [],
           }}
-          onRefresh={onRefresh}
+          onRefresh={() => undefined}
         />,
       ),
     );
 
-    expect(container.textContent).toContain('跨语言检索');
-    expect(container.textContent).toContain('memory-retrieval-v1');
-    expect(container.textContent).toContain('9 / 17 条（待处理 7 · 失败 1）');
-    expect(container.textContent).toContain('来源语、简体中文和英文别名');
-    const backfill = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent === '回填现有记忆',
-    ) as HTMLButtonElement;
-    await act(async () => {
-      backfill.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-
-    expect(confirm).toHaveBeenCalledOnce();
-    expect(confirm.mock.calls[0][0]).toContain('请先确认已有可用备份');
-    expect(confirm.mock.calls[0][0]).toContain('预计最多 1 次批量模型调用');
-    expect(confirm.mock.calls[0][0]).toContain('可能产生费用');
-    expect(request).toHaveBeenCalledWith('/memory/retrieval/backfill', { method: 'POST' });
-    expect(onRefresh).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain('笔记当前记忆集合');
+    expect(container.textContent).toContain('每篇模型调用1 次');
+    expect(container.textContent).not.toContain('跨语言检索');
+    expect(container.textContent).not.toContain('回填现有记忆');
+    expect(request).not.toHaveBeenCalled();
 
     await act(async () => root.unmount());
   });
@@ -882,7 +849,7 @@ describe('Admin 管理界面', () => {
     await act(async () => root.unmount());
   });
 
-  it('两阶段记忆页面不暴露候选审核并显示可解释的持久化进度', async () => {
+  it('当前集合页面显示一次提取与原子替换进度', async () => {
     const container = document.createElement('div');
     const root = createRoot(container);
     await act(async () =>
@@ -893,16 +860,11 @@ describe('Admin 管理界面', () => {
             memories: [],
             extraction: {
               policy: {
-                enabled: false,
+                enabled: true,
                 source_mode: 'automatic',
-                max_evidence_per_note: 3,
               },
-              revision: null,
-              readiness: { ready: false, blockers: ['extraction_disabled', 'consolidation_model_binding_missing'] },
-              phase1_readiness: { ready: false, blockers: ['extraction_disabled'], external_model_id: 'extract-model' },
-              phase2_readiness: { ready: false, blockers: ['consolidation_model_binding_missing'] },
-              stage1: { total: 8, ready: 2, no_output: 1, withdrawn: 0, pending: 2 },
-              consolidation: { generation: 3, last_success_at: 1, pipeline_generation: 1, memory_summary_present: true },
+              revision: 1,
+              readiness: { ready: true, blockers: [], external_model_id: 'extract-model' },
             },
             memory_jobs: [{
               id: 'memory-job',
@@ -915,8 +877,8 @@ describe('Admin 管理界面', () => {
                 total: 8,
                 current_index: 3,
                 current_path: 'notes/roadmap.md',
-                raw_memories_staged: 2,
-                phase1_no_output: 1,
+                items_published: 3,
+                empty_sets_published: 0,
                 source_ingestion_failures: 1,
                 source_ingestion_failure_notes: [{
                   index: 2,
@@ -936,19 +898,15 @@ describe('Admin 管理界面', () => {
       ),
     );
 
-    expect(container.textContent).toContain('两阶段长期记忆');
-    expect(container.textContent).toContain('不存在“待审核候选”');
-    expect(container.textContent).toContain('不需要添加特殊标记');
-    expect(container.textContent).not.toContain('进入审核的最低置信度');
-    expect(container.textContent).toContain('提取模型不负责返回证据行号');
-    expect(container.textContent).toContain('尚未绑定阶段二“记忆整理”模型');
-    expect(container.textContent).toContain('阶段一 · 提取模型');
-    expect(container.textContent).toContain('阶段二 · 整理模型');
+    expect(container.textContent).toContain('笔记当前记忆集合');
+    expect(container.textContent).toContain('一次提取 · 整体替换');
+    expect(container.textContent).toContain('每篇笔记一次模型调用');
+    expect(container.textContent).toContain('按来源完整集合原子替换');
+    expect(container.textContent).not.toContain('两阶段长期记忆');
+    expect(container.textContent).not.toContain('候选审核');
     expect(container.textContent).toContain('执行中 · 25%');
     expect(container.textContent).toContain('正在处理第 3 / 8 篇：notes/roadmap.md');
-    expect(container.textContent).toContain('提炼原始记忆 2 篇');
-    expect(container.textContent).toContain('无需形成记忆 1 篇');
-    expect(container.textContent).not.toContain('原文证据未通过');
+    expect(container.textContent).toContain('发布当前记忆 3 条');
     expect(container.textContent).toContain('未变化且已处理，跳过模型 1 篇');
     const runButton = Array.from(container.querySelectorAll('button')).find((button) => button.textContent?.includes('任务执行中'));
     expect(runButton?.disabled).toBe(true);
@@ -956,7 +914,7 @@ describe('Admin 管理界面', () => {
     await act(async () => root.unmount());
   });
 
-  it('等待首次全量生成时配置就绪即可手动触发', async () => {
+  it('提取模型未就绪时明确阻塞手动任务', async () => {
     const container = document.createElement('div');
     const root = createRoot(container);
     await act(async () =>
@@ -968,15 +926,7 @@ describe('Admin 管理界面', () => {
             extraction: {
               policy: { enabled: true, source_mode: 'automatic', max_evidence_per_note: 3 },
               revision: 1,
-              readiness: { ready: false, blockers: ['memory_pipeline_regeneration_pending'] },
-              phase1_readiness: { ready: true, blockers: [], external_model_id: 'mimo-v2.5' },
-              phase2_readiness: { ready: true, blockers: [], external_model_id: 'mimo-v2.5' },
-              stage1: { total: 0, ready: 0, no_output: 0, withdrawn: 0, pending: 0 },
-              consolidation: {
-                generation: 0,
-                pipeline_generation: 2,
-                regeneration_pending: true,
-              },
+              readiness: { ready: false, blockers: ['model_binding_missing'] },
             },
             memory_jobs: [],
           }}
@@ -985,16 +935,16 @@ describe('Admin 管理界面', () => {
       ),
     );
 
-    expect(container.textContent).toContain('准备重新生成');
+    expect(container.textContent).toContain('尚未绑定“记忆提取”模型');
     const runButton = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent === '立即开始全量生成',
+      (button) => button.textContent === '处理新增或变化的笔记',
     );
-    expect(runButton?.disabled).toBe(false);
+    expect(runButton?.disabled).toBe(true);
 
     await act(async () => root.unmount());
   });
 
-  it('旧版候选不会重新出现在两阶段记忆页面', async () => {
+  it('旧版候选不会重新出现在当前记忆页面', async () => {
     const container = document.createElement('div');
     const root = createRoot(container);
     await act(async () =>
@@ -1014,31 +964,19 @@ describe('Admin 管理界面', () => {
               policy: {
                 enabled: true,
                 source_mode: 'automatic',
-                max_evidence_per_note: 3,
               },
               revision: 1,
-              readiness: { ready: true, blockers: [] },
-              phase1_readiness: { ready: true, blockers: [], external_model_id: 'extract-model' },
-              phase2_readiness: { ready: true, blockers: [], external_model_id: 'consolidate-model' },
-              stage1: { total: 0, ready: 0, no_output: 0, withdrawn: 0, pending: 0 },
-              consolidation: { generation: 0, last_success_at: null, pipeline_generation: 0, memory_summary_present: false },
+              readiness: { ready: true, blockers: [], external_model_id: 'extract-model' },
             },
-            memory_jobs: [{
-              id: 'reset-job',
-              job_type: 'memory.reset_pipeline',
-              status: 'running',
-              progress: { phase: 'resetting_memory_pipeline', completed: 0, total: 1 },
-            }],
+            memory_jobs: [],
           }}
           onRefresh={() => undefined}
         />,
       ),
     );
 
-    expect(container.textContent).not.toContain('确认写入长期记忆');
+    expect(container.textContent).toContain('笔记当前记忆集合');
     expect(container.querySelectorAll('.record-item').length).toBe(0);
-    expect(container.textContent).toContain('旧版记忆系统正在整体作废并清理');
-    expect(container.textContent).toContain('正在清空旧版记忆系统');
 
     await act(async () => root.unmount());
   });
@@ -1056,11 +994,7 @@ describe('Admin 管理界面', () => {
             extraction: {
               policy: { enabled: true, source_mode: 'automatic', max_evidence_per_note: 3 },
               revision: 1,
-              readiness: { ready: true, blockers: [] },
-              phase1_readiness: { ready: true, blockers: [], external_model_id: 'extract-model' },
-              phase2_readiness: { ready: true, blockers: [], external_model_id: 'consolidate-model' },
-              stage1: { total: 3, ready: 1, no_output: 2, withdrawn: 0, pending: 1 },
-              consolidation: { generation: 1, last_success_at: 1, pipeline_generation: 1, regeneration_pending: true },
+              readiness: { ready: true, blockers: [], external_model_id: 'extract-model' },
             },
             memory_jobs: [{
               id: 'active-memory-job',
@@ -1078,7 +1012,7 @@ describe('Admin 管理界面', () => {
       button.textContent?.includes('任务执行中'),
     );
     expect(active?.disabled).toBe(true);
-    expect(container.textContent).toContain('配置就绪后会立即创建全量任务');
+    expect(container.textContent).toContain('按来源完整集合原子替换');
     expect(request).not.toHaveBeenCalled();
 
     await act(async () => root.unmount());
@@ -1103,11 +1037,7 @@ describe('Admin 管理界面', () => {
             extraction: {
               policy: { enabled: true, source_mode: 'automatic', max_evidence_per_note: 3 },
               revision: 1,
-              readiness: { ready: true, blockers: [] },
-              phase1_readiness: { ready: true, blockers: [], external_model_id: 'extract-model' },
-              phase2_readiness: { ready: true, blockers: [], external_model_id: 'consolidate-model' },
-              stage1: { total: 3, ready: 1, no_output: 2, withdrawn: 0, pending: 0 },
-              consolidation: { generation: 1, last_success_at: 1, pipeline_generation: 1 },
+              readiness: { ready: true, blockers: [], external_model_id: 'extract-model' },
             },
             memory_jobs: [],
           }}
@@ -1123,7 +1053,7 @@ describe('Admin 管理界面', () => {
       run.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    expect(confirm.mock.calls[0][0]).toContain('再次调用提取模型');
+    expect(confirm.mock.calls[0][0]).toContain('再次调用一次提取模型');
     expect(request).toHaveBeenCalledWith('/memory/extraction/run', {
       method: 'POST',
       body: { include_evaluated: true },
@@ -1133,7 +1063,7 @@ describe('Admin 管理界面', () => {
     await act(async () => root.unmount());
   });
 
-  it('长期记忆无需父页面刷新即可连续归档、恢复和删除多条记录', async () => {
+  it('当前记忆无需父页面刷新即可连续删除多条记录', async () => {
     const request = vi.spyOn(adminApi, 'request').mockResolvedValue({});
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     const onRefresh = vi.fn();
@@ -1143,12 +1073,10 @@ describe('Admin 管理界面', () => {
       id: 'memory-1',
       content: 'Admin 登录认证始终保留。',
       memory_type: 'decision',
-      canonical_path: '_mcp-vault/memory/records/2026/08/memory-1.md',
-      confidence: 1,
-      importance: 0.9,
+      ownership: 'explicit',
+      canonical_path: '_mcp-vault/memory/current/explicit/memory-1.md',
       updated_at: 1,
       revision: 7,
-      status: 'active',
       sources: [{
         source_type: 'note',
         path: 'notes/security.md',
@@ -1163,7 +1091,7 @@ describe('Admin 管理界面', () => {
       ...memory,
       id: 'memory-2',
       content: '第二条长期记忆。',
-      canonical_path: '_mcp-vault/memory/records/2026/08/memory-2.md',
+      canonical_path: '_mcp-vault/memory/current/explicit/memory-2.md',
       revision: 9,
     };
     const extraction = {
@@ -1183,52 +1111,29 @@ describe('Admin 管理界面', () => {
 
     expect(container.textContent).toContain('查看来源笔记与证据定位（1）');
     expect(container.textContent).toContain(
-      '记忆文件 _mcp-vault/memory/records/2026/08/memory-1.md',
+      '规范文件 _mcp-vault/memory/current/explicit/memory-1.md',
     );
     expect(container.textContent).toContain('notes/security.md');
     expect(container.textContent).toContain('修订 4');
     expect(container.textContent).toContain('第 12–14 行');
     expect(container.textContent).toContain('原文仍保留在对应笔记及其修订历史中');
 
-    const archive = container.querySelector(
-      'button[aria-label="归档长期记忆 memory-1"]',
-    ) as HTMLButtonElement;
-    await act(async () => {
-      archive.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    expect(request).toHaveBeenCalledWith('/memories/memory-1/archive', {
-      method: 'POST',
-      body: { expected_revision: 7 },
-    });
-
-    const restore = container.querySelector(
-      'button[aria-label="恢复长期记忆 memory-1"]',
-    ) as HTMLButtonElement;
-    expect(restore).not.toBeNull();
-    await act(async () => {
-      restore.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    expect(request).toHaveBeenCalledWith('/memories/memory-1/restore', {
-      method: 'POST',
-      body: { expected_revision: 8 },
-    });
-
     const remove = container.querySelector(
-      'button[aria-label="永久删除长期记忆 memory-1"]',
+      'button[aria-label="删除当前记忆 memory-1"]',
     ) as HTMLButtonElement;
     await act(async () => {
       remove.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(confirm).toHaveBeenCalledOnce();
-    expect(confirm.mock.calls[0][0]).toContain('当前规范 Markdown 和记忆投影会删除');
-    expect(request).toHaveBeenCalledWith('/memories/memory-1?expected_revision=9', {
+    expect(confirm.mock.calls[0][0]).toContain('当前规范 Markdown 和记忆投影都会删除');
+    expect(request).toHaveBeenCalledWith('/memories/memory-1?expected_revision=7', {
       method: 'DELETE',
     });
 
-    expect(container.querySelector('button[aria-label="永久删除长期记忆 memory-1"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="删除当前记忆 memory-1"]')).toBeNull();
     expect(container.textContent).toContain('长期记忆（1）');
     const removeSecond = container.querySelector(
-      'button[aria-label="永久删除长期记忆 memory-2"]',
+      'button[aria-label="删除当前记忆 memory-2"]',
     ) as HTMLButtonElement;
     expect(removeSecond).not.toBeNull();
     await act(async () => {
@@ -1237,9 +1142,10 @@ describe('Admin 管理界面', () => {
     expect(request).toHaveBeenCalledWith('/memories/memory-2?expected_revision=9', {
       method: 'DELETE',
     });
-    expect(container.querySelector('button[aria-label="永久删除长期记忆 memory-2"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="删除当前记忆 memory-2"]')).toBeNull();
     expect(container.textContent).toContain('长期记忆（0）');
-    expect(onRefresh).toHaveBeenCalledTimes(4);
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(onRefresh).toHaveBeenCalledTimes(2);
 
     await act(async () => root.unmount());
   });

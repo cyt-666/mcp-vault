@@ -138,6 +138,10 @@ pub struct EmbeddingRecord {
     pub dimension: u32,
     /// Hash of the exact source chunk.
     pub content_hash: String,
+    /// Hash of the complete provider/model/preparation profile.
+    pub profile_hash: String,
+    /// Hash of the exact prepared input under `profile_hash`.
+    pub input_hash: String,
     /// Backend-local stable key.
     pub vector_backend_key: String,
     /// Creation timestamp.
@@ -227,6 +231,8 @@ struct EmbeddingRow {
     model_id: String,
     dimension: i64,
     content_hash: String,
+    profile_hash: String,
+    input_hash: String,
     vector_backend_key: String,
     created_at: i64,
     updated_at: i64,
@@ -244,6 +250,8 @@ struct EmbeddingMetadataRow {
     model_id: String,
     dimension: i64,
     content_hash: String,
+    profile_hash: String,
+    input_hash: String,
     vector_backend_key: String,
     created_at: i64,
     updated_at: i64,
@@ -814,6 +822,9 @@ impl ProviderRepository {
         }
         let vector_blob = encode_vector(vector);
         let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+        if !norm.is_finite() || norm <= f32::EPSILON {
+            return Err(StateError::InvalidInput("embedding vector is invalid"));
+        }
         let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "DELETE FROM embedding_records
@@ -830,9 +841,9 @@ impl ProviderRepository {
         sqlx::query(
             "INSERT INTO embedding_records
              (id, vault_id, object_type, object_id, chunk_key, provider_id,
-              model_id, dimension, content_hash, vector_backend_key,
-              created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              model_id, dimension, content_hash, profile_hash, input_hash,
+              vector_backend_key, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(embedding.id.to_string())
         .bind(context.id().to_string())
@@ -843,6 +854,8 @@ impl ProviderRepository {
         .bind(embedding.model_id.to_string())
         .bind(i64::from(embedding.dimension))
         .bind(&embedding.content_hash)
+        .bind(&embedding.profile_hash)
+        .bind(&embedding.input_hash)
         .bind(&embedding.vector_backend_key)
         .bind(embedding.created_at)
         .bind(embedding.updated_at)
@@ -876,7 +889,8 @@ impl ProviderRepository {
         let row = sqlx::query_as::<_, EmbeddingRow>(
             "SELECT e.id, e.vault_id, e.object_type, e.object_id, e.chunk_key,
                     e.provider_id, e.model_id, e.dimension, e.content_hash,
-                    e.vector_backend_key, e.created_at, e.updated_at,
+                    e.profile_hash, e.input_hash, e.vector_backend_key,
+                    e.created_at, e.updated_at,
                     v.vector_blob
              FROM embedding_records e
              JOIN embedding_vectors v
@@ -907,7 +921,8 @@ impl ProviderRepository {
         let rows = sqlx::query_as::<_, EmbeddingMetadataRow>(
             "SELECT id, vault_id, object_type, object_id, chunk_key,
                     provider_id, model_id, dimension, content_hash,
-                    vector_backend_key, created_at, updated_at
+                    profile_hash, input_hash, vector_backend_key,
+                    created_at, updated_at
              FROM embedding_records
              WHERE vault_id = ? AND model_id = ? AND object_type = ?
              ORDER BY object_id ASC, chunk_key ASC, id ASC LIMIT ? OFFSET ?",
@@ -937,7 +952,35 @@ impl ProviderRepository {
         Ok(result.rows_affected() == 1)
     }
 
-    /// Load bounded vector candidates for one Vault/model/dimension.
+    /// Delete every derived vector for one exact Vault-scoped source object.
+    ///
+    /// This intentionally spans model/profile partitions: once canonical
+    /// content is deleted or replaced, no stale representation of that object
+    /// should remain online under an older embedding configuration.
+    pub async fn delete_embeddings_for_object(
+        &self,
+        context: &VaultContext,
+        object_type: &str,
+        object_id: &str,
+    ) -> Result<u64, StateError> {
+        self.ensure_vault_context(context).await?;
+        validate_label(object_type, "embedding object type")?;
+        if object_id.is_empty() || object_id.len() > 512 {
+            return Err(StateError::InvalidInput("embedding object id is invalid"));
+        }
+        let result = sqlx::query(
+            "DELETE FROM embedding_records
+             WHERE vault_id = ? AND object_type = ? AND object_id = ?",
+        )
+        .bind(context.id().to_string())
+        .bind(object_type)
+        .bind(object_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Load one bounded vector-candidate page for a Vault/model/dimension.
     pub async fn list_vectors(
         &self,
         context: &VaultContext,
@@ -945,6 +988,7 @@ impl ProviderRepository {
         object_type: &str,
         dimension: u32,
         limit: u32,
+        offset: u32,
     ) -> Result<Vec<VectorCandidate>, StateError> {
         validate_label(object_type, "embedding object type")?;
         if limit == 0 || limit > MAX_VECTOR_LIMIT || dimension == 0 {
@@ -953,20 +997,22 @@ impl ProviderRepository {
         let rows = sqlx::query_as::<_, EmbeddingRow>(
             "SELECT e.id, e.vault_id, e.object_type, e.object_id, e.chunk_key,
                     e.provider_id, e.model_id, e.dimension, e.content_hash,
-                    e.vector_backend_key, e.created_at, e.updated_at,
+                    e.profile_hash, e.input_hash, e.vector_backend_key,
+                    e.created_at, e.updated_at,
                     v.vector_blob
              FROM embedding_records e
              JOIN embedding_vectors v
                ON v.vault_id = e.vault_id AND v.embedding_id = e.id
              WHERE e.vault_id = ? AND e.model_id = ? AND e.object_type = ?
                AND e.dimension = ?
-             ORDER BY e.id ASC LIMIT ?",
+             ORDER BY e.id ASC LIMIT ? OFFSET ?",
         )
         .bind(context.id().to_string())
         .bind(model_id.to_string())
         .bind(object_type)
         .bind(i64::from(dimension))
         .bind(i64::from(limit))
+        .bind(i64::from(offset))
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(row_to_candidate).collect()
@@ -1138,6 +1184,8 @@ fn row_to_embedding(row: EmbeddingRow) -> Result<EmbeddingRecord, StateError> {
         dimension: u32::try_from(row.dimension)
             .map_err(|_| StateError::InvalidInput("embedding dimension is invalid"))?,
         content_hash: row.content_hash,
+        profile_hash: row.profile_hash,
+        input_hash: row.input_hash,
         vector_backend_key: row.vector_backend_key,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -1156,6 +1204,8 @@ fn row_to_embedding_metadata(row: EmbeddingMetadataRow) -> Result<EmbeddingRecor
         dimension: u32::try_from(row.dimension)
             .map_err(|_| StateError::InvalidInput("embedding dimension is invalid"))?,
         content_hash: row.content_hash,
+        profile_hash: row.profile_hash,
+        input_hash: row.input_hash,
         vector_backend_key: row.vector_backend_key,
         created_at: row.created_at,
         updated_at: row.updated_at,

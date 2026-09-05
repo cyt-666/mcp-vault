@@ -434,39 +434,38 @@ CI never uses real API keys or billable endpoints.
 
 ## 12. Recall quality tests
 
-Maintain a versioned benchmark corpus with Chinese and English notes/memories.
+Maintain the versioned corpus in `tests/fixtures/memory-quality/`. It contains
+at least 40 labeled retrieval queries, including at least 10 no-answer lexical
+hard negatives, and at least 15 generation cases. The deterministic evaluator
+reports the corpus fingerprint, pipeline version, Recall@5, MRR@5, no-answer
+false-return rate, support precision, critical-fact coverage, subject errors,
+condition/negation errors, type errors, duplicates, language, latency, and
+request count. Ranking changes require a before/after report and rationale.
 
-Evaluate:
+Deterministic fake generation proves contract wiring and accounting only. A
+real-provider quality run requires explicit operator authorization, protected
+credentials, synthetic or authorized notes, and a separate non-CI report. If
+it is not run, release evidence must say “real-model quality unvalidated” and
+must not infer quality from schema tests.
 
-- lexical exact match;
-- semantic paraphrase;
-- preference/decision distinction;
-- current project continuity;
-- stale/superseded filtering;
-- temporal validity;
-- duplicate diversity;
-- cross-topic false positives;
-- source/provenance accuracy.
-
-Ranking changes require benchmark comparison and recorded rationale.
-
-Memory integration fixtures cover explicit `remember` staging, the exact Codex
-Phase 1 three-field output, local whole-source provenance/revision checks,
-durable `no_output` coverage, unchanged-note skip, forced re-extraction,
-source update/withdrawal, Phase 2 create/update/archive/discard decisions,
-semantic snapshot conflicts, revision-only drift, proposal reuse, canonical artifact rendering, lifecycle
-filtering, FTS-only recall, optional vector degradation, recall budgets, MCP
-memory scopes/resources, and two-Vault isolation. Tests use local Provider
+Memory integration fixtures cover direct explicit `remember`, omitted/set/
+clear metadata fidelity, one-call `memories[]` validation, valid empty sets,
+invalid optional metadata normalization, exact File-ID/hash ownership,
+whole-set replacement, unchanged-note skip, forced extraction, move without a
+Provider call, change-before-regeneration fail-closed behavior, source delete,
+derived-item delete/pause, explicit resume, prepared-snapshot adoption and CAS,
+current-only get/list/resources/recall, actual delete, FTS-only recall,
+calibrated vector degradation, object aggregation, long-input tail coverage,
+whole-response budgets, and two-Vault isolation. Tests use local Provider
 fakes only; recall tests prove that no query-time LLM is required.
 
 The public MCP suite also proves that `recall` can return an indexed ordinary
 note without durable memory and that a `memory:read` credential lacking
-`vault:read` receives no note cue. `remember` tests require a raw-input ID and
-consolidation-job ID and prove the final memory is unavailable until Phase 2
-commits. Provider fixtures assert stable schema category/path diagnostics
-without response values; generic single-array-envelope repair remains bounded
-to schemas where the direct item/array already validates, while the multi-field
-Phase 1/Phase 2 contracts reject missing fields.
+`vault:read` receives no note cue. `remember` returns an immediately current
+canonical memory rather than a staging/job handle. Provider fixtures assert
+stable schema category/path diagnostics without response values; missing or
+ambiguous roots and invalid required content fail the full source replacement,
+while invalid optional kind/tags are safely dropped.
 
 The MCP metadata contract test enumerates every advertised tool and requires a
 unique title, an explicit selection condition, model-readable success field
@@ -479,18 +478,16 @@ tool count, replay a labeled prompt set in the target Host with direct, indirect
 and negative prompts and record which tool was selected; static schema checks
 cannot by themselves prove model routing quality.
 
-Worker fixtures prove a full-Vault Phase 1 job continues after one malformed
+Worker fixtures prove a full-Vault extraction continues after one malformed
 note output, checkpoints a bounded redacted failure, preserves its paid-work
-cursor, and admits Phase 2. State fixtures prove one active consolidation per
-Vault, exact raw-hash selection commit, idempotent applied proposals, and
-cross-Vault rejection. Migration/reset fixtures upgrade from schema 9, remove
-legacy quote-as-content extracted memory through Vault Core, stage explicit
-memory, clear legacy candidate/note rows, and preserve source history. Admin
-and frontend tests cover two-role readiness, active-run reuse, truthful
-Phase 1/Phase 2 progress, archive/restore revision conflicts, consecutive
-permanent deletes without refresh, and the absence of candidate-generation or
-review controls. Artifact pagination tests prove `MEMORY.md` includes active
-memory beyond one 200-row State page.
+cursor, and opens the three-consecutive-output-failure circuit. State fixtures
+prove snapshot/set CAS, idempotent publication, current query scoping, and
+cross-Vault rejection. Migration fixtures upgrade additively, classify legacy
+rows in a content-free preflight, require exact confirmation, preserve safe
+explicit IDs/metadata, schedule note regeneration, and leave ambiguous/history
+untouched. Admin/frontend tests cover one-role readiness, active-run reuse,
+truthful extraction/source-reconcile progress, current CRUD, delete/pause/
+resume, migration confirmation, and absence of lifecycle/consolidation controls.
 
 ## 13. Crash and recovery tests
 

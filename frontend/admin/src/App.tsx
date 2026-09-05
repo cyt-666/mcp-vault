@@ -84,11 +84,9 @@ async function loadPage(page: Page, vaultSlug: string): Promise<JsonObject> {
   }
 
   if (page === 'memory') {
-    const [memoryData, extractionData, sourceHealthData, retrievalData, embeddingData, jobsOverview] = await Promise.all([
+    const [memoryData, extractionData, embeddingData, jobsOverview] = await Promise.all([
       adminApi.request<JsonObject>(scopedPath(vaultSlug, '/memories?limit=50')),
       adminApi.request<JsonObject>(scopedPath(vaultSlug, '/memory/extraction')),
-      adminApi.request<JsonObject>(scopedPath(vaultSlug, '/memory/source-health?limit=50')),
-      adminApi.request<JsonObject>(scopedPath(vaultSlug, '/memory/retrieval')),
       adminApi.request<JsonObject>(scopedPath(vaultSlug, '/memory/embeddings')),
       adminApi.request<JsonObject>(scopedPath(vaultSlug, '/jobs/overview?limit=50')),
     ]);
@@ -103,8 +101,6 @@ async function loadPage(page: Page, vaultSlug: string): Promise<JsonObject> {
     return {
       ...memoryData,
       extraction: extractionData,
-      source_health: sourceHealthData,
-      retrieval: retrievalData,
       embedding: embeddingData,
       memory_jobs: memoryJobs,
     };

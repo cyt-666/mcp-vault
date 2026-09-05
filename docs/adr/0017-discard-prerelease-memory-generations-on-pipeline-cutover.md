@@ -1,8 +1,10 @@
 # ADR-0017: Discard prerelease memory generations on pipeline cutover
 
-- Status: Accepted
+- Status: Superseded by ADR-0026
 - Date: 2026-08-26
 - Amends: ADR-0016 migration behavior
+- Replaced by: ADR-0026 preflighted ownership migration; do not apply this
+  destructive reset to the new architecture.
 
 ## Context
 

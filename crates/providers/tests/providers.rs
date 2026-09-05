@@ -24,8 +24,8 @@ use mcp_vault_providers::{
     AuthStyle, EmbeddingInput, EmbeddingRequest, EmbeddingSourceRef, EmbeddingSourceResolver,
     ModelCapabilities, ModelInput, ModelSettings, OpenAiStructuredOutputMode, ProviderError,
     ProviderInput, ProviderKind, ProviderMode, ProviderService, ProviderSettings,
-    ProviderTransport, RequestOptions, StructuredGenerationRequest, endpoint_url,
-    validate_endpoint,
+    ProviderTransport, RequestOptions, SqliteVectorIndex, StructuredGenerationRequest,
+    endpoint_url, validate_endpoint,
 };
 use mcp_vault_state::{StateError, StateStore, VaultStatus};
 use reqwest::Method;
@@ -371,6 +371,14 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
         .await
         .unwrap();
     assert_eq!(records.len(), 2);
+    for invalid_vector in [[0.0, 0.0, 0.0], [f32::NAN, 0.0, 0.0]] {
+        let error = state
+            .providers()
+            .upsert_embedding(&work, &records[0], &invalid_vector)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StateError::InvalidInput(_)));
+    }
     embeddings
         .embed_and_store(
             &work,
@@ -416,12 +424,30 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
     assert_eq!(tied_hits[0].embedding.chunk_key, "appendix");
     assert_eq!(tied_hits[1].embedding.chunk_key, "root");
     assert_eq!(tied_hits[2].embedding.object_id, "note-b");
+    let paged_service = ProviderService::with_vector_index(
+        state.clone(),
+        auth.clone(),
+        Arc::new(SqliteVectorIndex::with_scan_page_size(state.clone(), 1).unwrap()),
+    );
+    let paged_hits = paged_service
+        .embeddings()
+        .search(&work, embedding.id, "note", &[1.0, 0.0, 0.0], 3)
+        .await
+        .unwrap();
+    assert_eq!(paged_hits, tied_hits);
     let differently_ranked = embeddings
         .search(&work, embedding.id, "note", &[0.0, 1.0, 0.0], 1)
         .await
         .unwrap();
     assert_eq!(differently_ranked[0].embedding.object_id, "note-b");
     assert_eq!(differently_ranked[0].score, 1.0);
+    for invalid_query in [[0.0, 0.0, 0.0], [f32::INFINITY, 0.0, 0.0]] {
+        let error = embeddings
+            .search(&work, embedding.id, "note", &invalid_query, 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ProviderError::InvalidConfiguration(_)));
+    }
     let memory_hits = embeddings
         .search(&work, embedding.id, "memory", &[1.0, 0.0, 0.0], 1)
         .await
@@ -438,6 +464,51 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
     assert_eq!(coverage.total, 4);
     assert_eq!(coverage.objects, 3);
     assert_eq!(coverage.dimensions, vec![3]);
+
+    service
+        .set_provider_mode(&other, ProviderMode::LocalOnly, None)
+        .await
+        .unwrap();
+    embeddings
+        .embed_and_store(
+            &other,
+            embedding.id,
+            &[EmbeddingInput {
+                source: EmbeddingSourceRef {
+                    object_type: "note".to_owned(),
+                    object_id: "note-a".to_owned(),
+                    chunk_key: "root".to_owned(),
+                    content_hash: "sha256:other-a".to_owned(),
+                },
+                text: "other Vault".to_owned(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        embeddings
+            .delete_object_vectors(&work, "note", "note-a")
+            .await
+            .unwrap(),
+        2
+    );
+    assert!(
+        embeddings
+            .search(&work, embedding.id, "note", &[1.0, 0.0, 0.0], 10)
+            .await
+            .unwrap()
+            .iter()
+            .all(|hit| hit.embedding.object_id != "note-a")
+    );
+    assert_eq!(
+        embeddings
+            .search(&other, embedding.id, "note", &[1.0, 0.0, 0.0], 10)
+            .await
+            .unwrap()[0]
+            .embedding
+            .object_id,
+        "note-a"
+    );
 
     let changed_model = service
         .register_model(ModelInput {
@@ -517,8 +588,8 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
         .await
         .unwrap();
     assert_eq!(job.job_type, "embedding.rebuild");
-    assert_eq!(job.payload["projection_version"], 2);
-    assert!(job.dedup_key.contains(":embedding:v2:"));
+    assert_eq!(job.payload["projection_version"], 3);
+    assert!(job.dedup_key.contains(":embedding:v3:"));
     assert!(job.payload.to_string().contains("note-a"));
     assert!(!job.payload.to_string().contains("first"));
 

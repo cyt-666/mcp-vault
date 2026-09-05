@@ -3,6 +3,8 @@
 - Status: Accepted
 - Date: 2026-08-19
 - Continuous source-health behavior amended by: ADR-0022
+- Historical lifecycle/query behavior superseded by ADR-0026; portable
+  canonical Markdown and provenance remain binding.
 
 ## Context
 

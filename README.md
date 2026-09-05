@@ -4,8 +4,8 @@ MCP Vault 是一个自托管的 Markdown 知识库和长期记忆服务。
 它让人通过 Obsidian 管理同一个 Vault，也让 AI Agent 通过 MCP 发现、检索、
 回忆和安全修改这些内容。
 
-当前版本：<code>0.1.21</code>（2026-09-04）。部署示例默认使用
-<code>mcp-vault:0.1.21</code>，目标架构为 <code>linux/amd64</code>。
+当前版本：<code>0.2.1</code>（2026-09-05）。部署示例默认使用
+<code>mcp-vault:0.2.1</code>，目标架构为 <code>linux/amd64</code>。
 
 ## 项目定位
 
@@ -118,14 +118,14 @@ curl --fail http://127.0.0.1:8080/health/ready
 当前版本镜像可以这样构建：
 
 ~~~bash
-docker build --platform linux/amd64 --tag mcp-vault:0.1.21 --tag mcp-vault:latest .
+docker build --platform linux/amd64 --tag mcp-vault:0.2.1 --tag mcp-vault:latest .
 ~~~
 
 镜像包含 Rust 服务和编译后的 Admin 前端，运行用户为非 root 的 <code>mcpvault</code>，
 入口命令为 <code>/usr/local/bin/mcp-vault</code>。在部署前可以执行：
 
 ~~~bash
-docker run --rm --platform linux/amd64 --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m mcp-vault:0.1.21 --check-config
+docker run --rm --platform linux/amd64 --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m mcp-vault:0.2.1 --check-config
 ~~~
 
 ## 首次配置顺序
@@ -137,8 +137,8 @@ docker run --rm --platform linux/amd64 --read-only --tmpfs /tmp:rw,noexec,nosuid
 5. 如需语义检索，配置 embedding Provider，并按需绑定
    <code>embedding_note</code> 与 <code>embedding_memory</code>；索引页和记忆页可分别
    生成缺失向量，无需重新分析笔记或整理记忆。
-6. 如需自动记忆，分别绑定 <code>memory_extraction</code> 和 <code>memory_consolidation</code> 模型，
-   然后显式启用 Vault 级自动记忆。
+6. 如需自动记忆，绑定 <code>memory_extraction</code> 模型，然后显式启用 Vault 级
+   自动记忆；每篇来源笔记只需要一次模型调用。
 7. 完成备份目录、保留策略和反向代理配置后，再将数据面发布到公网。
 
 Admin 密码、WebDAV 密码、MCP PAT 和 Vault OAuth 密码属于不同安全平面，不能
@@ -251,71 +251,63 @@ Access Token 有效期为 1 小时。每次成功刷新都会重新获得 180 �
 如果希望 ChatGPT 保存新的 <code>offline_access</code> grant，升级后建议在 ChatGPT 中点一次
 “重新连接”。Token 已过期、被撤销或被 ChatGPT 丢失时，才必须重新登录。
 
-从 <code>0.1.16</code> 升级到 <code>0.1.17</code> 不会重置记忆、OAuth 或 Vault 内容。
-迁移 0013 将旧笔记来源标记为待核验，并在首次完整 Vault reconciliation 后自动提交
-分页来源审计。审计完成前，未核验的笔记依赖型记忆暂不参与普通 recall；无笔记来源的
-Agent/Admin 显式记忆不受影响。升级前仍应创建并验证备份；数据库迁移为前向迁移。
+包含迁移 0015 的 v2.1 版本不会自动删除旧记忆、OAuth 或 Vault 内容。升级后旧记忆
+引擎立即退出所有模型读取入口；显式保留与笔记重新生成必须通过 Admin 的预检和明确
+迁移确认完成。升级前仍应创建并验证备份；数据库迁移为前向迁移。
 
 ## 长期记忆
 
-自动记忆是显式启用的事件驱动功能，不是默认的定时全库扫描。普通 Markdown
-笔记不需要添加标签、frontmatter、特殊目录或服务专用标记。
+长期记忆只有“当前”状态，并分为两种归属：
 
-记忆处理分为两个阶段：
+- 显式记忆：Agent 或 Admin 明确保存，每条拥有独立的规范 Markdown；
+- 笔记派生记忆：每篇来源笔记按稳定 File ID 拥有一组完整的当前记忆。
 
-~~~text
-笔记修订 / remember
-    ↓
-Phase 1: memory.extract
-    ↓  本地绑定 Vault、文件、修订和哈希
-Stage 1 raw memory / no_output
-    ↓
-Phase 2: memory.consolidate
-    ↓  去重、冲突解决、合并、归档和遗忘
-通过 Vault Core 写入规范 Markdown
-    ↓
-本地投影和无需 LLM 的 recall
-~~~
-
-规范记忆文件位于 Vault 内容根目录的受管命名空间：
+自动记忆是显式启用的事件驱动功能。只需绑定
+<code>memory_extraction</code> 模型；普通 Markdown 不需要特殊标签、目录或
+frontmatter。每篇笔记只调用一次模型：
 
 ~~~text
-_mcp-vault/memory/MEMORY.md
-_mcp-vault/memory/memory_summary.md
-_mcp-vault/memory/raw_memories.md
-_mcp-vault/memory/source_summaries/
-_mcp-vault/memory/records/YYYY/MM/memory-id.md
+读取当前笔记、File ID 与内容哈希
+    ↓
+模型返回完整的 {"memories":[...]} 内容集合
+    ↓
+本地校验并持久化可恢复快照
+    ↓
+通过 Vault Core 原子替换该来源的规范 memory-set
+    ↓
+替换当前投影、FTS，并按需生成向量
 ~~~
 
-这些是长期记忆自身的规范 Markdown，不是 Agent 写笔记时遗留的临时文件。
-Admin 中的“记忆文件”显示上述路径；展开“来源笔记与证据定位”后看到的
-<code>sources[].path</code> 才是支持该记忆的原始笔记路径。
+模型只建议 <code>content</code> 与可选 <code>kind/tags</code>；ID、路径、来源、修订、
+替换和删除全部由服务端控制。重要技术知识可以被提炼，但教程、第三人称事实或
+未采纳建议不能被改写成用户已经掌握或采用的事实。
 
-最终记忆会带有来源、置信度、时间有效性、生命周期和 Vault 身份。<code>recall</code> 只
-读取本地持久化投影，不会在查询时调用 LLM；普通文章知识以单独的
-<code>related_notes</code> 提示返回，不会被自动冒充为长期事实。
+当前规范文件位于受管命名空间：
 
-笔记来源以稳定 <code>FileId</code>、证据修订和精确证据哈希记录在规范记忆
-Markdown 中。文件创建、更新、移动、删除、恢复或由外部同步修改时，服务都会先
-协调来源健康，再决定是否提交可选的 AI 提取任务。纯移动且内容未变时只更新路径，
-不会调用模型。
+~~~text
+_mcp-vault/memory/current/explicit/{memory_id}.md
+_mcp-vault/memory/current/sources/{source_file_id}.md
+~~~
 
-任何带笔记来源的记忆都必须至少有一个当前有效来源才能保持
-<code>active</code>；这也适用于 Agent/Admin 显式创建但附带笔记证据的记忆。完全
-不依赖笔记的显式记忆继续有效。最后一个有效来源消失时，记忆进入
-<code>stale</code> 并退出普通 <code>recall</code>，但不会自动删除；历史查询仍可查看。
+来源内容哈希一旦变化，旧派生集合会立即退出所有记忆读取入口；新提取失败时也
+不会重新开放旧内容。相同 File ID、相同内容的移动只更新展示路径，不调用模型。
+删除来源会删除其派生集合；同一路径删除后重建得到新 File ID，不继承旧集合。
 
-跨 <code>FileId</code> 只接受当前 Vault 内唯一的精确全文哈希，或同一行锚点/标题路径的
-精确摘录哈希。候选重复、扫描受限、跨 Vault 内容和语义相似都不会绑定。文件重新
-出现且能够严格证明时，因 <code>source_unavailable</code> 失效的记忆会自动恢复。
+<code>forget_memory</code> 始终删除当前记忆，不再归档。删除笔记派生条目会重写所属
+集合，并暂停该来源的自动提取，直到 Admin 以当前 set revision 明确恢复。显式
+记忆通过 <code>remember</code> 直接写入，不经过提取或全局整理。
 
-升级和每次完整 Vault 扫描后都会运行可重复的“审计记忆来源健康”任务。Admin
-分别显示最终记忆来源、受影响记忆、阶段一来源和不同 FileId 数量，不再把它们合并为
-含义模糊的“未解析来源”总数。首次 0.1.17 审计完成前，未核验的笔记依赖型记忆会
-暂时退出普通召回，宁可少返回也不会继续提供无法证明的来源。
+<code>recall</code> 只读取当前、来源哈希仍有效的本地投影，不在查询时调用生成式
+模型。词法/实体证据始终可用；语义单独命中只有在对应 embedding profile 已用
+真实标注集校准后才可进入普通召回。返回的 <code>score</code> 是融合排序分，原始
+余弦仅在诊断字段 <code>semantic_cosine</code> 中出现。
 
-如果未配置 Provider，WebDAV、文件写入、词法搜索和已有记忆回忆仍可用；Admin
-会显示记忆功能的配置阻塞原因和任务状态。
+升级到 v2.1 时，迁移 0015 只新增 current-only 表。旧生命周期、Phase 1/2、
+source-health 与别名表不会自动删除，也不会再被 MCP、Admin 记忆读取、resource、
+recall 或 embedding source 使用。Admin 必须先运行无正文的迁移预检，再用
+<code>MIGRATE_MEMORY_V2_1</code> 明确确认：可可靠识别的显式记忆保留原 ID，笔记
+派生内容从当前来源重新生成，混合/不明归属只报告、不猜测。生产升级前仍应创建并
+验证备份。
 
 ## 文件、数据库和备份
 

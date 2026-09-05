@@ -86,6 +86,8 @@ typed_uuid_id!(VaultId, "Vault ID");
 typed_uuid_id!(FileId, "file ID");
 typed_uuid_id!(RevisionId, "revision ID");
 typed_uuid_id!(MemoryId, "memory ID");
+typed_uuid_id!(MemorySetId, "memory set ID");
+typed_uuid_id!(MemorySetSnapshotId, "memory set snapshot ID");
 typed_uuid_id!(IdentityId, "identity ID");
 typed_uuid_id!(AdminUserId, "Admin user ID");
 typed_uuid_id!(AdminSessionId, "Admin session ID");
@@ -124,7 +126,7 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::{FileId, MemoryId, VaultId};
+    use super::{FileId, MemoryId, MemorySetId, VaultId};
     use crate::DomainError;
 
     #[test]
@@ -133,10 +135,12 @@ mod tests {
         let vault = VaultId::from_uuid(uuid);
         let file = FileId::from_uuid(uuid);
         let memory = MemoryId::from_uuid(uuid);
+        let memory_set = MemorySetId::from_uuid(uuid);
 
         assert_eq!(vault.as_uuid(), file.as_uuid());
         assert_eq!(file.as_uuid(), memory.as_uuid());
         assert_ne!(format!("{vault:?}"), format!("{file:?}"));
+        assert_ne!(format!("{memory:?}"), format!("{memory_set:?}"));
     }
 
     #[test]

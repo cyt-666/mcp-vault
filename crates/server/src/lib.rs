@@ -16,7 +16,6 @@ use std::{io, net::SocketAddr, path::Path, path::PathBuf, sync::Arc};
 use axum::Router;
 use config::AppConfig;
 use mcp_vault_domain::MaintenanceGate;
-use mcp_vault_memory::MEMORY_PIPELINE_GENERATION;
 use thiserror::Error;
 use tokio::{net::TcpListener, sync::Notify, time::timeout};
 use tracing::{info, warn};
@@ -331,85 +330,8 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         .map_err(|failure| ServerError::Workers(failure.code))?;
     supervisor
         .register_job_handler(
-            "memory.consolidate",
-            workers::memory_consolidate_job_handler(
-                state.clone(),
-                history_root.clone(),
-                core_runtime.clone(),
-                memory_service.clone(),
-            ),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
-            "memory.enrich_retrieval",
-            workers::memory_retrieval_job_handler(
-                state.clone(),
-                history_root.clone(),
-                core_runtime.clone(),
-                memory_service.clone(),
-            ),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
-            "memory.reset_pipeline",
-            workers::memory_reset_pipeline_job_handler(
-                state.clone(),
-                history_root.clone(),
-                core_runtime.clone(),
-                memory_service.clone(),
-            ),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
-            "memory.revalidate",
-            workers::memory_revalidate_job_handler(
-                state.clone(),
-                history_root.clone(),
-                core_runtime.clone(),
-                memory_service.clone(),
-            ),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
             "memory.source_reconcile",
             workers::memory_source_reconcile_job_handler(
-                state.clone(),
-                history_root.clone(),
-                core_runtime.clone(),
-                memory_service.clone(),
-            ),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
-            "memory.rebuild",
-            workers::memory_rebuild_job_handler(
-                state.clone(),
-                history_root.clone(),
-                core_runtime.clone(),
-                memory_service.clone(),
-            ),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
-            "memory.repair_sources",
-            workers::memory_source_repair_job_handler(
-                state.clone(),
-                history_root.clone(),
-                core_runtime.clone(),
-                memory_service.clone(),
-            ),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
-            "memory.audit_sources",
-            workers::memory_source_audit_job_handler(
                 state.clone(),
                 history_root.clone(),
                 core_runtime.clone(),
@@ -429,32 +351,8 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         }
         let context = vault
             .context()
-            .map_err(|_| ServerError::Workers("memory_pipeline_reset_context_invalid"))?;
-        let reset_complete = state
-            .memory()
-            .get_consolidation_state(&context)
-            .await?
-            .is_some_and(|memory_state| {
-                memory_state.pipeline_generation >= MEMORY_PIPELINE_GENERATION
-            });
-        if !reset_complete {
-            workers::ensure_memory_pipeline_reset_job(&state, &context).await?;
-        } else {
-            workers::ensure_memory_pipeline_regeneration_job(
-                &state,
-                &memory_service,
-                &context,
-                None,
-            )
-            .await
-            .map_err(|_| ServerError::Workers("memory_regeneration_admission_failed"))?;
-            workers::ensure_memory_consolidation_job(&state, &context, "startup_recovery", None)
-                .await?;
-            memory_service
-                .ensure_retrieval_enrichment(&context, "startup_recovery")
-                .await
-                .map_err(|_| ServerError::Workers("memory_retrieval_admission_failed"))?;
-        }
+            .map_err(|_| ServerError::Workers("memory_context_invalid"))?;
+        workers::retire_legacy_memory_jobs(&state, &context).await?;
     }
     let worker_shutdown = workers::Cancellation::default();
     let worker_task = tokio::spawn({
@@ -469,7 +367,6 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         state.clone(),
         config.reconciliation_interval,
         maintenance.clone(),
-        memory_service.clone(),
         reconciliation_shutdown.clone(),
     ));
 
@@ -772,13 +669,6 @@ pub async fn reconcile_vault_once(
                 .await?;
         }
     }
-    workers::enqueue_memory_source_audit_job(
-        state,
-        &context,
-        &generation,
-        &format!("vault_reconciliation:{scan_type}"),
-    )
-    .await?;
     Ok(report)
 }
 
@@ -786,7 +676,6 @@ async fn run_reconciliation_loop(
     state: mcp_vault_state::StateStore,
     interval: std::time::Duration,
     maintenance: MaintenanceGate,
-    memory_service: mcp_vault_memory::MemoryService,
     shutdown: workers::Cancellation,
 ) {
     let mut ticker = tokio::time::interval(interval);
@@ -852,41 +741,11 @@ async fn run_reconciliation_loop(
                         Ok(Some(_)) => {}
                         Err(_) => warn!(vault_id = %vault_id, "periodic Vault reconciliation lookup failed"),
                     }
-                    if workers::ensure_memory_pipeline_reset_job(&state, &context)
+                    if workers::retire_legacy_memory_jobs(&state, &context)
                         .await
                         .is_err()
                     {
-                        warn!(vault_id = %vault_id, "periodic memory pipeline reset admission failed");
-                        continue;
-                    }
-                    if workers::ensure_memory_pipeline_regeneration_job(
-                        &state,
-                        &memory_service,
-                        &context,
-                        None,
-                    )
-                    .await
-                    .is_err()
-                    {
-                        warn!(vault_id = %vault_id, "periodic memory regeneration admission failed");
-                    }
-                    if workers::ensure_memory_consolidation_job(
-                        &state,
-                        &context,
-                        "periodic_recovery",
-                        None,
-                    )
-                    .await
-                    .is_err()
-                    {
-                        warn!(vault_id = %vault_id, "periodic memory consolidation admission failed");
-                    }
-                    if memory_service
-                        .ensure_retrieval_enrichment(&context, "periodic_recovery")
-                        .await
-                        .is_err()
-                    {
-                        warn!(vault_id = %vault_id, "periodic memory retrieval admission failed");
+                        warn!(vault_id = %vault_id, "periodic legacy memory-job retirement failed");
                     }
                 }
             }

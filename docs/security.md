@@ -540,68 +540,46 @@ reserved namespace, reconciliation does not infer managed-file deletion, and
 memory extraction skips managed files to prevent self-triggering loops.
 Automatic memory is enabled once per Vault and does not inspect an author-facing
 frontmatter key, tag, path, or folder convention. Eligible ordinary Markdown
-changes may therefore reach the configured Phase 1 Provider. Legacy
+changes may therefore reach the configured extraction Provider. Legacy
 `explicit_only` and `all_notes` configuration deserialize to `automatic`;
 every other path/content privacy rule continues to apply.
 
-Phase 1 and Phase 2 model output is untrusted. Automatic Phase 1 returns only
-semantic raw memory, source summary, and slug; local code binds the current
-Vault/File ID/revision and normalized whole-note hash. Explicit/imported
-evidence may carry locally validated heading/line anchors and excerpt hashes.
-Model text never becomes evidence. Phase 2 may paraphrase and merge only
-referenced Stage 1 inputs.
-Local code rejects unknown or cross-Vault references, missing evidence,
-unsupported lifecycle actions, stale base revisions, and incomplete raw-input
-dispositions before any canonical write or selection commit. Neither phase
-accepts model-generated confidence or importance as trust evidence.
+Extraction model output is untrusted. The only accepted root is one
+`memories[]` array whose items contain required non-empty `content` and optional
+`kind`/`tags`. Local code applies bounds and secret filtering, drops invalid
+optional metadata, allocates all durable IDs, and binds the proposal to the
+current Vault/File ID/revision/normalized whole-note hash. The model cannot
+provide source identity, evidence coordinates, lifecycle actions, confidence,
+importance, database references, or write paths. A missing/ambiguous/truncated
+root or invalid required content fails the whole source operation; it is never
+interpreted as an empty set.
 
-Multilingual retrieval enrichment is equally untrusted. The Provider receives
-only bounded source samples and request-local integer indexes, never
-application-owned memory IDs. Local validation requires an exact item set,
-valid BCP-47 language tags, source/`zh-Hans`/`en` coverage after language
-deduplication, one to eight aliases per language, and a 128-byte per-alias
-limit. Control characters, out-of-scope languages, and secret-shaped aliases
-reject the complete proposal. A source-language body rewrite is separately
-fail-closed: it is allowed only for a current hash-verified Vault Core source,
-must retain every detected URL, UUID, path, code span, number, and version, and
-otherwise leaves the canonical body unchanged while retaining only validated
-aliases and a stable warning code.
+The complete validated source-set snapshot is persisted before canonical
+mutation. Publication rechecks the exact File ID/hash, source pause state, and
+expected set revision. Recovery may adopt only byte-identical managed output
+from that snapshot, so an interruption cannot justify replaying the paid call,
+publishing stale output, or overwriting a concurrent set change. Generated
+content and metadata receive best-effort secret redaction before persistence;
+no response content is emitted into logs or progress.
 
-When a note source cannot be verified, local code stores BCP-47 `und` and
-accepts only the `zh-Hans` and `en` alias groups; it does not let Provider text
-claim a source language or authorize a body rewrite.
-
-The complete validated retrieval proposal is persisted before any canonical
-mutation. Recovery applies an exact revision/content snapshot item by item and
-records its prefix, so an interruption cannot justify replaying the paid
-Provider request or overwriting a concurrent memory edit. Alias generation
-failure occurs after the core memory commit and cannot roll that memory back.
-
-Generated raw memory, source summaries, global summaries, final semantic
-content, reasons, and metadata strings receive best-effort secret redaction
-before persistence. Provider schema-envelope repair is allowed only for an
-unambiguous single-array schema whose direct item/array already passes the
-complete item schema; the multi-field Phase 1 and Phase 2 contracts do not
-qualify. Every repaired value is revalidated against the full root schema.
-No response content is emitted into logs or progress.
-
-Normal memory recall additionally joins Vault-scoped source health to current
-file metadata and requires the verified file hash to remain current. Cross-
-File-ID identity uses one exact candidate inside the same Vault; filename,
-semantic/vector, LLM, ambiguous, truncated, and cross-Vault candidates are
-rejected. Source audits and event reconciliation run without a Provider and
-persist only hashes, IDs, paths, revisions, bounded reasons, and counts.
+Normal memory recall joins note-derived ownership to current file metadata and
+requires the full source hash to match. A same-File-ID move may update path
+metadata without a Provider call; content change immediately makes the old set
+ineligible, delete removes it, and a new File ID never inherits ownership.
+Event reconciliation runs without a Provider and persists only hashes, IDs,
+paths, revisions, bounded reasons, and counts.
 
 Schema failures persist only a project-owned category, a path assembled from
 the trusted request schema, and a bounded Admin-visible source path. Unknown
 Provider property names, response values, note bodies, prompts, and response
 bodies are not written to progress or logs; process logs hash the source path.
-Stage 1 coverage is the Vault/source identity, source/configuration revisions,
-one-way profile/output hashes, status, and bounded timestamps/counters. The
+Extraction coverage is the Vault/source identity, source/configuration
+revisions, one-way profile/output hashes, status, and bounded timestamps/
+counters. The
 default manual action consults that coverage before a remote request; the
 explicit `include_evaluated` option is authenticated/CSRF-protected and
 accompanied by an Admin cost warning.
-Recall returns only Vault-scoped projection rows after lifecycle, temporal,
+Recall returns only Vault-scoped current projection rows after temporal,
 permission, and budget filtering; it never scans the filesystem or sends a
 query to a generative LLM. Its `related_notes` cues are emitted only when the
 authenticated principal has `vault:read`; `memory:read` alone cannot reveal
@@ -609,15 +587,15 @@ ordinary note paths, titles, snippets, tags, or headings. Query embeddings and
 durable `embedding_note` jobs remain subject to the same per-Vault provider
 mode and path/content privacy policy as other provider requests.
 
-Persisted aliases are search-only derived state and are never returned as
-facts or provenance. Recall uses bounded escaped OR terms and reports
-`multilingual_alias_coverage_incomplete` when the current memory/profile set is
-not fully covered. It does not translate the user's query at request time.
-Vector candidates are constrained by Vault, model, dimension, and object type
-before the bounded candidate pool so one projection class cannot reveal or
-crowd out another. Note chunks are then validated against the current derived
-note projection and collapsed by File ID before the final note Top-K; stale
-chunks cannot win or hide a lower-scoring current chunk for the same note.
+Vector candidates are constrained by Vault, object type, model, projection
+version, profile hash, dimension, source/content hash, chunk key, and exact
+embedding-input hash before the bounded candidate pool. Raw cosine is retained
+separately from fused score and must pass a profile-calibrated semantic gate;
+recency/importance cannot create relevance. Chunks are collapsed by source
+object before final Top-K, so stale or duplicate chunks cannot reveal, crowd
+out, or multiply one note/memory. The whole serialized response shares one
+budget and oversized candidates are skipped rather than forcing a leak or an
+early stop.
 
 Provider audit records include byte/token estimates and model, not note body.
 
@@ -646,7 +624,7 @@ until that job completes. A job handler reconstructs context from the durable
 job row's `vault_id` and never trusts a payload-supplied Vault identity.
 
 Startup recovery, Worker admission, index/vector rebuilds, and memory
-reset/consolidation isolate failures by Vault. An initializing, disabled, or
+extraction/source reconciliation isolate failures by Vault. An initializing, disabled, or
 error Vault cannot grant access to another Vault or stop a healthy Vault;
 installation-global backup/restore remains the documented exception because it
 deliberately coordinates every root and SQLite together.
@@ -677,7 +655,7 @@ Audit security-sensitive actions:
 - OAuth grant changes;
 - provider/secret changes;
 - note mutation/delete/restore;
-- memory consolidation/edit/archive/delete and prerelease pipeline reset;
+- memory create/edit/delete, source pause/resume, and migration apply;
 - backup/restore;
 - permission/settings changes.
 

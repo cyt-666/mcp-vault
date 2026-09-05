@@ -330,10 +330,8 @@ To enable AI memory extraction after first setup, use Admin in this order:
 2. create the Provider and discover its model list, or manually register the
    exact provider model ID when discovery is absent/inaccurate;
 3. bind that model to `memory_extraction`;
-4. bind a suitable model to `memory_consolidation` (it may be the same
-   registered model, but remains a separate role binding);
-5. enable automatic memory; source admission is fixed to `automatic`;
-6. optionally request “处理新增或有变化的笔记” once, then rely on future
+4. enable automatic memory; source admission is fixed to `automatic`;
+5. optionally request “处理新增或有变化的笔记” once, then rely on future
    Markdown create/update/move/restore events.
 
 No note frontmatter, tag, folder, or path convention is required. Enabling the
@@ -342,30 +340,28 @@ extraction model. Legacy `explicit_only` and `all_notes` settings deserialize
 as aliases for `automatic`; operators do not need to rewrite stored settings or
 edit notes during upgrade.
 
-Successful Phase 1 evaluation is persisted independently from whether raw
-memory was generated. Later automatic events and default manual runs compare
-the current file revision and effective extraction profile before sending
-content, so an unchanged current note costs no generation call. The one-time
-prerelease pipeline cutover removes all prior memory state and memory jobs;
-current notes are then evaluated from note one under the current Phase 1
-contract.
+Successful evaluation publishes one complete current set for its source even
+when `memories` is empty. Later automatic events and default manual runs
+compare the current File ID, normalized content hash, and effective extraction
+profile before sending content, so an unchanged current note costs no
+generation call.
 
 Enable “包含已处理且未变化的笔记” only when intentionally forcing a complete
 re-evaluation despite unchanged recorded configuration, for example after an
-upstream model alias changes behavior without a local revision. It may produce
-a different semantic raw memory from the unchanged note and consume the same
-per-note model budget again. A failed forced evaluation leaves the note stale
-for the next default incremental run.
+upstream model alias changes behavior without a local revision. It may replace
+the complete current set for an unchanged note and consume the same per-note
+model budget again. A failed forced evaluation does not publish a partial or
+empty replacement.
 
-Phase 1 returns the Codex three-field `raw_memory`, `rollout_summary`, and
-`rollout_slug` object. MCP Vault derives file/path/revision and normalized
-whole-source hash locally; the Provider does not return canonical evidence
-coordinates and Phase 1 does not write final memory. A separate durable
-`memory.consolidate` job uses the `memory_consolidation` model to merge,
-deduplicate, supersede, archive, or discard staged inputs. Only a fully
-validated prepared proposal is materialized as canonical semantic memory.
-Neither phase asks the Provider for confidence/importance scores, and neither
-requires per-result human approval.
+The one-call contract is
+`{"memories":[{"content":"...","kind":"fact","tags":["..."]}]}`.
+Only the array and each non-empty content value are required; invalid optional
+kind/tag metadata is dropped locally. MCP Vault allocates identifiers and
+derives Vault/File ID/path/revision/content-hash provenance locally. The model
+does not return lifecycle actions, evidence coordinates, confidence,
+importance, or bookkeeping identifiers. A fully validated prepared snapshot
+is atomically materialized as one portable Markdown set after exact source
+hash, pause-state, and set-revision checks. There is no second model phase.
 
 Select the first-class AI service type whenever possible. The Admin form fills
 the current official global API root for DeepSeek, MiMo, Zhipu, Kimi, and
@@ -390,18 +386,17 @@ This is not a periodic LLM sweep. Disabled extraction admits no new
 `memory.extract` event jobs, while the explicit backfill is a durable job that
 survives restart. The Memory page reports readiness blockers and recent
 extraction failures without exposing note bodies or provider responses.
-The Phase 1 policy returns either `no_output` or one bounded semantic raw input
-with application-derived source provenance. Ordinary
+A valid empty `memories` array is a successful empty current set. Ordinary
 article/reference and technical content always remains in the note retrieval
-index even when Phase 1 returns `no_output`. On upgrade, migration 0011 deletes
-all prerelease memory rows and `memory.*` jobs. The automatically admitted
-`memory.reset_pipeline` job removes the old managed memory namespace through
-Vault Core and admits a brand-new current-generation full-Vault extraction with
-no inherited cursor. Vault source notes, revision history, existing backups,
-Provider settings, non-memory jobs, and audit history remain intact; old
-explicit memories are intentionally not converted. If Phase 1 is not
-configured, `regeneration_pending` remains visible and periodic reconciliation
-admits the fresh pass after configuration becomes ready.
+index even when extraction returns no durable memories.
+
+Migration 0015 adds current ownership without deleting prerelease rows or
+managed files. Existing installations must take a backup, run the authenticated
+preflight, inspect ambiguous/mixed counts, and explicitly confirm
+`MIGRATE_MEMORY_V2_1`. Legacy rows remain excluded from current reads until
+classified; safe explicit rows can be preserved and note-derived content is
+regenerated from current sources. No startup worker silently chooses or deletes
+old knowledge.
 
 One structured memory-extraction call has a five-minute default response
 deadline, configurable per Vault from 30 through 1800 seconds; the provider's
@@ -427,18 +422,12 @@ the provider response body.
 `provider_schema_invalid` is narrower than malformed JSON: the model returned
 one complete JSON value, but a required field, type, enum, array bound, or
 additional-property rule did not match. Current jobs show the redacted mismatch
-category and trusted schema path. Phase 1 requires exactly
-`raw_memory`, `rollout_summary`, and nullable `rollout_slug`; its zero-result
-form uses empty summary/raw strings and a null slug. Source provenance is local,
-not a model field. Phase 2 requires a summary, bounded memory actions, and a
-local disposition for every dirty raw input. These are multi-field contracts, so the
-generic single-array-envelope repair does not apply; missing or renamed fields
-remain visible contract failures rather than being guessed locally.
-
-Phase 2 assigns dirty inputs request-local indexes before context-only inputs
-and publishes the exact allowed discard indexes in the structured-output
-schema. A generated bookkeeping violation does not partially commit the global
-proposal; it enters `retry_wait` and consumes the job's bounded retry budget.
+category and trusted schema path. Current extraction requires exactly one root
+`memories` array and non-empty content for every item. Missing/renamed roots,
+unknown root fields, invalid content, or truncated output fail the source
+operation without publishing an empty/partial set. Invalid optional kind/tags
+are dropped locally under fixed bounds. Source provenance and identity are
+local, not model fields.
 
 During a full-Vault run, one malformed generated output is recorded against
 that note and later notes continue. The final job can read “完成但有失败” while
@@ -549,14 +538,14 @@ memory_extract_source_ingestion_failed
 memory_extract_note_output_failed
 ```
 
-For automatic memory, Phase 1 `job_progress` includes the current
-ordinal/total, model-evaluated notes, unchanged-note skips, raw inputs staged,
-`no_output` results, source-ingestion failures that prove no Provider call, and
-generated-output failures after a Provider call, plus elapsed milliseconds and
-a one-way hash of the current path. Phase 2 progress includes
-dirty raw inputs plus created, updated, retired, discarded, generation, and
-prepared-proposal reuse counts. Error events include only stable redacted error
-codes. The events never include job payloads, note bodies, raw/generated memory,
+For automatic memory, `job_progress` includes the current ordinal/total,
+model-evaluated notes, unchanged-note skips, published items, empty sets,
+source-ingestion failures that prove no Provider call, and generated-output
+failures after a Provider call, plus elapsed milliseconds and a one-way hash of
+the current path. Single-source work reports prepared-snapshot reuse. Source
+reconciliation reports checked/current/moved/changed/deleted sets and
+hidden/removed current memories. Error events include only stable redacted
+codes. The events never include job payloads, note bodies, generated memory,
 prompts, provider responses, API keys, or raw upstream error text. With the
 default JSON logging configuration, follow them with:
 
@@ -781,27 +770,23 @@ unchanged. Create and verify a fresh global backup before adding a second
 Vault; an older one-Vault backup remains readable but restore correctly rejects
 it against a different live Vault topology.
 
-The 0.1.17 upgrade adds migration 0013 without deleting memory or canonical
-Markdown. Existing final note sources begin `unverified`; normal recall fails
-closed for those note-dependent memories until the first generation-keyed
-`memory.audit_sources` job proves current evidence. Source-less explicit
-Agent/Admin memory remains available. Every completed full Vault reconciliation,
-including post-restore reconciliation, admits a new paged audit generation.
-Operators can also run it from Admin under **Memory → Source health**. Final-
-source, affected-memory, Stage 1, and distinct-File-ID counts are intentionally
-separate and must not be interpreted as interchangeable totals.
+Migration 0015 introduces the v2.1 current-ownership schema additively. It does
+not delete prerelease tables, rows, canonical Markdown, source notes, history,
+or backups. After upgrading an installation with legacy memory:
 
-Migration 0014 creates only Vault-scoped multilingual retrieval projections and
-rebuilds memory FTS; it does not rewrite existing canonical memory Markdown or
-advance the prerelease memory pipeline generation. Take and verify a backup
-before upgrade as usual. After upgrade, inspect **Memory → Cross-language
-retrieval**. Existing active, stale, and superseded memory remains uncovered
-until an Admin explicitly confirms backfill. The dialog reports estimated
-eight-item Provider batches and may equivalently restore verifiable translated
-bodies to their source language. Those body changes create ordinary revisions
-and can be restored from history. Cancelled or failed work retains applied
-metadata and resumes from durable pending/proposal state; do not delete the
-retrieval proposal table to retry a paid response.
+1. keep automatic extraction disabled and verify a fresh backup;
+2. run **Memory → Migration preflight**;
+3. inspect safe-explicit, note-derived, ambiguous/mixed, unsupported, and
+   historical counts;
+4. explicitly confirm `MIGRATE_MEMORY_V2_1` only when the report is acceptable;
+5. bind `memory_extraction`, enable extraction, and regenerate current
+   note-derived sets.
+
+Unambiguous explicit/import records preserve IDs and validated optional
+metadata. Note-derived records are regenerated from current File IDs and hashes.
+Ambiguous/mixed and non-current historical rows remain excluded from all model
+reads and are not silently reassigned or deleted. Obsolete two-stage jobs are
+retired as terminal operational work without touching user knowledge.
 
 ### Rollback
 
@@ -865,8 +850,7 @@ upgrade complete.
 
 If `embedding_memory` was already bound before upgrade, open the Memory page
 and use **Generate missing vectors**. This rebuilds vectors from current memory
-records and does not re-run memory extraction, consolidation, or multilingual
-alias generation.
+records and does not re-run memory extraction or rewrite canonical memory.
 
 ## 17. Diagnostics
 

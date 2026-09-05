@@ -1,8 +1,9 @@
 # ADR-0022: Continuously verify memory sources with exact Vault-scoped evidence
 
-- Status: Accepted
+- Status: Superseded by ADR-0026
 - Date: 2026-09-02
 - Amends: ADR-0007 and ADR-0016
+- Replaced by: ADR-0026 stable File-ID/source-hash current-set validation.
 
 ## Context
 

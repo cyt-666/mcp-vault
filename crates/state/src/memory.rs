@@ -1,7 +1,9 @@
-//! Vault-scoped durable memory projections and candidate state.
+//! Prerelease memory repository retained for bounded v2.1 migration input.
 //!
-//! Canonical memory Markdown is written by Vault Core. This module owns only
-//! the authoritative operational projection and rebuildable search metadata.
+//! Current runtime reads and writes use `current_memory`; this module exists so
+//! migration preflight/apply and backup compatibility can read immutable legacy
+//! tables without reimplementing their row formats. Protocol and worker paths
+//! must never use it as a current-memory repository.
 
 use std::collections::{HashMap, HashSet};
 

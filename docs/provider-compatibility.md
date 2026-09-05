@@ -92,9 +92,9 @@ visible output together; the Admin UI therefore describes the value as a
 per-note upper bound rather than promising a visible JSON size.
 
 Every returned value is parsed and validated locally against MCP Vault's JSON
-Schema subset. Provider JSON mode or SDK parsing never bypasses Phase 1
-source/evidence validation or Phase 2 reference, deduplication, conflict,
-forgetting, and revision-snapshot checks.
+Schema subset. Provider JSON mode or SDK parsing never bypasses the current
+`memories[]` schema, content bounds, secret filtering, File-ID/source-hash
+check, pause check, or source-set revision compare-and-swap.
 
 ## 4. Provider-specific notes
 
@@ -111,43 +111,18 @@ therefore omits extraction temperature while thinking is active.
 MiMo v2.5 JSON mode requires `json_object` and a complete format instruction.
 `max_completion_tokens` includes reasoning plus final content. Thinking remains
 enabled by default; the operator may explicitly disable it or change the
-per-call generation bound. Xiaomi's current structured-output guide explicitly
-states that JSON Object mode guarantees valid JSON syntax, not the requested
-field hierarchy, and recommends a complete structure template. MCP Vault
-therefore includes both the full JSON Schema and the exact Codex Phase 1
-three-field root template in the prompt and still validates the result locally.
-If Phase 1 returns valid `raw_memory` but omits only auxiliary
-`rollout_summary`, MCP Vault copies `raw_memory` verbatim into that field and
-reruns the full validator. Unknown or empty objects still fail without issuing
-an automatic second paid request. An invalid optional `rollout_slug` is dropped
-instead of discarding otherwise valid semantic output. Source provenance is
-derived locally; MiMo is never asked for evidence line coordinates. This is
-`memory-stage1-v5`. The v5 prompt also requires `raw_memory` and
-`rollout_summary` to retain the note's primary language while preserving
-technical literals.
-
-Phase 2 likewise includes an exact compact root template, but does not ask MiMo
-to generate or copy durable identifiers, evidence indexes, or mechanically
-duplicated raw dispositions. The request labels raw inputs and current memories
-with small request-local integers. MiMo returns semantic actions, those bounded
-indexes, and explicit discard indexes. MCP Vault maps them back to the captured
-snapshot, allocates every create ID locally, expands ready inputs to validated
-evidence, and derives `used`, `no_output`, and `withdrawn` state. An out-of-range
-reference is reported as a redacted `memory_phase2_*_index_invalid` code; the
-Provider response body is never retained. This is the
-`memory-consolidation-v7` contract. The v7 prompt uses the primary language of
-supporting raw inputs for creates and retains current-memory language for
-updates. Older prepared proposals are rejected before
-parsing, and revision-only projection drift does not invalidate unchanged
-semantic memory.
-
-Multilingual retrieval enrichment is a third prompt contract, not a third
-model role. `memory-retrieval-v1` reuses the effective
-`memory_consolidation` binding with at most eight request-local memory indexes.
-It returns a BCP-47 source language, an optional equivalent source-language
-rewrite, and bounded aliases for source/`zh-Hans`/`en`. MCP Vault redacts and
-validates the complete result, persists it before application, and never logs
-or retries a paid response merely because application was interrupted.
+per-call generation bound. Xiaomi's current structured-output guide states
+that JSON Object mode guarantees valid JSON syntax, not the requested field
+hierarchy, and recommends a complete structure template. MCP Vault therefore
+includes both the full JSON Schema and the exact current root template
+`{"memories":[{"content":"...","kind":"fact","tags":[]}]}` in the prompt
+and still validates the result locally. Missing/renamed roots, unknown fields,
+truncation, or invalid required content fail without issuing an automatic
+second paid request. Invalid optional kinds/tags are dropped locally under
+fixed bounds. Source provenance, IDs, confidence, importance, and lifecycle
+actions are never requested from MiMo. The same one-call contract is used for
+all generation providers; there is no consolidation or retrieval-enrichment
+prompt.
 
 ### 4.3 Zhipu GLM
 
@@ -161,7 +136,7 @@ and the OpenAI-compatible `{model,input}` response shape. Its documented
 per-input limit is 3,072 tokens and its default output is 2,048 dimensions.
 Provider model discovery is not treated as a complete catalog, so Admin may
 manually register `embedding-3` with Embedding capability and dimension 2,048.
-MCP Vault's `text-v2` note projection caps the complete decoded input at 2,048
+MCP Vault's `text-v3` note projection caps the complete decoded input at 2,048
 UTF-8 bytes; this conservative bound avoids coupling rebuild correctness to a
 vendor tokenizer. The prior 6,000-character profile is obsolete derived state.
 

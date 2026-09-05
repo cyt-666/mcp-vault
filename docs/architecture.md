@@ -119,8 +119,8 @@ Rebuildable from canonical knowledge plus configuration:
 - FTS indexes;
 - topic and knowledge-index projections;
 - embeddings;
-- Stage 1 and final-memory query projections reconstructed from managed
-  memory artifacts and source notes;
+- current-memory query/ownership projections reconstructed from explicit and
+  source-set Markdown plus exact source metadata;
 - semantic relationships and optional knowledge graph.
 
 Deleting derived state must not delete current notes or durable memories.
@@ -456,9 +456,8 @@ Long-running or retryable work is represented in SQLite:
 - note analysis;
 - FTS update;
 - topic-index update;
-- Phase 1 memory extraction;
-- Phase 2 memory consolidation;
-- prerelease memory-pipeline reset and fresh regeneration;
+- one-call current memory-set extraction;
+- File-ID/hash memory-source reconciliation;
 - embedding;
 - re-embedding after model change;
 - index rebuild;
@@ -522,138 +521,61 @@ The index never moves user notes automatically.
 
 ## 11. Memory architecture
 
-Memory has separate command and query paths.
+### 11.1 Current source-owned architecture (normative v2.1)
 
-### Command path
-
-```text
-explicit remember or note change
-    → Phase 1 semantic distillation and exact-source validation
-    → sourced raw-memory staging
-    → Phase 2 global deduplication/conflict/forgetting decisions
-    → prepared-proposal and revision-snapshot validation
-    → canonical semantic Markdown materialization
-    → projection and embedding
-    → asynchronous multilingual retrieval metadata
-```
-
-### Query path
+Memory has two ownership forms and no model-visible lifecycle. An explicit
+memory owns one canonical Markdown file. A note-derived item belongs to the one
+complete current set owned by its source File ID; the source note remains the
+authority and the set is a rebuildable/materialized derivative.
 
 ```text
-recall request
-    → normalized OR terms and persisted multilingual-alias candidates
-    → object-scoped durable-memory vector/entity/topic candidates
-    → ordinary-note lexical/vector cue generation
-    → Vault/status/temporal filtering
-    → rank fusion and diversity
-    → token-budgeted typed memories + related-note cues
+explicit remember/update
+    -> validate caller content and optional metadata
+    -> reserve idempotent identity when supplied
+    -> Vault Core canonical current Markdown
+    -> current projection + FTS + vector scheduling
+
+source note event
+    -> File ID + exact full-content hash
+    -> immediate repository-level invalidation on mismatch/delete
+    -> one structured {memories:[...]} generation call
+    -> validated prepared whole-set snapshot
+    -> Vault Core canonical set replacement
+    -> atomic projection replacement + vector scheduling
+
+recall
+    -> current-eligibility SQL joins
+    -> gated FTS/entity/tag/current-vector candidates
+    -> per-object fusion, deduplication, complete output budgeting
+    -> current memories and separately typed ordinary-note cues
 ```
 
-Normal recall is an index query and does not call an LLM. See `memory-system.md`.
+Same-ID/same-hash moves update navigation and set Markdown without generation.
+There is no cross-File-ID source repair. A note-derived item deletion rewrites
+the whole set and pauses that source until an authenticated, revision-aware
+Admin resume. Explicit deletion removes its canonical current file. All get,
+list, recall, MCP resource/context, and embedding-source paths use the same
+current repository; retained revisions and legacy rows are unreachable from
+model routes.
 
-The Memory application service uses the Codex-style boundary adopted by
-ADR-0016. `memory.extract` distills one ordinary note revision into semantic
-`raw_memory`, `rollout_summary`, and `rollout_slug`, matching the Codex Phase 1
-wire contract. The model never supplies source coordinates. MCP Vault locally
-binds a non-empty output to file identity, path, exact revision, and normalized
-whole-source hash. A valid zero-result is durable `no_output` coverage. Phase 1
-does not create final memory or FTS rows.
+The filesystem/SQLite handoff uses a persisted prepared set snapshot or an
+explicit idempotency reservation. A retry adopts only byte-identical canonical
+output and still compares the source hash and expected set/item revision.
+Vectors carry separate content, profile, and prepared-input hashes and are
+always rebuildable. Recall makes no query-time generation call.
 
-`memory.consolidate` is a separate Vault-scoped persistent job using the
-`memory_consolidation` binding. It consumes dirty Stage 1 rows and current
-global memory, then proposes create/update/archive semantics, request-local
-integer references, explicit discards, supersession, and compact-summary
-changes. Durable UUIDs remain local. Application code maps each integer back to
-the captured Vault snapshot, allocates every create ID, attaches all
-application-derived Stage 1 provenance, derives used/no-output/withdrawn dispositions,
-validates every reference,
-captures action-target revisions, persists the prepared proposal, rechecks the
-selected semantic input snapshot, writes canonical artifacts through Vault Core, and atomically
-marks exact raw hashes selected. One active consolidation job is permitted per
-Vault. Reconciliation waits for unrelated active extraction work. Projection
-rebuilds are record-path-only and idempotent; same-content revision drift is
-normalized instead of invalidating a proposal. Once prepared, targeted semantic
-memory mutations yield a retryable
-conflict until the persisted generation finishes; a restarted worker reuses
-that proposal, adopts byte-identical file-first writes, and drains successive
-bounded batches. Startup and periodic reconciliation re-admit any durable dirty
-input left while the singleton job was completing.
+See [Long-Term Memory System](memory-system.md) and ADR 0026 for the full
+contract.
 
-Explicit `remember` uses the same Stage 1/Phase 2 path and returns raw-input and
-job IDs rather than an immediate final memory. Final semantic content and
-supporting evidence are distinct. Normal recall consumes only the latest
-committed Vault-scoped memory FTS/entity/tag/recent/vector projections and
-defaults to omitting sources. It also delegates ordinary-note cues to the Index
-application service; those cues require Vault read permission and never acquire
-memory lifecycle or canonical memory Markdown.
+### 11.2 Superseded prerelease architecture (non-normative)
 
-Phase 1 `memory-stage1-v5` writes raw memory and source summaries in the note's
-primary language. Phase 2 `memory-consolidation-v7` uses the supporting raw
-memory language for creates and retains a current memory's language for
-updates. These prompt changes do not advance the destructive prerelease
-pipeline generation.
-
-After a new memory or body change commits, `memory.enrich_retrieval` uses the
-existing `memory_consolidation` binding to generate bounded aliases for the
-source language, `zh-Hans`, and `en`. Existing records enter that paid path only
-after explicit Admin admission. The job passes request-local indexes rather
-than durable IDs to the Provider and persists a fully validated proposal before
-applying individual items. Exact current note sources may authorize an
-equivalence-preserving source-language rewrite through Vault Core; unavailable
-sources never authorize a body rewrite. Alias failure is isolated from the
-already committed memory.
-
-`memory_fts` stores canonical text, aliases, and deterministic NFKC-normalized
-Latin tokens/Han bigrams. Recall submits at most 64 escaped OR terms, never
-translates a query online, and reports incomplete multilingual coverage. Vector
-search filters the existing `memory` or `note` object type (where `note` rows
-are deterministic note chunks) before the bounded vector candidate pool.
-The Index service validates current note chunk hashes, keeps only the highest
-non-negative cosine chunk per File ID, and then applies the final note Top-K.
-Duplicate chunks neither add score nor advance another note's semantic rank.
-Non-negative cosine similarity is multiplied into the reciprocal-rank
-contribution; negative hits are discarded.
-
-Note provenance stores stable File ID, path, and evidence revision in both the
-projection and canonical memory Markdown. The rebuildable
-`memory_source_health` projection binds that evidence to a verified current
-file hash. Every create/update/move/delete/restore/external event runs source
-coordination before optional Phase 1 admission. A move with unchanged evidence
-updates navigation without Provider work; a sole unavailable note source makes
-any note-dependent memory stale, including explicit memory. Source-less
-explicit Agent/Admin memory remains self-supported.
-
-Cross-File-ID recovery accepts only one exact Vault-scoped full-note or anchored
-excerpt match. Ambiguous, missing, truncated, semantic, filename, and cross-
-Vault candidates never bind. Repeatable generation-keyed audits replace the
-one-time repair scheduler; legacy repair/revalidate handlers only drain queued
-upgrade work.
-Outward note/index queries likewise join stable File ID
-to current active file state, while retaining the analyzed projection revision
-until a full rebuild advances content and revision together.
-
-Incremental Phase 1 compares note revision and an effective profile hash over
-policy, prompt/pipeline, binding, model, and Provider configuration. Explicit
-full re-extraction includes unchanged rows. Malformed output is a note-local
-failure and later notes continue; bounded consecutive failures stop repeated
-invalid paid calls while preserving the durable cursor. Progress and logs expose
-only redacted counts, timings, stable error codes, and trusted schema paths.
-
-Canonical artifacts are `_mcp-vault/memory/MEMORY.md`,
-`memory_summary.md`, `raw_memories.md`, `source_summaries/`, and per-record
-Markdown. Legacy quote-as-content extracted memories are removed and
-all discarded during the ADR-0017 prerelease cutover. Migration 0011 deletes
-every old memory row and `memory.*` job; no explicit or extracted memory is
-converted. The idempotent `memory.reset_pipeline` job removes all current
-managed memory files through Vault Core, writes empty current artifacts, and
-admits a fresh full-Vault extraction at note one. Managed files remain excluded
-from ordinary reconciliation and note-indexing loops.
-
-Every durable memory job carries `pipeline_generation`. The Worker cancels a
-missing or mismatched generation before handler or Provider invocation. Reset
-is exclusive with extraction/consolidation/revalidation/rebuild work for the
-same Vault, and `regeneration_pending` is cleared only after the dedicated
-current-generation `fresh_start` job has been admitted.
+Releases before v2.1 used lifecycle rows, Stage 1 raw outputs, global Phase 2
+consolidation, source-health projections, and multilingual alias backfill.
+ADR 0026 supersedes that architecture. The old SQLite tables remain readable
+only by the bounded migration classifier and backup tooling; startup cancels
+their queued job types, and no protocol, resource, worker, recall, or embedding
+source can execute the former engine. Historical rationale remains in the
+superseded ADRs and migrations rather than in this normative runtime design.
 
 ## 12. Provider architecture
 
@@ -715,8 +637,8 @@ Embedding job identities contain a project-owned projection version. A chunk
 contract repair therefore admits a new current-model job rather than reusing a
 terminal incompatible job. Binding `embedding_note` or `embedding_memory`
 schedules missing current-model projections; memory vectors are reconstructed
-directly from current active/stale/superseded memory and never require semantic
-re-extraction. Workers persist stable redacted Provider error codes and Admin
+directly from current memories and never require source-note re-extraction.
+Workers persist stable redacted Provider error codes and Admin
 exposes only model ID, homogeneous source type, and source count as job detail.
 
 Provider configuration edits and deletions remain Provider application
@@ -726,8 +648,9 @@ superseded Provider-owned ciphertext after the Provider row references the new
 secret. DELETE is one immediate State transaction: remove bindings for the
 Provider's models, remove Vault-partitioned derived embeddings/vectors, remove
 models and health/configuration, then remove every encrypted secret owned by
-that Provider. It deliberately retains canonical notes, memory lifecycle
-records/materialized Markdown, durable job history, and append-only audit.
+that Provider. It deliberately retains canonical notes, current memory
+Markdown/projections, legacy migration input, durable job history, and
+append-only audit.
 
 ## 13. Multi-Vault management
 

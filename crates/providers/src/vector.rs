@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::ProviderError;
 
+const DEFAULT_VECTOR_SCAN_PAGE_SIZE: u32 = 10_000;
+
 /// One vector similarity hit.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VectorHit {
@@ -49,18 +51,47 @@ pub trait VectorIndex: Send + Sync {
         context: &VaultContext,
         model_id: ModelId,
     ) -> Result<u64, ProviderError>;
+
+    /// Delete all model/profile variants for one Vault-scoped source object.
+    async fn delete_object(
+        &self,
+        context: &VaultContext,
+        object_type: &str,
+        object_id: &str,
+    ) -> Result<u64, ProviderError>;
 }
 
 /// Mandatory SQLite exact-cosine backend.
 #[derive(Clone)]
 pub struct SqliteVectorIndex {
     state: StateStore,
+    scan_page_size: u32,
 }
 
 impl SqliteVectorIndex {
     /// Bind the backend to operational state.
     pub fn new(state: StateStore) -> Self {
-        Self { state }
+        Self {
+            state,
+            scan_page_size: DEFAULT_VECTOR_SCAN_PAGE_SIZE,
+        }
+    }
+
+    /// Construct the same backend with a smaller bounded scan page. This is a
+    /// test/substitution seam for proving that ranking spans page boundaries.
+    pub fn with_scan_page_size(
+        state: StateStore,
+        scan_page_size: u32,
+    ) -> Result<Self, ProviderError> {
+        if scan_page_size == 0 || scan_page_size > DEFAULT_VECTOR_SCAN_PAGE_SIZE {
+            return Err(ProviderError::InvalidConfiguration(
+                "vector scan page size is invalid",
+            ));
+        }
+        Ok(Self {
+            state,
+            scan_page_size,
+        })
     }
 
     /// Return the state store used by this derived backend.
@@ -106,46 +137,64 @@ impl VectorIndex for SqliteVectorIndex {
             ));
         }
         let query_norm = query.iter().map(|value| value * value).sum::<f32>().sqrt();
-        let candidates = self
-            .state
-            .providers()
-            .list_vectors(context, model_id, object_type, dimension, 10_000)
-            .await?;
-        let mut hits = candidates
-            .into_iter()
-            .map(|candidate| {
+        if !query_norm.is_finite() || query_norm <= f32::EPSILON {
+            return Err(ProviderError::InvalidConfiguration(
+                "query vector has zero magnitude",
+            ));
+        }
+        let mut offset = 0_u32;
+        let mut hits = Vec::new();
+        loop {
+            let candidates = self
+                .state
+                .providers()
+                .list_vectors(
+                    context,
+                    model_id,
+                    object_type,
+                    dimension,
+                    self.scan_page_size,
+                    offset,
+                )
+                .await?;
+            let page_len = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
+            hits.extend(candidates.into_iter().filter_map(|candidate| {
                 let candidate_norm = candidate
                     .vector
                     .iter()
                     .map(|value| value * value)
                     .sum::<f32>()
                     .sqrt();
+                if candidate.vector.len() != dimension as usize
+                    || candidate.vector.iter().any(|value| !value.is_finite())
+                    || !candidate_norm.is_finite()
+                    || candidate_norm <= f32::EPSILON
+                {
+                    return None;
+                }
                 let dot = candidate
                     .vector
                     .iter()
                     .zip(query)
                     .map(|(left, right)| left * right)
                     .sum::<f32>();
-                let score = if query_norm == 0.0 || candidate_norm == 0.0 {
-                    0.0
-                } else {
-                    (dot / (query_norm * candidate_norm)).clamp(-1.0, 1.0)
-                };
-                VectorHit {
+                let score = (dot / (query_norm * candidate_norm)).clamp(-1.0, 1.0);
+                Some(VectorHit {
                     embedding: candidate.embedding,
                     score,
-                }
-            })
-            .collect::<Vec<_>>();
-        hits.sort_by(|left, right| {
-            right
-                .score
-                .total_cmp(&left.score)
-                .then_with(|| left.embedding.object_id.cmp(&right.embedding.object_id))
-                .then_with(|| left.embedding.chunk_key.cmp(&right.embedding.chunk_key))
-                .then_with(|| left.embedding.id.cmp(&right.embedding.id))
-        });
-        hits.truncate(limit as usize);
+                })
+            }));
+            hits.sort_by(vector_hit_order);
+            hits.truncate(limit as usize);
+            if page_len < self.scan_page_size {
+                break;
+            }
+            offset = offset
+                .checked_add(page_len)
+                .ok_or(ProviderError::InvalidConfiguration(
+                    "vector scan offset overflow",
+                ))?;
+        }
         Ok(hits)
     }
 
@@ -160,6 +209,28 @@ impl VectorIndex for SqliteVectorIndex {
             .delete_embeddings_for_model(context, model_id)
             .await?)
     }
+
+    async fn delete_object(
+        &self,
+        context: &VaultContext,
+        object_type: &str,
+        object_id: &str,
+    ) -> Result<u64, ProviderError> {
+        Ok(self
+            .state
+            .providers()
+            .delete_embeddings_for_object(context, object_type, object_id)
+            .await?)
+    }
+}
+
+fn vector_hit_order(left: &VectorHit, right: &VectorHit) -> std::cmp::Ordering {
+    right
+        .score
+        .total_cmp(&left.score)
+        .then_with(|| left.embedding.object_id.cmp(&right.embedding.object_id))
+        .then_with(|| left.embedding.chunk_key.cmp(&right.embedding.chunk_key))
+        .then_with(|| left.embedding.id.cmp(&right.embedding.id))
 }
 
 /// Stable source reference used by re-embedding job admission.

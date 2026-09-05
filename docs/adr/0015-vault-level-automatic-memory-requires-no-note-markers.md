@@ -7,6 +7,8 @@
   rules.
 - Amended by: ADR-0016 supersedes direct automatic promotion while retaining
   marker-free Vault-level admission and exact supporting evidence.
+- Automatic knowledge classification superseded by ADR-0026, which retains
+  marker-free Vault-level admission but allows useful sourced knowledge.
 
 ## Context
 

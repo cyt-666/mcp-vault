@@ -491,7 +491,7 @@ async fn active_job_lookup_is_type_and_vault_scoped_and_ignores_terminal_rows() 
 }
 
 #[tokio::test]
-async fn memory_consolidation_is_a_vault_scoped_non_cancellable_singleton() {
+async fn obsolete_memory_consolidation_jobs_stay_vault_scoped_until_retired() {
     let (store, context) = store_and_context().await;
     let first = store
         .jobs()

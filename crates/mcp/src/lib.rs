@@ -22,8 +22,8 @@ use mcp_vault_indexer::{
     IndexError, IndexService, NoteRetrievalHit, NoteRetrievalMode, NoteRetrievalScope,
 };
 use mcp_vault_memory::{
-    MemoryError, MemoryOrigin, MemoryService, MemorySourceInput, MemoryStatus, MemoryType,
-    MemoryUpdateInput, RecallContext, RecallRequest, RememberInput,
+    MemoryError, MemoryOrigin, MemoryService, MemorySourceInput, MemoryType, MemoryUpdateInput,
+    RecallContext, RecallRequest, RememberInput,
 };
 use mcp_vault_state::{FileRecord, FileRevisionRecord, StateStore};
 use mcp_vault_storage_fs::{ReadFile, StorageOptions};
@@ -951,9 +951,6 @@ struct RecallMemoryInput {
     /// Minimum stored importance in the inclusive range 0-1. Defaults to 0.
     #[serde(default)]
     min_importance: Option<f64>,
-    /// Include stale, superseded, archived, and other historical lifecycle states. Defaults to false.
-    #[serde(default)]
-    include_historical: Option<bool>,
     /// Include detailed provenance in each memory result. Defaults to false to conserve context.
     #[serde(default)]
     include_sources: Option<bool>,
@@ -992,9 +989,6 @@ struct MemoryIdInput {
 
 #[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
 struct ListMemoryInput {
-    /// Lifecycle filters: candidate, active, superseded, stale, archived, rejected, or quarantined.
-    #[serde(default)]
-    statuses: Vec<String>,
     /// Memory-type filters: identity, preference, decision, constraint, fact, project, progress, event, relationship, or procedure.
     #[serde(default)]
     types: Vec<String>,
@@ -1020,11 +1014,14 @@ struct RememberMemoryInput {
     /// One concise durable proposition, not a transcript, temporary thought, or complete note body.
     content: String,
     /// Memory type: identity, preference, decision, constraint, fact, project, progress, event, relationship, or procedure.
-    memory_type: String,
-    /// Long-term significance in the inclusive range 0-1.
-    importance: f64,
-    /// Confidence supported by the stated source in the inclusive range 0-1.
-    confidence: f64,
+    #[serde(default)]
+    memory_type: Option<String>,
+    /// Optional long-term significance in the inclusive range 0-1.
+    #[serde(default)]
+    importance: Option<f64>,
+    /// Optional confidence supported by the stated source in the inclusive range 0-1.
+    #[serde(default)]
+    confidence: Option<f64>,
     /// Optional validity start as Unix milliseconds.
     #[serde(default)]
     valid_from: Option<i64>,
@@ -1040,9 +1037,6 @@ struct RememberMemoryInput {
     /// Optional exact source-note provenance. Read the source first instead of inventing coordinates.
     #[serde(default)]
     source_note: Option<MemorySourceInputDto>,
-    /// Optional active memory ID that this new durable proposition replaces.
-    #[serde(default)]
-    supersedes: Option<String>,
     /// Stable key that makes retries idempotent; reuse only with the identical logical memory.
     #[serde(default)]
     idempotency_key: Option<String>,
@@ -1082,19 +1076,19 @@ struct UpdateMemoryInput {
     #[serde(default)]
     content: Option<String>,
     /// Replacement type from the supported memory-type list. Omit to preserve it.
-    #[serde(default)]
-    memory_type: Option<String>,
-    /// Replacement importance in the inclusive range 0-1. Omit to preserve it.
-    #[serde(default)]
-    importance: Option<f64>,
-    /// Replacement confidence in the inclusive range 0-1. Omit to preserve it.
-    #[serde(default)]
-    confidence: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    memory_type: Option<Option<String>>,
+    /// Replacement importance in the inclusive range 0-1. Null clears it.
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    importance: Option<Option<f64>>,
+    /// Replacement confidence in the inclusive range 0-1. Null clears it.
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    confidence: Option<Option<f64>>,
     /// Optional replacement validity start as Unix milliseconds.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
     valid_from: Option<Option<i64>>,
     /// Optional replacement exclusive validity end as Unix milliseconds.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
     valid_to: Option<Option<i64>>,
     /// Complete replacement tag set. Omit to preserve the current tags.
     #[serde(default)]
@@ -1104,15 +1098,20 @@ struct UpdateMemoryInput {
     entities: Option<Vec<String>>,
 }
 
+fn deserialize_patch_field<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct ForgetMemoryInput {
     /// Stable durable-memory ID returned by get_memory, recall, or list_memories.
     id: String,
     /// Current metadata revision returned by get_memory.
     expected_revision: u64,
-    /// False archives the memory; true permanently deletes it. Defaults to false.
-    #[serde(default)]
-    permanent: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
@@ -1375,7 +1374,7 @@ impl McpHandler {
             Ok(max_bytes) => max_bytes,
             Err(error) => return Ok(error_result(&context, error)),
         };
-        let path = match parse_tool_path(&input.path) {
+        let path = match parse_user_tool_path(&request.core, &input.path) {
             Ok(path) => path,
             Err(error) => return Ok(error_result(&context, error)),
         };
@@ -1429,7 +1428,7 @@ impl McpHandler {
     #[tool(
         name = "recall",
         title = "Recall relevant memory",
-        description = "Use this proactively before answering when the current request may depend on information the user previously saved, such as preferences, decisions, constraints, project state, progress, relationships, procedures, or past work. Pass the current question or task in its natural language as query; MCP Vault uses persisted multilingual aliases and optional semantic vectors, so do not translate the query just for this tool. On success, `data.memories` contains concise long-term context relevant to the task, while `data.related_notes` contains candidate source notes with paths, revisions, and snippets; `retrieval_coverage`, `memory_count`, `related_note_count`, `degraded`, and `truncated` show coverage limits. Use the memories as context, call read_note when exact source wording or more detail matters, and use search_notes instead for general document or quotation search.",
+        description = "Use this proactively before answering when the current request may depend on information the user previously saved, such as preferences, decisions, constraints, project state, progress, relationships, procedures, or past work. Pass the current question or task in its natural language as query. On success, `data.memories` contains current long-term context that passed the relevance gate, while `data.related_notes` contains candidate source notes with paths, revisions, and snippets; candidate/relevant/available counts, `retrieval_profile_hash`, `degraded`, and `truncated` explain policy, coverage, and budget limits. Semantic-only matches are admitted only for an evaluated embedding profile; strong lexical matches remain available during degradation. Call read_note when exact source wording or more detail matters, and use search_notes instead for general document or quotation search.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1470,7 +1469,6 @@ impl McpHandler {
                     types,
                     valid_at: input.valid_at,
                     min_importance: input.min_importance.unwrap_or(0.0),
-                    include_historical: input.include_historical.unwrap_or(false),
                     include_sources: input.include_sources.unwrap_or(false),
                     include_score_breakdown: input.include_score_breakdown.unwrap_or(false),
                     include_related_notes,
@@ -1493,7 +1491,7 @@ impl McpHandler {
     #[tool(
         name = "get_memory",
         title = "Inspect a durable memory",
-        description = "Use this when you already have a long-term memory ID from recall or list_memories and need the complete stored record. Pass that ID. On success, `data` contains `id`, `memory_type`, lifecycle `status`, current `revision`, `content`, importance, confidence, validity dates, tags, entities, source references, relations, and managed note location. Use its revision before update_memory or forget_memory; use read_note on a returned source path when exact evidence matters. Use recall when you do not yet know the relevant memory ID.",
+        description = "Use this when you already have a current long-term memory ID from recall or list_memories and need the complete stored record. Pass that ID. Deleted, replaced, source-invalidated, and legacy historical records always return not found. On success, `data` includes ownership, current revision, content, optional kind/importance/confidence, tags, entities, source references, and managed Markdown location. Use its revision before update_memory or forget_memory; use read_note on a returned source path when exact evidence matters.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1522,7 +1520,7 @@ impl McpHandler {
     #[tool(
         name = "list_memories",
         title = "List durable memories",
-        description = "Use this when the user explicitly wants to browse or audit stored long-term memories, or when you need records matching a lifecycle status, type, tag, entity, or source path. Pass only the needed filters and reuse the returned cursor for pagination. On success, `data.memories` contains complete memory records and `next_cursor` and `truncated` indicate more results. Use get_memory for one known ID and recall instead when the goal is to retrieve context relevant to the current task.",
+        description = "Use this when the user explicitly wants to browse current long-term memories, or when you need records matching an optional kind, tag, entity, or source path. Legacy, deleted, replaced, and source-invalidated records are never listed. On success, `data.memories` contains the current matching records and `data.next_cursor` is the optional cursor for the next page. Reuse that cursor for pagination. Use get_memory for one known ID and recall when the goal is context relevant to a task.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1535,15 +1533,6 @@ impl McpHandler {
         if let Err(error) = require_permission(&request.principal, Permission::ReadMemory) {
             return Ok(error_result(&context, error));
         }
-        let statuses = match input
-            .statuses
-            .iter()
-            .map(|value| parse_memory_status(value))
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(statuses) => statuses,
-            Err(error) => return Ok(error_result(&context, error)),
-        };
         let types = match input
             .types
             .iter()
@@ -1565,7 +1554,6 @@ impl McpHandler {
             .memory
             .list(
                 &request.vault,
-                statuses,
                 types,
                 input.tag,
                 input.entity,
@@ -1590,7 +1578,7 @@ impl McpHandler {
     #[tool(
         name = "remember",
         title = "Save a durable memory",
-        description = "Use this only when the user has authorized saving one concise fact, preference, decision, constraint, relationship, procedure, or project state for future conversations. Pass the proposition in content, classify it with memory_type, provide importance and confidence from 0 to 1, and include exact source-note details only when verified; provide idempotency_key for safe retries. On success, `data` contains `outcome`, optional `memory`, `raw_memory_id`, and `consolidation_job_id`; newly staged content is queued for background consolidation and is not immediately available to recall. Use create_note or edit_note when the user wants readable Vault note content changed.",
+        description = "Use this only when the user has authorized saving one concise durable proposition for future conversations. Pass content; memory_type, importance, and confidence are optional metadata and omission is preserved. Include exact source-note details only when verified, and provide idempotency_key for safe retries. On success, `data.memory` is already materialized as Markdown and immediately available to get/list/recall, and `data.outcome` reports whether it was newly stored or an idempotent retry; there is no later consolidation phase. Use create_note or edit_note when the user wants ordinary Vault note content changed.",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1606,20 +1594,16 @@ impl McpHandler {
         if let Err(error) = require_permission(&request.principal, Permission::WriteMemory) {
             return Ok(error_result(&context, error));
         }
-        let memory_type = match parse_memory_type(&input.memory_type) {
-            Ok(memory_type) => memory_type,
-            Err(error) => return Ok(error_result(&context, error)),
-        };
-        let supersedes = match input.supersedes.as_deref() {
-            Some(value) => match parse_memory_id(value) {
-                Ok(id) => Some(id),
+        let memory_type = match input.memory_type.as_deref() {
+            Some(value) => match parse_memory_type(value) {
+                Ok(memory_type) => Some(memory_type),
                 Err(error) => return Ok(error_result(&context, error)),
             },
             None => None,
         };
         let source = match input.source_note {
             Some(source) => {
-                let path = match parse_tool_path(&source.path) {
+                let path = match parse_user_tool_path(&request.core, &source.path) {
                     Ok(path) => path,
                     Err(error) => return Ok(error_result(&context, error)),
                 };
@@ -1674,7 +1658,6 @@ impl McpHandler {
                     tags: input.tags,
                     entities: input.entities,
                     sources: source,
-                    supersedes,
                     idempotency_key: input.idempotency_key,
                     origin: MemoryOrigin::ExplicitAgent,
                     extraction: json!({}),
@@ -1687,8 +1670,6 @@ impl McpHandler {
                 json!({
                     "outcome": result.outcome,
                     "memory": result.memory,
-                    "raw_memory_id": result.raw_memory_id,
-                    "consolidation_job_id": result.consolidation_job_id,
                 }),
             )),
             Err(error) => Ok(error_result(&context, memory_error(error))),
@@ -1718,11 +1699,12 @@ impl McpHandler {
             Ok(id) => id,
             Err(error) => return Ok(error_result(&context, error)),
         };
-        let memory_type = match input.memory_type.as_deref() {
-            Some(value) => match parse_memory_type(value) {
-                Ok(value) => Some(value),
+        let memory_type = match input.memory_type.as_ref() {
+            Some(Some(value)) => match parse_memory_type(value) {
+                Ok(value) => Some(Some(value)),
                 Err(error) => return Ok(error_result(&context, error)),
             },
+            Some(None) => Some(None),
             None => None,
         };
         match request
@@ -1756,7 +1738,7 @@ impl McpHandler {
     #[tool(
         name = "forget_memory",
         title = "Forget a durable memory",
-        description = "Use this only when the user explicitly asks to stop using a known long-term memory or to delete it permanently. First call get_memory, then pass its id and current revision as expected_revision; omit permanent or set it to false to archive, and set it to true only for an explicitly authorized irreversible deletion. On success, `data` contains the affected memory record. If a revision conflict occurs, call get_memory again; do not retry with a guessed revision.",
+        description = "Use this only when the user explicitly asks to forget a known current long-term memory. First call get_memory, then pass its id and current revision as expected_revision. This physically deletes the current memory; there is no archive or historical retrieval switch. Deleting a note-derived item rewrites its source-owned set and pauses automatic extraction for that source until an explicit resume. On success, `data` contains only the deleted ID, ownership, deletion flag, and source-pause effect, never the deleted body.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1783,7 +1765,6 @@ impl McpHandler {
                 &request.core,
                 id,
                 Revision::new(input.expected_revision),
-                input.permanent.unwrap_or(false),
             )
             .await
         {
@@ -1834,7 +1815,7 @@ impl McpHandler {
                 ),
             ));
         }
-        let path = match parse_tool_path(&input.path) {
+        let path = match parse_user_tool_path(&request.core, &input.path) {
             Ok(path) => path,
             Err(error) => return Ok(error_result(&context, error)),
         };
@@ -1874,7 +1855,7 @@ impl McpHandler {
         if let Err(error) = require_permission(&request.principal, Permission::WriteVault) {
             return Ok(error_result(&context, error));
         }
-        let path = match parse_tool_path(&input.path) {
+        let path = match parse_user_tool_path(&request.core, &input.path) {
             Ok(path) => path,
             Err(error) => return Ok(error_result(&context, error)),
         };
@@ -1992,11 +1973,11 @@ impl McpHandler {
         if let Err(error) = require_permission(&request.principal, Permission::WriteVault) {
             return Ok(error_result(&context, error));
         }
-        let source = match parse_tool_path(&input.source) {
+        let source = match parse_user_tool_path(&request.core, &input.source) {
             Ok(path) => path,
             Err(error) => return Ok(error_result(&context, error)),
         };
-        let destination = match parse_tool_path(&input.destination) {
+        let destination = match parse_user_tool_path(&request.core, &input.destination) {
             Ok(path) => path,
             Err(error) => return Ok(error_result(&context, error)),
         };
@@ -2047,7 +2028,7 @@ impl McpHandler {
                 ),
             ));
         }
-        let path = match parse_tool_path(&input.path) {
+        let path = match parse_user_tool_path(&request.core, &input.path) {
             Ok(path) => path,
             Err(error) => return Ok(error_result(&context, error)),
         };
@@ -2084,7 +2065,7 @@ impl McpHandler {
         if let Err(error) = require_permission(&request.principal, Permission::ReadHistory) {
             return Ok(error_result(&context, error));
         }
-        let path = match parse_tool_path(&input.path) {
+        let path = match parse_user_tool_path(&request.core, &input.path) {
             Ok(path) => path,
             Err(error) => return Ok(error_result(&context, error)),
         };
@@ -2121,7 +2102,7 @@ impl McpHandler {
                 return Ok(error_result(&context, error));
             }
         }
-        let path = match parse_tool_path(&input.path) {
+        let path = match parse_user_tool_path(&request.core, &input.path) {
             Ok(path) => path,
             Err(error) => return Ok(error_result(&context, error)),
         };
@@ -2352,6 +2333,9 @@ impl ServerHandler for McpHandler {
                     .map_err(|_| ErrorData::invalid_params("resource is not available", None))?;
                 let path = VaultPath::from_url_path(url.path())
                     .map_err(|_| ErrorData::invalid_params("resource path is invalid", None))?;
+                if request_context.core.is_managed_path(&path) {
+                    return Err(ErrorData::invalid_params("resource is not available", None));
+                }
                 let ReadResult { reader, .. } = request_context
                     .core
                     .read(&request_context.vault, &path)
@@ -2377,16 +2361,7 @@ impl ServerHandler for McpHandler {
                 if value == "context" {
                     let memories = request_context
                         .memory
-                        .list(
-                            &request_context.vault,
-                            vec![MemoryStatus::Active],
-                            Vec::new(),
-                            None,
-                            None,
-                            None,
-                            12,
-                            0,
-                        )
+                        .list(&request_context.vault, Vec::new(), None, None, None, 12, 0)
                         .await
                         .map_err(|_| {
                             ErrorData::internal_error("memory resource is unavailable", None)
@@ -2467,11 +2442,6 @@ fn parse_memory_id(value: &str) -> Result<MemoryId, ToolErrorBody> {
 fn parse_memory_type(value: &str) -> Result<MemoryType, ToolErrorBody> {
     MemoryType::try_from(value)
         .map_err(|_| ToolErrorBody::new("invalid_argument", "memory type is invalid", false))
-}
-
-fn parse_memory_status(value: &str) -> Result<MemoryStatus, ToolErrorBody> {
-    MemoryStatus::try_from(value)
-        .map_err(|_| ToolErrorBody::new("invalid_argument", "memory status is invalid", false))
 }
 
 fn memory_error(error: MemoryError) -> ToolErrorBody {
@@ -2637,6 +2607,18 @@ fn parse_tool_path(value: &str) -> Result<VaultPath, ToolErrorBody> {
             false,
         )
     })
+}
+
+fn parse_user_tool_path(core: &VaultCore, value: &str) -> Result<VaultPath, ToolErrorBody> {
+    let path = parse_tool_path(value)?;
+    if core.is_managed_path(&path) {
+        return Err(ToolErrorBody::new(
+            "invalid_path",
+            "path must identify ordinary Vault content",
+            false,
+        ));
+    }
+    Ok(path)
 }
 
 fn parse_node_id(value: Option<&str>) -> Result<String, ToolErrorBody> {
@@ -3150,8 +3132,8 @@ mod tests {
     use std::{collections::BTreeSet, io::ErrorKind, path::PathBuf};
 
     use super::{
-        McpHandler, McpService, bearer_token, mounted_slug, oauth_metadata_router, router,
-        stateful_router, vault_error,
+        McpHandler, McpService, UpdateMemoryInput, bearer_token, mounted_slug,
+        oauth_metadata_router, router, stateful_router, vault_error,
     };
     use axum::{Router, body::Body, http::Request};
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -3162,12 +3144,12 @@ mod tests {
     };
     use mcp_vault_core::{VaultCore, VaultError};
     use mcp_vault_domain::{
-        Actor, MemoryId, Revision, Scope, ScopeSet, VaultContext, VaultId, VaultPath,
-        VaultPathPolicy, VaultSlug,
+        Actor, MemoryId, Revision, Scope, ScopeSet, VaultContext, VaultId, VaultPathPolicy,
+        VaultSlug,
     };
     use mcp_vault_indexer::IndexService;
-    use mcp_vault_memory::{MEMORY_PIPELINE_GENERATION, MemoryOrigin, MemoryStatus, MemoryType};
-    use mcp_vault_state::{MemoryBundle, MemoryRecord, StateStore, VaultStatus};
+    use mcp_vault_memory::{MemoryOrigin, MemoryService, MemoryType, RememberInput};
+    use mcp_vault_state::{StateStore, VaultStatus};
     use mcp_vault_storage_fs::{StorageError, StorageOptions};
     use rand::rngs::OsRng;
     use rsa::{
@@ -3191,6 +3173,40 @@ mod tests {
         );
         assert!(mounted_slug("/mcp/v1/vaults/work/extra").is_err());
         assert!(mounted_slug("/mcp/v1/vaults/../work").is_err());
+    }
+
+    #[test]
+    fn update_memory_json_distinguishes_omitted_set_and_clear_fields() {
+        let omitted: UpdateMemoryInput = serde_json::from_value(json!({
+            "id": MemoryId::new().to_string(),
+            "expected_revision": 1
+        }))
+        .unwrap();
+        assert_eq!(omitted.memory_type, None);
+        assert_eq!(omitted.confidence, None);
+
+        let cleared: UpdateMemoryInput = serde_json::from_value(json!({
+            "id": MemoryId::new().to_string(),
+            "expected_revision": 1,
+            "memory_type": null,
+            "confidence": null
+        }))
+        .unwrap();
+        assert_eq!(cleared.memory_type, Some(None));
+        assert_eq!(cleared.confidence, Some(None));
+
+        let set: UpdateMemoryInput = serde_json::from_value(json!({
+            "id": MemoryId::new().to_string(),
+            "expected_revision": 1,
+            "memory_type": "preference",
+            "confidence": 0.8
+        }))
+        .unwrap();
+        assert_eq!(
+            set.memory_type.as_ref().and_then(|value| value.as_deref()),
+            Some("preference")
+        );
+        assert_eq!(set.confidence, Some(Some(0.8)));
     }
 
     #[test]
@@ -3290,9 +3306,9 @@ mod tests {
         assert!(description("recall").contains("`data.memories`"));
         assert!(description("recall").contains("`data.related_notes`"));
         assert!(description("recall").contains("natural language"));
-        assert!(description("recall").contains("`retrieval_coverage`"));
-        assert!(description("remember").contains("`raw_memory_id`"));
-        assert!(description("remember").contains("not immediately available to recall"));
+        assert!(description("recall").contains("candidate/relevant/available counts"));
+        assert!(description("remember").contains("`data.memory`"));
+        assert!(description("remember").contains("immediately available"));
         assert!(description("edit_note").contains("First call read_note"));
         assert!(description("edit_note").contains("replace_heading_section"));
     }
@@ -3440,13 +3456,6 @@ mod tests {
             .insert(&other_context, "Other", VaultStatus::Active)
             .await
             .unwrap();
-        for vault_context in [&context, &other_context] {
-            state
-                .memory()
-                .set_pipeline_generation_state(vault_context, MEMORY_PIPELINE_GENERATION, false)
-                .await
-                .unwrap();
-        }
         if initializing {
             state
                 .jobs()
@@ -3520,11 +3529,6 @@ mod tests {
         state
             .vaults()
             .insert(&context, "Work", VaultStatus::Active)
-            .await
-            .unwrap();
-        state
-            .memory()
-            .set_pipeline_generation_state(&context, MEMORY_PIPELINE_GENERATION, false)
             .await
             .unwrap();
         let core = VaultCore::new(
@@ -3651,11 +3655,6 @@ mod tests {
             .insert(&context, "Work", VaultStatus::Active)
             .await
             .unwrap();
-        state
-            .memory()
-            .set_pipeline_generation_state(&context, MEMORY_PIPELINE_GENERATION, false)
-            .await
-            .unwrap();
         let core = VaultCore::new(
             state.clone(),
             root.path().join("history"),
@@ -3663,59 +3662,36 @@ mod tests {
             StorageOptions::default(),
             Default::default(),
         );
-        let memory_id = MemoryId::new();
-        let canonical_path = core
-            .managed_root()
-            .join(&VaultPath::parse(&format!("memory/records/2026/08/{memory_id}.md")).unwrap())
-            .unwrap();
-        state
-            .memory()
-            .replace_bundle(
+        let auth = AuthService::new(
+            state.auth(),
+            MasterKeyRing::from_bytes(1, &[19_u8; 32]).unwrap(),
+        );
+        let memory_id = MemoryService::new(state.clone(), auth.clone())
+            .remember(
                 &context,
-                &MemoryBundle {
-                    memory: MemoryRecord {
-                        id: memory_id,
-                        vault_id: context.id(),
-                        memory_type: MemoryType::Decision.as_str().to_owned(),
-                        status: MemoryStatus::Active.as_str().to_owned(),
-                        status_reason: None,
-                        status_changed_at: None,
-                        content: "OAuth memory operations are available.".to_owned(),
-                        normalized_content: "oauth memory operations are available.".to_owned(),
-                        content_hash: "oauth-all-tools-fixture".to_owned(),
-                        importance: 0.9,
-                        confidence: 1.0,
-                        origin: MemoryOrigin::ExplicitAdmin.as_str().to_owned(),
-                        revision: Revision::new(1),
-                        canonical_file_id: None,
-                        canonical_path: Some(canonical_path),
-                        canonical_revision: None,
-                        valid_from: None,
-                        valid_to: None,
-                        extraction: json!({"fixture": "oauth_all_tools"}),
-                        created_at: 1_777_593_600_000,
-                        updated_at: 1_777_593_600_000,
-                        last_recalled_at: None,
-                        recall_count: 0,
-                    },
-                    sources: Vec::new(),
-                    entities: Vec::new(),
+                &core,
+                RememberInput {
+                    content: "OAuth memory operations are available.".to_owned(),
+                    memory_type: Some(MemoryType::Decision),
+                    importance: Some(0.9),
+                    confidence: Some(1.0),
                     tags: vec!["oauth".to_owned()],
-                    relations: Vec::new(),
+                    idempotency_key: Some("oauth-current-fixture".to_owned()),
+                    origin: MemoryOrigin::ExplicitAdmin,
+                    extraction: json!({"fixture": "oauth_all_tools"}),
+                    ..RememberInput::default()
                 },
-                None,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .memory
+            .unwrap()
+            .id;
         core.reconcile(&context, Actor::system()).await.unwrap();
         IndexService::new(state.clone())
             .rebuild_vault(&core, &context)
             .await
             .unwrap();
-        let auth = AuthService::new(
-            state.auth(),
-            MasterKeyRing::from_bytes(1, &[19_u8; 32]).unwrap(),
-        );
         auth.configure_local_oauth_user(
             &context,
             "chatgpt",
@@ -4262,7 +4238,7 @@ mod tests {
         assert_tool_ok(&remember, "remember");
         assert_eq!(
             remember["result"]["structuredContent"]["data"]["outcome"],
-            "staged"
+            "stored"
         );
 
         let update_memory = call_tool_json(
@@ -4293,8 +4269,16 @@ mod tests {
         .await;
         assert_tool_ok(&forget_memory, "forget_memory");
         assert_eq!(
-            forget_memory["result"]["structuredContent"]["data"]["status"],
-            "archived"
+            forget_memory["result"]["structuredContent"]["data"]["deleted"],
+            true
+        );
+        assert_eq!(
+            forget_memory["result"]["structuredContent"]["data"]["ownership"],
+            "explicit"
+        );
+        assert_eq!(
+            forget_memory["result"]["structuredContent"]["data"]["source_extraction_paused"],
+            false
         );
     }
 
@@ -4747,10 +4731,12 @@ mod tests {
             "vault://note/notes/search%2Emd"
         );
         assert_eq!(data["available_related_note_count"], 1);
-        assert_eq!(data["retrieval_coverage"]["eligible"], 0);
-        assert_eq!(
-            data["retrieval_coverage"]["target_languages"],
-            json!(["source", "zh-Hans", "en"])
+        assert_eq!(data["candidate_memory_count"], 0);
+        assert_eq!(data["relevant_memory_count"], 0);
+        assert!(
+            data["retrieval_profile_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
         );
     }
 
@@ -4849,7 +4835,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remember_stages_input_and_context_changes_only_after_consolidation() {
+    async fn remember_and_forget_are_current_only_across_all_model_read_paths() {
         let (router, token, _root) = configured_memory_router().await;
         let remember = router
             .clone()
@@ -4875,17 +4861,27 @@ mod tests {
         assert_eq!(body["result"]["isError"], false);
         assert_eq!(
             body["result"]["structuredContent"]["data"]["outcome"],
-            "staged"
+            "stored"
         );
-        assert!(body["result"]["structuredContent"]["data"]["memory"].is_null());
-        let raw_memory_id = body["result"]["structuredContent"]["data"]["raw_memory_id"]
+        let memory_id = body["result"]["structuredContent"]["data"]["memory"]["id"]
             .as_str()
             .unwrap()
             .to_owned();
-        assert!(
-            body["result"]["structuredContent"]["data"]["consolidation_job_id"]
+        let memory_revision = body["result"]["structuredContent"]["data"]["memory"]["revision"]
+            .as_u64()
+            .unwrap();
+        let canonical_path =
+            body["result"]["structuredContent"]["data"]["memory"]["canonical_path"]
                 .as_str()
-                .is_some()
+                .unwrap()
+                .to_owned();
+        let canonical_revision =
+            body["result"]["structuredContent"]["data"]["memory"]["canonical_revision"]
+                .as_u64()
+                .unwrap();
+        assert_eq!(
+            body["result"]["structuredContent"]["data"]["memory"]["importance"],
+            0.95
         );
 
         let recall = router
@@ -4901,14 +4897,13 @@ mod tests {
         let body = recall.into_body().collect().await.unwrap().to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["result"]["isError"], false);
-        assert!(
-            body["result"]["structuredContent"]["data"]["memories"]
-                .as_array()
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            body["result"]["structuredContent"]["data"]["memories"][0]["id"],
+            memory_id.as_str()
         );
 
         let resource = router
+            .clone()
             .oneshot(resource_read_request(&token, "vault://memory/context"))
             .await
             .unwrap();
@@ -4920,10 +4915,109 @@ mod tests {
             "application/json"
         );
         assert!(
-            !body["result"]["contents"][0]["text"]
+            body["result"]["contents"][0]["text"]
                 .as_str()
                 .unwrap()
-                .contains(&raw_memory_id)
+                .contains(&memory_id)
         );
+
+        for (id, tool, arguments) in [
+            (23, "read_note", serde_json::json!({"path": canonical_path})),
+            (
+                24,
+                "read_note",
+                serde_json::json!({
+                    "path": canonical_path,
+                    "revision": canonical_revision
+                }),
+            ),
+            (
+                25,
+                "note_history",
+                serde_json::json!({"path": canonical_path}),
+            ),
+        ] {
+            let blocked = call_tool_json(&router, &token, id, tool, arguments).await;
+            assert_eq!(blocked["result"]["isError"], true, "{tool}: {blocked}");
+            assert_eq!(
+                blocked["result"]["structuredContent"]["error"]["code"],
+                "invalid_path"
+            );
+        }
+        let managed_resource = router
+            .clone()
+            .oneshot(resource_read_request(
+                &token,
+                &format!("vault://note/{canonical_path}"),
+            ))
+            .await
+            .unwrap();
+        let managed_resource = managed_resource
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let managed_resource: serde_json::Value =
+            serde_json::from_slice(&managed_resource).unwrap();
+        assert!(managed_resource.get("error").is_some());
+
+        let forgotten = call_tool_json(
+            &router,
+            &token,
+            26,
+            "forget_memory",
+            serde_json::json!({
+                "id": memory_id,
+                "expected_revision": memory_revision
+            }),
+        )
+        .await;
+        assert_tool_ok(&forgotten, "forget_memory");
+        assert_eq!(
+            forgotten["result"]["structuredContent"]["data"]["deleted"],
+            true
+        );
+
+        for (id, tool, arguments) in [
+            (27, "get_memory", serde_json::json!({"id": memory_id})),
+            (28, "list_memories", serde_json::json!({})),
+            (
+                29,
+                "recall",
+                serde_json::json!({
+                    "query": "canonical Markdown memory subsystem",
+                    "max_results": 5,
+                    "max_tokens": 500
+                }),
+            ),
+        ] {
+            let response = call_tool_json(&router, &token, id, tool, arguments).await;
+            if tool == "get_memory" {
+                assert_eq!(response["result"]["isError"], true, "{response}");
+            } else {
+                assert_eq!(response["result"]["isError"], false, "{response}");
+                assert!(
+                    !response["result"]["structuredContent"]["data"]
+                        .to_string()
+                        .contains(&memory_id),
+                    "{tool}: {response}"
+                );
+            }
+        }
+
+        for uri in [
+            "vault://memory/context".to_owned(),
+            format!("vault://memory/{memory_id}"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(resource_read_request(&token, &uri))
+                .await
+                .unwrap();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(!body.to_string().contains(&memory_id), "{uri}: {body}");
+        }
     }
 }

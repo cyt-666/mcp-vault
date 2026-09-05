@@ -5,14 +5,14 @@ Owner: Codex
 Created: 2026-08-21
 Last updated: 2026-08-31
 
-> Memory redesign notice (2026-08-26): all candidate-first, exact-quote-as-final,
-> direct-promotion, marker, and candidate-review material below is retained only
-> as an implementation-history record. ADR-0016 and
-> `docs/exec-plans/completed/wp-14-codex-two-phase-memory.md` supersede those
-> decisions. Current release validation must exercise Phase 1 raw-memory
-> staging, Phase 2 consolidation, ADR-0017 destructive cutover/fresh
-> regeneration, and the candidate-free
-> Admin/MCP contracts described by that dedicated ExecPlan.
+> Memory redesign notice (2026-09-05): ADR-0026 and
+> `docs/exec-plans/completed/memory-simplification-and-retrieval-v2.1.md`
+> supersede every candidate, lifecycle, two-phase consolidation, destructive
+> cutover, source-health, and retrieval-enrichment decision recorded below.
+> Those references remain implementation history only. Current release
+> validation must exercise current-only reads, true deletion, one-call
+> source-owned set replacement, non-destructive migration, calibrated hybrid
+> retrieval, and the v2.1 Admin/MCP contracts.
 
 ## Purpose and user-visible result
 
