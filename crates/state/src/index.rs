@@ -283,6 +283,55 @@ impl IndexRepository {
         Self { pool }
     }
 
+    /// Counts of saved current grouping outcomes, without source content.
+    pub async fn chunk_plan_counts(
+        &self,
+        context: &VaultContext,
+    ) -> Result<(i64, i64, i64), StateError> {
+        Ok(sqlx::query_as("SELECT COALESCE(SUM(json_type(p.plan_json,'$.groups')='array'),0), COALESCE(SUM(json_type(p.plan_json,'$.groups') IS NULL AND COALESCE(json_extract(p.plan_json,'$.pending_until'),0)<=?),0), COALESCE(SUM(COALESCE(json_extract(p.plan_json,'$.pending_until'),0)>?),0) FROM note_chunk_plans p JOIN notes n ON n.vault_id=p.vault_id AND n.file_id=p.file_id AND n.analyzed_content_hash=p.source_hash JOIN file_entries f ON f.vault_id=n.vault_id AND f.id=n.file_id AND f.content_hash=n.analyzed_content_hash AND f.deleted_at IS NULL WHERE p.vault_id=?")
+            .bind(now_millis()?).bind(now_millis()?).bind(context.id().to_string()).fetch_one(&self.pool).await?)
+    }
+
+    /// Read derived grouping only for the exact current source.
+    pub async fn chunk_plan(
+        &self,
+        context: &VaultContext,
+        file_id: FileId,
+        source_hash: &str,
+    ) -> Result<Option<Value>, StateError> {
+        let row: Option<String> = sqlx::query_scalar("SELECT p.plan_json FROM note_chunk_plans p JOIN notes n ON n.vault_id=p.vault_id AND n.file_id=p.file_id WHERE p.vault_id=? AND p.file_id=? AND p.source_hash=? AND n.analyzed_content_hash=p.source_hash AND EXISTS (SELECT 1 FROM file_entries f WHERE f.vault_id=n.vault_id AND f.id=n.file_id AND f.deleted_at IS NULL AND f.content_hash=n.analyzed_content_hash)")
+            .bind(context.id().to_string()).bind(file_id.to_string()).bind(source_hash).fetch_optional(&self.pool).await?;
+        row.map(|s| {
+            serde_json::from_str(&s).map_err(|_| StateError::InvalidInput("invalid chunk plan"))
+        })
+        .transpose()
+    }
+
+    /// Claim one source once; an interrupted attempt remains a durable rule fallback.
+    pub async fn claim_chunk_plan(
+        &self,
+        context: &VaultContext,
+        file_id: FileId,
+        source_hash: &str,
+    ) -> Result<bool, StateError> {
+        let saved = sqlx::query("INSERT INTO note_chunk_plans (vault_id,file_id,source_hash,plan_json) SELECT vault_id,file_id,analyzed_content_hash,? FROM notes WHERE vault_id=? AND file_id=? AND analyzed_content_hash=? AND EXISTS (SELECT 1 FROM file_entries f WHERE f.vault_id=notes.vault_id AND f.id=notes.file_id AND f.deleted_at IS NULL AND f.content_hash=notes.analyzed_content_hash) ON CONFLICT(vault_id,file_id) DO UPDATE SET source_hash=excluded.source_hash,plan_json=excluded.plan_json WHERE note_chunk_plans.source_hash != excluded.source_hash")
+            .bind(serde_json::json!({"fallback":"rules", "pending_until":now_millis()?.saturating_add(120_000)}).to_string()).bind(context.id().to_string()).bind(file_id.to_string()).bind(source_hash).execute(&self.pool).await?;
+        Ok(saved.rows_affected() == 1)
+    }
+
+    /// Publish one complete grouping only while its source is still current.
+    pub async fn save_chunk_plan(
+        &self,
+        context: &VaultContext,
+        file_id: FileId,
+        source_hash: &str,
+        plan: &Value,
+    ) -> Result<bool, StateError> {
+        let saved = sqlx::query("INSERT INTO note_chunk_plans (vault_id,file_id,source_hash,plan_json) SELECT vault_id,file_id,analyzed_content_hash,? FROM notes WHERE vault_id=? AND file_id=? AND analyzed_content_hash=? AND EXISTS (SELECT 1 FROM file_entries f WHERE f.vault_id=notes.vault_id AND f.id=notes.file_id AND f.deleted_at IS NULL AND f.content_hash=notes.analyzed_content_hash) ON CONFLICT(vault_id,file_id) DO UPDATE SET source_hash=excluded.source_hash,plan_json=excluded.plan_json")
+            .bind(plan.to_string()).bind(context.id().to_string()).bind(file_id.to_string()).bind(source_hash).execute(&self.pool).await?;
+        Ok(saved.rows_affected() == 1)
+    }
+
     /// Replace one note and all of its subordinate projections atomically.
     pub async fn replace_note(
         &self,

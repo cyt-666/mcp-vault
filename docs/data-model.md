@@ -869,6 +869,16 @@ and bindings. It also adds provider_health for redacted test/availability
 state. Existing provider/model rows from the operational foundation remain
 compatible and are upgraded forward-only.
 
+Migration 0018 adds `embedding_revision` to providers and models, initially copied
+from each existing `revision`. Admin edits still compare and advance `revision`.
+Vector fingerprints use `embedding_revision`, which remains unchanged for Provider
+display-name/enabled-only edits and identical stored model configuration. Relevant
+configuration changes atomically advance it to the new edit revision. Existing
+fingerprints, vector bytes, input hashes and calibration signatures survive upgrade.
+The migration also closes unfinished calibration records referenced only by terminal
+jobs; an active job with that signature prevents retirement. Queries match Vault
+identity, and stored caches, reports and consumed budgets are retained.
+
 ## 15. Embeddings
 
 Wrap vector storage behind an internal `VectorIndex`.
@@ -1054,3 +1064,12 @@ Migration 0016 preserves prepared snapshots and allows null Provider/model ident
 
 The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
 specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).
+
+## Migration 0019: derived note grouping
+
+`note_chunk_plans` is keyed by `(vault_id,file_id)` and stores current source hash
+and JSON grouping/fallback/temporary claim metadata, never canonical prose. Reads
+and publication require the current note and live canonical file hash. Rebuilds
+retain matching plans; obsolete source plans cannot resolve vectors. Migration also
+retires old automatic diagnostic jobs without refunding budgets or changing valid
+vectors, completed reports, source pauses or canonical content.

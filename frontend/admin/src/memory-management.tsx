@@ -49,7 +49,7 @@ export function MemoryManagement({ data, notify, onRefresh }: Props) {
 
   return <>
     {Object.entries(errors).map(([name, error]) => <Notice key={name} tone="warning">{name} 加载失败：{String(error)}。其他管理操作仍可使用。</Notice>)}
-    <Panel title="语义检索校准" eyebrow="服务端自动评测" description="向量覆盖与校准状态独立。服务会在启动后自动补校准；这里仅查看状态。内置合成基准通过不代表你的全部笔记达到同样正确率。">
+    <Panel title="检索效果诊断（可选）" eyebrow="内置合成样本" description="评测仅供诊断，不决定语义检索是否启用。启动和模型绑定不会自动评测；手动运行会调用 embedding 模型并产生相应费用。结果不代表真实笔记准确率。">
       {channels.map((channel) => {
         const name = stringValue(channel.channel);
         const profile = asRecord(channel.profile);
@@ -57,7 +57,7 @@ export function MemoryManagement({ data, notify, onRefresh }: Props) {
         const report = asRecord(channel.report);
         return <article className="record-item record-item--stack" key={name}>
           <strong>{name === 'memory' ? '记忆通道' : '笔记通道'} · {stringValue(profile.external_model_id, '未绑定模型')}</strong>
-          <StatusBadge tone={booleanValue(channel.active) ? 'success' : 'warning'}>{booleanValue(channel.active) ? '语义检索已启用' : Array.isArray(channel.blockers) && channel.blockers.includes('joint_no_answer_quality_failed') ? '双通道联合质量检验未通过' : stringValue(run.status, '等待校准')}</StatusBadge>
+          <StatusBadge tone={booleanValue(channel.active) ? 'success' : 'neutral'}>{booleanValue(channel.active) ? '内置基准通过' : stringValue(run.status, '尚未评测')}</StatusBadge>
           <p>{Array.isArray(channel.blockers) ? channel.blockers.map(String).join('；') : ''}</p>
           {channel.joint_no_answer ? <details><summary>查看双通道联合无答案检验</summary><RawData data={asRecord(channel.joint_no_answer)} /></details> : null}
           <p>累计请求 {numberValue(run.requests)} / {numberValue(run.request_limit, 32)} · 请求字节 {numberValue(run.request_bytes)} / {numberValue(run.byte_limit, 2097152)}</p>
@@ -65,17 +65,17 @@ export function MemoryManagement({ data, notify, onRefresh }: Props) {
             <button type="button" className="secondary-button" disabled={!!busy || !channel.profile || !booleanValue(channel.automatic)} onClick={() => void action(`calibrate-${name}`, async () => {
               const result = asRecord(await adminApi.request(pathFor(data, '/memory/semantic-calibration/run'), { method: 'POST', body: { channel: name } }));
               notify(booleanValue(result.admitted) ? '已提交或复用服务端校准任务。' : '当前配置不允许校准，请检查模型及维护设置。', booleanValue(result.admitted) ? 'success' : 'warning'); onRefresh();
-            })}>运行／重试校准</button>
+            })}>运行／重试评测</button>
             <button type="button" className="secondary-button" disabled={!!busy} onClick={() => void action('maintenance', async () => {
               await adminApi.request(pathFor(data, '/memory/semantic-calibration/maintenance'), { method: 'PUT', body: { enabled: !booleanValue(channel.automatic) } }); onRefresh();
-            })}>{booleanValue(channel.automatic) ? '暂停自动校准' : '恢复自动校准'}</button>
+            })}>{booleanValue(channel.automatic) ? '暂停诊断调用' : '允许诊断调用'}</button>
           </div>
-          <small>重试按任务保存的请求预算申请新一轮额度；不会重新生成记忆或重建有效业务向量。暂停维护保留已适用的校准结果。</small>
+          <small>重试按任务保存的请求预算申请新一轮额度；不会重新生成记忆或重建有效业务向量。暂停仅限制诊断调用，不影响正常检索。</small>
           {Object.keys(report).length > 0 ? <details><summary>查看内置基准评测报告</summary><RawData data={report} /></details> : null}
-          {typeof run.report_json === 'string' ? <details><summary>查看最近执行结果</summary><pre>{run.report_json}</pre></details> : null}
+          {typeof run.report_json === 'string' ? <details><summary>查看最近执行结果</summary><pre className="data-inspector">{run.report_json}</pre></details> : null}
         </article>;
       })}
-      {channels.length === 0 ? <Notice tone="info">校准状态尚未加载；不能据此判断语义检索已就绪。</Notice> : null}
+      {channels.length === 0 ? <Notice tone="info">诊断状态尚未加载；正常检索不依赖此结果。</Notice> : null}
     </Panel>
     <Panel title="旧记忆迁移" eyebrow="需要明确确认" description="升级校准不会迁移旧记忆。先备份数据库与 Vault，再检查来源分类和未解决项目。">
       <button type="button" className="secondary-button" disabled={!!busy} onClick={() => void action('preflight', async () => {

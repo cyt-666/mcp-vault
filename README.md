@@ -4,8 +4,8 @@ MCP Vault 是一个自托管的 Markdown 知识库和长期记忆服务。
 它让人通过 Obsidian 管理同一个 Vault，也让 AI Agent 通过 MCP 发现、检索、
 回忆和安全修改这些内容。
 
-当前版本：<code>0.2.2</code>（2026-09-06）。部署示例默认使用
-<code>mcp-vault:0.2.2</code>，目标架构为 <code>linux/amd64</code>。
+当前版本：<code>0.2.3</code>（2026-09-06）。部署示例默认使用
+<code>mcp-vault:0.2.3</code>，目标架构为 <code>linux/amd64</code>。
 
 ## 项目定位
 
@@ -118,14 +118,14 @@ curl --fail http://127.0.0.1:8080/health/ready
 当前版本镜像可以这样构建：
 
 ~~~bash
-docker build --platform linux/amd64 --tag mcp-vault:0.2.2 --tag mcp-vault:latest .
+docker build --platform linux/amd64 --tag mcp-vault:0.2.3 --tag mcp-vault:latest .
 ~~~
 
 镜像包含 Rust 服务和编译后的 Admin 前端，运行用户为非 root 的 <code>mcpvault</code>，
 入口命令为 <code>/usr/local/bin/mcp-vault</code>。在部署前可以执行：
 
 ~~~bash
-docker run --rm --platform linux/amd64 --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m mcp-vault:0.2.2 --check-config
+docker run --rm --platform linux/amd64 --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m mcp-vault:0.2.3 --check-config
 ~~~
 
 ## 首次配置顺序

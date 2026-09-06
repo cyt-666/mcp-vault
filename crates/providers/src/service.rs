@@ -114,6 +114,7 @@ pub struct ProviderService {
     /// this process-wide lock across their state/secret I/O prevents a delete
     /// from racing a secret-bearing update into an orphaned secret row.
     lifecycle: Arc<AsyncMutex<()>>,
+    generation_budget: Option<Arc<dyn crate::RequestBudget>>,
 }
 
 #[derive(Clone)]
@@ -133,6 +134,7 @@ impl ProviderService {
             vector,
             transports: Arc::new(Mutex::new(HashMap::new())),
             lifecycle: Arc::new(AsyncMutex::new(())),
+            generation_budget: None,
         }
     }
 
@@ -149,7 +151,15 @@ impl ProviderService {
             vector,
             transports: Arc::new(Mutex::new(HashMap::new())),
             lifecycle: Arc::new(AsyncMutex::new(())),
+            generation_budget: None,
         }
+    }
+
+    /// Limit every generation HTTP attempt, including transport retries, for
+    /// this service instance. Existing Provider configuration is unchanged.
+    pub fn with_generation_budget(mut self, budget: Arc<dyn crate::RequestBudget>) -> Self {
+        self.generation_budget = Some(budget);
+        self
     }
 
     /// Create a provider and optionally save its encrypted API secret.
@@ -172,6 +182,7 @@ impl ProviderService {
             })?,
             enabled: input.enabled,
             revision: Revision::new(1),
+            embedding_revision: Revision::new(1),
             created_at: now,
             updated_at: now,
         };
@@ -339,6 +350,7 @@ impl ProviderService {
                 .map_err(|_| ProviderError::InvalidConfiguration("model settings are invalid"))?,
             enabled: input.enabled,
             revision: Revision::new(1),
+            embedding_revision: Revision::new(1),
             created_at: now_millis(),
             updated_at: now_millis(),
         };
@@ -436,10 +448,14 @@ impl ProviderService {
             &runtime.capabilities,
             request.max_output_tokens,
         );
+        let transport = self.generation_budget.as_ref().map_or_else(
+            || runtime.transport.clone(),
+            |budget| runtime.transport.clone().with_budget(budget.clone()),
+        );
         runtime
             .adapter
             .generate_structured(
-                &runtime.transport,
+                &transport,
                 &runtime.base_url,
                 runtime.mode,
                 GenerationOptions::new(
@@ -477,6 +493,7 @@ impl ProviderService {
         request: &EmbeddingRequest,
     ) -> Result<EmbeddingResult, ProviderError> {
         let runtime = self.runtime(context, model_id).await?;
+        validate_embedding_inputs(&runtime.model, request)?;
         let result = runtime
             .adapter
             .embed(
@@ -502,6 +519,7 @@ impl ProviderService {
         budget: Arc<dyn crate::RequestBudget>,
     ) -> Result<EmbeddingResult, ProviderError> {
         let runtime = self.runtime(context, model_id).await?;
+        validate_embedding_inputs(&runtime.model, request)?;
         let transport = runtime.transport.with_budget(budget);
         let result = runtime
             .adapter
@@ -1070,14 +1088,14 @@ fn embedding_profile_hash(provider: &ProviderRecord, model: &ModelRecord) -> Str
             "type": provider.provider_type,
             "base_url": provider.base_url,
             "settings": provider.settings,
-            "revision": provider.revision.value(),
+            "revision": provider.embedding_revision.value(),
         },
         "model": {
             "id": model.id,
             "external_model_id": model.external_model_id,
             "capabilities": model.capabilities,
             "settings": model.settings,
-            "revision": model.revision.value(),
+            "revision": model.embedding_revision.value(),
         }
     });
     let mut hasher = Sha256::new();
@@ -1120,18 +1138,41 @@ fn validate_provider_url(url: &Url) -> Result<(), ProviderError> {
     Ok(())
 }
 
+// Defaults are resource ceilings, never requests to use a model's maximum.
+const DEFAULT_EMBEDDING_INPUT_BYTES: usize = 8_192;
+const DEFAULT_EMBEDDING_DIMENSION_LIMIT: usize = 8_192;
+
+fn validate_embedding_inputs(
+    model: &ModelRecord,
+    request: &EmbeddingRequest,
+) -> Result<(), ProviderError> {
+    let cap = ModelCapabilities::from_json(&model.capabilities)?;
+    // Conservative bytes-as-token bound when a tokenizer is unavailable.
+    let limit = cap
+        .context_window
+        .map(|n| n as usize)
+        .unwrap_or(DEFAULT_EMBEDDING_INPUT_BYTES);
+    if request.inputs.iter().any(|input| input.len() > limit) {
+        return Err(ProviderError::InvalidConfiguration(
+            "embedding input exceeds configured or default bound",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_model_dimensions(
     model: &ModelRecord,
     result: &EmbeddingResult,
 ) -> Result<(), ProviderError> {
-    let Some(expected) = ModelCapabilities::from_json(&model.capabilities)?.dimension else {
-        return Ok(());
-    };
-    if result
-        .vectors
-        .iter()
-        .any(|vector| vector.len() as u32 != expected)
-    {
+    let expected = ModelCapabilities::from_json(&model.capabilities)?.dimension;
+    let limit = expected
+        .map(|n| n as usize)
+        .unwrap_or(DEFAULT_EMBEDDING_DIMENSION_LIMIT);
+    if result.vectors.iter().any(|vector| {
+        vector.is_empty()
+            || vector.len() > limit
+            || expected.is_some_and(|n| vector.len() != n as usize)
+    }) {
         return Err(ProviderError::DimensionMismatch);
     }
     Ok(())
@@ -1160,6 +1201,60 @@ mod tests {
     use super::ProviderService;
     use crate::ProviderSettings;
 
+    #[test]
+    fn unset_embedding_capabilities_still_enforce_resource_bounds() {
+        let mut model = mcp_vault_state::ModelRecord {
+            id: mcp_vault_domain::ModelId::new(),
+            provider_id: ProviderId::new(),
+            external_model_id: "default".into(),
+            capabilities: serde_json::json!({"embeddings":true}),
+            settings: serde_json::json!({}),
+            enabled: true,
+            revision: Revision::new(1),
+            embedding_revision: Revision::new(1),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let mut request = crate::EmbeddingRequest {
+            model: "default".into(),
+            inputs: vec!["x".repeat(8192)],
+        };
+        assert!(super::validate_embedding_inputs(&model, &request).is_ok());
+        request.inputs[0].push('x');
+        assert!(super::validate_embedding_inputs(&model, &request).is_err());
+        let result = crate::EmbeddingResult {
+            vectors: vec![vec![1.0; 8193]],
+            model: None,
+            usage: None,
+        };
+        assert!(super::validate_model_dimensions(&model, &result).is_err());
+        model.capabilities =
+            serde_json::json!({"embeddings":true,"dimension":256,"context_window":1024});
+        assert!(super::validate_embedding_inputs(&model, &request).is_err());
+        assert!(
+            super::validate_model_dimensions(
+                &model,
+                &crate::EmbeddingResult {
+                    vectors: vec![vec![1.0; 256]],
+                    model: None,
+                    usage: None,
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            super::validate_model_dimensions(
+                &model,
+                &crate::EmbeddingResult {
+                    vectors: vec![vec![1.0; 2048]],
+                    model: None,
+                    usage: None,
+                }
+            )
+            .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn provider_transport_cache_is_shared_and_revision_aware() {
         let state = StateStore::connect_and_migrate("sqlite::memory:")
@@ -1179,6 +1274,7 @@ mod tests {
             settings: serde_json::json!({}),
             enabled: true,
             revision: Revision::new(1),
+            embedding_revision: Revision::new(1),
             created_at: 1,
             updated_at: 1,
         };

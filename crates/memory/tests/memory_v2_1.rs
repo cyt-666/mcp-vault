@@ -254,6 +254,7 @@ async fn seed_vector_model(state: &StateStore) -> (ProviderId, ModelId) {
             settings: json!({}),
             enabled: true,
             revision: Revision::new(1),
+            embedding_revision: Revision::new(1),
             created_at: 1,
             updated_at: 1,
         })
@@ -270,6 +271,7 @@ async fn seed_vector_model(state: &StateStore) -> (ProviderId, ModelId) {
             settings: json!({}),
             enabled: true,
             revision: Revision::new(1),
+            embedding_revision: Revision::new(1),
             created_at: 1,
             updated_at: 1,
         })
@@ -1829,6 +1831,7 @@ async fn configure_test_embeddings_with_gate(
             && body["input"]
                 .as_array()
                 .is_some_and(|inputs| inputs.len() == 1)
+            && gate.calls.fetch_add(1, Ordering::SeqCst) == 1
         {
             gate.started.notify_one();
             gate.release.notified().await;
@@ -2557,7 +2560,7 @@ async fn generation_receives_full_source_language_and_coverage_contract_without_
 }
 
 #[tokio::test]
-async fn positive_cosine_hard_negative_is_rejected_while_lexical_answer_survives() {
+async fn diagnostic_threshold_does_not_suppress_similarity_candidates_or_lexical_answers() {
     let (_dir, state, context, core, service) = fixture("positive-hard-negative").await;
     let (providers, model) = configure_test_embeddings(&state, &context).await;
     let item = service
@@ -2699,8 +2702,11 @@ orchard irrigation schedule",
         )
         .await
         .unwrap();
-    assert!(unrelated.memories.is_empty());
-    assert!(unrelated.related_notes.is_empty());
+    assert!(
+        !unrelated.memories.is_empty(),
+        "similarity is not an answer guarantee"
+    );
+    assert!(!unrelated.related_notes.is_empty());
     let lexical = service
         .recall(
             &context,
@@ -2900,8 +2906,12 @@ async fn recall_revalidates_current_objects_after_related_note_provider_wait() {
         .forget(&context, &core, item.id, item.revision)
         .await
         .unwrap();
+    gate.mode.store(0, Ordering::SeqCst);
     gate.release.notify_one();
-    let result = recall.await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(10), recall)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(result.memories.is_empty());
     assert!(
         result

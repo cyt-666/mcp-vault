@@ -775,7 +775,7 @@ The architecture is preserved when:
 
 ## Bounded calibration application service
 
-The memory application service owns synthetic evaluation and publication; state repositories own checkpoints and atomic request accounting. The server registers the bounded retrieval.calibrate worker and startup/periodic compensation. The Provider transport enforces accounting at actual dispatch. Neither protocol handlers nor UI compute quality metrics.
+The memory application service owns synthetic evaluation and publication; state repositories own checkpoints and atomic request accounting. The server registers the bounded retrieval.calibrate worker for explicitly requested diagnostics only (ADR-0028); startup/periodic reconciliation does not admit synthetic evaluations. The indexer uses bounded deterministic rule chunks for ingestion and retrieval; legacy model grouping plans and bindings are ignored. The Provider transport enforces accounting at actual dispatch. Neither protocol handlers nor UI compute quality metrics.
 
 The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
 specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).

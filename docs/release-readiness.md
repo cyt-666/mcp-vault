@@ -7,14 +7,17 @@ and, for container checks, the image digest.
 
 ## Current memory administration change
 
-The local memory review change adds automatic startup calibration, independent memory
-and note preparation with a combined no-answer gate, five connected Admin workflows,
+The local memory review change adds optional retrieval diagnostics, independent memory
+and note preparation, five connected Admin workflows,
 current-set deletion/recovery fixes, and complete response budgeting/section diagnostics.
-Forward migrations 0016–0017 preserve existing canonical knowledge and valid vectors.
-See the [task acceptance report](exec-plans/reports/memory-review-autocalibration-admin-fix.md)
+Forward migrations 0016–0019 preserve existing canonical knowledge and valid vectors.
+See the [task acceptance report](exec-plans/reports/memory-review-autocalibration-admin-fix.md),
+the [subsequent regression and authorized real-model report](exec-plans/reports/memory-system-regression-20260906.md),
 and [upgrade/rollback procedure](memory-autocalibration-operations.md#upgrade-and-rollback).
 This engineering evidence does not sign off deployment-model quality, the platform's
 optional ONNX runtime linkage, or unexecuted interoperability gates below.
+
+Latest user-approved direction: [model grouping ExecPlan](exec-plans/completed/model-guided-note-chunking.md) and ADR-0028 supersede automatic benchmark activation.
 
 ## Required gates
 

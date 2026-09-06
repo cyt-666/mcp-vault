@@ -23,7 +23,6 @@ use crate::{
     files::FileStateRepository,
     index::IndexRepository,
     memory::MemoryRepository,
-    migrations::MIGRATOR,
     providers::ProviderRepository,
     settings::SettingsRepository,
     vaults::VaultRepository,
@@ -41,6 +40,31 @@ pub struct StateStore {
 }
 
 impl StateStore {
+    /// Open an existing database for offline diagnostics. Never create a path,
+    /// change journal mode, apply migrations or allow SQL writes.
+    pub async fn connect_read_only(database_url: &str) -> Result<Self, StateError> {
+        if is_memory_database(database_url) {
+            return Err(StateError::InvalidInput(
+                "diagnostics require an existing database",
+            ));
+        }
+        let options = SqliteConnectOptions::from_str(database_url)
+            .map_err(|error| StateError::Connection(error.to_string()))?
+            .create_if_missing(false)
+            .read_only(true)
+            .pragma("query_only", "ON")
+            .busy_timeout(BUSY_TIMEOUT);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(ACQUIRE_TIMEOUT)
+            .connect_with(options)
+            .await?;
+        Ok(Self {
+            pool,
+            write_gate: Arc::new(Semaphore::new(1)),
+        })
+    }
+
     /// Connect to a SQLite URL without applying migrations.
     pub async fn connect(database_url: &str) -> Result<Self, StateError> {
         let in_memory = is_memory_database(database_url);
@@ -83,7 +107,7 @@ impl StateStore {
 
     /// Apply pending migrations and validate already-applied checksums.
     pub async fn migrate(&self) -> Result<(), StateError> {
-        MIGRATOR.run(&self.pool).await?;
+        crate::migrations::run(&self.pool).await?;
         Ok(())
     }
 
@@ -504,6 +528,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn diagnostic_connection_is_read_only_and_never_creates_a_database() {
+        let (directory, store) = migrated_file_store().await;
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        let reader = StateStore::connect_read_only(&database_url(directory.path()))
+            .await
+            .unwrap();
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(&reader.pool)
+            .await
+            .unwrap();
+        assert_eq!(before, after);
+        assert!(
+            sqlx::query("CREATE TABLE unexpected_write(id INTEGER)")
+                .execute(&reader.pool)
+                .await
+                .is_err()
+        );
+        let missing = directory.path().join("missing/never.sqlite3");
+        assert!(
+            StateStore::connect_read_only(&format!("sqlite://{}", missing.display()))
+                .await
+                .is_err()
+        );
+        assert!(!missing.parent().unwrap().exists());
+    }
+
+    #[tokio::test]
     async fn migration_creates_operational_tables_and_integrity_is_green() {
         let store = StateStore::connect_and_migrate("sqlite::memory:")
             .await
@@ -578,7 +632,7 @@ mod tests {
         let report = store.integrity_check().await.unwrap();
         assert!(report.integrity_ok);
         assert_eq!(report.foreign_key_violations, 0);
-        assert_eq!(report.migration_version, 17);
+        assert_eq!(report.migration_version, 19);
         assert!(store.foreign_keys_enabled().await.unwrap());
     }
 
@@ -700,7 +754,7 @@ mod tests {
         }
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 17);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 19);
     }
 
     #[tokio::test]
@@ -742,7 +796,7 @@ mod tests {
         assert!(jwks.is_none());
         assert_eq!(enabled, 0);
         assert!(store.has_table("installation_key_checks").await.unwrap());
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 17);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 19);
     }
 
     #[tokio::test]
@@ -793,7 +847,7 @@ mod tests {
         assert_eq!(store.integrity_check().await.unwrap().migration_version, 10);
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 17);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 19);
     }
 
     #[tokio::test]
@@ -949,7 +1003,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(pipeline_column, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 17);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 19);
     }
 
     #[tokio::test]
@@ -1011,7 +1065,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(retained, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 17);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 19);
     }
 
     #[tokio::test]
@@ -1096,7 +1150,7 @@ mod tests {
         .unwrap();
         assert_eq!(reason.as_deref(), Some("source_unavailable"));
         assert_eq!(changed_at, Some(20));
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 17);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 19);
     }
 
     #[tokio::test]
@@ -1234,7 +1288,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(fts_row, (String::new(), "keep canonical memory".to_owned()));
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 17);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 19);
     }
 
     #[tokio::test]
@@ -1395,6 +1449,279 @@ mod tests {
                 .foreign_key_violations
                 == 0
         );
+    }
+
+    #[tokio::test]
+    async fn migration_0018_preserves_embedding_identity_vectors_and_calibration() {
+        let store = StateStore::connect("sqlite::memory:").await.unwrap();
+        let mut prior = sqlx::migrate::Migrator::DEFAULT;
+        prior.migrations = std::borrow::Cow::Owned(
+            crate::migrations::MIGRATOR
+                .iter()
+                .filter(|migration| migration.version <= 17)
+                .cloned()
+                .collect(),
+        );
+        prior.run(&store.pool).await.unwrap();
+        let vault = VaultId::new();
+        insert_vault(&store, vault, "identity-upgrade").await;
+        sqlx::query("INSERT INTO providers (id,name,provider_type,base_url,settings_json,enabled,revision,created_at,updated_at) VALUES ('provider','before','embedding_http','https://example.invalid/','{}',1,7,1,2)").execute(&store.pool).await.unwrap();
+        sqlx::query("INSERT INTO models (id,provider_id,external_model_id,capability_json,settings_json,enabled,revision,created_at,updated_at) VALUES ('model','provider','test','{}','{}',1,11,1,3)").execute(&store.pool).await.unwrap();
+        sqlx::query("INSERT INTO embedding_records (id,vault_id,object_type,object_id,chunk_key,provider_id,model_id,dimension,content_hash,vector_backend_key,created_at,updated_at) VALUES ('embedding',?,'note','source','text-v3:0000','provider','model',2,'source-hash','embedding',1,2)").bind(vault.to_string()).execute(&store.pool).await.unwrap();
+        sqlx::query("INSERT INTO embedding_vectors (vault_id,embedding_id,dimension,vector_blob,norm,created_at) VALUES (?,'embedding',2,?,1.0,2)").bind(vault.to_string()).bind([1.0_f32.to_le_bytes(),0.0_f32.to_le_bytes()].concat()).execute(&store.pool).await.unwrap();
+        let context = store
+            .vaults()
+            .find_by_id(vault)
+            .await
+            .unwrap()
+            .unwrap()
+            .context()
+            .unwrap();
+        store
+            .calibrations()
+            .ensure(&context, "note", "same-signature")
+            .await
+            .unwrap();
+        store
+            .calibrations()
+            .checkpoint(
+                &context,
+                "note",
+                "same-signature",
+                &serde_json::json!({"cache":[1.0,0.0]}),
+            )
+            .await
+            .unwrap();
+        store
+            .calibrations()
+            .finish(
+                &context,
+                "note",
+                "same-signature",
+                "passed",
+                &serde_json::json!({"saved":true}),
+            )
+            .await
+            .unwrap();
+        let before = serde_json::to_value(
+            store
+                .calibrations()
+                .get(&context, "note", "same-signature")
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let vector_before: (Vec<u8>, i64) =
+            sqlx::query_as("SELECT vector_blob,created_at FROM embedding_vectors WHERE vault_id=?")
+                .bind(vault.to_string())
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        for signature in ["stranded", "active"] {
+            store
+                .calibrations()
+                .ensure(&context, "memory", signature)
+                .await
+                .unwrap();
+            store
+                .calibrations()
+                .reserve_request(&context, "memory", signature, 123, 900_000)
+                .await
+                .unwrap();
+            store
+                .calibrations()
+                .checkpoint(
+                    &context,
+                    "memory",
+                    signature,
+                    &serde_json::json!({"saved":[1.0,0.0]}),
+                )
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO jobs(id,vault_id,job_type,dedup_key,payload_json,status,max_attempts,available_at,created_at,updated_at) VALUES (?,?,'retrieval.calibrate',?,?,'completed',3,1,1,1)")
+                .bind(format!("finished-{signature}")).bind(vault.to_string()).bind(format!("finished-{signature}"))
+                .bind(serde_json::json!({"signatures":[signature]}).to_string()).execute(&store.pool).await.unwrap();
+        }
+        store
+            .jobs()
+            .enqueue(
+                &context,
+                "retrieval.calibrate",
+                "active-job",
+                &serde_json::json!({"signatures":["active"],"explicit_diagnostic":true}),
+                0,
+                3,
+                0,
+            )
+            .await
+            .unwrap();
+        let other_id = VaultId::new();
+        insert_vault(&store, other_id, "other-identity").await;
+        let other = store
+            .vaults()
+            .find_by_id(other_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .context()
+            .unwrap();
+        store
+            .calibrations()
+            .ensure(&other, "memory", "stranded")
+            .await
+            .unwrap();
+        store.migrate().await.unwrap();
+        let revisions:(i64,i64,i64,i64)=sqlx::query_as("SELECT p.revision,p.embedding_revision,m.revision,m.embedding_revision FROM providers p JOIN models m ON m.provider_id=p.id").fetch_one(&store.pool).await.unwrap();
+        assert_eq!(
+            revisions,
+            (7, 7, 11, 11),
+            "legacy fingerprint revision components must remain byte-identical"
+        );
+        assert_eq!(
+            vector_before,
+            sqlx::query_as::<_, (Vec<u8>, i64)>(
+                "SELECT vector_blob,created_at FROM embedding_vectors WHERE vault_id=?"
+            )
+            .bind(vault.to_string())
+            .fetch_one(&store.pool)
+            .await
+            .unwrap()
+        );
+        let after = store
+            .calibrations()
+            .get(&context, "note", "same-signature")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before, serde_json::to_value(&after).unwrap());
+        assert_eq!(
+            after.checkpoint_json,
+            serde_json::json!({"cache":[1.0,0.0]}).to_string()
+        );
+        let stranded = store
+            .calibrations()
+            .get(&context, "memory", "stranded")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stranded.status, "cancelled");
+        assert_eq!(stranded.requests, 1);
+        assert_eq!(stranded.request_bytes, 123);
+        assert_eq!(
+            stranded.checkpoint_json,
+            serde_json::json!({"saved":[1.0,0.0]}).to_string()
+        );
+        assert_eq!(
+            store
+                .calibrations()
+                .get(&context, "memory", "active")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "running"
+        );
+        assert_eq!(
+            store
+                .calibrations()
+                .get(&other, "memory", "stranded")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "pending"
+        );
+        assert!(store.integrity_check().await.unwrap().integrity_ok);
+    }
+
+    #[tokio::test]
+    async fn migration_0019_retires_only_automatic_jobs_and_keeps_reports_and_budgets() {
+        let store = StateStore::connect("sqlite::memory:").await.unwrap();
+        let mut prior = sqlx::migrate::Migrator::DEFAULT;
+        prior.migrations = std::borrow::Cow::Owned(
+            crate::migrations::MIGRATOR
+                .iter()
+                .filter(|m| m.version <= 18)
+                .cloned()
+                .collect(),
+        );
+        prior.run(&store.pool).await.unwrap();
+        let vault = VaultId::new();
+        insert_vault(&store, vault, "retire-auto").await;
+        let context = store
+            .vaults()
+            .find_by_id(vault)
+            .await
+            .unwrap()
+            .unwrap()
+            .context()
+            .unwrap();
+        let other_id = VaultId::new();
+        insert_vault(&store, other_id, "manual-diagnostic").await;
+        let other = store
+            .vaults()
+            .find_by_id(other_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .context()
+            .unwrap();
+        for (signature, explicit) in [("auto", false), ("manual", true)] {
+            let context = if explicit { &other } else { &context };
+            store
+                .calibrations()
+                .ensure(context, "note", signature)
+                .await
+                .unwrap();
+            store
+                .calibrations()
+                .reserve_request(context, "note", signature, 42, i64::MAX)
+                .await
+                .unwrap();
+            store
+                .jobs()
+                .enqueue(
+                    context,
+                    "retrieval.calibrate",
+                    signature,
+                    &serde_json::json!({"signatures":[signature],"explicit_diagnostic":explicit}),
+                    0,
+                    3,
+                    0,
+                )
+                .await
+                .unwrap();
+        }
+        store.migrate().await.unwrap();
+        for (signature, status) in [("auto", "cancelled"), ("manual", "running")] {
+            let context = if signature == "manual" {
+                &other
+            } else {
+                &context
+            };
+            let row = store
+                .calibrations()
+                .get(context, "note", signature)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.status, status);
+            assert_eq!(row.requests, 1);
+            assert_eq!(row.request_bytes, 42);
+        }
+        let jobs = store
+            .jobs()
+            .list(&context, None, Some("retrieval.calibrate"), 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            jobs.iter()
+                .filter(|j| j.status == crate::JobStatus::Cancelled)
+                .count(),
+            1
+        );
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 19);
     }
 
     async fn insert_vault(store: &StateStore, id: VaultId, slug: &str) {

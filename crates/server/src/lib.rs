@@ -6,6 +6,7 @@
 
 mod assets;
 pub mod config;
+pub mod diagnostics;
 pub mod health;
 pub mod metrics;
 mod router;

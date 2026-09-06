@@ -22,4 +22,5 @@ pub use service::{
 mod calibration;
 pub use calibration::{
     CalibrationMetrics, CalibrationProfile, CalibrationReport, CalibrationStatus,
+    diagnose_calibration,
 };

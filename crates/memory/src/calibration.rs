@@ -25,6 +25,9 @@ const POLICY: &str = "recall-admission-object-rank-v5-joint";
 const MAINTENANCE: &str = "retrieval.calibration.automatic";
 const ACTIVE: &str = "retrieval.calibration.active";
 
+mod diagnostics;
+pub use diagnostics::diagnose_calibration;
+
 #[derive(Clone, Deserialize)]
 struct Corpus {
     version: String,
@@ -474,7 +477,7 @@ impl MemoryService {
                     context,
                     "retrieval.calibrate",
                     &dedup,
-                    &json!({"signatures":signatures}),
+                    &json!({"signatures":signatures,"explicit_diagnostic":true}),
                     0,
                     3,
                     now(),
@@ -569,57 +572,10 @@ impl MemoryService {
         &self,
         context: &VaultContext,
     ) -> Result<Option<JobId>, MemoryError> {
-        let mut signatures = Vec::new();
-        for channel in ["memory", "note"] {
-            let status = self.calibration_status(context, channel).await?;
-            if !status.automatic
-                || status.active
-                || status.blockers.iter().any(|value| {
-                    matches!(
-                        value.as_str(),
-                        "provider_disabled"
-                            | "model_or_provider_disabled"
-                            | "joint_no_answer_quality_failed"
-                    )
-                })
-            {
-                continue;
-            }
-            let Some(profile) = status.profile else {
-                continue;
-            };
-            if status.run.as_ref().is_some_and(|run| {
-                matches!(
-                    run.status.as_str(),
-                    "quality_failed" | "failed" | "cancelled"
-                )
-            }) {
-                continue;
-            }
-            signatures.push(profile.signature);
-        }
-        if signatures.is_empty() {
-            return Ok(None);
-        }
-        let dedup = format!(
-            "retrieval-calibration:{}:{}",
-            hash(&signatures.join("|")),
-            JobId::new()
-        );
-        let job = self
-            .state
-            .jobs()
-            .enqueue_singleton(
-                context,
-                "retrieval.calibrate",
-                &dedup,
-                &json!({"signatures":signatures}),
-                0,
-                3,
-                now(),
-            )
-            .await?;
-        Ok(Some(job.id))
+        // Kept as a compatible no-op for older event callers. Only explicit
+        // diagnostic requests may schedule synthetic inputs (ADR-0028).
+        let _ = context;
+        Ok(None)
     }
 
     /// Run the actual configured Provider with bounded cached synthetic inputs.
@@ -716,22 +672,8 @@ impl MemoryService {
                 .await?;
         }
         let scored = score_queries(context, &corpus, &prepared, &cache, &profile.channel).await?;
-        let mut boundaries = vec![0.0, 1.0];
-        for query in scored
-            .iter()
-            .filter(|query| query.query.split == "calibration")
-        {
-            for (_, cosine, _) in &query.candidates {
-                if (0.0..1.0).contains(cosine) {
-                    boundaries.push(*cosine);
-                }
-            }
-        }
-        boundaries.sort_by(f64::total_cmp);
-        boundaries.dedup();
-        let floors = boundaries.windows(2).map(|pair| (pair[0] + pair[1]) / 2.0);
         let mut best = None;
-        for floor in floors {
+        for floor in threshold_candidates(&scored) {
             let metrics = evaluate(&scored, "calibration", Some(floor), &profile.channel);
             if metrics.passes()
                 && best
@@ -922,6 +864,26 @@ struct ScoredQuery<'a> {
     lexical_ranks: HashMap<String, usize>,
     candidates: Vec<(String, f64, f64)>,
 }
+
+fn threshold_candidates(scored: &[ScoredQuery<'_>]) -> Vec<f64> {
+    let mut boundaries = vec![0.0, 1.0];
+    for query in scored
+        .iter()
+        .filter(|query| query.query.split == "calibration")
+    {
+        for (_, cosine, _) in &query.candidates {
+            if (0.0..1.0).contains(cosine) {
+                boundaries.push(*cosine);
+            }
+        }
+    }
+    boundaries.sort_by(f64::total_cmp);
+    boundaries.dedup();
+    boundaries
+        .windows(2)
+        .map(|pair| (pair[0] + pair[1]) / 2.0)
+        .collect()
+}
 async fn score_queries<'a>(
     context: &VaultContext,
     corpus: &'a Corpus,
@@ -1002,6 +964,47 @@ async fn score_queries<'a>(
     }
     Ok(result)
 }
+fn ranked_candidates<'a>(
+    entry: &'a ScoredQuery<'_>,
+    floor: Option<f64>,
+    channel: &str,
+) -> Vec<(&'a String, f64)> {
+    let mut ranked = entry
+        .candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(rank, (id, similarity, lexical))| {
+            let semantic = floor
+                .and_then(|floor| calibrated_semantic_rank_score(*similarity as f32, rank, floor));
+            let lexical_rank = entry.lexical_ranks.get(id).copied();
+            if (*lexical == 0.0 || lexical_rank.is_none()) && semantic.is_none() {
+                return None;
+            }
+            let lexical_score = if *lexical > 0.0 && lexical_rank.is_some() {
+                let lexical_rank = lexical_rank.unwrap_or(0);
+                if channel == "memory" {
+                    {
+                        let (coverage, rank) =
+                            mcp_vault_indexer::relevance::memory_lexical_contributions(
+                                *lexical,
+                                lexical_rank,
+                            );
+                        coverage + rank
+                    }
+                } else {
+                    mcp_vault_indexer::relevance::note_lexical_contribution(lexical_rank)
+                }
+            } else {
+                0.0
+            };
+            Some((id, lexical_score + semantic.unwrap_or(0.0)))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    ranked.truncate(5);
+    ranked
+}
+
 fn evaluate(
     queries: &[ScoredQuery<'_>],
     split: &str,
@@ -1010,40 +1013,7 @@ fn evaluate(
 ) -> CalibrationMetrics {
     let mut metrics = CalibrationMetrics::default();
     for entry in queries.iter().filter(|entry| entry.query.split == split) {
-        let mut ranked = entry
-            .candidates
-            .iter()
-            .enumerate()
-            .filter_map(|(rank, (id, similarity, lexical))| {
-                let semantic = floor.and_then(|floor| {
-                    calibrated_semantic_rank_score(*similarity as f32, rank, floor)
-                });
-                let lexical_rank = entry.lexical_ranks.get(id).copied();
-                if (*lexical == 0.0 || lexical_rank.is_none()) && semantic.is_none() {
-                    return None;
-                }
-                let lexical_score = if *lexical > 0.0 && lexical_rank.is_some() {
-                    let lexical_rank = lexical_rank.unwrap_or(0);
-                    if channel == "memory" {
-                        {
-                            let (coverage, rank) =
-                                mcp_vault_indexer::relevance::memory_lexical_contributions(
-                                    *lexical,
-                                    lexical_rank,
-                                );
-                            coverage + rank
-                        }
-                    } else {
-                        mcp_vault_indexer::relevance::note_lexical_contribution(lexical_rank)
-                    }
-                } else {
-                    0.0
-                };
-                Some((id, lexical_score + semantic.unwrap_or(0.0)))
-            })
-            .collect::<Vec<_>>();
-        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-        ranked.truncate(5);
+        let ranked = ranked_candidates(entry, floor, channel);
         let query = entry.query;
         if query.relevant.is_empty() {
             metrics.unanswered_queries += 1;

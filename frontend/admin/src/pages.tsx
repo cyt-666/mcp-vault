@@ -1041,7 +1041,7 @@ function ManualModelForm({ provider, notify, onRefresh }: { provider: JsonObject
       <div className="form-grid">
         <label>模型 ID<input required value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="例如：gpt-5-mini 或 qwen3:8b" /></label>
         <label>主要能力<select value={capability} onChange={(event) => setCapability(event.target.value)}><option value="generation">结构化文本生成</option><option value="embedding">Embedding</option><option value="reranking">结果重排</option></select></label>
-        {capability === 'embedding' ? <label>向量维度（可选）<input min="1" type="number" value={dimension} onChange={(event) => setDimension(event.target.value)} placeholder="例如：1536" /></label> : null}
+        {capability === 'embedding' ? <label>预期输出维度（校验用，可选）<input min="1" type="number" value={dimension} onChange={(event) => setDimension(event.target.value)} placeholder="例如：1536" /><small>填写模型实际返回的维度，不是最大支持维度。此项只校验响应，不会要求模型降维或截断向量。</small></label> : null}
         <label>上下文窗口（可选）<input min="1" type="number" value={contextWindow} onChange={(event) => setContextWindow(event.target.value)} placeholder="例如：128000" /></label>
       </div>
       {capability === 'generation' ? <details className="disclosure"><summary>高级：兼容模式与 Token 上限</summary><div className="form-grid">
@@ -1385,6 +1385,7 @@ function IndexPage({ data, notify, onRefresh }: { data: JsonObject | null; notif
           </section>
           <p className="muted compact-text">上次完成：{formatTime(status.last_rebuilt_at)} · 索引版本：{numberValue(status.revision)}</p>
           {booleanValue(noteSemantic.configured) ? <p className="muted compact-text">语义模型：<code>{stringValue(noteSemantic.external_model_id, '模型记录缺失')}</code>{numberValue(noteSemantic.stale_vectors) > 0 ? ` · ${numberValue(noteSemantic.stale_vectors)} 条过期向量待重建` : ''}</p> : null}
+          <p className="muted compact-text">笔记按结构和大小限制进行规则分块，不调用分块模型。</p>
           {semanticBlockers.length > 0 && booleanValue(noteSemantic.configured) ? <Notice tone="warning">语义召回尚未完全就绪：{semanticBlockers.map(noteSemanticBlockerLabel).join('；')}。</Notice> : null}
           {typeof status.last_error === 'string' && status.last_error ? <Notice tone="danger">最近错误：{status.last_error}</Notice> : null}
         </>
@@ -1594,7 +1595,7 @@ function MemoryEmbeddingPanel({ data, notify, onRefresh }: { data: JsonObject; n
       </div>
       {!configured ? <Notice tone="info">在“AI 服务”中绑定“记忆向量”模型后即可生成；未生成向量时，具有明确词法或实体证据的结果仍可检索。</Notice> : null}
       {configured && blockers.length > 0 ? <Notice tone="warning">记忆语义召回尚未完全就绪：{blockers.map(memoryEmbeddingBlockerLabel).join('；')}。</Notice> : null}
-      {configured && blockers.length === 0 ? <Notice tone="success">当前记忆向量覆盖完整；语义检索是否启用请查看独立的校准状态。</Notice> : null}
+      {configured && blockers.length === 0 ? <Notice tone="success">当前记忆向量覆盖完整，可用于语义检索；相似度不代表资料一定回答了问题。</Notice> : null}
     </Panel>
   );
 }

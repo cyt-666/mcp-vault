@@ -46,7 +46,7 @@ describe('当前记忆管理闭环', () => {
     const rootNode = document.createElement('div'); const root = createRoot(rootNode);
     await act(async () => root.render(<MemoryManagement data={{ vault_slug: 'a', calibration: { channels: [{ channel: 'memory', automatic: true, active: false, profile: { external_model_id: 'embed' }, blockers: ['calibration_missing'] }] }, sources: { sources: [{ file_id: 'empty', path: 'empty.md', set_revision: 9, current_item_count: 0, paused: true, restorable: true }] } }} notify={vi.fn()} onRefresh={vi.fn()} />));
     expect(request).not.toHaveBeenCalled(); expect(rootNode.textContent).not.toContain('语义检索已启用');
-    await act(async () => button(rootNode, '运行／重试校准').click());
+    await act(async () => button(rootNode, '运行／重试评测').click());
     expect(request).toHaveBeenCalledWith('/vaults/a/memory/semantic-calibration/run', { method: 'POST', body: { channel: 'memory' } });
     await act(async () => button(rootNode, '恢复来源提取').click());
     expect(request).toHaveBeenLastCalledWith('/vaults/a/memory/extraction/sources/empty/resume', { method: 'POST', body: { expected_set_revision: 9 } });

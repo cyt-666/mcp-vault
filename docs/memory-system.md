@@ -167,9 +167,11 @@ It combines:
   source content hash, chunk identity, and input hash all match;
 - optional ordinary-note results from the index service.
 
-Candidate admission is relevance-gated. Recency alone cannot cause a memory to
+Lexical admission requires query evidence; semantic ranking uses current valid vectors
+without a benchmark-derived floor. Similarity alone does not prove answerability.
+Recency alone cannot cause a memory to
 be returned. Semantic raw cosine is retained as `semantic_cosine` for
-diagnostics; the public `score` is a calibrated fusion score and must not be
+diagnostics; the public `score` is a fusion ranking score and must not be
 described as cosine similarity. Missing/unavailable vectors degrade to local
 retrieval instead of widening relevance.
 
@@ -203,6 +205,12 @@ Scheduling, status, source resolution, and recall all apply the same freshness
 predicate. Changing a source, preprocessing rule, model binding, endpoint, or
 relevant settings makes the old vector ineligible. Vectors are never the only
 copy of knowledge and can always be rebuilt.
+
+Admin edit revision and embedding identity revision are distinct. Renaming a
+Provider or saving identical model configuration must not invalidate vectors.
+Provider disabled/mode checks still block unauthorized operations even when the
+stored vector fingerprint remains valid. Migration 0018 preserves pre-upgrade
+fingerprints by initializing the new identity revisions from their former values.
 
 ## 8. Migration from prerelease memory
 
@@ -259,7 +267,7 @@ explicit resume, exact-vector freshness, output budgets, and crash adoption.
 
 ## Current-set calibration and source-language preservation
 
-ADR-0027 adds automatic synthetic calibration within ADR-0026 current-set ownership. It does not restore lifecycle history or global consolidation. The extraction prompt preserves source language, progress, environment, conditional results and future plans; unchanged source sets are not re-extracted merely because the prompt version changes.
+ADR-0028 supersedes ADR-0027 automatic synthetic calibration: evaluations are optional diagnostics and do not gate production recall. The amended ADR-0028 requires deterministic rule chunks; legacy model grouping plans and bindings are ignored. It does not restore lifecycle history or global consolidation. The extraction prompt preserves source language, progress, environment, conditional results and future plans; unchanged source sets are not re-extracted merely because the prompt version changes.
 
 The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
 specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).

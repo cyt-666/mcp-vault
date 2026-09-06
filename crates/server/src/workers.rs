@@ -1594,6 +1594,15 @@ pub fn retrieval_calibration_job_handler(state: StateStore, memory: MemoryServic
         let memory = memory.clone();
         let slots = slots.clone();
         Box::pin(async move {
+            if job
+                .payload
+                .get("explicit_diagnostic")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            {
+                return JobOutcome::Cancelled;
+            }
+
             let permit = tokio::select! {
                 _=shutdown.cancelled()=>return JobOutcome::Cancelled,
                 permit=slots.acquire()=>permit,
@@ -1627,9 +1636,38 @@ pub fn retrieval_calibration_job_handler(state: StateStore, memory: MemoryServic
             let mut terminal_error = None;
             for channel in ["memory", "note"] {
                 let profile = match memory.calibration_profile(&context, channel).await {
-                    Ok(Some(profile)) => profile,
-                    Ok(None) => continue,
+                    Ok(profile) => profile,
                     Err(error) => return JobOutcome::Failed { code: error.code() },
+                };
+                // A configuration change can make a retry skip every channel.
+                // Retire only signatures owned by this job, preserving cached
+                // vectors, spent budget, completed reports and newer jobs.
+                if let Some(signatures) = job.payload["signatures"].as_array() {
+                    for signature in signatures.iter().filter_map(Value::as_str) {
+                        if profile
+                            .as_ref()
+                            .is_none_or(|current| current.signature != signature)
+                            && state
+                                .calibrations()
+                                .finish(
+                                    &context,
+                                    channel,
+                                    signature,
+                                    "cancelled",
+                                    &json!({"error_code":"calibration_profile_changed"}),
+                                )
+                                .await
+                                .is_err()
+                        {
+                            return JobOutcome::Retry {
+                                delay: Duration::from_secs(30),
+                                code: "calibration_retirement_failed",
+                            };
+                        }
+                    }
+                }
+                let Some(profile) = profile else {
+                    continue;
                 };
                 if !job.payload["signatures"]
                     .as_array()

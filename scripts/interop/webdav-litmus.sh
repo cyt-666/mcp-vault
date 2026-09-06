@@ -15,7 +15,8 @@ if ! command -v litmus >/dev/null 2>&1; then
 fi
 
 suite=${1:-basic}
+# The upstream driver selects suites through TESTS, not a fourth argument.
+export TESTS="$suite"
 exec litmus "$MCP_VAULT_WEBDAV_URL" \
   "$MCP_VAULT_WEBDAV_USERNAME" \
-  "$MCP_VAULT_WEBDAV_PASSWORD" \
-  "$suite"
+  "$MCP_VAULT_WEBDAV_PASSWORD"

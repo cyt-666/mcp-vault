@@ -1,6 +1,6 @@
 # Automatic retrieval calibration and memory administration
 
-This contract implements [ADR-0027](adr/0027-bounded-automatic-retrieval-calibration.md)
+This contract amends [ADR-0027](adr/0027-bounded-automatic-retrieval-calibration.md) with ADR-0028
 within [ADR-0026](adr/0026-current-source-owned-memory-sets.md)'s current-set model.
 Canonical Markdown, source ownership, physical deletion, and extraction pauses retain
 their meaning. Calibration never migrates legacy memories, resumes sources, invokes
@@ -8,30 +8,39 @@ extraction, or rewrites business vectors.
 
 ## Preparation and startup
 
-After recovery and worker registration, the first server reconciliation tick admits
-`retrieval.calibrate` for each ready Vault with an allowed, enabled embedding role and
-no applicable server report. Existing role bindings and vectors are sufficient: no
-Admin visit, binding update, regeneration, or manual API request is required. Later
-reconciliation ticks (normally every 300 seconds) compensate for missed events.
-Admin embedding binding, Provider edits and Provider-mode changes, successful embedding
-jobs, and new Vault initialization also call the same ensure service. A global binding
-change checks each Vault independently. Reconciliation admits Vaults in bounded pages
-of 64 and checks cancellation between pages; missed events are covered by later ticks.
+[ADR-0028](adr/0028-model-guided-chunks-and-diagnostic-evaluation.md) supersedes
+the automatic quality gate in ADR-0027. Existing current vectors can participate in
+semantic retrieval without a bundled benchmark report. Startup, role binding and
+ordinary reconciliation no longer schedule synthetic evaluations. Schema 0019 retires
+old automatically admitted jobs while retaining spent budgets, caches and reports;
+explicit diagnostic jobs remain resumable. Model availability, permissions, vector
+identity/dimension and current-source checks still apply.
 
-Memory and note channels have separate signatures and quality gates. A missing note
-role does not block the memory channel. An embedding role is sufficient; generation
-and reranking roles are not required. Valid existing business vectors are reused.
-Coverage remains independent of calibration. A passed report cannot repair missing
-or stale vectors, and 100% vector coverage cannot replace calibration.
+Admin may explicitly run the bounded diagnostic. Its historical `active` field means
+an applicable passing diagnostic report, not production semantic eligibility; the UI
+labels it as benchmark success. Missing/failed reports do not disable normal retrieval.
+The maintenance endpoint now permits/pauses diagnostic dispatch only. Neither endpoint
+re-extracts memory or rewrites valid business vectors.
 
-The signature includes Vault, role, embedding profile, document and query preparation,
-lexical admission, object ranking policy, and the bundled corpus fingerprint. Reports
-are stored under their complete signature, so an older task cannot overwrite a newer
-configuration's publication. Reads only accept a matching passed server report. A
-report saved before a crash is reused after checking the current signature again.
-An endpoint silently replacing a model without changing any configuration cannot be
-detected from its name; operators must change the model identity/profile to invalidate
-that preparation.
+## Optional model grouping and default limits
+
+Model grouping was withdrawn by user decision (ADR-0028 amendment). Preparation,
+source resolution and retrieval always use deterministic rule chunks. Admin no
+longer offers the note_chunking role. Legacy bindings and cached plans, including
+pending records, are ignored; no grouping LLM request occurs.
+
+Default bounds remain: note embedding chunks are at most 2048 UTF-8 bytes including
+up to 512 context bytes and separators. Unconfigured embedding context retains the
+8192-byte service ceiling; a configured context window is a conservative byte ceiling.
+Vectors must have finite compatible dimensions; absent dimensions retain the 8192
+resource ceiling, while configured dimensions require an exact output match. These
+are validation limits, not instructions to generate maximum-dimensional vectors.
+
+Existing valid rule vectors are reused. Legacy model-grouped keys are excluded from
+current retrieval and normal scheduling fills missing rule vectors. No canonical
+note rewrite, memory re-extraction, user pause removal or schema downgrade occurs.
+Schema 19 and historical reports remain for compatibility. Rolling back only this
+policy requires a prior compatible binary, not destructive database migration.
 
 ## Evaluation and honest interpretation
 
@@ -54,23 +63,53 @@ relevant objects rather than treating any hit as full recall. Invalid dimensions
 missing vectors, zero vectors and non-finite values fail evaluation rather than
 becoming successful no-answer results.
 
-When both configured channels have applicable reports, status and recall also check the
-union of holdout no-answer failures. Two different false returns out of 20 fail the
-combined 5% gate even if each channel individually passed. Both semantic paths then
-remain inactive with `joint_no_answer_quality_failed`; reports are retained for diagnosis,
-lexical retrieval remains available, and automatic compensation does not create retry
-storms. Admin shows the combined sample count, failed case IDs and rate. Changing a
-model/profile or explicitly retrying remains possible.
+When both channels have reports, diagnostic status also reports their combined
+no-answer failure IDs. A failed combined score remains a diagnostic failure; it
+has no effect on production retrieval. The benchmark still evaluates its historical
+threshold policy to preserve comparability and read-only cache replay. It does not
+represent the new production ranking policy or prove private-Vault accuracy.
 
-Reports identify `evaluation_scope=builtin_benchmark`, configured profile, corpus hash,
-implementation package version, build commit and checkout state, split/subset metrics, failed case IDs, absolute
-no-answer false-return counts, actual HTTP requests/bytes, and elapsed wall time.
-One error out of 20 no-answer samples is already 5%; this small synthetic benchmark
-is a gate, not a guarantee about private Vault quality. Release evidence must retain
-the build commit alongside the report. Source archives should set `MCP_VAULT_BUILD_COMMIT`
-at build time; missing provenance is reported as `unknown`, never invented. Dirty
-worktree builds explicitly report `implementation_source_state=dirty`. Contract fake metrics in CI are never evidence
-of a deployment model's semantic or multilingual quality.
+## Read-only diagnosis of an existing failed run
+
+The `diagnose-calibration` operator command recomputes one exact existing run from
+its saved synthetic vectors. It opens SQLite read-only without migrations, reads only
+the selected Vault/channel/signature, and creates an in-memory synthetic FTS index.
+It does not initialize Provider credentials, start workers/listeners, send model
+requests, publish a threshold, or read canonical Vault files. Standard file-access
+permissions authorize this local operator command; it is not an MCP tool.
+
+The JSON contains raw answer ranks before admission, every calibration threshold trial
+and its failed gates, one closest trial selected on calibration data only, and a replay
+comparison with the original report. A closest trial is diagnostic evidence, not an
+enabled or passing configuration. It exports neither raw vectors, arbitrary cache keys,
+database/Vault paths, secrets, nor private notes. Unknown corpus hashes and incomplete
+caches fail explicitly; the command never fetches missing embeddings.
+
+This command was added after the original 0.2.2 commit `6500214`; an image built from
+the updated source is required. After building that image, run a temporary command
+container from the deployment's Compose directory (no service restart is needed):
+
+```bash
+docker compose run --rm --no-deps -T mcp-vault diagnose-calibration \
+  --vault default --channel note \
+  --signature sha256:700548b45805452e35a386e696b6ae753ee3c7f011721f214a4c1e50e8a29ace \
+  > calibration-diagnostics.json
+```
+
+The signature above targets the user-reported failed note run. Use the actual Vault
+slug instead of `default` if different, and use the exact `profile.signature` from
+the relevant run for other diagnoses. The command uses the Compose service's existing
+database configuration and mount. Check its exit status before sharing the JSON;
+errors go to stderr and do not create a successful diagnostic report. The running
+service and saved calibration result are not changed by this command.
+
+Diagnosis limitations: the old failure report used 0.999999 when no threshold passed;
+its zero pure-semantic score is not an unconstrained measurement of model ability.
+Version 0.2.2 also ignored embedding response `index` values. Updated decoding restores
+input order and rejects duplicate/missing/mixed/out-of-range indices; adapters omitting
+every index keep their positional contract. Cached vectors alone cannot prove whether
+an old Provider response was reordered. No automatic business-vector rebuild or paid
+calibration retry is triggered by this parsing fix.
 
 ## Bounded execution and controls
 
@@ -89,7 +128,7 @@ channels serially; the registered worker allows at most two such jobs globally.
 Transient failures use the existing bounded job retry mechanism. Quality failures and
 terminal execution failures require an explicit retry. Admin cancellation also stops
 a queued signature; graceful process shutdown preserves resumable work. Pausing
-maintenance stops further calibration requests but keeps applicable query reports.
+maintenance stops further calibration requests but retains prior diagnostic reports.
 Already dispatched HTTP requests cannot be recalled.
 
 The maintenance endpoint accepts an optional typed engineering `budget` for future
@@ -139,8 +178,8 @@ All memory retrieval paths apply type, validity and importance filters again whe
 reading current bundles. Context contributes ranking only after query relevance has
 admitted the object. Semantic rank counts valid unique objects after source/profile
 and request filters; extra chunks of one object do not demote another object.
-Related notes in recall use the same lexical gate and their independent calibrated
-semantic floor. General `search_notes` retains its discovery behavior.
+Related notes in recall use lexical evidence and current-vector similarity ranking
+without a benchmark-derived semantic floor. General `search_notes` retains its discovery behavior.
 
 Recall budgets estimate complete serialized JSON bytes divided by four, rounded up.
 They include escaped content, full headings, tags, paths, provenance, resource URIs,
@@ -167,19 +206,42 @@ The 15-source `generation-coverage.json` fixture supplies required facts and for
 claims for separately authorized real-model review; offline transport assertions do
 not claim generation quality.
 
+## Explicitly authorized real generation evaluation
+
+`crates/memory/examples/real_generation_eval.rs` exercises the 15 synthetic
+`generation-coverage.json` sources through the normal extraction and Provider path.
+It requires an explicitly authorized 15-request allowance and a `memory_extraction`
+binding in the isolated local test installation. It is not a startup task.
+Build with `cargo build --locked -p mcp-vault-memory --example real_generation_eval`,
+then invoke `target/debug/examples/real_generation_eval --source-data LOCAL_TEST_DATA
+--output NEW_OUTPUT_DIRECTORY --authorized-requests 15` (one command line).
+
+The source database is read-only. Necessary Provider configuration is copied into
+an ephemeral installation with a new key; synthetic canonical writes use its Vault
+Core. The evaluator disables transport retries, charges its shared budget before
+every dispatch, persists each result, and refuses an existing output directory.
+An interrupted run retains evidence but must not be restarted as an assumed free
+retry. Reports require source/output review; contract success alone is not a quality
+score. See the [authorized run and review limitations](exec-plans/reports/memory-system-regression-20260906.md).
+
 ## Upgrade and rollback
 
 1. Stop writes and take a coordinated backup of the database, canonical Vault and
    revision history; retain the separately protected installation master key. Record
    the application commit and current ProviderMode/role configuration.
-2. Start the new binary with the existing state. Forward migrations 0016 and 0017 run
+2. Start the new binary with the existing state. Forward migrations 0016–0019 run
    through the normal migration runner. 0016 makes deletion-snapshot Provider/model
    references nullable while copying prepared snapshots unchanged. 0017 adds only
-   operational calibration state and the calibration-job singleton index.
-3. Startup automatically prepares configured embedding channels. No legacy-memory
+   operational calibration state and the calibration-job singleton index. 0018
+   separates embedding identity revisions from Admin edit revisions, initialized
+   to preserve existing fingerprints and vectors. It also closes unfinished
+   calibration rows left by terminal jobs, retaining caches and spent requests;
+   rows with an active job remain resumable. Later display-name/enabled-only edits
+   and identical model saves preserve vector identity and calibration signatures.
+   0019 adds derived note grouping and retires automatically admitted diagnostics.
+3. Startup preserves configured embedding channels and does not run synthetic evaluations. No legacy-memory
    migration, extraction resume, full extraction or business-vector rebuild is part
-   of this step. Inspect channel reports and coverage independently. If the configured
-   model fails quality, lexical recall remains available and diagnostics explain why.
+   of this step. Inspect current vector coverage; diagnostic quality does not gate retrieval.
 4. Legacy memory conversion is a separate reviewed Admin preflight/execute operation.
    Resume individual paused sources only when regeneration is intended.
 

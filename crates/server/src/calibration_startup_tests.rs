@@ -20,7 +20,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 
 async fn synthetic_embeddings(
     AxumState(calls): AxumState<Arc<AtomicUsize>>,
@@ -56,7 +56,176 @@ fn providers(state: &StateStore) -> ProviderService {
 }
 
 #[tokio::test]
-async fn a01_existing_binding_and_vectors_calibrate_on_start_without_admin_or_regeneration() {
+async fn obsolete_calibration_job_retires_only_its_vaults_unfinished_profiles() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let mut contexts = Vec::new();
+    for slug in ["obsolete", "isolated"] {
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new(slug).unwrap(),
+            dir.path().join(slug),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, slug, VaultStatus::Active)
+            .await
+            .unwrap();
+        for channel in ["memory", "note"] {
+            state
+                .calibrations()
+                .ensure(&context, channel, "old-profile")
+                .await
+                .unwrap();
+            state
+                .calibrations()
+                .reserve_request(&context, channel, "old-profile", 123, 900_000)
+                .await
+                .unwrap();
+            state
+                .calibrations()
+                .checkpoint(
+                    &context,
+                    channel,
+                    "old-profile",
+                    &json!({"saved":[1.0,0.0]}),
+                )
+                .await
+                .unwrap();
+        }
+        contexts.push(context);
+    }
+    let context = &contexts[0];
+    let provider_service = providers(&state);
+    let provider = provider_service
+        .create_provider(ProviderInput {
+            name: "Never contacted".into(),
+            kind: ProviderKind::EmbeddingHttp,
+            base_url: "http://127.0.0.1:1/v1/".parse().unwrap(),
+            settings: ProviderSettings::default(),
+            enabled: true,
+            secret: None,
+        })
+        .await
+        .unwrap();
+    let model = provider_service
+        .register_model(ModelInput {
+            provider_id: provider.id,
+            external_model_id: "new-model".into(),
+            capabilities: ModelCapabilities {
+                embeddings: true,
+                dimension: Some(2),
+                ..Default::default()
+            },
+            settings: ModelSettings::default(),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    provider_service
+        .bind_model(Some(context), "embedding_memory", model.id, json!({}), None)
+        .await
+        .unwrap();
+    let memory = MemoryService::with_provider_service(state.clone(), provider_service);
+    let current = memory
+        .calibration_profile(context, "memory")
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .calibrations()
+        .ensure(context, "memory", &current.signature)
+        .await
+        .unwrap();
+    state
+        .calibrations()
+        .ensure(context, "memory", "completed-profile")
+        .await
+        .unwrap();
+    state
+        .calibrations()
+        .finish(
+            context,
+            "memory",
+            "completed-profile",
+            "passed",
+            &json!({"kept":true}),
+        )
+        .await
+        .unwrap();
+    let job = state
+        .jobs()
+        .enqueue(
+            context,
+            "retrieval.calibrate",
+            "obsolete-test",
+            &json!({"signatures":["old-profile"],"explicit_diagnostic":true}),
+            0,
+            3,
+            0,
+        )
+        .await
+        .unwrap();
+    let handler = retrieval_calibration_job_handler(state.clone(), memory);
+    assert_eq!(
+        handler(job, Cancellation::default()).await,
+        JobOutcome::Complete
+    );
+    for channel in ["memory", "note"] {
+        let old = state
+            .calibrations()
+            .get(context, channel, "old-profile")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            old.status, "cancelled",
+            "a skipped obsolete job cannot leave a running report"
+        );
+        assert_eq!(old.requests, 1);
+        assert_eq!(old.request_bytes, 123);
+        assert_eq!(old.checkpoint_json, json!({"saved":[1.0,0.0]}).to_string());
+        assert_eq!(
+            serde_json::from_str::<Value>(old.report_json.as_deref().unwrap()).unwrap()["error_code"],
+            "calibration_profile_changed"
+        );
+        assert_eq!(
+            state
+                .calibrations()
+                .get(&contexts[1], channel, "old-profile")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "running"
+        );
+    }
+    let pending = state
+        .calibrations()
+        .get(context, "memory", &current.signature)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.status, "pending");
+    assert_eq!(pending.requests, 0);
+    assert_eq!(
+        state
+            .calibrations()
+            .get(context, "memory", "completed-profile")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "passed"
+    );
+}
+
+#[tokio::test]
+async fn a01_existing_vectors_work_on_start_without_benchmark_or_regeneration() {
     let dir = tempfile::tempdir().unwrap();
     let database = format!("sqlite://{}", dir.path().join("state.sqlite").display());
     let state = StateStore::connect_and_migrate(&database).await.unwrap();
@@ -179,12 +348,12 @@ async fn a01_existing_binding_and_vectors_calibrate_on_start_without_admin_or_re
             .unwrap()
             .active
     );
-    let before = calls.load(Ordering::SeqCst);
     // New application services read the already populated disk database. No
     // bind event, extraction, browser, run endpoint or calibration PUT is used.
     let upgraded = StateStore::connect_and_migrate(&database).await.unwrap();
     let memory = MemoryService::with_provider_service(upgraded.clone(), providers(&upgraded));
     for restart in 0..2 {
+        let before = calls.load(Ordering::SeqCst);
         let supervisor = WorkerSupervisor::new(
             upgraded.clone(),
             Arc::new(|_| Box::pin(async { Ok(()) })),
@@ -234,47 +403,22 @@ async fn a01_existing_binding_and_vectors_calibrate_on_start_without_admin_or_re
             MaintenanceGate::new(),
             tick_stop.clone(),
         ));
-        let completed =
-            timeout(Duration::from_secs(60), async {
-                loop {
-                    if memory
-                        .calibration_status(&context, "memory")
-                        .await
-                        .unwrap()
-                        .active
-                    {
-                        break;
-                    }
-                    let status = memory.calibration_status(&context, "memory").await.unwrap();
-                    if status.run.as_ref().is_some_and(|run| {
-                        matches!(run.status.as_str(), "failed" | "quality_failed")
-                    }) {
-                        panic!(
-                            "startup calibration terminal result: {}",
-                            serde_json::to_string(&status).unwrap()
-                        );
-                    }
-                    sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await;
-        if let Err(error) = completed {
-            let status = memory.calibration_status(&context, "memory").await.unwrap();
-            let jobs = upgraded
-                .jobs()
-                .list(&context, None, Some("retrieval.calibrate"), 10, 0)
+        sleep(Duration::from_millis(250)).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            before,
+            "startup must not dispatch synthetic inputs"
+        );
+        assert!(
+            memory
+                .calibration_status(&context, "memory")
                 .await
-                .unwrap();
-            panic!(
-                "startup deadline: {error}; status={}; jobs={:?}",
-                serde_json::to_string(&status).unwrap(),
-                jobs.iter()
-                    .map(|job| (&job.status, job.attempts, &job.last_error))
-                    .collect::<Vec<_>>()
-            );
-        }
+                .unwrap()
+                .run
+                .is_none()
+        );
         if restart == 0 {
-            assert!(calls.load(Ordering::SeqCst) > before);
+            assert_eq!(calls.load(Ordering::SeqCst), before);
             let result = memory
                 .recall(
                     &context,
@@ -328,7 +472,7 @@ async fn a01_existing_binding_and_vectors_calibrate_on_start_without_admin_or_re
             .await
             .unwrap()
             .len(),
-        1
+        0
     );
     fake.abort();
 }

@@ -1461,19 +1461,9 @@ impl MemoryService {
             if profile_hash.is_empty() {
                 // Lexical and entity retrieval remain available.
             } else {
-                'semantic_admission: {
-                    let calibration = self.semantic_calibration(context).await?;
-                    let min_cosine = calibration
-                        .active
-                        .then(|| calibration.calibration.map(|value| value.min_cosine))
-                        .flatten();
-                    let Some(min_cosine) = min_cosine else {
-                        degraded.push("semantic_profile_uncalibrated".to_owned());
-                        // An uncalibrated profile must not trigger a paid query or
-                        // admit semantic-only content. Strong lexical evidence
-                        // remains available below.
-                        break 'semantic_admission;
-                    };
+                {
+                    // ADR-0028: benchmark outcomes are diagnostics, not eligibility.
+                    let min_cosine = 0.0;
                     match self
                         .providers
                         .embed(
@@ -1658,15 +1648,7 @@ impl MemoryService {
         if request.include_related_notes && request.max_related_notes != 0 {
             let index =
                 IndexService::with_provider_service(self.state.clone(), self.providers.clone());
-            let note_status = self.calibration_status(context, "note").await?;
-            let note_floor = if note_status.active {
-                note_status.report.map(|report| report.min_cosine)
-            } else {
-                None
-            };
-            if note_floor.is_none() {
-                degraded.push("note_semantic_profile_uncalibrated".to_owned());
-            }
+            let note_floor = Some(0.0);
             match index
                 .retrieve_notes_for_recall(context, &request.query, note_floor, 100)
                 .await
@@ -1778,8 +1760,8 @@ impl MemoryService {
                 let note = self.calibration_status(context, "note").await?;
                 Some(
                     json!({"count_scope":"authorized_bounded_candidates", "policy":"recall-admission-object-rank-v4",
-                    "memory":{"candidate":memory_candidates.len(),"eligible":eligible_memories.len(),"admitted":available_memory_count,"returned":selected_memory_count,"signature":memory.profile.as_ref().map(|profile|&profile.signature),"embedding_profile":memory.profile.as_ref().map(|profile|&profile.embedding_profile_hash),"semantic_active":memory.active},
-                    "note":{"candidate":note_candidate_count,"eligible":note_eligible_count,"admitted":available_related_note_count,"returned":selected_note_count,"signature":note.profile.as_ref().map(|profile|&profile.signature),"embedding_profile":note.profile.as_ref().map(|profile|&profile.embedding_profile_hash),"semantic_active":note.active},
+                    "memory":{"candidate":memory_candidates.len(),"eligible":eligible_memories.len(),"admitted":available_memory_count,"returned":selected_memory_count,"signature":memory.profile.as_ref().map(|profile|&profile.signature),"embedding_profile":memory.profile.as_ref().map(|profile|&profile.embedding_profile_hash),"benchmark_passed":memory.active},
+                    "note":{"candidate":note_candidate_count,"eligible":note_eligible_count,"admitted":available_related_note_count,"returned":selected_note_count,"signature":note.profile.as_ref().map(|profile|&profile.signature),"embedding_profile":note.profile.as_ref().map(|profile|&profile.embedding_profile_hash),"benchmark_passed":note.active},
                     "budget_estimator":"ceil_serialized_utf8_bytes_div_4", "budget_limited":memory_budget_skipped || note_budget_skipped }),
                 )
             } else {

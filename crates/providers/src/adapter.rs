@@ -823,13 +823,40 @@ async fn openai_embeddings(
             RequestOptions::new(AuthStyle::Bearer, secret),
         )
         .await?;
-    let data = response
-        .body
+    decode_embeddings(&response.body, request.inputs.len())
+}
+
+fn decode_embeddings(body: &Value, input_count: usize) -> Result<EmbeddingResult, ProviderError> {
+    let data = body
         .get("data")
         .and_then(Value::as_array)
         .ok_or(ProviderError::InvalidResponse("embedding data is missing"))?;
-    let mut vectors = Vec::with_capacity(data.len());
-    for item in data {
+    if data.len() != input_count || input_count == 0 {
+        return Err(ProviderError::InvalidResponse(
+            "embedding response count is inconsistent",
+        ));
+    }
+    let indexed = data.iter().any(|item| item.get("index").is_some());
+    let mut ordered = vec![None; input_count];
+    for (position, item) in data.iter().enumerate() {
+        // Some compatible adapters omit every index and promise positional
+        // order. An indexed response must instead be a complete permutation.
+        let index = if indexed {
+            item.get("index")
+                .and_then(Value::as_u64)
+                .and_then(|index| usize::try_from(index).ok())
+                .filter(|index| *index < input_count)
+                .ok_or(ProviderError::InvalidResponse(
+                    "embedding index is invalid or missing",
+                ))?
+        } else {
+            position
+        };
+        if ordered[index].is_some() {
+            return Err(ProviderError::InvalidResponse(
+                "embedding index is duplicated",
+            ));
+        }
         let values = item.get("embedding").and_then(Value::as_array).ok_or(
             ProviderError::InvalidResponse("embedding vector is missing"),
         )?;
@@ -846,12 +873,15 @@ async fn openai_embeddings(
         if vector.is_empty() {
             return Err(ProviderError::InvalidResponse("embedding vector is empty"));
         }
-        vectors.push(vector);
+        ordered[index] = Some(vector);
     }
-    if vectors.len() != request.inputs.len()
-        || vectors
-            .windows(2)
-            .any(|vectors| vectors[0].len() != vectors[1].len())
+    let vectors = ordered
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or(ProviderError::InvalidResponse("embedding index is missing"))?;
+    if vectors
+        .windows(2)
+        .any(|vectors| vectors[0].len() != vectors[1].len())
     {
         return Err(ProviderError::InvalidResponse(
             "embedding response count or dimensions are inconsistent",
@@ -859,12 +889,8 @@ async fn openai_embeddings(
     }
     Ok(EmbeddingResult {
         vectors,
-        model: response
-            .body
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        usage: response.body.get("usage").cloned(),
+        model: body.get("model").and_then(Value::as_str).map(str::to_owned),
+        usage: body.get("usage").cloned(),
     })
 }
 
@@ -1020,6 +1046,46 @@ mod tests {
         OpenAiTokenLimitField, ProviderKind,
     };
     use serde_json::json;
+
+    #[test]
+    fn embedding_batch_restores_input_order_and_rejects_ambiguous_indices() {
+        let result = super::decode_embeddings(
+            &json!({"data":[
+                {"index":1,"embedding":[0.0,1.0]}, {"index":0,"embedding":[1.0,0.0]}
+            ]}),
+            2,
+        )
+        .unwrap();
+        assert_eq!(result.vectors, vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+        for invalid in [json!(0), json!(-1), json!(2), json!(0.5), json!(null)] {
+            assert!(
+                super::decode_embeddings(
+                    &json!({"data":[
+                        {"index":0,"embedding":[1.0,0.0]}, {"index":invalid,"embedding":[0.0,1.0]}
+                    ]}),
+                    2
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            super::decode_embeddings(
+                &json!({"data":[
+                    {"index":0,"embedding":[1.0,0.0]}, {"embedding":[0.0,1.0]}
+                ]}),
+                2
+            )
+            .is_err()
+        );
+        let positional = super::decode_embeddings(
+            &json!({"data":[
+                {"embedding":[1.0,0.0]}, {"embedding":[0.0,1.0]}
+            ]}),
+            2,
+        )
+        .unwrap();
+        assert_eq!(positional.vectors, result.vectors);
+    }
 
     fn generation_request(model: &str) -> StructuredGenerationRequest {
         StructuredGenerationRequest {

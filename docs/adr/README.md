@@ -70,3 +70,7 @@ Rejected
 ```
 
 When architecture changes, do not rewrite historical rationale. Add a new ADR that supersedes the old one and update the old status/link.
+
+ADR-0028 makes bundled evaluation diagnostic-only and adds optional persisted
+model grouping of note source units, amending ADR-0026/0027 retrieval admission.
+See [ADR-0028](0028-model-guided-chunks-and-diagnostic-evaluation.md).

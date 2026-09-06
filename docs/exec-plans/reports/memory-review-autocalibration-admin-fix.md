@@ -1,5 +1,7 @@
 # Memory review / automatic calibration / Admin 验收报告
 
+后续综合回归及获授权的真实模型结果见[2026-09-06 回归报告](memory-system-regression-20260906.md)；以下保留初次交付时的证据和限制。
+
 - 日期：2026-09-06；执行依据：[ExecPlan](../active/memory-review-autocalibration-admin-fix.md)。
 - 起始及当前 HEAD：`92d9367949570ccd3c19ece8895cdd8f00cc5e78`。成果是本地未提交工作树，不把 HEAD 当作包含本轮代码的新提交。
 - 起始未提交项只有 ExecPlan 及其 `:Zone.Identifier`；二者保留。未 reset、覆盖用户代码、push 或部署。

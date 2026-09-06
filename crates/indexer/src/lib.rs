@@ -249,7 +249,13 @@ pub struct NoteSemanticStatus {
     pub model_id: Option<String>,
     /// Provider-visible model identifier.
     pub external_model_id: Option<String>,
-    /// Current deterministic note chunks expected.
+    /// Saved current model-grouped sources.
+    pub model_grouped_sources: u64,
+    /// Saved rule fallback or preserved existing-vector sources.
+    pub rule_fallback_sources: u64,
+    /// In-flight generation sources (expired claims use rules).
+    pub planning_sources: u64,
+    /// Current persisted/rule note chunks expected.
     pub source_chunks: u64,
     /// Current-model vectors whose source hashes still match.
     pub indexed_chunks: u64,
@@ -1764,7 +1770,8 @@ impl IndexService {
             .collect())
     }
 
-    async fn note_embedding_inputs(
+    /// Read current prepared inputs without invoking generation or embedding.
+    pub async fn note_embedding_inputs(
         &self,
         context: &VaultContext,
     ) -> Result<Vec<EmbeddingInput>, IndexError> {
@@ -3054,9 +3061,41 @@ mod tests {
             .bind_model(Some(&context), "embedding_note", model.id, json!({}), None)
             .await
             .unwrap();
+        // An obsolete grouping binding and pending plan must never suppress rule inputs.
+        providers
+            .bind_model(Some(&context), "note_chunking", model.id, json!({}), None)
+            .await
+            .unwrap();
         let service = IndexService::with_provider_service(state.clone(), providers);
         service.rebuild_vault(&core, &context).await.unwrap();
+        let baseline = service.note_embedding_sources(&context).await.unwrap();
+        for source in service
+            .repository()
+            .list_note_embedding_sources(&context, 100, 0)
+            .await
+            .unwrap()
+        {
+            service
+                .repository()
+                .save_chunk_plan(
+                    &context,
+                    source.file_id,
+                    &source.analyzed_content_hash,
+                    &json!({"groups":[[0]],"pending_until":i64::MAX}),
+                )
+                .await
+                .unwrap();
+        }
         let sources = service.note_embedding_sources(&context).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&sources).unwrap(),
+            serde_json::to_value(&baseline).unwrap()
+        );
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.chunk_key.starts_with("text-v3:"))
+        );
         assert!(sources.len() > 3);
         let source_count = sources.len() as u64;
         assert_eq!(

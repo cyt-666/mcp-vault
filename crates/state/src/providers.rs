@@ -35,6 +35,8 @@ pub struct ProviderRecord {
     pub enabled: bool,
     /// Optimistic configuration revision.
     pub revision: Revision,
+    /// Last vector-affecting revision; excludes display/enabled-only edits.
+    pub embedding_revision: Revision,
     /// Creation timestamp.
     pub created_at: i64,
     /// Last configuration update timestamp.
@@ -71,6 +73,8 @@ pub struct ModelRecord {
     pub enabled: bool,
     /// Optimistic configuration revision.
     pub revision: Revision,
+    /// Last vector-affecting revision; unchanged model saves preserve it.
+    pub embedding_revision: Revision,
     /// Creation timestamp.
     pub created_at: i64,
     /// Last update timestamp.
@@ -180,6 +184,7 @@ struct ProviderRow {
     settings_json: String,
     enabled: i64,
     revision: i64,
+    embedding_revision: i64,
     created_at: i64,
     updated_at: i64,
 }
@@ -193,6 +198,7 @@ struct ModelRow {
     settings_json: String,
     enabled: i64,
     revision: i64,
+    embedding_revision: i64,
     created_at: i64,
     updated_at: i64,
 }
@@ -278,8 +284,8 @@ impl ProviderRepository {
         sqlx::query(
             "INSERT INTO providers
              (id, name, provider_type, base_url, secret_id, settings_json,
-              enabled, revision, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              enabled, revision, embedding_revision, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(record.id.to_string())
         .bind(&record.name)
@@ -288,6 +294,7 @@ impl ProviderRepository {
         .bind(record.secret_id.map(|id| id.to_string()))
         .bind(serde_json::to_string(&record.settings)?)
         .bind(if record.enabled { 1_i64 } else { 0_i64 })
+        .bind(record.revision.as_i64()?)
         .bind(record.revision.as_i64()?)
         .bind(record.created_at)
         .bind(record.updated_at)
@@ -305,7 +312,7 @@ impl ProviderRepository {
     ) -> Result<Option<ProviderRecord>, StateError> {
         let row = sqlx::query_as::<_, ProviderRow>(
             "SELECT id, name, provider_type, base_url, secret_id, settings_json,
-                    enabled, revision, created_at, updated_at
+                    enabled, revision, embedding_revision, created_at, updated_at
              FROM providers WHERE id = ?",
         )
         .bind(provider_id.to_string())
@@ -321,7 +328,7 @@ impl ProviderRepository {
         }
         let rows = sqlx::query_as::<_, ProviderRow>(
             "SELECT id, name, provider_type, base_url, secret_id, settings_json,
-                    enabled, revision, created_at, updated_at
+                    enabled, revision, embedding_revision, created_at, updated_at
              FROM providers ORDER BY id ASC LIMIT ?",
         )
         .bind(i64::from(limit))
@@ -362,10 +369,18 @@ impl ProviderRepository {
         }
         let result = sqlx::query(
             "UPDATE providers
-             SET name = ?, provider_type = ?, base_url = ?, secret_id = ?,
+             SET embedding_revision = CASE
+                   WHEN provider_type = ? AND base_url = ? AND secret_id IS ? AND settings_json = ?
+                   THEN embedding_revision ELSE ? END,
+                 name = ?, provider_type = ?, base_url = ?, secret_id = ?,
                  settings_json = ?, enabled = ?, revision = ?, updated_at = ?
              WHERE id = ? AND revision = ?",
         )
+        .bind(&record.provider_type)
+        .bind(&record.base_url)
+        .bind(secret_id.as_deref())
+        .bind(serde_json::to_string(&record.settings)?)
+        .bind(next_revision.as_i64()?)
         .bind(&record.name)
         .bind(&record.provider_type)
         .bind(&record.base_url)
@@ -500,8 +515,8 @@ impl ProviderRepository {
         sqlx::query(
             "INSERT INTO models
              (id, provider_id, external_model_id, capability_json, settings_json,
-              enabled, revision, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              enabled, revision, embedding_revision, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(record.id.to_string())
         .bind(record.provider_id.to_string())
@@ -509,6 +524,7 @@ impl ProviderRepository {
         .bind(serde_json::to_string(&record.capabilities)?)
         .bind(serde_json::to_string(&record.settings)?)
         .bind(if record.enabled { 1_i64 } else { 0_i64 })
+        .bind(record.revision.as_i64()?)
         .bind(record.revision.as_i64()?)
         .bind(record.created_at)
         .bind(record.updated_at)
@@ -523,7 +539,7 @@ impl ProviderRepository {
     pub async fn get_model(&self, model_id: ModelId) -> Result<Option<ModelRecord>, StateError> {
         let row = sqlx::query_as::<_, ModelRow>(
             "SELECT id, provider_id, external_model_id, capability_json,
-                    settings_json, enabled, revision, created_at, updated_at
+                    settings_json, enabled, revision, embedding_revision, created_at, updated_at
              FROM models WHERE id = ?",
         )
         .bind(model_id.to_string())
@@ -544,7 +560,7 @@ impl ProviderRepository {
         let rows = if let Some(provider_id) = provider_id {
             sqlx::query_as::<_, ModelRow>(
                 "SELECT id, provider_id, external_model_id, capability_json,
-                        settings_json, enabled, revision, created_at, updated_at
+                        settings_json, enabled, revision, embedding_revision, created_at, updated_at
                  FROM models WHERE provider_id = ? ORDER BY id ASC LIMIT ?",
             )
             .bind(provider_id.to_string())
@@ -554,7 +570,7 @@ impl ProviderRepository {
         } else {
             sqlx::query_as::<_, ModelRow>(
                 "SELECT id, provider_id, external_model_id, capability_json,
-                        settings_json, enabled, revision, created_at, updated_at
+                        settings_json, enabled, revision, embedding_revision, created_at, updated_at
                  FROM models ORDER BY id ASC LIMIT ?",
             )
             .bind(i64::from(limit))
@@ -570,10 +586,18 @@ impl ProviderRepository {
         let next_revision = record.revision.next()?;
         let result = sqlx::query(
             "UPDATE models
-             SET provider_id = ?, external_model_id = ?, capability_json = ?,
+             SET embedding_revision = CASE
+                   WHEN provider_id = ? AND external_model_id = ? AND capability_json = ? AND settings_json = ?
+                   THEN embedding_revision ELSE ? END,
+                 provider_id = ?, external_model_id = ?, capability_json = ?,
                  settings_json = ?, enabled = ?, revision = ?, updated_at = ?
              WHERE id = ? AND revision = ?",
         )
+        .bind(record.provider_id.to_string())
+        .bind(&record.external_model_id)
+        .bind(serde_json::to_string(&record.capabilities)?)
+        .bind(serde_json::to_string(&record.settings)?)
+        .bind(next_revision.as_i64()?)
         .bind(record.provider_id.to_string())
         .bind(&record.external_model_id)
         .bind(serde_json::to_string(&record.capabilities)?)
@@ -1152,6 +1176,7 @@ fn row_to_provider(row: ProviderRow) -> Result<ProviderRecord, StateError> {
         settings: serde_json::from_str(&row.settings_json)?,
         enabled: row.enabled != 0,
         revision: Revision::try_from(row.revision)?,
+        embedding_revision: Revision::try_from(row.embedding_revision)?,
         created_at: row.created_at,
         updated_at: row.updated_at,
     })
@@ -1166,6 +1191,7 @@ fn row_to_model(row: ModelRow) -> Result<ModelRecord, StateError> {
         settings: serde_json::from_str(&row.settings_json)?,
         enabled: row.enabled != 0,
         revision: Revision::try_from(row.revision)?,
+        embedding_revision: Revision::try_from(row.embedding_revision)?,
         created_at: row.created_at,
         updated_at: row.updated_at,
     })

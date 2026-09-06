@@ -1039,3 +1039,10 @@ Accessibility requirements:
 - Vault-scoped settings cannot affect another fixture Vault;
 - Admin UI remains usable when LLM/embedding are disabled;
 - public reverse-proxy fixture cannot reach Admin listener.
+
+## Optional note grouping and retrieval diagnostics
+
+Notes use deterministic structure/size-bounded chunks. No grouping model binding is
+exposed or invoked; legacy note_chunking bindings and plans are ignored.
+Bundled evaluation is explicitly requested, can incur embedding usage, and does not
+enable or disable production semantic retrieval (ADR-0028).

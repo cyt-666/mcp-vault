@@ -44,6 +44,15 @@ memory-vector scheduling action and coverage view.
 
 ## Consequences
 
+2026-09-06 clarification: optimistic Admin edit revisions and vector identity
+revisions are separate operational values. Provider display-name/enabled-only
+edits and saves of identical model configuration still advance Admin CAS but
+preserve embedding identity. Endpoint, adapter, secret identity, stored settings,
+model identity or capabilities changes remain conservative invalidation triggers.
+Migration 0018 initializes each embedding revision from its existing edit revision,
+preserving the former fingerprint exactly rather than re-embedding valid data.
+Provider authorization and enabled checks remain independent of vector freshness.
+
 - Long multilingual notes generate more, smaller vector chunks and remain
   semantically searchable with lower-limit Providers.
 - A chunk-profile upgrade invalidates only derived vector identity; canonical

@@ -1205,6 +1205,110 @@ async fn transport_enforces_retry_auth_timeout_and_redirect_contracts() {
 }
 
 #[tokio::test]
+async fn generation_budget_blocks_retries_and_cloned_service_dispatch() {
+    struct OneAttempt(AtomicUsize);
+    #[async_trait]
+    impl mcp_vault_providers::RequestBudget for OneAttempt {
+        async fn reserve(&self, _bytes: usize) -> Result<(), ProviderError> {
+            self.0
+                .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                .map(|_| ())
+                .map_err(|_| ProviderError::InvalidConfiguration("test_budget_exhausted"))
+        }
+    }
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counter = attempts.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/v1/chat/completions",
+                post(move || {
+                    let counter = counter.clone();
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        StatusCode::SERVICE_UNAVAILABLE
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let directory = tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let work = context(&state, "generation-budget", directory.path().join("vault")).await;
+    let auth = AuthService::new(
+        state.auth(),
+        MasterKeyRing::from_bytes(1, &[4; 32]).unwrap(),
+    );
+    let service = ProviderService::new(state, auth)
+        .with_generation_budget(Arc::new(OneAttempt(AtomicUsize::new(0))));
+    service
+        .set_provider_mode(&work, ProviderMode::LocalOnly, None)
+        .await
+        .unwrap();
+    let provider = service
+        .create_provider(ProviderInput {
+            name: "budget contract".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: format!("http://{address}/v1/").parse().unwrap(),
+            settings: ProviderSettings {
+                max_retries: 2,
+                ..Default::default()
+            },
+            enabled: true,
+            secret: None,
+        })
+        .await
+        .unwrap();
+    let model = service
+        .register_model(ModelInput {
+            provider_id: provider.id,
+            external_model_id: "budget-test".into(),
+            capabilities: ModelCapabilities {
+                structured_output: true,
+                ..Default::default()
+            },
+            settings: ModelSettings::default(),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    let request = StructuredGenerationRequest {
+        model: model.external_model_id,
+        system: "local test".into(),
+        user: "local test".into(),
+        schema_name: "answer".into(),
+        schema: json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}),
+        missing_required_string_fallbacks: Vec::new(),
+        max_output_tokens: 32,
+        temperature: None,
+        timeout: None,
+    };
+    for caller in [service.clone(), service] {
+        let error = caller
+            .generate_structured(&work, model.id, &request)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ProviderError::InvalidConfiguration("test_budget_exhausted")
+        ));
+    }
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "HTTP retry and service clone must share the limit"
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn provider_policy_rejects_remote_http_and_unsafe_endpoints() {
     let settings = ProviderSettings::default();
     let public_http = Url::parse("http://8.8.8.8/v1/").unwrap();

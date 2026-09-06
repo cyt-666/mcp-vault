@@ -8,6 +8,24 @@ async fn main() -> Result<ExitCode, mcp_vault_server::ServerError> {
     let command = std::env::args().nth(1);
 
     match command.as_deref() {
+        Some("diagnose-calibration") => {
+            let arguments = std::env::args().skip(2).collect::<Vec<_>>();
+            return match mcp_vault_server::diagnostics::calibration(
+                &config.database_url,
+                &arguments,
+            )
+            .await
+            {
+                Ok(report) => {
+                    println!("{report}");
+                    Ok(ExitCode::SUCCESS)
+                }
+                Err(error) => {
+                    eprintln!("calibration diagnosis failed: {error}");
+                    Ok(ExitCode::FAILURE)
+                }
+            };
+        }
         Some("--check-config") => {
             println!("mcp-vault configuration is valid");
             return Ok(ExitCode::SUCCESS);

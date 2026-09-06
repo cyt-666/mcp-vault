@@ -263,7 +263,7 @@ textarea { min-height: 7rem; resize: vertical; }
 .record-list { display: grid; }
 .record-item { align-items: center; border-top: 1px solid #25374a; display: flex; gap: 1rem; justify-content: space-between; min-width: 0; padding: 0.85rem 0; }
 .record-item:first-child { border-top: 0; padding-top: 0.25rem; }
-.record-item--stack { align-items: stretch; display: grid; }
+.record-item--stack { align-items: stretch; display: grid; grid-template-columns: minmax(0, 1fr); }
 .record-main { min-width: 0; }
 .record-title { align-items: center; display: flex; flex-wrap: wrap; gap: 0.6rem; justify-content: flex-start; }
 .record-title strong { line-height: 1.45; overflow-wrap: anywhere; }
@@ -329,7 +329,7 @@ textarea { min-height: 7rem; resize: vertical; }
 .raw-details { background: #0a1521; }
 .raw-details > summary { padding: 0.8rem 1rem; }
 .raw-details > p { color: var(--subtle); font-size: 0.75rem; margin: 0; padding: 0 1rem; }
-.data-inspector { background: #06101a; border-top: 1px solid #233548; color: #9ebec3; font-size: 0.74rem; line-height: 1.55; margin: 0.8rem 0 0; max-height: 480px; overflow: auto; padding: 1rem; white-space: pre-wrap; }
+.data-inspector { background: #06101a; border-top: 1px solid #233548; color: #9ebec3; font-size: 0.74rem; line-height: 1.55; margin: 0.8rem 0 0; max-height: 480px; overflow: auto; overflow-wrap: anywhere; padding: 1rem; white-space: pre-wrap; }
 
 .timeline-list { display: grid; }
 .timeline-item { display: grid; gap: 0.8rem; grid-template-columns: 0.7rem 1fr; padding: 0.7rem 0; }

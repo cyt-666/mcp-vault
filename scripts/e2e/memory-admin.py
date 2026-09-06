@@ -5,7 +5,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright, expect
 
 root=Path(__file__).resolve().parents[2]
-output=root/'target/memory-review/browser-e2e'
+output=Path(os.environ.get('MCP_VAULT_E2E_OUTPUT_DIR',str(root/'target/memory-review/browser-e2e')))
 output.mkdir(parents=True,exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='mcp-vault-browser-') as temporary:
     manifest=Path(temporary)/'manifest.json'
@@ -39,20 +39,22 @@ with tempfile.TemporaryDirectory(prefix='mcp-vault-browser-') as temporary:
                         if not page.get_by_text('请求失败（authentication_unavailable），请稍后重试。',exact=True).count(): break
 
                     page.get_by_role('button',name='记忆',exact=True).first.click()
-                    expect(page.get_by_text('语义检索校准',exact=True)).to_be_visible()
+                    expect(page.get_by_text('检索效果诊断（可选）',exact=True)).to_be_visible()
                     assert not any('/semantic-calibration/run' in url for _,url in requests),'page GET must not run calibration'
                     page.wait_for_timeout(1000)
                     (output/'loaded-debug.txt').write_text(page.locator('body').inner_text())
-                    expect(page.get_by_text('当前记忆向量覆盖完整；语义检索是否启用请查看独立的校准状态。',exact=True)).to_be_visible()
-                    expect(page.get_by_text('语义检索已启用',exact=True)).to_have_count(0)
+                    expect(page.get_by_text('当前记忆向量覆盖完整，可用于语义检索；相似度不代表资料一定回答了问题。',exact=True)).to_be_visible()
+                    expect(page.get_by_text('内置基准通过',exact=True)).to_have_count(0)
                     # U3: real worker computation, metrics are never submitted by UI.
-                    page.get_by_role('button',name='运行／重试校准',exact=True).first.click()
+                    page.get_by_role('button',name='运行／重试评测',exact=True).first.click()
                     for _ in range(60):
-                        if page.get_by_text('语义检索已启用',exact=True).count(): break
+                        if page.get_by_text('内置基准通过',exact=True).count(): break
                         page.wait_for_timeout(300)
                         page.get_by_role('button',name='刷新状态',exact=True).click()
-                    expect(page.get_by_text('语义检索已启用',exact=True)).to_be_visible()
+                    expect(page.get_by_text('内置基准通过',exact=True)).to_be_visible()
                     assert not any(method=='PUT' and url.endswith('/semantic-calibration') for method,url in requests)
+                    page.get_by_text('查看最近执行结果',exact=True).first.click()
+                    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth'), 'expanded calibration report must not widen the page'
                     # U6: server pagination, not a static count.
                     page.get_by_role('button',name='加载更多记忆',exact=True).click()
                     expect(page.get_by_text('长期记忆（已加载 53 条）',exact=True)).to_be_visible()
@@ -77,7 +79,10 @@ with tempfile.TemporaryDirectory(prefix='mcp-vault-browser-') as temporary:
                     page.get_by_role('button',name='恢复来源提取',exact=True).click()
                     expect(page.get_by_text('来源恢复已提交，后台完成后自动提取。',exact=True)).to_be_visible()
                     page.screenshot(path=str(output/'memory-admin.png'),full_page=True)
-                    (output/'result.json').write_text(json.dumps({'result':'passed','backend':'real_admin_http','provider':'local_synthetic_contract','flows':['U1','U2','U3','U4','U5','U6_pagination'],'production_data':False},indent=2)+'\n')
+                    page.get_by_role('button',name='AI 服务',exact=True).first.click()
+                    page.get_by_text('高级：摘要、Embedding 与重排模型',exact=True).click()
+                    expect(page.get_by_text('笔记语义分块（可选）',exact=True)).to_have_count(0)
+                    (output/'result.json').write_text(json.dumps({'result':'passed','backend':'real_admin_http','provider':'local_synthetic_contract','flows':['U1','U2','U3','U4','U5','U6_pagination','rule_chunking_no_model_control'],'production_data':False},indent=2)+'\n')
                 except Exception:
                     (output/'failure.txt').write_text(page.locator('body').inner_text())
                     page.screenshot(path=str(output/'failure.png'),full_page=True,timeout=10000)

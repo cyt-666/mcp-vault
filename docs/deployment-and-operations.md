@@ -925,3 +925,21 @@ The first post-recovery server reconciliation tick schedules missing calibration
 
 The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
 specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).
+
+## Known schema-17 deployment checksum compatibility
+
+Some deployed builds recorded different SQLx checksums for migrations 16 and 17.
+Startup previously stopped at `VersionMismatch(16)` before reaching 17. The 0.2.3
+compatibility fix accepts only the two explicitly identified deployed checksums,
+and verifies the affected tables, indexes and triggers against a fresh reference
+created from the embedded migration set. Only trailing line whitespace is normalized.
+Unknown hashes or schema differences still fail; the historical migration ledger is
+never rewritten. Current migration files remain unchanged.
+
+Before upgrading, stop the service and take a consistent backup of the persistent
+data directory, including SQLite WAL and the installation key. Rebuild the 0.2.3
+image from the fixed source and recreate the application container using the same
+persistent mount. Startup validates the existing schema and applies migrations 18/19;
+it does not invoke memory extraction, model grouping or automatic calibration.
+Do not remove `_sqlx_migrations`, overwrite its checksums or delete the database.
+Rollback after migration requires the pre-upgrade backup and matching prior image.
