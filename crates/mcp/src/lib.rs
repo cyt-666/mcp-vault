@@ -1532,7 +1532,7 @@ impl McpHandler {
     #[tool(
         name = "recall",
         title = "Recall relevant memory",
-        description = "Use this proactively before answering questions about saved decisions, preferences, constraints or past work. Pass the task in natural language. On success, `data.memories` contains context and sources[].path, the source-note paths that generated each memory; include_sources defaults to true. When original wording or more detail matters, pass that path directly to read_note, without another search. `data.related_notes` are additional retrieval cues, not necessarily sources of a memory. If sources are absent, get_memory by id; search_notes only if a source is missing, unreadable or more evidence is needed. Explicit memories may have no source. Degraded or truncated results have incomplete coverage.",
+        description = "Use this proactively before answering questions about saved decisions, preferences, constraints or past work. Pass the task in natural language. On success, `data.memories` contains context and sources[].path, the source-note paths that generated each memory; include_sources defaults to true. When original wording or more detail matters, pass that path directly to read_note, without another search. `data.related_notes` are additional retrieval cues, not necessarily sources of a memory. For source navigation, call get_memory only when a source is expected but was omitted (for example include_sources=false or ownership=note_derived). An explicit memory may legitimately have no note source; do not repeatedly fetch details to find one. Use search_notes if a known source is unreadable or more evidence is needed. Degraded or truncated results have incomplete coverage.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1805,7 +1805,7 @@ impl McpHandler {
     #[tool(
         name = "update_memory",
         title = "Update a durable memory",
-        description = "Use this only when correcting a memory with user authorization. First call get_memory; use its revision as expected_revision. Omitted fields stay unchanged; null clears nullable metadata, [] clears tags/entities. On success, `data` contains the updated id, content and revision. On conflict get_memory again and reconsider. This does not edit its source note: use read_note then edit_note for that. Use forget_memory for deletion.",
+        description = "Use this only when correcting a memory with ownership=explicit and user authorization. First call get_memory; verify ownership=explicit and use its revision as expected_revision. Note-derived memories cannot be updated here; read and edit their source note instead. Omitted fields stay unchanged; null clears nullable metadata, [] clears tags/entities. On success, `data` contains the updated id, content and revision. On conflict get_memory again and reconsider. This does not edit its source note: use read_note then edit_note for that. Use forget_memory for deletion.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -3671,6 +3671,12 @@ mod tests {
         assert!(description("recall").contains("`data.related_notes`"));
         assert!(description("recall").contains("natural language"));
         assert!(description("recall").contains("sources[].path"));
+        assert!(description("recall").contains("only when a source is expected but was omitted"));
+        assert!(description("recall").contains("do not repeatedly fetch details"));
+        assert!(description("update_memory").contains("verify ownership=explicit"));
+        assert!(
+            description("update_memory").contains("Note-derived memories cannot be updated here")
+        );
         assert!(!description("recall").contains("evaluated embedding profile"));
         assert!(description("remember").contains("`data.memory`"));
         assert!(description("remember").contains("immediately available"));

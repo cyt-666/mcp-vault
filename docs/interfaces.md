@@ -338,8 +338,12 @@ selected revision, including historical reads. Its file_id can be used as proven
 path usable directly with `read_note`; no intermediate search is required. Compact
 sources contain paths only; detailed mode includes revision/heading/line metadata.
 Explicit false omits sources. Explicit memories may legitimately have no source.
-Use get_memory for missing details, then search only if a source is missing/unreadable
-or more evidence is needed. `related_notes` are additional cues, not guaranteed sources
+For source navigation, use get_memory only when a source is expected but omitted
+(for example include_sources=false or ownership=note_derived). An explicit memory
+may have no note source; do not repeatedly fetch details in search of one. Search
+when a known source is unreadable or additional evidence is needed.
+update_memory only supports ownership=explicit: verify ownership with get_memory;
+for note-derived memories, read and edit the source note instead. `related_notes` are additional cues, not guaranteed sources
 of a returned memory. Detailed `canonical_path` is managed memory Markdown, not the
 source note; do not pass it to read_note. Use memory `revision`, not canonical_revision,
 for memory updates/deletion. Source reads still require vault:read.
