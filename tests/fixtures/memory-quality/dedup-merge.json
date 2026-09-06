@@ -1,0 +1,468 @@
+{
+  "version": 1,
+  "purpose": "Human-labeled semantic boundary corpus. Local fake tests validate mechanics only; real provider quality remains a separate run.",
+  "cases": [
+    {
+      "id": "D01F",
+      "left": "StandardScaler centers each feature using the training mean and scales it by the training standard deviation.",
+      "right": "StandardScaler 对每个特征减去训练集均值并除以训练集标准差。",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D01R",
+      "left": "StandardScaler 对每个特征减去训练集均值并除以训练集标准差。",
+      "right": "StandardScaler centers each feature using the training mean and scales it by the training standard deviation.",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D02F",
+      "left": "KV Cache reuses previously computed attention keys and values during decoding.",
+      "right": "解码时 KV Cache 复用已经计算的注意力键和值。",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D02R",
+      "left": "解码时 KV Cache 复用已经计算的注意力键和值。",
+      "right": "KV Cache reuses previously computed attention keys and values during decoding.",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D03F",
+      "left": "A mutex allows at most one thread to enter its protected critical section at a time.",
+      "right": "A mutex prevents simultaneous thread access to its protected critical section.",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D03R",
+      "left": "A mutex prevents simultaneous thread access to its protected critical section.",
+      "right": "A mutex allows at most one thread to enter its protected critical section at a time.",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D04F",
+      "left": "HTTP 404 means the requested resource was not found.",
+      "right": "HTTP 状态码 404 表示未找到请求的资源。",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D04R",
+      "left": "HTTP 状态码 404 表示未找到请求的资源。",
+      "right": "HTTP 404 means the requested resource was not found.",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D05F",
+      "left": "Gradient descent updates parameters in the direction opposite to the gradient.",
+      "right": "梯度下降沿梯度的反方向更新参数。",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D05R",
+      "left": "梯度下降沿梯度的反方向更新参数。",
+      "right": "Gradient descent updates parameters in the direction opposite to the gradient.",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D06F",
+      "left": "The Alpha backend requires Rust 1.94.",
+      "right": "Alpha 后端要求使用 Rust 1.94。",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D06R",
+      "left": "Alpha 后端要求使用 Rust 1.94。",
+      "right": "The Alpha backend requires Rust 1.94.",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D07F",
+      "left": "Project Cedar adopted SQLite for operational state.",
+      "right": "Cedar 项目已采用 SQLite 保存运行状态。",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D07R",
+      "left": "Cedar 项目已采用 SQLite 保存运行状态。",
+      "right": "Project Cedar adopted SQLite for operational state.",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D08F",
+      "left": "The user prefers tea without sugar.",
+      "right": "用户喜欢不加糖的茶。",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D08R",
+      "left": "用户喜欢不加糖的茶。",
+      "right": "The user prefers tea without sugar.",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D09F",
+      "left": "If the queue is full, reject the new request.",
+      "right": "队列已满时拒绝新请求。",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D09R",
+      "left": "队列已满时拒绝新请求。",
+      "right": "If the queue is full, reject the new request.",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D10F",
+      "left": "The deployment uses port 8080 for the data listener.",
+      "right": "部署的数据监听端口为 8080。",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D10R",
+      "left": "部署的数据监听端口为 8080。",
+      "right": "The deployment uses port 8080 for the data listener.",
+      "relation": "equivalent"
+    },
+    {
+      "id": "D11F",
+      "left": "KV Cache accelerates decoding by reusing attention keys and values.",
+      "right": "KV Cache is not durable long-term memory.",
+      "relation": "related"
+    },
+    {
+      "id": "D11R",
+      "left": "KV Cache is not durable long-term memory.",
+      "right": "KV Cache accelerates decoding by reusing attention keys and values.",
+      "relation": "related"
+    },
+    {
+      "id": "D12F",
+      "left": "Experiment A used batch size 32.",
+      "right": "Experiment B used batch size 32.",
+      "relation": "different"
+    },
+    {
+      "id": "D12R",
+      "left": "Experiment B used batch size 32.",
+      "right": "Experiment A used batch size 32.",
+      "relation": "different"
+    },
+    {
+      "id": "D13F",
+      "left": "Project Alpha requires Rust 1.94.",
+      "right": "Project Beta requires Rust 1.94.",
+      "relation": "different"
+    },
+    {
+      "id": "D13R",
+      "left": "Project Beta requires Rust 1.94.",
+      "right": "Project Alpha requires Rust 1.94.",
+      "relation": "different"
+    },
+    {
+      "id": "D14F",
+      "left": "The migration is planned.",
+      "right": "The migration is completed.",
+      "relation": "different"
+    },
+    {
+      "id": "D14R",
+      "left": "The migration is completed.",
+      "right": "The migration is planned.",
+      "relation": "different"
+    },
+    {
+      "id": "D15F",
+      "left": "The team suggested adopting Go.",
+      "right": "The team adopted Go.",
+      "relation": "different"
+    },
+    {
+      "id": "D15R",
+      "left": "The team adopted Go.",
+      "right": "The team suggested adopting Go.",
+      "relation": "different"
+    },
+    {
+      "id": "D16F",
+      "left": "The cache may improve throughput.",
+      "right": "The cache always improves throughput.",
+      "relation": "different"
+    },
+    {
+      "id": "D16R",
+      "left": "The cache always improves throughput.",
+      "right": "The cache may improve throughput.",
+      "relation": "different"
+    },
+    {
+      "id": "D17F",
+      "left": "The user prefers tea.",
+      "right": "The user reports that a colleague prefers tea.",
+      "relation": "different"
+    },
+    {
+      "id": "D17R",
+      "left": "The user reports that a colleague prefers tea.",
+      "right": "The user prefers tea.",
+      "relation": "different"
+    },
+    {
+      "id": "D18F",
+      "left": "The retry is enabled.",
+      "right": "The retry is not enabled.",
+      "relation": "different"
+    },
+    {
+      "id": "D18R",
+      "left": "The retry is not enabled.",
+      "right": "The retry is enabled.",
+      "relation": "different"
+    },
+    {
+      "id": "D19F",
+      "left": "Set timeout to 30 seconds.",
+      "right": "Set timeout to 30 milliseconds.",
+      "relation": "different"
+    },
+    {
+      "id": "D19R",
+      "left": "Set timeout to 30 milliseconds.",
+      "right": "Set timeout to 30 seconds.",
+      "relation": "different"
+    },
+    {
+      "id": "D20F",
+      "left": "Use a learning rate of 0.01.",
+      "right": "Use a learning rate of 0.1.",
+      "relation": "different"
+    },
+    {
+      "id": "D20R",
+      "left": "Use a learning rate of 0.1.",
+      "right": "Use a learning rate of 0.01.",
+      "relation": "different"
+    },
+    {
+      "id": "D21F",
+      "left": "The formula is `x2 + 1`.",
+      "right": "The formula is `x² + 1`.",
+      "relation": "different"
+    },
+    {
+      "id": "D21R",
+      "left": "The formula is `x² + 1`.",
+      "right": "The formula is `x2 + 1`.",
+      "relation": "different"
+    },
+    {
+      "id": "D22F",
+      "left": "Set the environment variable `PATH`.",
+      "right": "Set the environment variable `path`.",
+      "relation": "different"
+    },
+    {
+      "id": "D22R",
+      "left": "Set the environment variable `path`.",
+      "right": "Set the environment variable `PATH`.",
+      "relation": "different"
+    },
+    {
+      "id": "D23F",
+      "left": "The January release requires TLS 1.2.",
+      "right": "The February release requires TLS 1.2.",
+      "relation": "different"
+    },
+    {
+      "id": "D23R",
+      "left": "The February release requires TLS 1.2.",
+      "right": "The January release requires TLS 1.2.",
+      "relation": "different"
+    },
+    {
+      "id": "D24F",
+      "left": "GPU A has 24 GiB of memory.",
+      "right": "GPU B has 24 GiB of memory.",
+      "relation": "different"
+    },
+    {
+      "id": "D24R",
+      "left": "GPU B has 24 GiB of memory.",
+      "right": "GPU A has 24 GiB of memory.",
+      "relation": "different"
+    },
+    {
+      "id": "D25F",
+      "left": "Loss training: forward pass, calculate loss, backpropagate, update parameters; formula `w = w - lr * grad`.",
+      "right": "Loss training: forward pass, calculate loss, backpropagate, update parameters.",
+      "relation": "left_covers_right"
+    },
+    {
+      "id": "D25R",
+      "left": "Loss training: forward pass, calculate loss, backpropagate, update parameters.",
+      "right": "Loss training: forward pass, calculate loss, backpropagate, update parameters; formula `w = w - lr * grad`.",
+      "relation": "right_covers_left"
+    },
+    {
+      "id": "D26F",
+      "left": "The service uses SQLite.",
+      "right": "The service uses SQLite with WAL mode and a five-second busy timeout.",
+      "relation": "right_covers_left"
+    },
+    {
+      "id": "D26R",
+      "left": "The service uses SQLite with WAL mode and a five-second busy timeout.",
+      "right": "The service uses SQLite.",
+      "relation": "left_covers_right"
+    },
+    {
+      "id": "D27F",
+      "left": "A network partition can interrupt replication.",
+      "right": "Yesterday a network partition interrupted Cedar replication.",
+      "relation": "related"
+    },
+    {
+      "id": "D27R",
+      "left": "Yesterday a network partition interrupted Cedar replication.",
+      "right": "A network partition can interrupt replication.",
+      "relation": "related"
+    },
+    {
+      "id": "D28F",
+      "left": "The configured limit is 64.",
+      "right": "The configured limit is 64.",
+      "relation": "uncertain"
+    },
+    {
+      "id": "D28R",
+      "left": "The configured limit is 64.",
+      "right": "The configured limit is 64.",
+      "relation": "uncertain"
+    },
+    {
+      "id": "D29F",
+      "left": "Backup nightly except during maintenance.",
+      "right": "Backup nightly.",
+      "relation": "different"
+    },
+    {
+      "id": "D29R",
+      "left": "Backup nightly.",
+      "right": "Backup nightly except during maintenance.",
+      "relation": "different"
+    },
+    {
+      "id": "D30F",
+      "left": "The cache is enabled only in development.",
+      "right": "The cache is enabled in all environments.",
+      "relation": "different"
+    },
+    {
+      "id": "D30R",
+      "left": "The cache is enabled in all environments.",
+      "right": "The cache is enabled only in development.",
+      "relation": "different"
+    }
+  ],
+  "queries": [
+    {
+      "id": "Q01",
+      "query": "StandardScaler centers each feature using the training mean and scales it by the training standard deviation.",
+      "case": "D01F"
+    },
+    {
+      "id": "Q02",
+      "query": "KV Cache reuses previously computed attention keys and values during decoding.",
+      "case": "D02F"
+    },
+    {
+      "id": "Q03",
+      "query": "A mutex allows at most one thread to enter its protected critical section at a time.",
+      "case": "D03F"
+    },
+    {
+      "id": "Q04",
+      "query": "HTTP 404 means the requested resource was not found.",
+      "case": "D04F"
+    },
+    {
+      "id": "Q05",
+      "query": "Gradient descent updates parameters in the direction opposite to the gradient.",
+      "case": "D05F"
+    },
+    {
+      "id": "Q06",
+      "query": "The Alpha backend requires Rust 1.94.",
+      "case": "D06F"
+    },
+    {
+      "id": "Q07",
+      "query": "Project Cedar adopted SQLite for operational state.",
+      "case": "D07F"
+    },
+    {
+      "id": "Q08",
+      "query": "The user prefers tea without sugar.",
+      "case": "D08F"
+    },
+    {
+      "id": "Q09",
+      "query": "If the queue is full, reject the new request.",
+      "case": "D09F"
+    },
+    {
+      "id": "Q10",
+      "query": "The deployment uses port 8080 for the data listener.",
+      "case": "D10F"
+    },
+    {
+      "id": "Q11",
+      "query": "KV Cache accelerates decoding by reusing attention keys and values.",
+      "case": "D11F"
+    },
+    {
+      "id": "Q12",
+      "query": "Experiment A used batch size 32.",
+      "case": "D12F"
+    },
+    {
+      "id": "Q13",
+      "query": "Project Alpha requires Rust 1.94.",
+      "case": "D13F"
+    },
+    {
+      "id": "Q14",
+      "query": "The migration is planned.",
+      "case": "D14F"
+    },
+    {
+      "id": "Q15",
+      "query": "The team suggested adopting Go.",
+      "case": "D15F"
+    },
+    {
+      "id": "Q16",
+      "query": "The cache may improve throughput.",
+      "case": "D16F"
+    },
+    {
+      "id": "Q17",
+      "query": "The user prefers tea.",
+      "case": "D17F"
+    },
+    {
+      "id": "Q18",
+      "query": "The retry is enabled.",
+      "case": "D18F"
+    },
+    {
+      "id": "Q19",
+      "query": "Set timeout to 30 seconds.",
+      "case": "D19F"
+    },
+    {
+      "id": "Q20",
+      "query": "Use a learning rate of 0.01.",
+      "case": "D20F"
+    }
+  ]
+}

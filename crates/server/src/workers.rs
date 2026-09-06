@@ -2614,6 +2614,27 @@ pub fn memory_source_resume_job_handler(
     core_runtime: mcp_vault_core::VaultCoreRuntime,
     memory: MemoryService,
 ) -> JobHandler {
+    memory_source_operation_job_handler(state, history_root, core_runtime, memory, false)
+}
+
+/// Local source-set deduplication uses the same Vault admission and cancellation
+/// boundary as source resume, but preserves the existing extraction pause.
+pub fn memory_source_dedup_job_handler(
+    state: StateStore,
+    history_root: std::path::PathBuf,
+    core_runtime: mcp_vault_core::VaultCoreRuntime,
+    memory: MemoryService,
+) -> JobHandler {
+    memory_source_operation_job_handler(state, history_root, core_runtime, memory, true)
+}
+
+fn memory_source_operation_job_handler(
+    state: StateStore,
+    history_root: std::path::PathBuf,
+    core_runtime: mcp_vault_core::VaultCoreRuntime,
+    memory: MemoryService,
+    deduplicate: bool,
+) -> JobHandler {
     Arc::new(move |job, shutdown| {
         let state = state.clone();
         let history_root = history_root.clone();
@@ -2650,7 +2671,26 @@ pub fn memory_source_resume_job_handler(
                     };
                 }
             };
-            let result = tokio::select! { _=shutdown.cancelled()=>return JobOutcome::Cancelled, result=memory.complete_note_extraction_resume(&context,&core,&job.payload)=>result };
+            let operation = async {
+                if deduplicate {
+                    let file_id = job
+                        .payload
+                        .get("file_id")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|value| mcp_vault_domain::FileId::parse(value).ok())
+                        .ok_or(MemoryError::InvalidInput("memory_dedup_source_missing"))?;
+                    memory
+                        .deduplicate_source_exact(&context, &core, file_id)
+                        .await
+                        .map(|_| ())
+                } else {
+                    memory
+                        .complete_note_extraction_resume(&context, &core, &job.payload)
+                        .await
+                        .map(|_| ())
+                }
+            };
+            let result = tokio::select! { _=shutdown.cancelled()=>return JobOutcome::Cancelled, result=operation=>result };
             match result {
                 Ok(_) => JobOutcome::Complete,
                 Err(error) if error.retryable() => JobOutcome::Retry {
@@ -2661,6 +2701,176 @@ pub fn memory_source_resume_job_handler(
             }
         })
     })
+}
+
+/// Automatic formal adoption and bounded semantic maintenance; never requires an
+/// Admin action, extraction rerun, or a dedicated model binding.
+pub fn memory_dedup_job_handler(
+    state: StateStore,
+    history_root: std::path::PathBuf,
+    core_runtime: mcp_vault_core::VaultCoreRuntime,
+    memory: MemoryService,
+) -> JobHandler {
+    Arc::new(move |job, shutdown| {
+        let state = state.clone();
+        let history_root = history_root.clone();
+        let core_runtime = core_runtime.clone();
+        let memory = memory.clone();
+        Box::pin(async move {
+            let Some(id) = job.vault_id else {
+                return JobOutcome::Failed {
+                    code: "memory_dedup_vault_missing",
+                };
+            };
+            let vault = match state.vaults().find_by_id(id).await {
+                Ok(Some(v)) => v,
+                _ => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(60),
+                        code: "memory_dedup_vault_unavailable",
+                    };
+                }
+            };
+            let context = match vault.context() {
+                Ok(c) => c,
+                Err(_) => {
+                    return JobOutcome::Failed {
+                        code: "memory_dedup_context_invalid",
+                    };
+                }
+            };
+            let core = match super::core_for_vault(&state, &history_root, &vault, &core_runtime) {
+                Ok(c) => c,
+                Err(_) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(60),
+                        code: "memory_dedup_core_unavailable",
+                    };
+                }
+            };
+            let mut slices = job
+                .progress
+                .as_ref()
+                .and_then(|p| p.get("slices_completed"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            loop {
+                // Poll reporting and maintenance concurrently. Awaiting report
+                // I/O inside a selected timer branch can deadlock a one-connection
+                // pool while maintenance holds its transaction between polls.
+                let result = tokio::select! {
+                    _=shutdown.cancelled()=>return JobOutcome::Cancelled,
+                    result=memory.maintain_memory_dedup(&context,&core)=>result,
+                    _=track_memory_dedup_progress(&state,&context,&job,slices)=>return JobOutcome::Retry{delay:Duration::from_secs(5),code:"memory_dedup_progress_failed"},
+                };
+                let continue_in_place = matches!(&result, Ok(true))
+                    || result
+                        .as_ref()
+                        .is_err_and(|error| error.code() == "memory_equivalence_slice_exhausted");
+                let outcome = match result {
+                    Ok(true) => JobOutcome::Deferred {
+                        delay: Duration::from_secs(1),
+                        code: "memory_dedup_checkpoint",
+                    },
+                    Ok(false) => JobOutcome::Complete,
+                    Err(e) => {
+                        let delay = if e.code() == "memory_equivalence_budget_exhausted" {
+                            3600
+                        } else if e.code() == "memory_equivalence_slice_exhausted" {
+                            1
+                        } else if e.retryable() {
+                            5
+                        } else {
+                            60
+                        };
+                        let _ = state
+                            .current_memory()
+                            .set_formal_status(
+                                &context,
+                                e.code(),
+                                if continue_in_place {
+                                    0
+                                } else {
+                                    now_millis() + delay * 1000
+                                },
+                            )
+                            .await;
+                        if delay <= 5 {
+                            JobOutcome::Deferred {
+                                delay: Duration::from_secs(delay as u64),
+                                code: e.code(),
+                            }
+                        } else {
+                            JobOutcome::Complete
+                        } // periodic admission resumes durable pairs after retry_at
+                    }
+                };
+                // Releasing a slice restores its attempt count. Persist content-free
+                // diagnostics before releasing the lease so queued work is not
+                // indistinguishable from a job which never ran.
+                if let Some(worker_id) = job.lease_owner.as_deref() {
+                    let status = match state.current_memory().formal_status(&context).await {
+                        Ok(status) => status,
+                        Err(_) => {
+                            return JobOutcome::Retry {
+                                delay: Duration::from_secs(5),
+                                code: "memory_dedup_progress_failed",
+                            };
+                        }
+                    };
+                    let (reason, resume_at) = if continue_in_place {
+                        (None, 0)
+                    } else {
+                        match outcome {
+                            JobOutcome::Deferred { delay, code } => (
+                                Some(code),
+                                now_millis().saturating_add(duration_millis(delay)),
+                            ),
+                            _ => (None, status.retry_at),
+                        }
+                    };
+                    if state.jobs().update_progress(job.id, worker_id, &json!({
+                    "phase": "memory_dedup", "slices_completed": slices.saturating_add(1),
+                    "stage": status.phase, "sentence_checked": status.sentence_checked,
+                    "maintenance_status": status.status, "adopted": status.adopted,
+                    "checked_pairs": status.checked_pairs, "pending_pairs": status.pending_pairs,
+                    "wait_reason": reason, "resume_at": resume_at,
+                })).await.is_err() {
+                    return JobOutcome::Retry { delay: Duration::from_secs(5), code: "memory_dedup_progress_failed" };
+                }
+                }
+                slices = slices.saturating_add(1);
+                if continue_in_place {
+                    // Keep this worker lease across bounded slices. Yield only to
+                    // Tokio/cancellation, not back to lower-priority durable jobs.
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                return outcome;
+            }
+        })
+    })
+}
+
+async fn track_memory_dedup_progress(
+    state: &StateStore,
+    context: &VaultContext,
+    job: &JobRecord,
+    slices: u64,
+) -> Result<(), mcp_vault_state::StateError> {
+    let mut tick = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        tick.tick().await;
+        if let Some(worker_id) = job.lease_owner.as_deref() {
+            let status = state.current_memory().formal_status(context).await?;
+            state.jobs().update_progress(job.id,worker_id,&json!({
+                "phase":"memory_dedup","stage":status.phase,"sentence_checked":status.sentence_checked,
+                "slices_completed":slices,"maintenance_status":status.status,"adopted":status.adopted,
+                "checked_pairs":status.checked_pairs,"pending_pairs":status.pending_pairs,
+                "wait_reason":null,"resume_at":0,
+            })).await?;
+        }
+    }
 }
 
 /// Reconcile one source identity/hash change before optional extraction.
@@ -2755,6 +2965,16 @@ pub fn memory_source_reconcile_job_handler(
                 }
             };
 
+            if memory
+                .ensure_memory_dedup_scheduled(&context)
+                .await
+                .is_err()
+            {
+                return JobOutcome::Retry {
+                    delay: Duration::from_secs(5),
+                    code: "memory_dedup_admission_failed",
+                };
+            }
             let path = job
                 .payload
                 .get("payload")
@@ -4213,17 +4433,22 @@ mod tests {
             .await
             .unwrap();
         let now = now_millis();
-        let mut claimed = state
+        let claimed = state
             .jobs()
-            .claim_batch("incremental-worker", now, now.saturating_add(60_000), 1)
+            .claim_batch("incremental-worker", now, now.saturating_add(60_000), 100)
             .await
+            .unwrap();
+        assert_eq!(claimed[0].job_type, "memory.deduplicate");
+        let claimed = claimed
+            .into_iter()
+            .find(|job| job.id == incremental.id)
             .unwrap();
         let incremental_outcome = memory_extract_job_handler(
             state.clone(),
             history_root.clone(),
             core_runtime.clone(),
             memory.clone(),
-        )(claimed.remove(0), Cancellation::default())
+        )(claimed, Cancellation::default())
         .await;
         assert_eq!(incremental_outcome, JobOutcome::Complete);
         assert_eq!(calls.load(Ordering::SeqCst), 3);
@@ -4398,6 +4623,17 @@ mod tests {
             .unwrap();
         supervisor
             .register_job_handler(
+                "memory.deduplicate",
+                super::memory_dedup_job_handler(
+                    state.clone(),
+                    history_root.clone(),
+                    core_runtime.clone(),
+                    memory.clone(),
+                ),
+            )
+            .unwrap();
+        supervisor
+            .register_job_handler(
                 "memory.extract",
                 memory_extract_job_handler(state.clone(), history_root, core_runtime, memory),
             )
@@ -4426,7 +4662,12 @@ mod tests {
             .list(&context, None, None, 10, 0)
             .await
             .unwrap();
-        assert_eq!(jobs.len(), 4);
+        assert_eq!(jobs.len(), 5);
+        assert!(
+            jobs.iter()
+                .any(|job| job.job_type == "memory.deduplicate"
+                    && job.status == JobStatus::Completed)
+        );
         assert!(
             jobs.iter()
                 .all(|job| matches!(job.status, JobStatus::Completed | JobStatus::Failed))

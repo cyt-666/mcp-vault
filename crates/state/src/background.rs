@@ -595,6 +595,20 @@ impl JobRepository {
         }
     }
 
+    /// Raise existing active work to the caller's current scheduling priority.
+    /// Preserve its identity, lease, checkpoint and retry deadline.
+    pub async fn promote_active_priority(
+        &self,
+        context: &VaultContext,
+        job_type: &str,
+        priority: i32,
+    ) -> Result<(), StateError> {
+        sqlx::query("UPDATE jobs SET priority=? WHERE vault_id=? AND job_type=? AND status IN ('queued','running','retry_wait') AND priority<?")
+            .bind(priority).bind(context.id().to_string()).bind(job_type).bind(priority)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
     /// Enqueue or return an explicitly global job.
     pub async fn enqueue_global(
         &self,

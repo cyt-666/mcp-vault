@@ -686,3 +686,63 @@ async fn legacy_retrieval_rows_remain_vault_scoped_for_backup_migration() {
         second_job.id
     );
 }
+
+#[tokio::test]
+async fn equivalence_cache_and_dispatch_budget_are_vault_scoped_and_bounded() {
+    let store = store().await;
+    let a = context("dedup-a", "/srv/dedup-a");
+    let b = context("dedup-b", "/srv/dedup-b");
+    insert(&store.vaults(), &a).await;
+    insert(&store.vaults(), &b).await;
+    let hash = format!("sha256:{}", "a".repeat(64));
+    let repository = store.current_memory();
+    repository
+        .save_equivalence_decision(&a, &hash, "uncertain")
+        .await
+        .unwrap();
+    repository
+        .save_equivalence_decision(&a, &hash, "equivalent")
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .equivalence_decision(&a, &hash)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("uncertain")
+    );
+    assert!(
+        repository
+            .equivalence_decision(&b, &hash)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for _ in 0..256 {
+        assert!(
+            repository
+                .reserve_equivalence_dispatch(&a, 1)
+                .await
+                .unwrap()
+        );
+    }
+    assert!(
+        !repository
+            .reserve_equivalence_dispatch(&a, 1)
+            .await
+            .unwrap()
+    );
+    assert!(
+        repository
+            .reserve_equivalence_dispatch(&b, 4 * 1024 * 1024)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repository
+            .reserve_equivalence_dispatch(&b, 1)
+            .await
+            .unwrap()
+    );
+}

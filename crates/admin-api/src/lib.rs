@@ -4386,6 +4386,7 @@ fn index_node_json(node: &mcp_vault_state::IndexNodeRecord) -> Value {
 
 #[derive(Debug, Deserialize, Default)]
 struct MemoryListQuery {
+    after_id: Option<MemoryId>,
     types: Option<String>,
     tag: Option<String>,
     entity: Option<String>,
@@ -4549,7 +4550,7 @@ async fn list_memories(
     };
     match state
         .memory()
-        .list(
+        .list_after(
             &context,
             types,
             query.tag.clone(),
@@ -4557,12 +4558,13 @@ async fn list_memories(
             query.source_path.clone(),
             limit,
             offset,
+            query.after_id,
         )
         .await
     {
         Ok(memories) => api_ok(
             StatusCode::OK,
-            json!({"memories": memories, "next_offset": (memories.len() == limit as usize).then_some(offset.saturating_add(limit))}),
+            json!({"memories": memories, "next_cursor": (memories.len() == limit as usize).then(|| memories.last().map(|m|m.id)), "next_offset": (memories.len() == limit as usize).then_some(offset.saturating_add(limit))}),
             request_id.0,
         ),
         Err(error) => memory_error(error, request_id.0),
@@ -5461,7 +5463,8 @@ async fn memory_extraction_json(
     let policy = state.memory().extraction_policy(context).await?;
     let readiness = state.memory().extraction_readiness(context).await?;
     Ok(json!({
-        "contract": "current_source_owned_sets_v2_1",
+        "contract": "current_formal_memories_v2_2",
+        "dedup": state.state.current_memory().formal_status(context).await?,
         "policy": policy.policy,
         "revision": policy.revision.map(Revision::value),
         "readiness": readiness,
@@ -7147,7 +7150,7 @@ mod tests {
         assert_eq!(extraction["data"]["readiness"]["ready"], true);
         assert_eq!(
             extraction["data"]["contract"],
-            "current_source_owned_sets_v2_1"
+            "current_formal_memories_v2_2"
         );
         assert!(
             state
@@ -8699,7 +8702,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{extraction}");
         assert_eq!(
             extraction["data"]["contract"],
-            "current_source_owned_sets_v2_1"
+            "current_formal_memories_v2_2"
         );
         assert_eq!(extraction["data"]["readiness"]["ready"], true);
         assert_eq!(extraction["data"]["behavior"]["model_calls_per_note"], 1);

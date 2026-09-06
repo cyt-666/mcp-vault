@@ -1176,7 +1176,7 @@ POST   /api/v1/maintenance/recover
 `oauth_authorization_server_metadata_url` derived from the configured public
 data origin; no value is derived from an untrusted request `Host` header.
 
-#### Current memory Admin contract (normative v2.1)
+#### Current memory Admin contract (normative v2.2)
 
 `POST /memories` directly creates an explicit current memory and returns the
 same `RememberResult` shape as MCP. `PATCH /memories/{id}` requires
@@ -1184,10 +1184,10 @@ same `RememberResult` shape as MCP. `PATCH /memories/{id}` requires
 Omitted optional patch fields preserve their value; a JSON `null` explicitly
 clears kind, importance, confidence, or validity, and an empty array clears
 tags/entities. `DELETE` always deletes current state. A note-derived deletion
-returns `source_extraction_paused: true` after atomically rewriting its set.
+returns `source_extraction_paused: true` after removing its exact contributions from all known supporting sets and pausing those sources.
 
 `GET /memory/extraction` returns `contract:
-"current_source_owned_sets_v2_1"`, typed policy/revision, one extraction
+"current_formal_memories_v2_2"`, typed policy/revision, one extraction
 `readiness`, and the one-call/full-set/fail-closed behavior summary. `POST
 /memory/extraction/run` accepts `include_evaluated`; `true` is an explicit
 cost-bearing forced re-evaluation. `POST
@@ -1383,3 +1383,17 @@ Admin adds read-only per-channel preparation status, bounded run/retry and maint
 
 The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
 specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).
+
+The extraction response additionally includes read-only `dedup` state: `adopted`
+(boolean), `pending_pairs`, `checked_pairs`, `status` and `retry_at` (epoch
+milliseconds). `covered_candidates` means the bounded candidate pass finished;
+it is not a global semantic-uniqueness claim. No run/approve action is required.
+Memory objects include `source_count`; compact list/recall responses include up to
+8 source paths. `get_memory`/details returns all bounded provenance, including
+File ID and revision. Multi-source objects omit the legacy single `note_set_id`.
+Absorbed IDs return not found and never redirect update or delete.
+
+Memory lists order by stable ID. MCP emits Vault-bound `memory:<vault>:<id>`
+cursors and continues to accept prior `offset:` cursors. Admin accepts `after_id`
+and emits `next_cursor` while retaining `next_offset` for older clients. The
+Admin memory page follows ID cursors sequentially and deduplicates visible IDs.

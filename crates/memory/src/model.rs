@@ -475,7 +475,7 @@ pub struct MemoryView {
     pub memory_type: Option<MemoryType>,
     /// Direct or note-derived ownership.
     pub ownership: MemoryOwnership,
-    /// Owning source set for note-derived memories.
+    /// Single source set when applicable; multi-source formal objects use sources.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note_set_id: Option<MemorySetId>,
     /// Optimistic memory metadata revision.
@@ -498,6 +498,8 @@ pub struct MemoryView {
     pub tags: Vec<String>,
     /// Entities.
     pub entities: Vec<String>,
+    /// Number of current distinct provenance records before presentation truncation.
+    pub source_count: usize,
     /// Provenance.
     pub sources: Vec<MemorySourceView>,
     /// Score when returned from recall.

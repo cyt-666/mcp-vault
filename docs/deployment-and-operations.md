@@ -943,3 +943,39 @@ persistent mount. Startup validates the existing schema and applies migrations 1
 it does not invoke memory extraction, model grouping or automatic calibration.
 Do not remove `_sqlx_migrations`, overwrite its checksums or delete the database.
 Rollback after migration requires the pre-upgrade backup and matching prior image.
+
+### Exact memory maintenance upgrade boundary
+
+The current change automatically schedules local exact source-set compaction at
+startup and periodic ready-Vault reconciliation. No Admin migration action or
+provider rebinding is required for that operation. Managed source-set writes use
+normal Vault Core revisions and prepared snapshots; original notes are untouched.
+`memory.deduplicate_source` appears in the existing jobs view. It does not pause
+extraction. An existing pause is preserved.
+
+Migrations 0020–0021 also install automatic semantic maintenance and formal
+projections. Startup, periodic ready-Vault reconciliation and source events admit
+`memory.deduplicate`. Existing extraction credentials/bindings and valid vectors
+are reused; a dedicated merge model is not required. Admin displays current
+adoption, candidate backlog and retry state. Waiting for a model or budget does
+not block local adoption/deletion, and maintenance resumes automatically.
+
+Before rollout, back up the operational database and Vault together. The first
+startup creates portable v2.2 formal fact files while retaining v2.1 source
+contributions and pauses. Original notes are not rewritten. Do not binary-downgrade
+against a migrated ledger or partially upgraded canonical namespace: restore a
+matching pre-upgrade database/Vault backup, then start the matching old binary.
+Pending operations are recovered by the upgraded service; do not manually delete
+its operation rows. Real-provider quality and production rollout remain pending
+explicit authorization; local fake checks do not certify model accuracy.
+
+
+Automatic memory maintenance has priority 100 (ordinary reconciliation/index
+jobs use 0). Startup also raises an existing active dedup job's old priority,
+without resetting its retry deadline or checkpoints. Normal bounded slices
+continue on the same worker lease; they do not voluntarily return to the queue.
+Cancellation and provider/day-budget waits remain effective. Each finished slice
+persists content-free counters and its actual wait reason in job progress. A
+changing job timestamp alone is not evidence that merging is advancing: inspect
+checked/pending pairs, adoption status and the reported error code. The Admin
+memory page preserves unknown error codes and shows the next eligible time.

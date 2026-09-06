@@ -33,6 +33,11 @@ const MODEL_NORMAL: usize = 0;
 const MODEL_INVALID_ROOT: usize = 1;
 const MODEL_EMPTY_SET: usize = 2;
 const MODEL_BLOCKED: usize = 3;
+const MODEL_CHAIN: usize = 5;
+const MODEL_JUDGMENT_BLOCKED: usize = 6;
+const MODEL_ALL_DIFFERENT: usize = 7;
+const MODEL_INVALID_PAIR: usize = 8;
+const MODEL_SENTENCE_BLOCKED: usize = 9;
 
 struct FailOnceAt {
     phase: CommitPhase,
@@ -78,6 +83,67 @@ async fn current_set_model(
         .as_str()
         .unwrap_or_default();
     let schema = &request["response_format"]["json_schema"]["schema"];
+    if system.starts_with("Remove only repeated or paraphrased sentences") {
+        state.requests.lock().await.push(request.clone());
+        state.calls.fetch_add(1, Ordering::SeqCst);
+        if state.mode.load(Ordering::SeqCst) == MODEL_SENTENCE_BLOCKED {
+            state.started.notify_one();
+            state.release.notified().await;
+        }
+        let body: Value = serde_json::from_str(user).unwrap();
+        return (
+            StatusCode::OK,
+            Json(
+                json!({"choices":[{"message":{"content":json!({"content":body["content"]}).to_string()}}]}),
+            ),
+        );
+    }
+    if system.starts_with("Compare two untrusted source-owned memory propositions.") {
+        state.requests.lock().await.push(request.clone());
+        state.calls.fetch_add(1, Ordering::SeqCst);
+        let pair: Value = serde_json::from_str(user).unwrap();
+        let corpus: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/memory-quality/dedup-merge.json"
+        ))
+        .unwrap();
+        let mut relation = corpus["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| {
+                c["left"] == pair["left"]["content"] && c["right"] == pair["right"]["content"]
+            })
+            .and_then(|c| c["relation"].as_str())
+            .unwrap_or(if pair["left"]["content"] == pair["right"]["content"] {
+                "equivalent"
+            } else {
+                "different"
+            });
+        if state.mode.load(Ordering::SeqCst) == MODEL_CHAIN {
+            let a = pair["left"]["content"].as_str().unwrap();
+            let b = pair["right"]["content"].as_str().unwrap();
+            relation = if (a.contains("1.94") && b.contains("Zig"))
+                || (b.contains("1.94") && a.contains("Zig"))
+            {
+                "different"
+            } else {
+                "equivalent"
+            };
+        }
+        if state.mode.load(Ordering::SeqCst) == MODEL_ALL_DIFFERENT {
+            relation = "different";
+        }
+        if state.mode.load(Ordering::SeqCst) == MODEL_JUDGMENT_BLOCKED {
+            state.started.notify_one();
+            state.release.notified().await;
+        }
+        return (
+            StatusCode::OK,
+            Json(json!({"choices":[{"message":{"content":
+                json!({"left":if state.mode.load(Ordering::SeqCst)==MODEL_INVALID_PAIR {2}else{0},"right":1,"relation":relation}).to_string()
+            }}]})),
+        );
+    }
     if !system.contains("complete set of durable, useful memories")
         || system.contains("Phase 1")
         || system.contains("consolidat")
@@ -107,7 +173,29 @@ async fn current_set_model(
         state.started.notify_one();
         state.release.notified().await;
     }
-    let memories = if mode == MODEL_EMPTY_SET {
+    let corpus: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/memory-quality/dedup-merge.json"
+    ))
+    .unwrap();
+    let fixture_case = corpus["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| user.contains(&format!("DEDUP_CASE {}:", case["id"].as_str().unwrap())));
+    let memories = if let Some(marker) = user.split("FAIRNESS:").nth(1) {
+        let label: String = marker.chars().take_while(char::is_ascii_digit).collect();
+        json!([{"content":format!("Project {label} uses Rust. Batch size is 32. Go was not adopted."),"kind":"fact"}])
+    } else if user.contains("DEDUP_CONTAINED") {
+        let case = &corpus["cases"][48];
+        json!([{"content":case["left"],"kind":"fact"},{"content":case["right"],"kind":"fact"}])
+    } else if let Some(case) = fixture_case {
+        let side = if user.contains(&format!("DEDUP_CASE {}:left", case["id"].as_str().unwrap())) {
+            "left"
+        } else {
+            "right"
+        };
+        json!([{"content":case[side],"kind":"fact"}])
+    } else if mode == MODEL_EMPTY_SET {
         json!([])
     } else if user.contains("THIRD") {
         json!([
@@ -2918,4 +3006,1166 @@ async fn recall_revalidates_current_objects_after_related_note_provider_wait() {
             .degraded
             .contains(&"candidate_changed_before_response".into())
     );
+}
+
+#[tokio::test]
+async fn existing_v21_exact_duplicates_compact_without_extraction_and_rebuild_stays_compact() {
+    check_existing_v21_exact_compaction(false).await;
+}
+
+#[tokio::test]
+async fn exact_compaction_adopts_prepared_bytes_after_canonical_commit_failure() {
+    check_existing_v21_exact_compaction(true).await;
+}
+
+async fn check_existing_v21_exact_compaction(inject_failure: bool) {
+    let (_directory, state, context, core, service) = fixture("exact-upgrade-v21").await;
+    let model = Arc::new(CurrentSetModelState::default());
+    configure_extraction(&state, &context, &service, model.clone()).await;
+    let path = VaultPath::parse("notes/upgrade.md").unwrap();
+    let note_bytes = b"# FIRST\nAlpha requires Rust 1.94. Go was not adopted.";
+    let source = core
+        .create_bytes(
+            &context,
+            &path,
+            note_bytes,
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap()
+        .file;
+    service.extract_note(&context, &core, &path).await.unwrap();
+    let set = state
+        .current_memory()
+        .get_note_set_by_source(&context, source.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut read = core
+        .read_managed(&context, &set.canonical_path)
+        .await
+        .unwrap();
+    let mut bytes = Vec::new();
+    read.reader.read_to_end(&mut bytes).await.unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    let (header, body) = text.split_once("```json\n").unwrap();
+    let (body, trailer) = body.split_once("\n```").unwrap();
+    let mut items: Vec<Value> = serde_json::from_str(body).unwrap();
+    let survivor = items[0]["id"].as_str().unwrap().to_owned();
+    let mut duplicate = items[0].clone();
+    let absorbed = MemoryId::new();
+    duplicate["id"] = json!(absorbed);
+    duplicate["ordinal"] = json!(1);
+    items[1]["ordinal"] = json!(2);
+    items.insert(1, duplicate);
+    let old_format = format!(
+        "{}```json\n{}\n```{trailer}",
+        header.replace("extraction_paused: false", "extraction_paused: true"),
+        serde_json::to_string_pretty(&items).unwrap()
+    );
+    core.replace_managed_bytes(
+        &context,
+        &set.canonical_path,
+        set.canonical_revision,
+        old_format.as_bytes(),
+        Actor::system(),
+        SourcePlane::System,
+        None,
+    )
+    .await
+    .unwrap();
+    // Fixture setup represents an already published v2.1 set with duplicates.
+    assert_eq!(
+        service.rebuild(&context, &core).await.unwrap().quarantined,
+        0
+    );
+    assert_eq!(
+        service
+            .list(&context, vec![], None, None, None, 20, 0)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+    let calls_before_upgrade = model.calls.load(Ordering::SeqCst);
+    service
+        .ensure_exact_memory_dedup_scheduled(&context)
+        .await
+        .unwrap();
+    let jobs = state
+        .jobs()
+        .list(&context, None, Some("memory.deduplicate_source"), 20, 0)
+        .await
+        .unwrap();
+    assert_eq!(jobs.len(), 1);
+    if inject_failure {
+        let failing = core
+            .clone()
+            .with_failure_injector(Arc::new(FailOnceAt::new(CommitPhase::MetadataCommitted)));
+        assert!(
+            service
+                .deduplicate_source_exact(&context, &failing, source.id)
+                .await
+                .is_err()
+        );
+        assert!(
+            state
+                .current_memory()
+                .prepared_note_set_snapshot(&context, source.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    assert_eq!(
+        service
+            .deduplicate_source_exact(&context, &core, source.id)
+            .await
+            .unwrap(),
+        if inject_failure { 0 } else { 1 }
+    );
+    assert_eq!(model.calls.load(Ordering::SeqCst), calls_before_upgrade);
+    assert!(matches!(
+        service.get(&context, absorbed).await,
+        Err(MemoryError::NotFound)
+    ));
+    assert!(
+        service
+            .get(&context, MemoryId::parse(&survivor).unwrap())
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        service
+            .list(&context, vec![], None, None, None, 20, 0)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        state
+            .current_memory()
+            .get_note_set_by_source(&context, source.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .extraction_paused
+    );
+    assert_eq!(
+        service.rebuild(&context, &core).await.unwrap().quarantined,
+        0
+    );
+    assert_eq!(
+        service
+            .list(&context, vec![], None, None, None, 20, 0)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        service
+            .deduplicate_source_exact(&context, &core, source.id)
+            .await
+            .unwrap(),
+        0
+    );
+    let mut original = core.read(&context, &path).await.unwrap();
+    let mut actual = Vec::new();
+    original.reader.read_to_end(&mut actual).await.unwrap();
+    assert_eq!(actual, note_bytes);
+}
+
+#[tokio::test]
+async fn equivalence_uses_existing_provider_and_persisted_cache_but_excludes_explicit() {
+    let (_directory, state, context, core, service) = fixture("equivalence-provider").await;
+    let model = Arc::new(CurrentSetModelState::default());
+    configure_extraction(&state, &context, &service, model.clone()).await;
+    let mut ids = Vec::new();
+    for path in ["notes/first.md", "notes/second.md"] {
+        let path = VaultPath::parse(path).unwrap();
+        core.create_bytes(
+            &context,
+            &path,
+            b"# FIRST\nAlpha requires Rust 1.94.",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+        service.extract_note(&context, &core, &path).await.unwrap();
+        ids.push(
+            service
+                .list(&context, vec![], None, None, Some(path.to_string()), 20, 0)
+                .await
+                .unwrap()[0]
+                .id,
+        );
+    }
+    let calls = model.calls.load(Ordering::SeqCst);
+    assert!(
+        service
+            .judge_memory_equivalence(&context, ids[0], ids[1])
+            .await
+            .unwrap()
+            .permits_cross_source_merge()
+    );
+    assert_eq!(model.calls.load(Ordering::SeqCst), calls + 1);
+    assert!(
+        service
+            .judge_memory_equivalence(&context, ids[0], ids[1])
+            .await
+            .unwrap()
+            .permits_cross_source_merge()
+    );
+    assert_eq!(model.calls.load(Ordering::SeqCst), calls + 1);
+    let explicit = service
+        .remember(
+            &context,
+            &core,
+            RememberInput {
+                content: "Alpha requires Rust 1.94.".into(),
+                ..RememberInput::default()
+            },
+        )
+        .await
+        .unwrap()
+        .memory
+        .unwrap();
+    assert!(
+        service
+            .judge_memory_equivalence(&context, explicit.id, ids[0])
+            .await
+            .is_err()
+    );
+    assert_eq!(model.calls.load(Ordering::SeqCst), calls + 1);
+    // A judgment is not a publication; it must not silently change ownership.
+    assert_eq!(
+        service
+            .list(&context, vec![], None, None, None, 20, 0)
+            .await
+            .unwrap()
+            .len(),
+        5
+    );
+}
+
+#[tokio::test]
+async fn formal_adoption_merge_forget_and_rebuild_keep_one_current_object() {
+    let (_dir, state, context, core, service) = fixture("formal-roundtrip").await;
+    let model = Arc::new(CurrentSetModelState::default());
+    configure_extraction(&state, &context, &service, model.clone()).await;
+    let mut ids = Vec::new();
+    let mut sources = Vec::new();
+    for name in ["a", "b"] {
+        let path = VaultPath::parse(&format!("notes/{name}.md")).unwrap();
+        let file = core
+            .create_bytes(
+                &context,
+                &path,
+                b"# FIRST\nAlpha requires Rust 1.94.",
+                Actor::system(),
+                SourcePlane::System,
+                None,
+            )
+            .await
+            .unwrap()
+            .file;
+        sources.push(file.id);
+        service.extract_note(&context, &core, &path).await.unwrap();
+        ids.push(
+            service
+                .list(&context, vec![], None, None, Some(path.to_string()), 20, 0)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|m| m.content.contains("requires Rust"))
+                .unwrap()
+                .id,
+        );
+    }
+    let calls = model.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        service
+            .adopt_current_memory_sets(&context, &core)
+            .await
+            .unwrap(),
+        4
+    );
+    assert_eq!(calls, model.calls.load(Ordering::SeqCst));
+    assert!(
+        state
+            .current_memory()
+            .formal_enabled(&context)
+            .await
+            .unwrap()
+    );
+    assert!(
+        service
+            .merge_equivalent_formal_memories(&context, &core, ids[0], ids[1])
+            .await
+            .unwrap()
+    );
+    let all = service
+        .list(&context, vec![], None, None, None, 20, 0)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 3);
+    let merged = all
+        .iter()
+        .find(|m| m.content.contains("requires Rust"))
+        .unwrap();
+    assert_eq!(merged.sources.len(), 2);
+    assert!(merged.note_set_id.is_none());
+    assert!(
+        merged
+            .canonical_path
+            .as_ref()
+            .unwrap()
+            .as_str()
+            .contains("/facts/")
+    );
+    for path in ["notes/a.md", "notes/b.md"] {
+        let filtered = service
+            .list(&context, vec![], None, None, Some(path.into()), 20, 0)
+            .await
+            .unwrap();
+        assert_eq!(filtered.iter().filter(|m| m.id == merged.id).count(), 1);
+    }
+    let absorbed = *ids.iter().find(|id| **id != merged.id).unwrap();
+    assert!(matches!(
+        service.get(&context, absorbed).await,
+        Err(MemoryError::NotFound)
+    ));
+    assert!(matches!(
+        service
+            .forget(&context, &core, absorbed, Revision::new(1))
+            .await,
+        Err(MemoryError::NotFound)
+    ));
+    assert_eq!(
+        service.rebuild(&context, &core).await.unwrap().quarantined,
+        0
+    );
+    assert_eq!(
+        service
+            .get(&context, merged.id)
+            .await
+            .unwrap()
+            .sources
+            .len(),
+        2
+    );
+    service
+        .forget(&context, &core, merged.id, merged.revision)
+        .await
+        .unwrap();
+    assert!(matches!(
+        service.get(&context, merged.id).await,
+        Err(MemoryError::NotFound)
+    ));
+    assert_eq!(
+        service.rebuild(&context, &core).await.unwrap().quarantined,
+        0
+    );
+    assert_eq!(
+        service
+            .list(&context, vec![], None, None, None, 20, 0)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    for source in sources {
+        assert!(
+            state
+                .current_memory()
+                .get_note_set_by_source(&context, source)
+                .await
+                .unwrap()
+                .unwrap()
+                .extraction_paused
+        );
+    }
+}
+
+async fn two_formal_sources(
+    slug: &str,
+) -> (
+    TempDir,
+    StateStore,
+    VaultContext,
+    VaultCore,
+    MemoryService,
+    Arc<CurrentSetModelState>,
+    Vec<mcp_vault_state::FileRecord>,
+    Vec<MemoryId>,
+) {
+    let (dir, state, context, core, service) = fixture(slug).await;
+    let model = Arc::new(CurrentSetModelState::default());
+    configure_extraction(&state, &context, &service, model.clone()).await;
+    let mut files = Vec::new();
+    let mut ids = Vec::new();
+    for name in ["a", "b"] {
+        let path = VaultPath::parse(&format!("notes/{name}.md")).unwrap();
+        files.push(
+            core.create_bytes(
+                &context,
+                &path,
+                b"# FIRST\nAlpha requires Rust 1.94.",
+                Actor::system(),
+                SourcePlane::System,
+                None,
+            )
+            .await
+            .unwrap()
+            .file,
+        );
+        service.extract_note(&context, &core, &path).await.unwrap();
+        ids.push(
+            service
+                .list(&context, vec![], None, None, Some(path.to_string()), 20, 0)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|m| m.content.contains("requires Rust"))
+                .unwrap()
+                .id,
+        );
+    }
+    service
+        .adopt_current_memory_sets(&context, &core)
+        .await
+        .unwrap();
+    (dir, state, context, core, service, model, files, ids)
+}
+
+#[tokio::test]
+async fn formal_support_loss_is_immediate_and_local_cleanup_needs_no_model() {
+    let (_dir, state, context, core, service, model, files, ids) =
+        two_formal_sources("formal-support-loss").await;
+    assert!(
+        service
+            .merge_equivalent_formal_memories(&context, &core, ids[0], ids[1])
+            .await
+            .unwrap()
+    );
+    let formal = service
+        .list(&context, vec![], None, None, None, 20, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.content.contains("requires Rust"))
+        .unwrap();
+    let policy = service.extraction_policy(&context).await.unwrap();
+    service
+        .set_extraction_policy(
+            &context,
+            ExtractionPolicy {
+                enabled: false,
+                ..policy.policy
+            },
+            policy.revision,
+            None,
+        )
+        .await
+        .unwrap();
+    let calls = model.calls.load(Ordering::SeqCst);
+    for (index, file) in files.iter().enumerate() {
+        core.delete(
+            &context,
+            &file.path,
+            file.current_revision,
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+        if index == 0 {
+            let current = service.get(&context, formal.id).await.unwrap();
+            assert_eq!(current.sources.len(), 1);
+            assert_eq!(current.sources[0].file_id, Some(files[1].id));
+        } else {
+            assert!(matches!(
+                service.get(&context, formal.id).await,
+                Err(MemoryError::NotFound)
+            ));
+        }
+        service
+            .maintain_memory_dedup(&context, &core)
+            .await
+            .unwrap();
+    }
+    assert_eq!(calls, model.calls.load(Ordering::SeqCst));
+    assert!(
+        state
+            .current_memory()
+            .formal_document(&context, formal.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        service.rebuild(&context, &core).await.unwrap().quarantined,
+        0
+    );
+    assert!(
+        service
+            .list(&context, vec![], None, None, None, 20, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn formal_merge_and_forget_recover_after_canonical_commit_without_resurrection() {
+    for forgetting in [false, true] {
+        let (_dir, state, context, core, service, model, _files, ids) =
+            two_formal_sources("formal-crash").await;
+        let failure = core
+            .clone()
+            .with_failure_injector(Arc::new(FailOnceAt::new(CommitPhase::MetadataCommitted)));
+        let id = if forgetting {
+            service
+                .merge_equivalent_formal_memories(&context, &core, ids[0], ids[1])
+                .await
+                .unwrap();
+            let current = service
+                .list(&context, vec![], None, None, None, 20, 0)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|m| m.content.contains("requires Rust"))
+                .unwrap();
+            assert!(
+                service
+                    .forget(&context, &failure, current.id, current.revision)
+                    .await
+                    .is_err()
+            );
+            assert!(matches!(
+                service.get(&context, current.id).await,
+                Err(MemoryError::NotFound)
+            ));
+            current.id
+        } else {
+            assert!(
+                service
+                    .merge_equivalent_formal_memories(&context, &failure, ids[0], ids[1])
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                service
+                    .list(&context, vec![], None, None, None, 20, 0)
+                    .await
+                    .unwrap()
+                    .len(),
+                4
+            );
+            ids[0]
+        };
+        assert!(
+            state
+                .current_memory()
+                .formal_operation(&context)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let calls = model.calls.load(Ordering::SeqCst);
+        let restarted = MemoryService::new(
+            state.clone(),
+            AuthService::new(
+                state.auth(),
+                MasterKeyRing::from_bytes(1, &[23; 32]).unwrap(),
+            ),
+        );
+        restarted
+            .recover_formal_publication(&context, &core)
+            .await
+            .unwrap();
+        restarted
+            .recover_formal_publication(&context, &core)
+            .await
+            .unwrap();
+        assert!(
+            state
+                .current_memory()
+                .formal_operation(&context)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            restarted
+                .rebuild(&context, &core)
+                .await
+                .unwrap()
+                .quarantined,
+            0
+        );
+        assert_eq!(model.calls.load(Ordering::SeqCst), calls);
+        let all = restarted
+            .list(&context, vec![], None, None, None, 20, 0)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), if forgetting { 2 } else { 3 });
+        if forgetting {
+            assert!(matches!(
+                restarted.get(&context, id).await,
+                Err(MemoryError::NotFound)
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn unchanged_memory_bodies_cannot_starve_pairs_and_interrupted_checks_resume_after_cursor() {
+    let (_dir, state, context, core, service) = fixture("dedup-fairness").await;
+    let model = Arc::new(CurrentSetModelState::default());
+    configure_extraction(&state, &context, &service, model.clone()).await;
+    let mut originals = Vec::new();
+    for i in 0..20 {
+        let path = VaultPath::parse(&format!("fairness/{i}.md")).unwrap();
+        let bytes =
+            format!("# FAIRNESS:{i}\nProject {i} uses Rust. Batch size is 32. Go was not adopted.");
+        core.create_bytes(
+            &context,
+            &path,
+            bytes.as_bytes(),
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+        service.extract_note(&context, &core, &path).await.unwrap();
+        originals.push((path, bytes));
+    }
+    let before = model.calls.load(Ordering::SeqCst);
+    assert!(
+        service
+            .maintain_memory_dedup(&context, &core)
+            .await
+            .unwrap()
+    );
+    let progress = state
+        .current_memory()
+        .formal_status(&context)
+        .await
+        .unwrap();
+    assert!(
+        progress.checked_pairs > 0,
+        "unchanged bodies must not consume every slice before pairs run"
+    );
+    assert!(progress.pending_pairs > 0);
+    assert_eq!(
+        progress.sentence_checked, 2,
+        "bound checks, not only successful rewrites"
+    );
+    assert!(model.calls.load(Ordering::SeqCst) - before <= 6);
+    model.mode.store(MODEL_SENTENCE_BLOCKED, Ordering::SeqCst);
+    let interrupted = tokio::spawn({
+        let service = service.clone();
+        let context = context.clone();
+        let core = core.clone();
+        async move { service.maintain_memory_dedup(&context, &core).await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), model.started.notified())
+        .await
+        .unwrap();
+    let cursor = state
+        .current_memory()
+        .sentence_scan_cursor(&context)
+        .await
+        .unwrap()
+        .unwrap();
+    let during = state
+        .current_memory()
+        .formal_status(&context)
+        .await
+        .unwrap();
+    assert_eq!(during.phase, "checking_sentences");
+    assert!(
+        during.checked_pairs > progress.checked_pairs,
+        "pairs advance even before a slow sentence check finishes"
+    );
+    interrupted.abort();
+    assert!(interrupted.await.unwrap_err().is_cancelled());
+    model.mode.store(MODEL_NORMAL, Ordering::SeqCst);
+    model.release.notify_waiters();
+    let restarted = MemoryService::new(
+        state.clone(),
+        AuthService::new(
+            state.auth(),
+            MasterKeyRing::from_bytes(1, &[23; 32]).unwrap(),
+        ),
+    );
+    assert!(
+        restarted
+            .maintain_memory_dedup(&context, &core)
+            .await
+            .unwrap()
+    );
+    assert!(
+        state
+            .current_memory()
+            .sentence_scan_cursor(&context)
+            .await
+            .unwrap()
+            .unwrap()
+            > cursor
+    );
+    assert_eq!(
+        state
+            .current_memory()
+            .formal_status(&context)
+            .await
+            .unwrap()
+            .sentence_checked,
+        4
+    );
+    for (path, bytes) in originals {
+        let mut read = core.read(&context, &path).await.unwrap();
+        let mut actual = Vec::new();
+        read.reader.read_to_end(&mut actual).await.unwrap();
+        assert_eq!(actual, bytes.as_bytes());
+    }
+}
+
+#[tokio::test]
+async fn dedup_labeled_60_pairs_and_20_queries_preserve_boundaries_and_paginate_over_100_sources() {
+    let (_dir, state, context, core, service) = fixture("dedup-labeled").await;
+    let model = Arc::new(CurrentSetModelState::default());
+    configure_extraction(&state, &context, &service, model.clone()).await;
+    let corpus: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/memory-quality/dedup-merge.json"
+    ))
+    .unwrap();
+    let cases = corpus["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 60);
+    let mut pairs = Vec::new();
+    for case in cases {
+        let name = case["id"].as_str().unwrap();
+        let mut ids = Vec::new();
+        for side in ["left", "right"] {
+            let path = VaultPath::parse(&format!("dedup/{name}-{side}.md")).unwrap();
+            core.create_bytes(
+                &context,
+                &path,
+                format!(
+                    "# DEDUP_CASE {name}:{side}\n{}",
+                    case[side].as_str().unwrap()
+                )
+                .as_bytes(),
+                Actor::system(),
+                SourcePlane::System,
+                None,
+            )
+            .await
+            .unwrap();
+            service.extract_note(&context, &core, &path).await.unwrap();
+            ids.push(
+                service
+                    .list(&context, vec![], None, None, Some(path.to_string()), 20, 0)
+                    .await
+                    .unwrap()[0]
+                    .id,
+            );
+        }
+        pairs.push((ids[0], ids[1]));
+    }
+    let calls = model.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        service
+            .adopt_current_memory_sets(&context, &core)
+            .await
+            .unwrap(),
+        120
+    );
+    assert_eq!(calls, model.calls.load(Ordering::SeqCst));
+    assert_eq!(
+        service
+            .list(&context, vec![], None, None, None, 100, 100)
+            .await
+            .unwrap()
+            .len(),
+        20
+    );
+    let mut report = Vec::new();
+    for (case, (a, b)) in cases.iter().zip(pairs) {
+        let relation = service
+            .judge_memory_equivalence(&context, a, b)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(relation).unwrap(),
+            case["relation"],
+            "{}",
+            case["id"]
+        );
+        let merged = service
+            .merge_equivalent_formal_memories(&context, &core, a, b)
+            .await
+            .unwrap();
+        assert_eq!(merged, case["relation"] == "equivalent", "{}", case["id"]);
+        if !merged {
+            assert!(service.get(&context, a).await.is_ok());
+            assert!(service.get(&context, b).await.is_ok());
+        }
+        report.push(json!({"id":case["id"],"relation":relation,"merged":merged,"passed":true}));
+    }
+    let mut query_report = Vec::new();
+    for query in corpus["queries"].as_array().unwrap() {
+        let source = format!("dedup/{}-left.md", query["case"].as_str().unwrap());
+        let expected = service
+            .list(&context, vec![], None, None, Some(source), 20, 0)
+            .await
+            .unwrap()[0]
+            .id;
+        let result = service
+            .recall(
+                &context,
+                RecallRequest {
+                    query: query["query"].as_str().unwrap().into(),
+                    max_results: 100,
+                    max_tokens: 32_000,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.memories.iter().any(|m| m.id == expected),
+            "missing query {}",
+            query["id"]
+        );
+        let unique = result
+            .memories
+            .iter()
+            .map(|m| m.id)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), result.memories.len());
+        query_report.push(json!({"id":query["id"],"passed":true}));
+    }
+    assert_eq!(query_report.len(), 20);
+    let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/automatic-memory-dedup-validation");
+    std::fs::create_dir_all(&output).unwrap();
+    std::fs::write(output.join("labeled-mechanism.json"),serde_json::to_vec_pretty(&json!({"mode":"local_fake_mechanism_not_real_model_quality","cases":report,"queries":query_report})).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn pairwise_chain_cannot_import_an_unverified_group_member() {
+    let (_dir, state, context, core, service) = fixture("no-transitive-merge").await;
+    let model = Arc::new(CurrentSetModelState::default());
+    configure_extraction(&state, &context, &service, model.clone()).await;
+    let mut ids = Vec::new();
+    for marker in ["FIRST", "SECOND", "THIRD"] {
+        let path = VaultPath::parse(&format!("notes/{marker}.md")).unwrap();
+        core.create_bytes(
+            &context,
+            &path,
+            marker.as_bytes(),
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+        service.extract_note(&context, &core, &path).await.unwrap();
+        ids.push(
+            service
+                .list(&context, vec![], None, None, Some(path.to_string()), 20, 0)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|m| m.content.contains("requires"))
+                .unwrap()
+                .id,
+        );
+    }
+    service
+        .adopt_current_memory_sets(&context, &core)
+        .await
+        .unwrap();
+    model.mode.store(MODEL_CHAIN, Ordering::SeqCst);
+    assert!(
+        service
+            .merge_equivalent_formal_memories(&context, &core, ids[1], ids[2])
+            .await
+            .unwrap()
+    );
+    // The fake deliberately emits A≈B and B≈C but A≠C. The engine must
+    // challenge C against A's complete body instead of taking graph closure.
+    assert!(
+        !service
+            .merge_equivalent_formal_memories(&context, &core, ids[0], ids[1])
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        service.get(&context, ids[0]).await.unwrap().sources.len(),
+        1
+    );
+    assert_eq!(
+        service.get(&context, ids[1]).await.unwrap().sources.len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn source_edit_while_judgment_waits_cannot_publish_stale_support() {
+    let (_dir, _state, context, core, service, model, files, ids) =
+        two_formal_sources("formal-edit-race").await;
+    model.mode.store(MODEL_JUDGMENT_BLOCKED, Ordering::SeqCst);
+    let merging = tokio::spawn({
+        let service = service.clone();
+        let context = context.clone();
+        let core = core.clone();
+        let ids = ids.clone();
+        async move {
+            service
+                .merge_equivalent_formal_memories(&context, &core, ids[0], ids[1])
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), model.started.notified())
+        .await
+        .unwrap();
+    core.replace_bytes(
+        &context,
+        &files[0].path,
+        files[0].current_revision,
+        b"# SECOND\nThe backend now uses a different compiler.",
+        Actor::system(),
+        SourcePlane::System,
+        None,
+    )
+    .await
+    .unwrap();
+    model.release.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(5), merging)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!matches!(result, Ok(true)));
+    assert_eq!(
+        service.get(&context, ids[1]).await.unwrap().sources.len(),
+        1
+    );
+    assert!(matches!(
+        service.get(&context, ids[0]).await,
+        Err(MemoryError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn same_source_inclusion_never_upgrades_another_sources_short_support() {
+    let (_dir, state, context, core, service) = fixture("inclusion-provenance").await;
+    let model = Arc::new(CurrentSetModelState::default());
+    configure_extraction(&state, &context, &service, model).await;
+    for (path, body) in [
+        ("notes/a.md", "DEDUP_CONTAINED"),
+        ("notes/b.md", "DEDUP_CASE D25F:right"),
+    ] {
+        let path = VaultPath::parse(path).unwrap();
+        core.create_bytes(
+            &context,
+            &path,
+            body.as_bytes(),
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+        service.extract_note(&context, &core, &path).await.unwrap();
+    }
+    for _ in 0..8 {
+        if !service
+            .maintain_memory_dedup(&context, &core)
+            .await
+            .unwrap()
+        {
+            break;
+        }
+    }
+    let a = service
+        .list(
+            &context,
+            vec![],
+            None,
+            None,
+            Some("notes/a.md".into()),
+            20,
+            0,
+        )
+        .await
+        .unwrap();
+    let b = service
+        .list(
+            &context,
+            vec![],
+            None,
+            None,
+            Some("notes/b.md".into()),
+            20,
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(a.len(), 1);
+    assert!(a[0].content.contains("formula"));
+    assert_eq!(a[0].sources.len(), 1);
+    assert_eq!(b.len(), 1);
+    assert!(!b[0].content.contains("formula"));
+    assert_eq!(b[0].sources.len(), 1);
+    assert_ne!(a[0].id, b[0].id);
+}
+
+#[tokio::test]
+async fn changed_judging_profile_splits_and_revalidates_existing_groups_automatically() {
+    let (_dir, state, context, core, service, model, _files, ids) =
+        two_formal_sources("group-revalidation").await;
+    service
+        .merge_equivalent_formal_memories(&context, &core, ids[0], ids[1])
+        .await
+        .unwrap();
+    model.mode.store(MODEL_ALL_DIFFERENT, Ordering::SeqCst);
+    let binding = state
+        .providers()
+        .resolve_binding(&context, "memory_extraction")
+        .await
+        .unwrap()
+        .unwrap();
+    let providers = ProviderService::new(
+        state.clone(),
+        AuthService::new(
+            state.auth(),
+            MasterKeyRing::from_bytes(1, &[23; 32]).unwrap(),
+        ),
+    );
+    providers
+        .bind_model(
+            Some(&context),
+            "memory_extraction",
+            binding.model_id,
+            json!({"temperature":0.1}),
+            Some(binding.revision),
+        )
+        .await
+        .unwrap();
+    for _ in 0..8 {
+        if !service
+            .maintain_memory_dedup(&context, &core)
+            .await
+            .unwrap()
+        {
+            break;
+        }
+    }
+    let all = service
+        .list(&context, vec![], None, None, None, 20, 0)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 4);
+    assert!(all.iter().all(|m| m.sources.len() == 1));
+}
+
+#[tokio::test]
+async fn malformed_pair_is_retained_without_repeated_paid_judgment() {
+    let (_dir, _state, context, core, service, model, _files, ids) =
+        two_formal_sources("bad-pair-cache").await;
+    model.mode.store(MODEL_INVALID_PAIR, Ordering::SeqCst);
+    assert!(
+        service
+            .judge_memory_equivalence(&context, ids[0], ids[1])
+            .await
+            .is_err()
+    );
+    let calls = model.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        service
+            .judge_memory_equivalence(&context, ids[0], ids[1])
+            .await
+            .unwrap(),
+        mcp_vault_memory::MemoryRelation::Uncertain
+    );
+    assert_eq!(model.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(
+        service
+            .list(&context, vec![], None, None, None, 20, 0)
+            .await
+            .unwrap()
+            .len(),
+        4
+    );
+    assert_eq!(
+        service.rebuild(&context, &core).await.unwrap().quarantined,
+        0
+    );
+}
+
+#[tokio::test]
+async fn regenerated_contribution_cannot_reuse_an_absorbed_formal_id() {
+    let (_dir, state, context, core, service, _model, files, ids) =
+        two_formal_sources("absorbed-id-reservation").await;
+    service
+        .merge_equivalent_formal_memories(&context, &core, ids[0], ids[1])
+        .await
+        .unwrap();
+    assert!(matches!(
+        service.get(&context, ids[1]).await,
+        Err(MemoryError::NotFound)
+    ));
+    core.replace_bytes(
+        &context,
+        &files[1].path,
+        files[1].current_revision,
+        b"# FIRST\nSame compiler fact with additional source context.",
+        Actor::system(),
+        SourcePlane::System,
+        None,
+    )
+    .await
+    .unwrap();
+    service
+        .extract_note(&context, &core, &files[1].path)
+        .await
+        .unwrap();
+    service
+        .reconcile_formal_supports(&context, &core)
+        .await
+        .unwrap();
+    service
+        .adopt_current_memory_sets(&context, &core)
+        .await
+        .unwrap();
+    assert!(matches!(
+        service.get(&context, ids[1]).await,
+        Err(MemoryError::NotFound)
+    ));
+    let owner = state
+        .current_memory()
+        .contribution_owner(&context, ids[1])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(owner, ids[1]);
+    assert_eq!(
+        service.rebuild(&context, &core).await.unwrap().quarantined,
+        0
+    );
+    assert!(matches!(
+        service.get(&context, ids[1]).await,
+        Err(MemoryError::NotFound)
+    ));
 }

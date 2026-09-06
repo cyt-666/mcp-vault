@@ -42,6 +42,7 @@ fn memory(value: &mut Value) {
             "valid_from",
             "valid_to",
             "sources",
+            "source_count",
         ],
     );
     if let Some(sources) = value.get_mut("sources").and_then(Value::as_array_mut) {
@@ -50,6 +51,7 @@ fn memory(value: &mut Value) {
         }
         sources.retain(|source| source.get("path").is_some());
         sources.dedup();
+        sources.truncate(8);
     }
 }
 fn revision(value: &mut Value) {

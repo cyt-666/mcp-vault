@@ -360,19 +360,33 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         .map_err(|failure| ServerError::Workers(failure.code))?;
     supervisor
         .register_job_handler(
+            "memory.deduplicate_source",
+            workers::memory_source_dedup_job_handler(
+                state.clone(),
+                history_root.clone(),
+                core_runtime.clone(),
+                memory_service.clone(),
+            ),
+        )
+        .map_err(|failure| ServerError::Workers(failure.code))?;
+    supervisor
+        .register_job_handler(
             "embedding.rebuild",
             workers::embedding_job_handler(state.clone(), index_service, memory_service.clone()),
         )
         .map_err(|failure| ServerError::Workers(failure.code))?;
-    for vault in state.vaults().list().await? {
-        if state.vaults().availability(&vault).await? != mcp_vault_state::VaultAvailability::Ready {
-            continue;
-        }
-        let context = vault
-            .context()
-            .map_err(|_| ServerError::Workers("memory_context_invalid"))?;
-        workers::retire_legacy_memory_jobs(&state, &context).await?;
-    }
+    supervisor
+        .register_job_handler(
+            "memory.deduplicate",
+            workers::memory_dedup_job_handler(
+                state.clone(),
+                history_root.clone(),
+                core_runtime.clone(),
+                memory_service.clone(),
+            ),
+        )
+        .map_err(|failure| ServerError::Workers(failure.code))?;
+    admit_memory_maintenance(&state, &memory_service).await?;
     let worker_shutdown = workers::Cancellation::default();
     let worker_task = tokio::spawn({
         let supervisor = supervisor.clone();
@@ -741,6 +755,9 @@ async fn run_reconciliation_loop(
                     };
                     if memory.ensure_retrieval_calibration(&context).await.is_err() {
                         warn!(vault_id=%context.id(),error_code="calibration_admission_failed","calibration compensation will retry");
+                    }
+                    if memory.ensure_memory_dedup_scheduled(&context).await.is_err() {
+                        warn!(vault_id=%context.id(),error_code="memory_dedup_admission_failed","memory deduplication admission will retry");
                     }
                     match state.jobs().find_active_by_type(&context, "vault.reconcile").await {
                         Ok(None) => {
@@ -1289,3 +1306,29 @@ mod tests {
 
 #[cfg(test)]
 mod calibration_startup_tests;
+
+async fn admit_memory_maintenance(
+    state: &mcp_vault_state::StateStore,
+    memory_service: &mcp_vault_memory::MemoryService,
+) -> Result<(), ServerError> {
+    for vault in state.vaults().list().await? {
+        if state.vaults().availability(&vault).await? != mcp_vault_state::VaultAvailability::Ready {
+            continue;
+        }
+        let context = vault
+            .context()
+            .map_err(|_| ServerError::Workers("memory_context_invalid"))?;
+        workers::retire_legacy_memory_jobs(state, &context).await?;
+        if memory_service
+            .ensure_memory_dedup_scheduled(&context)
+            .await
+            .is_err()
+        {
+            tracing::warn!(vault_id=%context.id(), "memory_dedup_admission_failed");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod memory_dedup_startup_tests;

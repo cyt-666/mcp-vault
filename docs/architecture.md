@@ -521,12 +521,12 @@ The index never moves user notes automatically.
 
 ## 11. Memory architecture
 
-### 11.1 Current source-owned architecture (normative v2.1)
+### 11.1 Current contribution/formal architecture (normative v2.2)
 
 Memory has two ownership forms and no model-visible lifecycle. An explicit
-memory owns one canonical Markdown file. A note-derived item belongs to the one
-complete current set owned by its source File ID; the source note remains the
-authority and the set is a rebuildable/materialized derivative.
+memory owns one canonical Markdown file. A source contribution belongs to the complete current set owned by its source File ID.
+A formal note-derived object has its own canonical fact file and one or more
+exact contribution supports; ADR 0030 defines automatic maintenance.
 
 ```text
 explicit remember/update

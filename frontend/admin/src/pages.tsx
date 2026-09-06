@@ -1409,6 +1409,7 @@ function noteSemanticBlockerLabel(code: string): string {
 function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; notify: Notify; onRefresh: () => void }) {
   const [memories, setMemories] = useState(() => arrayRecords(data?.memories));
   const extraction = asRecord(data?.extraction);
+  const dedup = asRecord(extraction?.dedup);
   const embedding = asRecord(data?.embedding);
   const memoryJobs = arrayRecords(data?.memory_jobs);
   const [memoryActionId, setMemoryActionId] = useState('');
@@ -1416,8 +1417,8 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
   const [newKind, setNewKind] = useState('');
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<JsonObject | null>(null);
-  const [nextOffset, setNextOffset] = useState<unknown>(data?.next_offset);
-  useEffect(() => setNextOffset(data?.next_offset), [data?.next_offset]);
+  const [nextOffset, setNextOffset] = useState<unknown>(data?.next_cursor ?? data?.next_offset);
+  useEffect(() => setNextOffset(data?.next_cursor ?? data?.next_offset), [data?.next_cursor, data?.next_offset]);
 
   const loadedPages = useRef(1);
   const vaultSlug = stringValue(data?.vault_slug, '');
@@ -1426,13 +1427,21 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
     const first = arrayRecords(data?.memories);
     if (loadedPages.current === 1) { setMemories(first); return; }
     const prefix = vaultSlug ? `/vaults/${encodeURIComponent(vaultSlug)}` : '';
-    void Promise.all(Array.from({ length: loadedPages.current - 1 }, (_, index) => adminApi.request<JsonObject>(`${prefix}/memories?limit=50&offset=${(index + 1) * 50}`))).then((pages) => {
-      if (cancelled) return;
-      setMemories([first, ...pages.map((page) => arrayRecords(page.memories))].flat());
-      setNextOffset(pages.at(-1)?.next_offset);
-    }).catch(() => { /* Keep the loaded collection; page-level errors remain visible. */ });
+    void (async () => {
+      const pages = [first];
+      let next = data?.next_cursor ?? data?.next_offset;
+      for (let index = 1; index < loadedPages.current && (typeof next === 'string' || typeof next === 'number'); index += 1) {
+        const query = typeof next === 'string' ? `after_id=${encodeURIComponent(next)}` : `offset=${next}`;
+        const page = await adminApi.request<JsonObject>(`${prefix}/memories?limit=50&${query}`);
+        pages.push(arrayRecords(page.memories)); next = page.next_cursor ?? page.next_offset;
+      }
+      if (!cancelled) {
+        setMemories([...new Map(pages.flat().map((memory) => [memory.id, memory])).values()]);
+        setNextOffset(next);
+      }
+    })().catch(() => { /* Keep the loaded collection; page-level errors remain visible. */ });
     return () => { cancelled = true; };
-  }, [data?.memories, vaultSlug]);
+  }, [data?.memories, data?.next_cursor, data?.next_offset, vaultSlug]);
 
   async function deleteMemory(memory: JsonObject) {
     const id = stringValue(memory.id, '');
@@ -1444,7 +1453,7 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
     const content = stringValue(memory.content, '这条记忆').slice(0, 120);
     const derived = stringValue(memory.ownership) === 'note_derived';
     const consequence = derived
-      ? '这会重写该来源的当前记忆集合，并暂停该来源的自动提取，直到管理员明确恢复。'
+      ? '这会从所有已知支持来源中删除该记忆，并暂停这些来源的自动提取，直到管理员明确恢复。'
       : '当前规范 Markdown 和记忆投影都会删除。';
     if (!window.confirm(`确定删除这条当前记忆吗？\n\n${content}\n\n${consequence}\n修订历史或备份仍按保留策略存在，但模型接口无法读取。`)) return;
     setMemoryActionId(id);
@@ -1490,7 +1499,13 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
 
   return (
     <div className="page-stack">
-      <Notice tone="info">每篇来源笔记只拥有一套当前记忆。内容变化会立即让旧集合退出读取；移动不会调用模型。显式记忆则直接保存，不经过提取或整理。</Notice>
+      <Notice tone="info">来源笔记的当前贡献会自动整理为正式记忆；等价内容共享一个 ID，并保留全部支持来源。来源内容变化会立即使旧贡献失效。显式记忆直接保存。</Notice>
+      <Panel title="自动记忆整理" description="升级启动后自动接管已有记忆；模型暂不可用或额度耗尽时保留当前内容，稍后自动继续。">
+        <p>状态：{({ pending: '等待后台接管', processing: '整理中', covered_candidates: '本轮候选已处理', waiting_for_extraction_model: '等待提取模型', memory_equivalence_budget_exhausted: '等待预算恢复' } as Record<string, string>)[stringValue(dedup?.status, '')] ?? (dedup?.status ? `等待重试：${jobErrorLabel(dedup.status)}（${stringValue(dedup.status)}）` : '等待后台接管')}</p>
+        {numberValue(dedup?.retry_at) > 0 ? <p>下次可执行：{formatTime(dedup?.retry_at)}</p> : null}
+        <p>已有记忆：{dedup?.adopted === true ? '已接管' : '等待接管'} · 待比较组合：{String(dedup?.pending_pairs ?? 0)} · 已检查组合：{String(dedup?.checked_pairs ?? 0)}</p>
+        <p>当前阶段：{dedupStageLabel(dedup?.phase)} · 累计条目检查：{numberValue(dedup?.sentence_checked)}</p>
+      </Panel>
       <MemoryExtractionPanel data={extraction} jobs={memoryJobs} notify={notify} onRefresh={onRefresh} />
       <MemoryEmbeddingPanel data={embedding} notify={notify} onRefresh={onRefresh} />
       <MemoryManagement data={data} notify={notify} onRefresh={onRefresh} />
@@ -1549,10 +1564,10 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
             })}
           </div>
         )}
-        {typeof nextOffset === 'number' ? <button type="button" className="secondary-button" onClick={() => {
-          void adminApi.request<JsonObject>(`/memories?limit=50&offset=${nextOffset}`).then((result) => {
+        {(typeof nextOffset === 'number' || typeof nextOffset === 'string') ? <button type="button" className="secondary-button" onClick={() => {
+          void adminApi.request<JsonObject>(`/memories?limit=50&${typeof nextOffset === 'string' ? `after_id=${encodeURIComponent(nextOffset)}` : `offset=${nextOffset}`}`).then((result) => {
             loadedPages.current += 1;
-            setMemories((current) => [...current, ...arrayRecords(result.memories)]); setNextOffset(result.next_offset);
+            setMemories((current) => [...new Map([...current, ...arrayRecords(result.memories)].map((memory) => [memory.id, memory])).values()]); setNextOffset(result.next_cursor ?? result.next_offset);
           }).catch((error: unknown) => notify(formatRequestError(error), 'danger'));
         }}>加载更多记忆</button> : null}
       </Panel>
@@ -1914,7 +1929,22 @@ function jobProgressDetail(job: JsonObject): string {
   const lastNoteElapsedMs = numberValue(progress.last_note_elapsed_ms);
 
   let detail: string;
-  if (phase === 'extracting_note') {
+  if (phase === 'memory_dedup') {
+    const reason = stringValue(progress.wait_reason, '');
+    const maintenance = stringValue(progress.maintenance_status, '');
+    const labels: Record<string, string> = {
+      processing: '正在自动整理', covered_candidates: '本轮候选处理完成',
+      waiting_for_extraction_model: '等待已有提取模型可用',
+      memory_dedup_checkpoint: '分批处理，自动续跑',
+      memory_equivalence_slice_exhausted: '本轮请求数达到上限，继续处理',
+      memory_equivalence_slice_timeout: '本轮处理超时，将从检查点重试',
+      memory_equivalence_budget_exhausted: '等待自动整理预算恢复',
+    };
+    detail = `${dedupStageLabel(progress.stage)} · 累计条目检查 ${numberValue(progress.sentence_checked)} 次 · 已检查 ${numberValue(progress.checked_pairs)} 组，待比较 ${numberValue(progress.pending_pairs)} 组`;
+    if (reason) detail += ` · ${labels[reason] ?? jobErrorLabel(reason)}`;
+    else if (maintenance && !['processing', 'covered_candidates'].includes(maintenance)) detail += ` · ${labels[maintenance] ?? jobErrorLabel(maintenance)}`;
+    if (numberValue(progress.resume_at) > 0) detail += ` · 下次可执行 ${formatTime(progress.resume_at)}`;
+  } else if (phase === 'extracting_note') {
     detail = `正在处理第 ${currentIndex || completed + 1} / ${total || 1} 篇${currentPath ? `：${currentPath}` : ''}`;
   } else if (phase === 'waiting_retry' || phase === 'failed') {
     detail = `第 ${currentIndex || completed + 1} / ${total || 1} 篇未完成${currentPath ? `：${currentPath}` : ''}`;
@@ -1973,6 +2003,11 @@ function jobProgressDetail(job: JsonObject): string {
   }
   return outcomes.length > 0 ? `${detail} · ${outcomes.join(' · ')}` : detail;
 }
+function dedupStageLabel(value: unknown): string {
+  const phase = stringValue(value, 'pending');
+  return ({ pending: '等待接管', recovering: '恢复中断操作', checking_sources: '检查来源状态', adopting: '接管已有记忆', finding_candidates: '查找相似记忆', checking_pairs: '比较记忆是否等价', checking_sentences: '检查记忆条目的重复表述', checkpoint: '本轮检查结束' } as Record<string,string>)[phase] ?? phase;
+}
+
 function schemaViolationLabel(issue: string, path: string): string {
   const location = path || '返回对象';
   const labels: Record<string, string> = {
@@ -2259,6 +2294,7 @@ function jobTypeLabel(value: unknown): string {
     'index.rebuild': '重建知识索引',
     'outbox.event': '文件事件处理',
     'memory.extract': '生成来源当前记忆集合',
+    'memory.deduplicate': '自动记忆去重与合并',
     'memory.consolidate': '旧版记忆任务（已退役）',
     'memory.enrich_retrieval': '旧版记忆任务（已退役）',
     'memory.reset_pipeline': '旧版记忆任务（已退役）',

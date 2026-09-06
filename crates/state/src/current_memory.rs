@@ -17,6 +17,9 @@ use mcp_vault_domain::{
 
 use crate::{StateError, memory_search_terms, now_millis};
 
+mod formal;
+pub use formal::*;
+
 const MAX_MEMORY_LIMIT: u32 = 200;
 
 /// Ownership determines which object controls replacement and deletion.
@@ -137,7 +140,7 @@ pub struct CurrentMemorySourceRecord {
 }
 
 /// Current item plus provenance and owning-set metadata.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CurrentMemoryBundle {
     /// Current item.
     pub memory: CurrentMemoryRecord,
@@ -148,7 +151,7 @@ pub struct CurrentMemoryBundle {
 }
 
 /// One source note's single current memory set.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct MemoryNoteSetRecord {
     /// Stable set identity.
     pub id: MemorySetId,
@@ -251,6 +254,8 @@ pub struct CurrentMemorySourceSetView {
 /// Current-only list/search filters.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CurrentMemoryFilter {
+    /// Stable list continuation; ordering is by identity, independent of updates.
+    pub after_id: Option<MemoryId>,
     /// Optional kind labels.
     pub kinds: Vec<String>,
     /// Optional ownership labels.
@@ -347,6 +352,74 @@ impl CurrentMemoryRepository {
         Self { pool }
     }
 
+    /// Read a derived judgment only inside its Vault and exact input/profile key.
+    pub async fn equivalence_decision(
+        &self,
+        context: &VaultContext,
+        input_hash: &str,
+    ) -> Result<Option<String>, StateError> {
+        self.ensure_vault_context(context).await?;
+        Ok(sqlx::query_scalar(
+            "SELECT relation FROM memory_equivalence_decisions WHERE vault_id=? AND input_hash=?",
+        )
+        .bind(context.id().to_string())
+        .bind(input_hash)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// Persist a validated decision; concurrent identical inputs retain the
+    /// first committed judgment rather than changing a previously used result.
+    pub async fn save_equivalence_decision(
+        &self,
+        context: &VaultContext,
+        input_hash: &str,
+        relation: &str,
+    ) -> Result<(), StateError> {
+        self.ensure_vault_context(context).await?;
+        if input_hash.len() != 71 || !input_hash.starts_with("sha256:") {
+            return Err(StateError::InvalidInput(
+                "equivalence input hash is invalid",
+            ));
+        }
+        sqlx::query("INSERT INTO memory_equivalence_decisions(vault_id,input_hash,relation,created_at) VALUES(?,?,?,?) ON CONFLICT(vault_id,input_hash) DO NOTHING")
+            .bind(context.id().to_string()).bind(input_hash).bind(relation).bind(now_millis()?)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Atomically reserve one real dispatch against a rolling 24-hour Vault
+    /// limit. Expiration needs no administrator action or budget reset.
+    pub async fn reserve_equivalence_dispatch(
+        &self,
+        context: &VaultContext,
+        input_bytes: usize,
+    ) -> Result<bool, StateError> {
+        self.ensure_vault_context(context).await?;
+        let bytes = i64::try_from(input_bytes)
+            .map_err(|_| StateError::InvalidInput("equivalence request is too large"))?;
+        let now = now_millis()?;
+        let cutoff = now.saturating_sub(24 * 60 * 60 * 1000);
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query(
+            "DELETE FROM memory_equivalence_dispatches WHERE vault_id=? AND dispatched_at<=?",
+        )
+        .bind(context.id().to_string())
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await?;
+        let (requests, used): (i64, i64) = sqlx::query_as("SELECT count(*),coalesce(sum(input_bytes),0) FROM memory_equivalence_dispatches WHERE vault_id=?")
+            .bind(context.id().to_string()).fetch_one(&mut *tx).await?;
+        if requests >= 256 || bytes > (4 * 1024 * 1024) - used {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        sqlx::query("INSERT INTO memory_equivalence_dispatches(vault_id,dispatched_at,input_bytes) VALUES(?,?,?)")
+            .bind(context.id().to_string()).bind(now).bind(bytes).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     /// Page independently of memory items so an empty paused source stays manageable.
     pub async fn list_source_sets(
         &self,
@@ -359,7 +432,7 @@ impl CurrentMemoryRepository {
         validate_page(limit, offset)?;
         let sql = format!(
             "SELECT s.source_file_id AS file_id, COALESCE(f.path,s.source_path) AS path, s.set_revision, s.extraction_paused AS paused, (SELECT count(*) FROM memory_current_items i WHERE i.vault_id=s.vault_id AND i.note_set_id=s.id AND {}) AS current_item_count, (f.deleted_at IS NULL AND f.id IS NOT NULL AND lower(f.path) LIKE '%.md') AS restorable FROM memory_note_sets s LEFT JOIN file_entries f ON f.vault_id=s.vault_id AND f.id=s.source_file_id WHERE s.vault_id=? AND (? IS NULL OR s.extraction_paused=?) ORDER BY s.source_path,s.source_file_id LIMIT ? OFFSET ?",
-            current_eligibility_sql()
+            contribution_eligibility_sql()
         );
         Ok(sqlx::query_as(&sql)
             .bind(context.id().to_string())
@@ -423,7 +496,10 @@ impl CurrentMemoryRepository {
         memory_id: MemoryId,
     ) -> Result<Option<CurrentMemoryBundle>, StateError> {
         self.ensure_vault_context(context).await?;
-        let sql = format!("{} WHERE i.vault_id = ? AND i.id = ?", item_select());
+        let sql = format!(
+            "{} WHERE i.vault_id = ? AND i.id = ?",
+            contribution_select()
+        );
         let row = sqlx::query_as::<_, CurrentMemoryRow>(&sql)
             .bind(context.id().to_string())
             .bind(memory_id.to_string())
@@ -448,7 +524,11 @@ impl CurrentMemoryRepository {
         query.push(" AND ");
         query.push(current_eligibility_sql());
         append_filter(&mut query, filter);
-        query.push(" ORDER BY i.updated_at DESC, i.id ASC LIMIT ");
+        if let Some(id) = filter.after_id {
+            query.push(" AND i.id > ");
+            query.push_bind(id.to_string());
+        }
+        query.push(" ORDER BY i.id ASC LIMIT ");
         query.push_bind(i64::from(limit));
         query.push(" OFFSET ");
         query.push_bind(i64::from(offset));
@@ -463,7 +543,7 @@ impl CurrentMemoryRepository {
     pub async fn counts(&self, context: &VaultContext) -> Result<CurrentMemoryCounts, StateError> {
         self.ensure_vault_context(context).await?;
         let sql = format!(
-            "SELECT i.ownership, COUNT(*) FROM memory_current_items i\n\
+            "SELECT i.ownership, COUNT(*) FROM memory_public_items i\n\
              WHERE i.vault_id = ? AND {} GROUP BY i.ownership",
             current_eligibility_sql()
         );
@@ -517,7 +597,7 @@ impl CurrentMemoryRepository {
                     i.updated_at, i.last_recalled_at, i.recall_count,\n\
                     bm25(memory_current_fts) AS memory_rank\n\
              FROM memory_current_fts\n\
-             JOIN memory_current_items i\n\
+             JOIN memory_public_items i\n\
                ON i.vault_id = memory_current_fts.vault_id\n\
               AND i.id = memory_current_fts.memory_id\n\
              WHERE memory_current_fts.vault_id = ",
@@ -636,7 +716,7 @@ impl CurrentMemoryRepository {
         }
         self.ensure_explicit_canonical_current(context, &bundle.memory)
             .await?;
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         delete_item_fts(&mut transaction, context.id(), bundle.memory.id).await?;
         upsert_item(&mut transaction, &bundle.memory).await?;
         replace_sources(
@@ -709,7 +789,7 @@ impl CurrentMemoryRepository {
         }
         self.ensure_explicit_canonical_current(context, &bundle.memory)
             .await?;
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         delete_item_fts(&mut transaction, context.id(), bundle.memory.id).await?;
         upsert_item(&mut transaction, &bundle.memory).await?;
         replace_sources(
@@ -823,7 +903,7 @@ impl CurrentMemoryRepository {
         {
             return Err(StateError::Conflict);
         }
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         delete_item_fts(&mut transaction, context.id(), memory_id).await?;
         let result = sqlx::query(
             "DELETE FROM memory_current_items\n\
@@ -887,7 +967,7 @@ impl CurrentMemoryRepository {
         self.ensure_vault_context(context).await?;
         let sql = format!(
             "{} WHERE i.vault_id = ? AND i.note_set_id = ? ORDER BY i.ordinal, i.id",
-            item_select()
+            contribution_select()
         );
         let rows = sqlx::query_as::<_, CurrentMemoryRow>(&sql)
             .bind(context.id().to_string())
@@ -1003,6 +1083,8 @@ impl CurrentMemoryRepository {
         items: &[CurrentMemoryBundle],
     ) -> Result<Vec<CurrentMemoryBundle>, StateError> {
         self.ensure_vault_context(context).await?;
+        self.ensure_no_formal_source_rewrite(context, note_set.source_file_id)
+            .await?;
         validate_note_set(context, note_set)?;
         for item in items {
             validate_current_bundle(context, item)?;
@@ -1036,7 +1118,7 @@ impl CurrentMemoryRepository {
             return Err(StateError::Conflict);
         }
 
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         delete_set_fts(&mut transaction, context.id(), note_set.id).await?;
         if current.is_some() {
             sqlx::query("DELETE FROM memory_current_items WHERE vault_id = ? AND note_set_id = ?")
@@ -1087,6 +1169,8 @@ impl CurrentMemoryRepository {
         items: &[CurrentMemoryBundle],
     ) -> Result<Vec<CurrentMemoryBundle>, StateError> {
         self.ensure_vault_context(context).await?;
+        self.ensure_no_formal_source_rewrite(context, note_set.source_file_id)
+            .await?;
         validate_note_set(context, note_set)?;
         for item in items {
             validate_current_bundle(context, item)?;
@@ -1132,7 +1216,7 @@ impl CurrentMemoryRepository {
             }
         }
 
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if let Some(current) = current.as_ref() {
             delete_set_fts(&mut transaction, context.id(), current.id).await?;
             sqlx::query("DELETE FROM memory_current_items WHERE vault_id = ? AND note_set_id = ?")
@@ -1208,7 +1292,7 @@ impl CurrentMemoryRepository {
         {
             return Err(StateError::Conflict);
         }
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         delete_item_fts(&mut transaction, context.id(), memory_id).await?;
         let deleted = sqlx::query(
             "DELETE FROM memory_current_items\n\
@@ -1255,7 +1339,7 @@ impl CurrentMemoryRepository {
             })
             .ok_or(StateError::Conflict)?;
         let _ = current;
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         update_note_set(&mut transaction, updated_set, true).await?;
         let job_id = JobId::new();
         let now = now_millis()?;
@@ -1294,7 +1378,7 @@ impl CurrentMemoryRepository {
                     && set.extraction_paused == updated_set.extraction_paused
             })
             .ok_or(StateError::Conflict)?;
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         update_note_set(&mut transaction, updated_set, true).await?;
         transaction.commit().await?;
         Ok(true)
@@ -1311,12 +1395,14 @@ impl CurrentMemoryRepository {
         expected_set_revision: Revision,
     ) -> Result<bool, StateError> {
         self.ensure_vault_context(context).await?;
+        self.ensure_no_formal_source_rewrite(context, source_file_id)
+            .await?;
         let set = self
             .get_note_set_by_source(context, source_file_id)
             .await?
             .filter(|set| set.set_revision == expected_set_revision)
             .ok_or(StateError::Conflict)?;
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         delete_set_fts(&mut transaction, context.id(), set.id).await?;
         let result = sqlx::query(
             "DELETE FROM memory_note_sets\n\
@@ -1344,7 +1430,7 @@ impl CurrentMemoryRepository {
             return Ok(());
         }
         let now = now_millis()?;
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         for memory_id in memory_ids {
             sqlx::query(
                 "UPDATE memory_current_items\n\
@@ -1356,6 +1442,9 @@ impl CurrentMemoryRepository {
             .bind(memory_id.to_string())
             .execute(&mut *transaction)
             .await?;
+            sqlx::query("UPDATE memory_formal_items SET last_recalled_at = ?, recall_count = recall_count + 1 WHERE vault_id = ? AND id = ?")
+                .bind(now).bind(context.id().to_string()).bind(memory_id.to_string())
+                .execute(&mut *transaction).await?;
         }
         transaction.commit().await?;
         Ok(())
@@ -1551,7 +1640,13 @@ impl CurrentMemoryRepository {
             return Ok(None);
         };
         let memory = row_to_item(row)?;
-        let sources = self.list_sources(context, memory.id).await?;
+        let sources = if memory.ownership == CurrentMemoryOwnership::NoteDerived
+            && memory.canonical_file_id.is_some()
+        {
+            self.formal_sources(context, memory.id).await?
+        } else {
+            self.list_sources(context, memory.id).await?
+        };
         let note_set = match memory.note_set_id {
             Some(set_id) => self.get_note_set(context, set_id).await?,
             None => None,
@@ -1687,7 +1782,7 @@ impl CurrentMemoryRepository {
     }
 }
 
-fn item_select() -> &'static str {
+fn contribution_select() -> &'static str {
     "SELECT i.id, i.vault_id, i.ownership, i.note_set_id, i.ordinal, i.kind,\n\
             i.content, i.normalized_content, i.content_hash, i.importance,\n\
             i.confidence, i.origin, i.revision, i.canonical_file_id,\n\
@@ -1695,6 +1790,10 @@ fn item_select() -> &'static str {
             i.tags_json, i.entities_json, i.metadata_json, i.created_at, i.updated_at,\n\
             i.last_recalled_at, i.recall_count\n\
      FROM memory_current_items i"
+}
+
+fn item_select() -> String {
+    contribution_select().replace("FROM memory_current_items i", "FROM memory_public_items i")
 }
 
 fn set_select() -> &'static str {
@@ -1720,7 +1819,7 @@ fn snapshot_select() -> &'static str {
 /// A note move keeps the same File ID/hash and remains eligible; a content
 /// change, deletion, missing canonical file, or half-published rewrite fails
 /// closed immediately.
-fn current_eligibility_sql() -> &'static str {
+fn contribution_eligibility_sql() -> &'static str {
     "(\n\
         (i.ownership = 'explicit' AND EXISTS (\n\
             SELECT 1 FROM file_entries canonical\n\
@@ -1745,6 +1844,13 @@ fn current_eligibility_sql() -> &'static str {
               AND canonical.current_revision = s.canonical_revision\n\
         ))\n\
      )"
+}
+
+fn current_eligibility_sql() -> String {
+    format!(
+        "(((i.ownership='explicit' OR i.canonical_file_id IS NULL) AND {}) OR (i.ownership='note_derived' AND i.canonical_file_id IS NOT NULL AND EXISTS(SELECT 1 FROM file_entries fc WHERE fc.vault_id=i.vault_id AND fc.id=i.canonical_file_id AND fc.deleted_at IS NULL AND (fc.current_revision=i.canonical_revision OR EXISTS(SELECT 1 FROM memory_formal_operations op,json_each(op.payload_json,'$.before') b WHERE op.vault_id=i.vault_id AND json_extract(b.value,'$.memory.id')=i.id AND json_extract(b.value,'$.memory.canonical_revision')=i.canonical_revision))) AND EXISTS (SELECT 1 FROM memory_valid_formal_supports p WHERE p.vault_id=i.vault_id AND p.formal_id=i.id))) AND NOT EXISTS (SELECT 1 FROM memory_formal_operations op, json_each(op.payload_json,'$.forgotten') d WHERE op.vault_id=i.vault_id AND d.value=i.id)",
+        contribution_eligibility_sql()
+    )
 }
 
 fn append_filter<'a>(query: &mut QueryBuilder<'a, Sqlite>, filter: &'a CurrentMemoryFilter) {
@@ -1791,7 +1897,7 @@ fn append_filter<'a>(query: &mut QueryBuilder<'a, Sqlite>, filter: &'a CurrentMe
                ON current_file.vault_id = source.vault_id\n\
               AND current_file.id = source.note_file_id\n\
               AND current_file.deleted_at IS NULL\n\
-             WHERE source.vault_id = i.vault_id AND source.memory_id = i.id\n\
+             WHERE source.vault_id = i.vault_id AND (source.memory_id = i.id AND i.canonical_file_id IS NULL OR i.ownership='explicit' AND source.memory_id=i.id OR EXISTS(SELECT 1 FROM memory_valid_formal_supports p WHERE p.vault_id=i.vault_id AND p.formal_id=i.id AND p.contribution_id=source.memory_id))\n\
                AND COALESCE(current_file.path, source.note_path) = ",
         );
         query.push_bind(source_path);
@@ -1814,8 +1920,15 @@ async fn upsert_item(
     transaction: &mut Transaction<'_, Sqlite>,
     item: &CurrentMemoryRecord,
 ) -> Result<(), StateError> {
-    sqlx::query(
-        "INSERT INTO memory_current_items\n\
+    upsert_item_table(transaction, item, false).await
+}
+
+async fn upsert_item_table(
+    transaction: &mut Transaction<'_, Sqlite>,
+    item: &CurrentMemoryRecord,
+    formal: bool,
+) -> Result<(), StateError> {
+    let statement = "INSERT INTO memory_current_items\n\
          (id, vault_id, ownership, note_set_id, ordinal, kind, content,\n\
           normalized_content, content_hash, importance, confidence, origin, revision,\n\
           canonical_file_id, canonical_path, canonical_revision, valid_from, valid_to,\n\
@@ -1834,38 +1947,51 @@ async fn upsert_item(
           valid_from = excluded.valid_from, valid_to = excluded.valid_to,\n\
           tags_json = excluded.tags_json, entities_json = excluded.entities_json,\n\
           metadata_json = excluded.metadata_json, updated_at = excluded.updated_at,\n\
-          last_recalled_at = excluded.last_recalled_at, recall_count = excluded.recall_count",
-    )
-    .bind(item.id.to_string())
-    .bind(item.vault_id.to_string())
-    .bind(item.ownership.as_str())
-    .bind(item.note_set_id.map(|id| id.to_string()))
-    .bind(item.ordinal.map(i64::from))
-    .bind(item.kind.as_deref())
-    .bind(&item.content)
-    .bind(&item.normalized_content)
-    .bind(&item.content_hash)
-    .bind(item.importance)
-    .bind(item.confidence)
-    .bind(&item.origin)
-    .bind(item.revision.as_i64()?)
-    .bind(item.canonical_file_id.map(|id| id.to_string()))
-    .bind(item.canonical_path.as_ref().map(VaultPath::as_str))
-    .bind(item.canonical_revision.map(Revision::as_i64).transpose()?)
-    .bind(item.valid_from)
-    .bind(item.valid_to)
-    .bind(serde_json::to_string(&item.tags)?)
-    .bind(serde_json::to_string(&item.entities)?)
-    .bind(serde_json::to_string(&item.metadata)?)
-    .bind(item.created_at)
-    .bind(item.updated_at)
-    .bind(item.last_recalled_at)
-    .bind(
-        i64::try_from(item.recall_count)
-            .map_err(|_| StateError::InvalidInput("current-memory recall count is invalid"))?,
-    )
-    .execute(&mut **transaction)
-    .await?;
+          last_recalled_at = excluded.last_recalled_at, recall_count = excluded.recall_count";
+    let statement = if formal {
+        statement.replace("memory_current_items", "memory_formal_items")
+    } else {
+        statement.to_owned()
+    };
+    sqlx::query(&statement)
+        .bind(item.id.to_string())
+        .bind(item.vault_id.to_string())
+        .bind(item.ownership.as_str())
+        .bind(item.note_set_id.map(|id| id.to_string()))
+        .bind(item.ordinal.map(i64::from))
+        .bind(item.kind.as_deref())
+        .bind(&item.content)
+        .bind(&item.normalized_content)
+        .bind(&item.content_hash)
+        .bind(item.importance)
+        .bind(item.confidence)
+        .bind(&item.origin)
+        .bind(item.revision.as_i64()?)
+        .bind(item.canonical_file_id.map(|id| id.to_string()))
+        .bind(item.canonical_path.as_ref().map(VaultPath::as_str))
+        .bind(item.canonical_revision.map(Revision::as_i64).transpose()?)
+        .bind(item.valid_from)
+        .bind(item.valid_to)
+        .bind(serde_json::to_string(&item.tags)?)
+        .bind(serde_json::to_string(&item.entities)?)
+        .bind(serde_json::to_string(&item.metadata)?)
+        .bind(item.created_at)
+        .bind(item.updated_at)
+        .bind(item.last_recalled_at)
+        .bind(
+            i64::try_from(item.recall_count)
+                .map_err(|_| StateError::InvalidInput("current-memory recall count is invalid"))?,
+        )
+        .execute(&mut **transaction)
+        .await?;
+    if !formal {
+        sqlx::query("UPDATE memory_current_items SET semantic_hash=? WHERE vault_id=? AND id=?")
+            .bind(contribution_semantic_hash(item)?)
+            .bind(item.vault_id.to_string())
+            .bind(item.id.to_string())
+            .execute(&mut **transaction)
+            .await?;
+    }
     Ok(())
 }
 
@@ -1917,6 +2043,49 @@ async fn insert_item_fts(
     transaction: &mut Transaction<'_, Sqlite>,
     item: &CurrentMemoryRecord,
 ) -> Result<(), StateError> {
+    if item.ownership == CurrentMemoryOwnership::NoteDerived {
+        let enabled: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM memory_formal_mode WHERE vault_id=? AND enabled=1)",
+        )
+        .bind(item.vault_id.to_string())
+        .fetch_one(&mut **transaction)
+        .await?;
+        if enabled {
+            return Ok(());
+        }
+    }
+    let exists: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM memory_formal_items WHERE vault_id=? AND id=?")
+            .bind(item.vault_id.to_string())
+            .bind(item.id.to_string())
+            .fetch_one(&mut **transaction)
+            .await?;
+    if exists == 0 {
+        insert_item_fts_raw(transaction, item).await?;
+    }
+    Ok(())
+}
+async fn delete_item_fts(
+    transaction: &mut Transaction<'_, Sqlite>,
+    vault_id: VaultId,
+    memory_id: MemoryId,
+) -> Result<(), StateError> {
+    let exists: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM memory_formal_items WHERE vault_id=? AND id=?")
+            .bind(vault_id.to_string())
+            .bind(memory_id.to_string())
+            .fetch_one(&mut **transaction)
+            .await?;
+    if exists == 0 {
+        delete_item_fts_raw(transaction, vault_id, memory_id).await?;
+    }
+    Ok(())
+}
+
+async fn insert_item_fts_raw(
+    transaction: &mut Transaction<'_, Sqlite>,
+    item: &CurrentMemoryRecord,
+) -> Result<(), StateError> {
     sqlx::query(
         "INSERT INTO memory_current_fts\n\
          (vault_id, memory_id, content, normalized_content, entities, tags, search_terms)\n\
@@ -1939,7 +2108,7 @@ async fn insert_item_fts(
     Ok(())
 }
 
-async fn delete_item_fts(
+async fn delete_item_fts_raw(
     transaction: &mut Transaction<'_, Sqlite>,
     vault_id: VaultId,
     memory_id: MemoryId,
@@ -1961,7 +2130,7 @@ async fn delete_set_fts(
         "DELETE FROM memory_current_fts\n\
          WHERE vault_id = ? AND memory_id IN (\n\
              SELECT id FROM memory_current_items\n\
-             WHERE vault_id = ? AND note_set_id = ?\n\
+             WHERE vault_id = ? AND note_set_id = ? AND NOT EXISTS (SELECT 1 FROM memory_formal_items f WHERE f.vault_id=memory_current_items.vault_id AND f.id=memory_current_items.id)\n\
          )",
     )
     .bind(vault_id.to_string())

@@ -1,6 +1,6 @@
 # Long-Term Memory System
 
-This document is the normative memory design for MCP Vault v2.1. ADR 0026
+This document is the normative memory design for MCP Vault v2.2. ADR 0030 extends source ownership with automatically maintained formal memories; ADR 0026
 supersedes the prerelease lifecycle, candidate, two-phase consolidation, and
 source-health designs. Their tables may remain as non-destructive migration
 input, but no MCP, Admin, resource, embedding, or recall path treats them as
@@ -17,8 +17,8 @@ route.
 There are exactly two ownership modes:
 
 - `explicit`: a user, Agent, Admin, or importer owns one independent memory;
-- `note_derived`: one item in the single current set owned by one source File
-  ID.
+- `note_derived`: one formal proposition supported by exact current contributions
+  from one or more source File IDs.
 
 There is no archive, restore, supersede, candidate approval, raw-memory inbox,
 global consolidation generation, or query-time memory model.
@@ -30,6 +30,7 @@ Current knowledge is materialized in the Vault reserved namespace:
 ```text
 .mcp-vault/memory/current/explicit/{memory_id}.md
 .mcp-vault/memory/current/sources/{source_file_id}.md
+.mcp-vault/memory/current/facts/{memory_id}.md
 ```
 
 The exact reserved root is configuration-owned. Explicit files contain the
@@ -39,7 +40,10 @@ flag, extraction profile, and every current item in deterministic order.
 
 SQLite owns operational coordination:
 
-- `memory_current_items` and `memory_current_sources` are current projections;
+- `memory_current_items` stores explicit memories and internal source contributions;
+- `memory_formal_items` and `memory_formal_supports` project formal facts;
+- `memory_public_items` is the shared get/list/recall/FTS/embedding read authority;
+- `memory_current_sources` stores exact contribution provenance;
 - `memory_note_sets` stores one row per source File ID;
 - `memory_note_set_snapshots` stores validated, prepared whole-set writes;
 - `memory_current_idempotency` and
@@ -87,7 +91,7 @@ importance, and database state. Invalid/unknown kinds and invalid, duplicate,
 or excess tags are dropped with a bounded content-free warning; they never
 discard otherwise valid content. Missing/invalid required content, a missing
 or oversized `memories` array, and ambiguous root structure fail the complete
-replacement. Duplicate normalized propositions are collapsed and secret-like
+replacement. Exactly identical content/kind/tag proposals are collapsed and secret-like
 text is redacted before publication.
 
 The extraction prompt requires complete useful coverage while preserving the
@@ -97,7 +101,7 @@ content need not be autobiographical. Note text is untrusted evidence and
 cannot instruct the extractor.
 
 An empty array is a valid current empty set. A replacement is all-or-nothing;
-there is no `supersedes` edge and no partial merge. Exact normalized items may
+there is no `supersedes` edge and no partial merge. Exact items may
 retain their stable item ID while their revision advances. Removed items cease
 to exist in the current projection.
 
@@ -280,3 +284,79 @@ are separate from memory provenance. Compact recall/list omit internal ranking a
 managed-memory-file metadata; include_details returns the extended record, while
 get_memory is always a full single-record read. Internal service/Admin contracts and
 complete-object token-budget accounting remain unchanged. No evaluation pass is required.
+
+## Automatic exact source-set maintenance (ADR-0030)
+
+The automatic `memory.deduplicate` worker compacts existing current sets, including
+paused sets. The legacy `memory.deduplicate_source` handler remains registered for
+previously queued exact-compaction jobs. The local operation removes only
+byte-identical content with identical semantic metadata. It retains the earliest
+source ordinal, rewrites the complete canonical set through the existing
+prepared snapshot protocol, preserves source pause state and surviving item IDs,
+and invalidates only removed objects' vectors. Remaining ordinals are contiguous
+so deleting an interior item remains compatible with Markdown rebuild.
+
+Extraction exact deduplication likewise must not use case-folded/NFKC lexical
+identity as evidence of equality. Different kinds or tags remain distinct.
+
+The application uses the existing authorized extraction model for structured
+semantic proposals, backed by Vault-isolated decisions and rolling transport
+accounting. Formal publication and background admission are described below.
+
+## Automatic formal-memory maintenance (v2.2, ADR 0030)
+
+Normal startup upgrades schema and admits one `memory.deduplicate` job per ready
+Vault. It recovers local operations, reconciles source identities, compacts exact
+same-source duplicates, and adopts old v2.1 contributions as singleton facts
+without generation. The public view switches atomically after eligible inputs are
+covered. No migration endpoint, regeneration, rebind or Admin visit is required.
+
+Same-source inclusion removes only the covered contribution; it does not promote
+another document's shorter evidence into support for a longer body. Sentence
+simplification uses a bounded proposal followed by independent complete-equivalence
+verification and numeric/inline-code conservation. Cross-source merging requires
+full equivalence of every incoming member against the stable complete body;
+relatedness, inclusion, uncertainty, conflicting scopes and transitive paths are
+insufficient. Explicit memories are excluded. Confidence is never increased by
+source count. Necessary bounded source context is read through Vault Core.
+
+Candidates union same-source siblings, lexical matches and valid existing-vector
+Top-32 matches. Small corpora (at most 64 contributions) enumerate bounded pairs.
+Larger corpora report candidate coverage, never a proof of global semantic uniqueness.
+Source and contribution scans use stable keyset cursors. Candidate fingerprints,
+completed judgments and dispatch reservations survive restart. Installation-wide
+semantic concurrency is 2; each Vault has one active job; a slice permits 16
+actual transports; rolling 24-hour limits are 256 transports or 4 MiB input.
+Model unavailability and exhausted budgets defer semantic work while local cleanup
+remains automatic. Normal recall performs no generation.
+
+Facts live in `memory/current/facts/{id}.md`. Supports identify exact contribution
+ID, source File ID/hash and semantic metadata hash. Pending multi-file publications
+have a persisted operation; byte-identical canonical writes are adopted on retry,
+the public projection changes transactionally, and obsolete files are removed
+before the operation is retired. Rebuild restores source sets before facts without
+LLM calls. A stale source immediately ceases to qualify as support; remaining
+qualified sources keep the formal object alive.
+
+Deleting a formal ID removes every known exact contribution and pauses all known
+source sets. A concurrently regenerated different contribution is preserved.
+Absorbed IDs do not redirect reads or writes. Revision/history retention still
+applies through Vault Core; no history becomes readable as current memory.
+
+
+Candidate checking must not wait for an unbounded memory-body cleanup pass.
+Each slice first persists candidates and processes up to two pairs, then visits
+at most two formal memory bodies, including bodies which need no changes.
+Migration 0022 stores the singleton scan cursor before external I/O; interrupted
+items remain eligible on the next sweep while later items can advance. The
+successful body-check counter is cumulative (including cached/no-change checks),
+not a count of unique memories or rewrites. Original source-note bytes are never
+rewritten by this cleanup.
+
+The Admin stage is persisted before recovery, source checking, adoption,
+candidate discovery, pair comparison and singleton-body checking. Workers publish
+these content-free metrics every two seconds. Whole-slice timeout reports
+`memory_equivalence_slice_timeout` and backs off; request-count exhaustion remains
+`memory_equivalence_slice_exhausted` and can continue in the same worker.
+Pair counts measure candidate combinations, not memory objects or successful
+merges; one memory may participate in many comparisons.

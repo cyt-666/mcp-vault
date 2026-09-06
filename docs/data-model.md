@@ -762,7 +762,7 @@ unindexed filter columns; it is always replaceable from the canonical notes.
 
 ## 13. Memory schema
 
-The normative v2.1 schema is defined in `memory-system.md` and migration 0015.
+The normative current schema is defined in `memory-system.md` and migrations 0015–0022.
 It contains:
 
 - `memory_current_items`: explicit and note-derived current projections, with
@@ -1073,3 +1073,46 @@ and publication require the current note and live canonical file hash. Rebuilds
 retain matching plans; obsolete source plans cannot resolve vectors. Migration also
 retires old automatic diagnostic jobs without refunding budgets or changing valid
 vectors, completed reports, source pauses or canonical content.
+
+## Migration 0020: bounded equivalence judgments
+
+`memory_equivalence_decisions` stores `(vault_id,input_hash,relation,created_at)`
+without canonical prose. The exact request, extraction profile and judgment rule
+version determine its hash; the first committed decision wins for a key.
+`memory_equivalence_dispatches` records actual transport dispatch byte counts and
+timestamps under a Vault foreign key. An immediate transaction removes expired
+accounting and admits at most 256 requests and 4 MiB within a rolling 24 hours.
+Failed or interrupted requests retain their reservation. No manual budget reset
+is required when old reservations expire. This forward migration preserves all
+source sets, explicit records, vectors, pauses and pending snapshots. It is not a
+formal-memory schema migration and does not imply semantic upgrade completion.
+
+### Formal memory projections (migration 0021)
+
+`memory_formal_items` has independent IDs and canonical revisions.
+`memory_formal_supports` links exact contribution/source/semantic hashes;
+`memory_valid_formal_supports` qualifies them against current sources and canonical
+sets. `memory_formal_mode` atomically switches each Vault's `memory_public_items`
+view from old contributions to formal objects; explicit items remain independent.
+
+`memory_formal_operations` persists before/after facts and optional full source
+rewrites through canonical publication, atomic projection commit and cleanup.
+`memory_formal_pairs` and `memory_formal_examined` preserve bounded candidate work;
+`memory_formal_maintenance` exposes content-free progress and automatic retry time.
+`memory_equivalence_decisions`, `memory_equivalence_rewrites` and
+`memory_equivalence_dispatches` store rebuildable proposals and persistent billing
+bounds. Every key/query is Vault-scoped. Formal knowledge is portable Markdown,
+not confined to these projections. Formal facts use `mcp-vault-memory-fact/v2.2`;
+source-set and explicit canonical formats remain compatible with v2.1.
+
+`memory_formal_identity_reservations` retains only allocated formal IDs, preventing
+absorbed IDs from being reused after a source is regenerated. It contains no
+prose or lifecycle history and is not exposed by model-readable APIs.
+
+
+Migration 0022 adds Vault-scoped `memory_dedup_progress`: current phase,
+singleton scan cursor and cumulative successful body-check count. These are
+operational checkpoints without memory bodies; migration preserves existing
+formal objects, candidate decisions, retry deadlines and jobs. Cancellation may
+leave the cursor past an interrupted item; that current item remains eligible
+on the next sweep. Canonical memory formats remain v2.1 source sets/v2.2 facts.

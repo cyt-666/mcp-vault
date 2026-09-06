@@ -1671,13 +1671,37 @@ impl McpHandler {
             Ok(limit) => limit,
             Err(error) => return Ok(error_result(&context, error)),
         };
-        let offset = match parse_cursor(input.cursor.as_deref()) {
-            Ok(offset) => offset,
-            Err(error) => return Ok(error_result(&context, error)),
+        let (offset, after_id) = if let Some(value) = input
+            .cursor
+            .as_deref()
+            .and_then(|s| s.strip_prefix("memory:"))
+        {
+            let prefix = format!("{}:", request.vault.id());
+            match value
+                .strip_prefix(&prefix)
+                .and_then(|id| mcp_vault_domain::MemoryId::parse(id).ok())
+            {
+                Some(id) => (0, Some(id)),
+                None => {
+                    return Ok(error_result(
+                        &context,
+                        ToolErrorBody::new(
+                            "invalid_argument",
+                            "Memory cursor is invalid for this Vault.",
+                            false,
+                        ),
+                    ));
+                }
+            }
+        } else {
+            match parse_cursor(input.cursor.as_deref()) {
+                Ok(offset) => (offset, None),
+                Err(error) => return Ok(error_result(&context, error)),
+            }
         };
         match request
             .memory
-            .list(
+            .list_after(
                 &request.vault,
                 types,
                 input.tag,
@@ -1685,12 +1709,13 @@ impl McpHandler {
                 input.source_path,
                 limit,
                 offset,
+                after_id,
             )
             .await
         {
             Ok(memories) => Ok(success(json!({
                 "memories": memories,
-                "next_cursor": (memories.len() == limit as usize).then(|| format!("offset:{}", offset.saturating_add(limit))),
+                "next_cursor": (memories.len() == limit as usize).then(|| memories.last().map(|m|format!("memory:{}:{}",request.vault.id(),m.id))),
                 "truncated": memories.len() == limit as usize
             }))),
             Err(error) => Ok(error_result(&context, memory_error(error))),
@@ -1870,7 +1895,7 @@ impl McpHandler {
     #[tool(
         name = "forget_memory",
         title = "Forget a durable memory",
-        description = "Use this only when the user explicitly asks to forget a memory. First get_memory and use its revision as expected_revision. On success, `data` contains id, deleted, ownership and source_extraction_paused. Deleting a note-derived item rewrites its source set and pauses automatic extraction for that source; it does not delete the original note. There is no memory undo/archive tool. On conflict get_memory again; source extraction can be resumed explicitly in Admin.",
+        description = "Use this only when the user explicitly asks to forget a memory. First get_memory and use its revision as expected_revision. On success, `data` contains id, deleted, ownership and source_extraction_paused. Deleting a note-derived item removes its contributions from all known supporting source sets and pauses automatic extraction for those sources; it does not delete the original note. There is no memory undo/archive tool. On conflict get_memory again; source extraction can be resumed explicitly in Admin.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -5390,5 +5415,50 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert!(!body.to_string().contains(&memory_id), "{uri}: {body}");
         }
+    }
+    #[tokio::test]
+    async fn memory_cursor_survives_deletion_before_the_next_page() {
+        let (router, token, _root) = configured_memory_router().await;
+        for index in 0..5 {
+            let saved = call_tool_json(
+                &router,
+                &token,
+                800 + index,
+                "remember",
+                json!({"content":format!("Cursor fixture unique assertion {index}.")}),
+            )
+            .await;
+            assert_tool_ok(&saved, "remember");
+        }
+        let all = call_tool_json(&router, &token, 810, "list_memories", json!({"limit":100})).await;
+        let all = &all["result"]["structuredContent"]["data"]["memories"];
+        let first = call_tool_json(&router, &token, 811, "list_memories", json!({"limit":2})).await;
+        let data = &first["result"]["structuredContent"]["data"];
+        let deleted=call_tool_json(&router,&token,812,"forget_memory",json!({"id":data["memories"][0]["id"],"expected_revision":data["memories"][0]["revision"]})).await;
+        assert_tool_ok(&deleted, "forget_memory");
+        let next = call_tool_json(
+            &router,
+            &token,
+            813,
+            "list_memories",
+            json!({"limit":100,"cursor":data["next_cursor"]}),
+        )
+        .await;
+        assert_tool_ok(&next, "list_memories");
+        let remaining = next["result"]["structuredContent"]["data"]["memories"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            remaining
+                .iter()
+                .map(|m| m["id"].clone())
+                .collect::<Vec<_>>(),
+            all.as_array()
+                .unwrap()
+                .iter()
+                .skip(2)
+                .map(|m| m["id"].clone())
+                .collect::<Vec<_>>()
+        );
     }
 }

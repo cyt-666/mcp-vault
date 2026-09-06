@@ -45,6 +45,8 @@ use crate::{
     RelatedNoteView, RememberInput, RememberResult, current_markdown, markdown,
 };
 
+mod formal;
+
 const MAX_CONTENT_BYTES: usize = 64 * 1024;
 const MAX_RECALL_RESULTS: u32 = 100;
 const MAX_RECALL_TOKENS: u32 = 32_000;
@@ -130,6 +132,8 @@ struct PreparedCurrentItem {
 pub struct MemoryService {
     pub(crate) state: StateStore,
     pub(crate) providers: ProviderService,
+    dedup_slots: Arc<tokio::sync::Semaphore>,
+    dedup_slice: Option<Arc<std::sync::atomic::AtomicUsize>>,
     vault_write_locks: Arc<Mutex<HashMap<mcp_vault_domain::VaultId, Arc<Mutex<()>>>>>,
 }
 
@@ -139,6 +143,8 @@ impl MemoryService {
         Self {
             providers: ProviderService::new(state.clone(), auth),
             state,
+            dedup_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            dedup_slice: None,
             vault_write_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -148,6 +154,8 @@ impl MemoryService {
         Self {
             state,
             providers,
+            dedup_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            dedup_slice: None,
             vault_write_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -309,6 +317,367 @@ impl MemoryService {
             model,
             profile_hash,
         })
+    }
+
+    /// Admit bounded local maintenance for every existing source set, including
+    /// paused sets. No extraction model, UI action or new note event is needed.
+    pub async fn ensure_exact_memory_dedup_scheduled(
+        &self,
+        context: &VaultContext,
+    ) -> Result<u64, MemoryError> {
+        let mut offset = 0;
+        let mut scheduled = 0;
+        loop {
+            let page = self
+                .state
+                .current_memory()
+                .list_source_sets(context, None, 200, offset)
+                .await?;
+            let more = page.len() == 200;
+            for source in page {
+                let file_id = FileId::parse(&source.file_id).map_err(|_| MemoryError::Conflict)?;
+                let Some(set) = self
+                    .state
+                    .current_memory()
+                    .get_note_set_by_source(context, file_id)
+                    .await?
+                else {
+                    continue;
+                };
+                let key = format!(
+                    "vault:{}:exact-memory-dedup-v1:{}:{}:{}",
+                    context.id(),
+                    file_id,
+                    set.set_revision.value(),
+                    set.source_content_hash
+                );
+                self.state.jobs().enqueue(context,"memory.deduplicate_source",&key,
+                    &json!({"file_id":file_id,"memory_contract_generation":MEMORY_CONTRACT_GENERATION}),
+                    0,10,0).await?;
+                scheduled += 1;
+            }
+            if !more {
+                break;
+            }
+            offset += 200;
+        }
+        Ok(scheduled)
+    }
+
+    /// Compact byte-identical, metadata-identical current source contributions
+    /// using the existing crash-adoptable canonical snapshot protocol. Automatic
+    /// maintenance never pauses/resumes a source or touches its original note.
+    pub async fn deduplicate_source_exact(
+        &self,
+        context: &VaultContext,
+        core: &VaultCore,
+        source_file_id: FileId,
+    ) -> Result<u64, MemoryError> {
+        if let Some(snapshot) = self
+            .state
+            .current_memory()
+            .prepared_note_set_snapshot(context, source_file_id)
+            .await?
+        {
+            let current = self
+                .state
+                .files()
+                .get_by_id(context, source_file_id)
+                .await?;
+            if current.is_some_and(|file| {
+                file.is_active()
+                    && file.content_hash.as_deref() == Some(snapshot.source_content_hash.as_str())
+                    && file.current_revision == snapshot.source_revision
+            }) {
+                self.apply_prepared_note_set(context, core, snapshot, true)
+                    .await?;
+            } else {
+                self.state
+                    .current_memory()
+                    .reject_note_set_snapshot(context, snapshot.id)
+                    .await?;
+            }
+        }
+        let lock = self.vault_write_lock(context).await;
+        let guard = lock.lock().await;
+        let Some(set) = self
+            .state
+            .current_memory()
+            .get_note_set_by_source(context, source_file_id)
+            .await?
+        else {
+            return Ok(0);
+        };
+        let items = self
+            .state
+            .current_memory()
+            .list_note_set_items(context, set.id)
+            .await?;
+        let before = items.len();
+        let mut seen = HashSet::new();
+        let mut kept = Vec::new();
+        for item in items {
+            let memory = &item.memory;
+            // All potentially semantic metadata participates. Never use the
+            // lexical content hash as equality proof or merge explicit records.
+            let identity = serde_json::to_string(&json!([
+                memory.content,
+                memory.kind,
+                memory.importance,
+                memory.confidence,
+                memory.valid_from,
+                memory.valid_to,
+                memory.tags,
+                memory.entities,
+                memory.metadata
+            ]))
+            .map_err(|_| MemoryError::Conflict)?;
+            if seen.insert(identity) {
+                kept.push(item);
+            }
+        }
+        let removed = before - kept.len();
+        if removed == 0 {
+            return Ok(0);
+        }
+        let mut next = set.clone();
+        next.set_revision = set.set_revision.next().map_err(|_| MemoryError::Conflict)?;
+        next.updated_at = now_millis();
+        let prepared_items = kept
+            .iter()
+            .map(|item| PreparedCurrentItem {
+                id: item.memory.id,
+                ordinal: item.memory.ordinal.unwrap_or_default(),
+                content: item.memory.content.clone(),
+                kind: item
+                    .memory
+                    .kind
+                    .as_deref()
+                    .and_then(|kind| MemoryType::try_from(kind).ok()),
+                tags: item.memory.tags.clone(),
+                content_hash: item.memory.content_hash.clone(),
+                revision: item.memory.revision,
+                created_at: item.memory.created_at,
+                preserved_memory: Some(item.memory.clone()),
+                preserved_sources: Some(item.sources.clone()),
+            })
+            .collect::<Vec<_>>();
+        let provisional =
+            current_bundles_from_prepared(context, &next, &prepared_items, next.updated_at);
+        let bytes = current_markdown::render_note_set(&next, &provisional)?;
+        let snapshot = MemoryNoteSetSnapshotRecord {
+            id: MemorySetSnapshotId::new(),
+            vault_id: context.id(),
+            note_set_id: set.id,
+            source_file_id,
+            source_path: set.source_path,
+            source_content_hash: set.source_content_hash,
+            source_revision: set.source_revision,
+            expected_set_revision: Some(set.set_revision),
+            proposed_set_revision: next.set_revision,
+            extraction_paused: set.extraction_paused,
+            items: serde_json::to_value(prepared_items).map_err(|_| MemoryError::Conflict)?,
+            canonical_bytes_hash: current_markdown::hash_bytes(&bytes),
+            canonical_path: set.canonical_path,
+            profile_hash: set.profile_hash,
+            prompt_version: set.prompt_version,
+            provider_id: set.provider_id,
+            model_id: set.model_id,
+            status: "prepared".into(),
+            created_at: next.updated_at,
+            applied_at: None,
+        };
+        self.state
+            .current_memory()
+            .prepare_note_set_snapshot(context, &snapshot)
+            .await?;
+        drop(guard);
+        self.apply_prepared_note_set(context, core, snapshot, false)
+            .await?;
+        Ok(removed as u64)
+    }
+
+    /// Compare two current note-derived contributions using the existing,
+    /// authorized extraction model. This returns a proposal only: publication
+    /// must independently revalidate every input revision and full source hash.
+    /// Explicit assertions are excluded, including when they cite a note.
+    pub async fn judge_memory_equivalence(
+        &self,
+        context: &VaultContext,
+        left: MemoryId,
+        right: MemoryId,
+    ) -> Result<crate::MemoryRelation, MemoryError> {
+        if left == right {
+            return Err(MemoryError::InvalidInput(
+                "equivalence requires distinct contributions",
+            ));
+        }
+        self.judge_memory_equivalence_with_body(context, left, right, None, None)
+            .await
+    }
+
+    async fn judge_memory_equivalence_with_body(
+        &self,
+        context: &VaultContext,
+        left: MemoryId,
+        right: MemoryId,
+        left_body: Option<&str>,
+        core: Option<&VaultCore>,
+    ) -> Result<crate::MemoryRelation, MemoryError> {
+        let policy = self.extraction_policy(context).await?.policy;
+        if !policy.enabled {
+            return Err(MemoryError::Configuration("memory_extraction_disabled"));
+        }
+        let runtime = self.extraction_runtime(context, policy).await?;
+        let mut inputs = Vec::new();
+        let mut dependencies = Vec::new();
+        for (index, id) in [left, right].into_iter().enumerate() {
+            let bundle = self
+                .state
+                .current_memory()
+                .get_unchecked(context, id)
+                .await?
+                .ok_or(MemoryError::NotFound)?;
+            if bundle.memory.ownership != CurrentMemoryOwnership::NoteDerived {
+                return Err(MemoryError::InvalidInput(
+                    "explicit memories cannot be automatically merged",
+                ));
+            }
+            let set = bundle.note_set.as_ref().ok_or(MemoryError::Conflict)?;
+            if !self
+                .state
+                .current_memory()
+                .support_current(
+                    context,
+                    &mcp_vault_state::FormalMemorySupport {
+                        contribution_id: id,
+                        source_file_id: set.source_file_id,
+                        source_hash: set.source_content_hash.clone(),
+                        semantic_hash: mcp_vault_state::contribution_semantic_hash(&bundle.memory)?,
+                    },
+                )
+                .await?
+            {
+                return Err(MemoryError::NotFound);
+            }
+            dependencies.push(json!([
+                set.source_file_id,
+                set.source_content_hash,
+                bundle.memory.content_hash,
+                bundle.memory.metadata
+            ]));
+            let source_context = if let Some(core) = core {
+                let read = core.read(context, &set.source_path).await?;
+                if read.file.id != set.source_file_id
+                    || read.file.content_hash.as_deref() != Some(set.source_content_hash.as_str())
+                {
+                    return Err(MemoryError::Conflict);
+                }
+                let mut bytes = Vec::new();
+                read.reader
+                    .take(4097)
+                    .read_to_end(&mut bytes)
+                    .await
+                    .map_err(|_| MemoryError::SourceIngestion("equivalence_source_read_failed"))?;
+                let complete = bytes.len() <= 4096;
+                bytes.truncate(4096);
+                json!({"text":redact_generated_text(String::from_utf8_lossy(&bytes).into_owned()),"complete":complete})
+            } else {
+                Value::Null
+            };
+            inputs.push(json!({
+                "content":if index==0 {left_body.unwrap_or(&bundle.memory.content)}else{&bundle.memory.content}, "kind":bundle.memory.kind,
+                "valid_from":bundle.memory.valid_from, "valid_to":bundle.memory.valid_to,
+                "tags":bundle.memory.tags, "entities":bundle.memory.entities, "metadata":bundle.memory.metadata,
+                "source_path":set.source_path, "source_context":source_context
+            }));
+        }
+        // Include necessary source context without sending application-owned IDs
+        // as writable model references. Exact request bytes are cache identity.
+        let user = serde_json::to_string(&json!({"left":inputs[0],"right":inputs[1]}))
+            .map_err(|_| MemoryError::InvalidInput("equivalence input is invalid"))?;
+        if user.len() > crate::dedup::MAX_PAIR_BYTES {
+            return Ok(crate::MemoryRelation::Uncertain);
+        }
+        let input_hash = markdown::hash_content(&format!(
+            "{}\0{}\0{}\0{}",
+            crate::dedup::RULE_VERSION,
+            runtime.profile_hash,
+            user,
+            json!(dependencies)
+        ));
+        if let Some(relation) = self
+            .state
+            .current_memory()
+            .equivalence_decision(context, &input_hash)
+            .await?
+        {
+            return crate::dedup::parse_relation(json!({"left":0,"right":1,"relation":relation}));
+        }
+        let request = StructuredGenerationRequest {
+            model: runtime.model.external_model_id.clone(),
+            system: crate::dedup::system_prompt().to_owned(),
+            user,
+            schema_name: "memory_equivalence".to_owned(),
+            schema: crate::dedup::schema(),
+            missing_required_string_fallbacks: Vec::new(),
+            max_output_tokens: 256,
+            temperature: Some(0.0),
+            timeout: Some(Duration::from_secs(runtime.policy.request_timeout_seconds)),
+        };
+        let provider =
+            self.providers
+                .clone()
+                .with_generation_budget(Arc::new(crate::dedup::DispatchBudget {
+                    slice: self.dedup_slice.clone(),
+                    state: self.state.clone(),
+                    context: context.clone(),
+                }));
+        let output = match provider
+            .generate_structured(context, runtime.binding.model_id, &request)
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                if crate::dedup::invalid_proposal(&error) {
+                    self.state
+                        .current_memory()
+                        .save_equivalence_decision(context, &input_hash, "uncertain")
+                        .await?;
+                }
+                return Err(error.into());
+            }
+        };
+        let relation = match crate::dedup::parse_relation(output.value) {
+            Ok(relation) => relation,
+            Err(error) => {
+                self.state
+                    .current_memory()
+                    .save_equivalence_decision(context, &input_hash, "uncertain")
+                    .await?;
+                return Err(error);
+            }
+        };
+        let label = serde_json::to_value(relation)
+            .map_err(|_| MemoryError::GeneratedOutput("memory_equivalence_output_invalid"))?;
+        self.state
+            .current_memory()
+            .save_equivalence_decision(
+                context,
+                &input_hash,
+                label.as_str().ok_or(MemoryError::GeneratedOutput(
+                    "memory_equivalence_output_invalid",
+                ))?,
+            )
+            .await?;
+        // Re-read the first committed result if another bounded worker raced us.
+        let saved = self
+            .state
+            .current_memory()
+            .equivalence_decision(context, &input_hash)
+            .await?
+            .ok_or(MemoryError::Conflict)?;
+        crate::dedup::parse_relation(json!({"left":0,"right":1,"relation":saved}))
     }
 
     pub async fn semantic_calibration(
@@ -1012,7 +1381,34 @@ impl MemoryService {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<MemoryView>, MemoryError> {
+        self.list_after(
+            context,
+            types,
+            tag,
+            entity,
+            source_path,
+            limit,
+            offset,
+            None,
+        )
+        .await
+    }
+
+    /// Continue a list by stable identity while other formal objects change.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn list_after(
+        &self,
+        context: &VaultContext,
+        types: Vec<MemoryType>,
+        tag: Option<String>,
+        entity: Option<String>,
+        source_path: Option<String>,
+        limit: u32,
+        offset: u32,
+        after_id: Option<MemoryId>,
+    ) -> Result<Vec<MemoryView>, MemoryError> {
         let filter = CurrentMemoryFilter {
+            after_id,
             kinds: types
                 .iter()
                 .map(|memory_type| memory_type.as_str().to_owned())
@@ -1153,6 +1549,32 @@ impl MemoryService {
         memory_id: MemoryId,
         expected_revision: Revision,
     ) -> Result<ForgetResult, MemoryError> {
+        if self.state.current_memory().formal_enabled(context).await?
+            && (self
+                .state
+                .current_memory()
+                .formal_document(context, memory_id)
+                .await?
+                .is_some()
+                || self
+                    .state
+                    .current_memory()
+                    .get_unchecked(context, memory_id)
+                    .await?
+                    .is_some_and(|bundle| {
+                        bundle.memory.ownership == CurrentMemoryOwnership::NoteDerived
+                    })
+                || self
+                    .state
+                    .current_memory()
+                    .formal_operation(context)
+                    .await?
+                    .is_some_and(|op| op.forgotten.contains(&memory_id)))
+        {
+            return self
+                .forget_formal(context, core, memory_id, expected_revision)
+                .await;
+        }
         let vault_write_lock = self.vault_write_lock(context).await;
         let write_guard = vault_write_lock.lock().await;
         let bundle = match self.state.current_memory().get(context, memory_id).await? {
@@ -2266,6 +2688,18 @@ impl MemoryService {
         let Some(file) = file.filter(FileRecord::is_active) else {
             let lock = self.vault_write_lock(context).await;
             let _guard = lock.lock().await;
+            self.recover_formal_locked(context, core).await?;
+            if self
+                .state
+                .current_memory()
+                .get_note_set_by_source(context, source_file_id)
+                .await?
+                .as_ref()
+                .map(|s| s.set_revision)
+                != Some(set.set_revision)
+            {
+                return Err(MemoryError::Conflict);
+            }
             let set = self
                 .state
                 .current_memory()
@@ -2323,6 +2757,18 @@ impl MemoryService {
         if moved {
             let lock = self.vault_write_lock(context).await;
             let _guard = lock.lock().await;
+            self.recover_formal_locked(context, core).await?;
+            if self
+                .state
+                .current_memory()
+                .get_note_set_by_source(context, source_file_id)
+                .await?
+                .as_ref()
+                .map(|s| s.set_revision)
+                != Some(set.set_revision)
+            {
+                return Err(MemoryError::Conflict);
+            }
             let items = self
                 .state
                 .current_memory()
@@ -2414,6 +2860,18 @@ impl MemoryService {
         }
         let lock = self.vault_write_lock(context).await;
         let _guard = lock.lock().await;
+        self.recover_formal_locked(context, core).await?;
+        if self
+            .state
+            .current_memory()
+            .get_note_set_by_source(context, snapshot.source_file_id)
+            .await?
+            .as_ref()
+            .map(|set| set.set_revision)
+            != snapshot.expected_set_revision
+        {
+            return Err(MemoryError::Conflict);
+        }
         let current_source = self
             .state
             .files()
@@ -2503,6 +2961,9 @@ impl MemoryService {
             self.schedule_current_embedding(context, &bundle.memory)
                 .await;
         }
+        if self.ensure_memory_dedup_scheduled(context).await.is_err() {
+            tracing::warn!(vault_id=%context.id(), "memory_dedup_admission_failed");
+        }
         Ok(NoteExtractionResult {
             source_admitted: true,
             empty_set_published: published.is_empty(),
@@ -2518,6 +2979,8 @@ impl MemoryService {
         context: &VaultContext,
         core: &VaultCore,
     ) -> Result<MemoryRebuildReport, MemoryError> {
+        self.recover_formal_publication(context, core).await?;
+        let mut formal_files = Vec::new();
         let vault_write_lock = self.vault_write_lock(context).await;
         let _write_guard = vault_write_lock.lock().await;
         let files = core.list_managed_files(context).await?;
@@ -2528,17 +2991,32 @@ impl MemoryService {
             };
             let explicit = is_current_explicit_path(core, &path);
             let note_set = is_current_note_set_path(core, &path);
+            if path
+                .as_str()
+                .starts_with(&format!("{}/memory/current/facts/", core.managed_root()))
+            {
+                formal_files.push(path.clone());
+                continue;
+            }
             if !explicit && !note_set {
                 continue;
             }
             let Some(file) = self.state.files().get_active(context, &path).await? else {
                 report.quarantined = report.quarantined.saturating_add(1);
+                *report
+                    .quarantine_reasons
+                    .entry("missing_canonical_file".into())
+                    .or_default() += 1;
                 continue;
             };
             let mut read = match core.read_managed(context, &path).await {
                 Ok(read) => read,
                 Err(_) => {
                     report.quarantined = report.quarantined.saturating_add(1);
+                    *report
+                        .quarantine_reasons
+                        .entry("canonical_read_failed".into())
+                        .or_default() += 1;
                     continue;
                 }
             };
@@ -2550,6 +3028,10 @@ impl MemoryService {
                 .is_err()
             {
                 report.quarantined = report.quarantined.saturating_add(1);
+                *report
+                    .quarantine_reasons
+                    .entry("canonical_read_failed".into())
+                    .or_default() += 1;
                 continue;
             }
             if explicit {
@@ -2563,6 +3045,10 @@ impl MemoryService {
                     Ok(bundle) => bundle,
                     Err(_) => {
                         report.quarantined = report.quarantined.saturating_add(1);
+                        *report
+                            .quarantine_reasons
+                            .entry("explicit_invalid".into())
+                            .or_default() += 1;
                         continue;
                     }
                 };
@@ -2571,6 +3057,10 @@ impl MemoryService {
                     .await?
                 {
                     report.quarantined = report.quarantined.saturating_add(1);
+                    *report
+                        .quarantine_reasons
+                        .entry("explicit_provenance_invalid".into())
+                        .or_default() += 1;
                     continue;
                 }
                 let previous = self
@@ -2612,6 +3102,10 @@ impl MemoryService {
                 Ok(parsed) => parsed,
                 Err(_) => {
                     report.quarantined = report.quarantined.saturating_add(1);
+                    *report
+                        .quarantine_reasons
+                        .entry("source_set_invalid".into())
+                        .or_default() += 1;
                     continue;
                 }
             };
@@ -2670,6 +3164,10 @@ impl MemoryService {
                 Ok(restored) => restored,
                 Err(mcp_vault_state::StateError::Conflict) => {
                     report.quarantined = report.quarantined.saturating_add(1);
+                    *report
+                        .quarantine_reasons
+                        .entry("source_set_conflict".into())
+                        .or_default() += 1;
                     continue;
                 }
                 Err(error) => return Err(error.into()),
@@ -2679,6 +3177,54 @@ impl MemoryService {
                     .await;
             }
             report.projected = report.projected.saturating_add(1);
+        }
+        let had_formal_files = !formal_files.is_empty();
+        for path in formal_files {
+            let mut read = core.read_managed(context, &path).await?;
+            let mut bytes = Vec::new();
+            read.reader
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|_| MemoryError::Markdown)?;
+            match current_markdown::parse_formal(
+                &bytes,
+                &path,
+                context.id(),
+                read.file.id,
+                read.file.current_revision,
+            ) {
+                Ok(doc) => {
+                    match self
+                        .state
+                        .current_memory()
+                        .restore_formal_document(context, &doc)
+                        .await
+                    {
+                        Ok(()) => report.projected += 1,
+                        Err(mcp_vault_state::StateError::Conflict) => {
+                            report.quarantined += 1;
+                            *report
+                                .quarantine_reasons
+                                .entry("formal_support_conflict".into())
+                                .or_default() += 1;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                Err(_) => {
+                    report.quarantined += 1;
+                    *report
+                        .quarantine_reasons
+                        .entry("formal_invalid".into())
+                        .or_default() += 1;
+                }
+            }
+        }
+        if had_formal_files {
+            self.state
+                .current_memory()
+                .enable_formal_if_covered(context)
+                .await?;
         }
         Ok(report)
     }
@@ -2928,6 +3474,15 @@ impl MemoryService {
         context: &VaultContext,
         memory_id: MemoryId,
     ) -> Result<u64, MemoryError> {
+        if self
+            .state
+            .current_memory()
+            .formal_document(context, memory_id)
+            .await?
+            .is_some()
+        {
+            return Ok(0);
+        }
         Ok(self
             .providers
             .embeddings()
@@ -2985,6 +3540,7 @@ impl MemoryService {
                 .or_else(|| bundle.note_set.as_ref().map(|set| set.canonical_revision)),
             tags: bundle.memory.tags.clone(),
             entities: bundle.memory.entities.clone(),
+            source_count: bundle.sources.len(),
             sources,
             score,
             score_breakdown: breakdown,
@@ -2999,6 +3555,8 @@ pub struct MemoryRebuildReport {
     pub projected: u64,
     /// Invalid records quarantined/diagnosed.
     pub quarantined: u64,
+    /// Bounded content-free diagnostic counts; no source paths or bodies.
+    pub quarantine_reasons: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -3015,10 +3573,13 @@ fn current_bundles_from_prepared(
 ) -> Vec<CurrentMemoryBundle> {
     items
         .iter()
-        .map(|item| {
+        .enumerate()
+        .map(|(index, item)| {
             if let Some(memory) = item.preserved_memory.as_ref() {
+                let mut memory = memory.clone();
+                memory.ordinal = Some(index as u32);
                 return CurrentMemoryBundle {
-                    memory: memory.clone(),
+                    memory,
                     sources: item.preserved_sources.clone().unwrap_or_default(),
                     note_set: Some(set.clone()),
                 };
@@ -3428,7 +3989,12 @@ fn normalize_current_extraction_output(
         discarded_optional_fields = discarded_optional_fields.saturating_add(
             u32::try_from(original_tag_count.saturating_sub(item.tags.len())).unwrap_or(u32::MAX),
         );
-        let identity = markdown::normalize_content(&item.content);
+        // Lexical normalization folds case and compatibility characters. It is
+        // useful for retrieval, but is not evidence of proposition equivalence
+        // (for example `PATH` and `path` can name different variables).
+        let mut identity_tags = item.tags.clone();
+        identity_tags.sort();
+        let identity = (item.content.clone(), item.kind.clone(), identity_tags);
         if seen.insert(identity) {
             normalized.push(item);
         }
@@ -3664,6 +4230,44 @@ mod tests {
         assert!(!properties.contains_key("memory_id"));
         assert!(!properties.contains_key("supersedes"));
         assert!(!properties.contains_key("confidence"));
+    }
+
+    #[test]
+    fn exact_extraction_dedup_preserves_case_symbols_conditions_and_metadata() {
+        let contents = [
+            "Read PATH.",
+            "Read path.",
+            "Use x².",
+            "Use x2.",
+            "Default port: 8080.",
+            "Default port: 8081.",
+            "Do adopt the proposal.",
+            "Do not adopt the proposal.",
+            "The default is enabled.",
+            "The default is enabled.",
+        ];
+        let mut output = CurrentExtractionOutput {
+            memories: contents
+                .iter()
+                .enumerate()
+                .map(|(index, content)| CurrentExtractionItem {
+                    content: (*content).into(),
+                    kind: Some(if index == 9 { "decision" } else { "fact" }.into()),
+                    tags: Vec::new(),
+                })
+                .collect(),
+        };
+        output.memories.push(output.memories[0].clone());
+        normalize_current_extraction_output(&mut output).unwrap();
+        assert_eq!(output.memories.len(), contents.len());
+        assert_eq!(
+            output
+                .memories
+                .iter()
+                .map(|item| item.content.as_str())
+                .collect::<Vec<_>>(),
+            contents
+        );
     }
 
     #[test]

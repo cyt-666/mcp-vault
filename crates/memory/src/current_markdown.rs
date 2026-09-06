@@ -500,6 +500,10 @@ fn write_optional_indented_integer(output: &mut String, key: &str, value: Option
 }
 
 fn write_string_list(output: &mut String, key: &str, values: &[String]) {
+    if values.is_empty() {
+        output.push_str(&format!("{key}: []\n"));
+        return;
+    }
     output.push_str(&format!("{key}:\n"));
     for value in values {
         output.push_str(&format!("  - {}\n", quote(value)));
@@ -591,6 +595,11 @@ fn string_list(root: &Yaml, key: &str) -> Result<Vec<String>, MemoryError> {
     let Some(value) = field(root, key) else {
         return Ok(Vec::new());
     };
+    // Older v2.1 writers emitted an empty YAML key for empty lists.
+    // Preserve that canonical compatibility while rejecting other scalar types.
+    if matches!(value, Yaml::Null) {
+        return Ok(Vec::new());
+    }
     let values = value.as_vec().ok_or(MemoryError::Markdown)?;
     values
         .iter()
@@ -662,4 +671,80 @@ fn parse_sources(
             })
         })
         .collect()
+}
+
+/// Render the portable current formal object. Physical file identity is assigned
+/// after the Vault Core write and never participates in canonical bytes.
+pub fn render_formal(doc: &mcp_vault_state::FormalMemoryDocument) -> Result<Vec<u8>, MemoryError> {
+    let mut doc = doc.clone();
+    doc.memory.canonical_file_id = None;
+    doc.memory.canonical_revision = None;
+    doc.memory.last_recalled_at = None;
+    doc.memory.recall_count = 0;
+    doc.supports.sort_by_key(|support| support.contribution_id);
+    Ok(format!(
+        "---\nschema: \"mcp-vault-memory-fact/v2.2\"\n---\n\n```json\n{}\n```\n",
+        serde_json::to_string_pretty(&doc).map_err(|_| MemoryError::Markdown)?
+    )
+    .into_bytes())
+}
+
+/// Parse exact canonical support references without a generation request.
+pub fn parse_formal(
+    bytes: &[u8],
+    path: &VaultPath,
+    vault_id: VaultId,
+    file_id: FileId,
+    revision: Revision,
+) -> Result<mcp_vault_state::FormalMemoryDocument, MemoryError> {
+    if bytes.len() > 2 * 1024 * 1024 {
+        return Err(MemoryError::Markdown);
+    }
+    let (root, body) = parse_document(bytes, 2 * 1024 * 1024)?;
+    if required_string(&root, "schema")? != "mcp-vault-memory-fact/v2.2" {
+        return Err(MemoryError::Markdown);
+    }
+    let json = body
+        .strip_prefix("```json\n")
+        .and_then(|s| s.strip_suffix("\n```"))
+        .ok_or(MemoryError::Markdown)?;
+    let mut doc: mcp_vault_state::FormalMemoryDocument =
+        serde_json::from_str(json).map_err(|_| MemoryError::Markdown)?;
+    if doc.memory.vault_id != vault_id
+        || doc.memory.ownership != CurrentMemoryOwnership::NoteDerived
+        || doc.supports.is_empty()
+        || doc.supports.len() > 256
+        || doc.memory.content.trim().is_empty()
+        || doc.memory.content.len() > 64 * 1024
+        || doc.memory.revision.value() == 0
+        || path.file_name() != Some(format!("{}.md", doc.memory.id).as_str())
+    {
+        return Err(MemoryError::Markdown);
+    }
+    validate_optional_score(doc.memory.importance)?;
+    validate_optional_score(doc.memory.confidence)?;
+    if matches!((doc.memory.valid_from, doc.memory.valid_to), (Some(from), Some(to)) if from >= to)
+        || doc.memory.normalized_content != markdown::normalize_content(&doc.memory.content)
+        || !doc.memory.metadata.is_object()
+    {
+        return Err(MemoryError::Markdown);
+    }
+    let mut ids = HashSet::new();
+    for p in &doc.supports {
+        if !ids.insert(p.contribution_id)
+            || !p.semantic_hash.starts_with("sha256:")
+            || p.source_hash.is_empty()
+        {
+            return Err(MemoryError::Markdown);
+        }
+    }
+    if markdown::hash_content(&markdown::normalize_content(&doc.memory.content))
+        != doc.memory.content_hash
+    {
+        return Err(MemoryError::Markdown);
+    }
+    doc.memory.canonical_file_id = Some(file_id);
+    doc.memory.canonical_path = Some(path.clone());
+    doc.memory.canonical_revision = Some(revision);
+    Ok(doc)
 }

@@ -1,11 +1,13 @@
 //! Transparent, sourced, Vault-scoped durable memory services.
 
 mod current_markdown;
+mod dedup;
 mod error;
 mod markdown;
 mod model;
 mod service;
 
+pub use dedup::MemoryRelation;
 pub use error::MemoryError;
 pub use model::{
     CurrentSourceReconcileReport, ExtractionPolicy, ExtractionPolicyState, ExtractionReadiness,

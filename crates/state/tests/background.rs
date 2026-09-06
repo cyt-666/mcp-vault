@@ -25,6 +25,81 @@ async fn store_and_context() -> (StateStore, VaultContext) {
 }
 
 #[tokio::test]
+async fn promoted_dedup_keeps_checkpoint_and_precedes_ordinary_jobs_without_crossing_vaults() {
+    let (store, context) = store_and_context().await;
+    let jobs = store.jobs();
+    jobs.enqueue(&context, "index.rebuild", "ordinary", &json!({}), 0, 3, 0)
+        .await
+        .unwrap();
+    let dedup = jobs
+        .enqueue_singleton(
+            &context,
+            "memory.deduplicate",
+            "old-dedup",
+            &json!({}),
+            -1,
+            10,
+            0,
+        )
+        .await
+        .unwrap();
+    let other = VaultContext::new(
+        VaultId::new(),
+        VaultSlug::new("other-priority").unwrap(),
+        "/srv/other-priority".into(),
+        Revision::new(1),
+    )
+    .unwrap();
+    store
+        .vaults()
+        .insert(&other, "Other", VaultStatus::Active)
+        .await
+        .unwrap();
+    let other_job = jobs
+        .enqueue_singleton(
+            &other,
+            "memory.deduplicate",
+            "other-dedup",
+            &json!({}),
+            -1,
+            10,
+            0,
+        )
+        .await
+        .unwrap();
+    jobs.promote_active_priority(&context, "memory.deduplicate", 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        jobs.get(&other, other_job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .priority,
+        -1
+    );
+    let claimed = jobs
+        .claim_batch("priority-worker", 1, 1000, 1)
+        .await
+        .unwrap();
+    assert_eq!(claimed[0].id, dedup.id);
+    jobs.update_progress(dedup.id, "priority-worker", &json!({"checked_pairs":8}))
+        .await
+        .unwrap();
+    jobs.release_claimed(dedup.id, "priority-worker", 500)
+        .await
+        .unwrap();
+    jobs.promote_active_priority(&context, "memory.deduplicate", 100)
+        .await
+        .unwrap();
+    let resumed = jobs.get(&context, dedup.id).await.unwrap().unwrap();
+    assert_eq!(resumed.priority, 100);
+    assert_eq!(resumed.available_at, 500);
+    assert_eq!(resumed.attempts, 0);
+    assert_eq!(resumed.progress.unwrap()["checked_pairs"], 8);
+}
+
+#[tokio::test]
 async fn jobs_deduplicate_claim_retry_and_reclaim_expired_leases() {
     let (store, context) = store_and_context().await;
     let first = store

@@ -625,6 +625,8 @@ mod tests {
             "index_nodes",
             "index_memberships",
             "index_status",
+            "memory_equivalence_decisions",
+            "memory_equivalence_dispatches",
         ] {
             assert!(store.has_table(table).await.unwrap(), "{table}");
         }
@@ -632,7 +634,7 @@ mod tests {
         let report = store.integrity_check().await.unwrap();
         assert!(report.integrity_ok);
         assert_eq!(report.foreign_key_violations, 0);
-        assert_eq!(report.migration_version, 19);
+        assert_eq!(report.migration_version, 22);
         assert!(store.foreign_keys_enabled().await.unwrap());
     }
 
@@ -754,7 +756,7 @@ mod tests {
         }
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 19);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 22);
     }
 
     #[tokio::test]
@@ -796,7 +798,7 @@ mod tests {
         assert!(jwks.is_none());
         assert_eq!(enabled, 0);
         assert!(store.has_table("installation_key_checks").await.unwrap());
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 19);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 22);
     }
 
     #[tokio::test]
@@ -847,7 +849,7 @@ mod tests {
         assert_eq!(store.integrity_check().await.unwrap().migration_version, 10);
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 19);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 22);
     }
 
     #[tokio::test]
@@ -1003,7 +1005,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(pipeline_column, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 19);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 22);
     }
 
     #[tokio::test]
@@ -1065,7 +1067,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(retained, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 19);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 22);
     }
 
     #[tokio::test]
@@ -1150,7 +1152,7 @@ mod tests {
         .unwrap();
         assert_eq!(reason.as_deref(), Some("source_unavailable"));
         assert_eq!(changed_at, Some(20));
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 19);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 22);
     }
 
     #[tokio::test]
@@ -1288,7 +1290,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(fts_row, (String::new(), "keep canonical memory".to_owned()));
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 19);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 22);
     }
 
     #[tokio::test]
@@ -1411,6 +1413,108 @@ mod tests {
         insert_job(&store, Some(vault), "global-scan")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn migration_0022_preserves_active_dedup_state_and_isolates_sentence_checkpoints() {
+        let store = StateStore::connect("sqlite::memory:").await.unwrap();
+        let mut prior = sqlx::migrate::Migrator::DEFAULT;
+        prior.migrations = std::borrow::Cow::Owned(
+            crate::migrations::MIGRATOR
+                .iter()
+                .filter(|migration| migration.version <= 21)
+                .cloned()
+                .collect(),
+        );
+        prior.run(&store.pool).await.unwrap();
+        let vault = VaultId::new();
+        let other = VaultId::new();
+        insert_vault(&store, vault, "progress-upgrade").await;
+        insert_vault(&store, other, "progress-other").await;
+        sqlx::query("INSERT INTO memory_formal_maintenance(vault_id,cursor,status,retry_at) VALUES(?,'existing-pair-cursor','memory_equivalence_budget_exhausted',123456)")
+            .bind(vault.to_string()).execute(&store.pool).await.unwrap();
+        store.migrate().await.unwrap();
+        let existing: (String, String, i64) = sqlx::query_as(
+            "SELECT cursor,status,retry_at FROM memory_formal_maintenance WHERE vault_id=?",
+        )
+        .bind(vault.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            existing,
+            (
+                "existing-pair-cursor".into(),
+                "memory_equivalence_budget_exhausted".into(),
+                123456
+            )
+        );
+        let context = store
+            .vaults()
+            .find_by_id(vault)
+            .await
+            .unwrap()
+            .unwrap()
+            .context()
+            .unwrap();
+        let other = store
+            .vaults()
+            .find_by_id(other)
+            .await
+            .unwrap()
+            .unwrap()
+            .context()
+            .unwrap();
+        let cursor = mcp_vault_domain::MemoryId::new();
+        store
+            .current_memory()
+            .checkpoint_sentence_scan(&context, Some(cursor))
+            .await
+            .unwrap();
+        store
+            .current_memory()
+            .set_dedup_phase(&context, "checking_sentences")
+            .await
+            .unwrap();
+        store
+            .current_memory()
+            .record_sentence_checked(&context)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .current_memory()
+                .sentence_scan_cursor(&context)
+                .await
+                .unwrap(),
+            Some(cursor)
+        );
+        assert_eq!(
+            store
+                .current_memory()
+                .sentence_scan_cursor(&other)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .current_memory()
+                .formal_status(&context)
+                .await
+                .unwrap()
+                .sentence_checked,
+            1
+        );
+        assert_eq!(
+            store
+                .current_memory()
+                .formal_status(&other)
+                .await
+                .unwrap()
+                .sentence_checked,
+            0
+        );
     }
 
     #[tokio::test]
@@ -1721,7 +1825,7 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 19);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 22);
     }
 
     async fn insert_vault(store: &StateStore, id: VaultId, slug: &str) {

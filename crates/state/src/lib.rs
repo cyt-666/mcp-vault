@@ -34,8 +34,10 @@ pub use backups::{BackupRecord, BackupRepository, BackupStatus};
 pub use current_memory::{
     CurrentExplicitReservation, CurrentMemoryBundle, CurrentMemoryCounts, CurrentMemoryFilter,
     CurrentMemoryOwnership, CurrentMemoryRecord, CurrentMemoryRepository, CurrentMemorySearchHit,
-    CurrentMemorySourceRecord, CurrentMemorySourceSetView, MemoryNoteSetRecord,
-    MemoryNoteSetSnapshotRecord, MemoryV2MigrationPreflight,
+    CurrentMemorySourceRecord, CurrentMemorySourceSetView, FormalMaintenanceStatus,
+    FormalMemoryDocument, FormalMemoryOperation, FormalMemorySupport, FormalSourceRewrite,
+    MemoryNoteSetRecord, MemoryNoteSetSnapshotRecord, MemoryV2MigrationPreflight,
+    contribution_semantic_hash,
 };
 pub use error::{IntegrityReport, StateError};
 pub use files::{

@@ -76,3 +76,7 @@ model grouping of note source units, amending ADR-0026/0027 retrieval admission.
 See [ADR-0028](0028-model-guided-chunks-and-diagnostic-evaluation.md).
 
 - [ADR-0029: Actionable compact MCP tool results](0029-actionable-compact-mcp-results.md)
+
+- [ADR-0030: Automatic memory equivalence](0030-automatic-memory-equivalence.md)
+  amends current source ownership for verified multi-source formal memories;
+  implementation and acceptance are tracked in the active deduplication ExecPlan.

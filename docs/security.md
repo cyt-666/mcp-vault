@@ -797,3 +797,20 @@ Calibration sends only the bundled non-private synthetic corpus through existing
 
 The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
 specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).
+
+### Bounded memory-equivalence proposals
+
+The internal equivalence operation excludes explicit assertions and reads only
+current Vault-scoped note-derived contributions. It reuses the enabled extraction
+policy and existing ProviderService binding/transport; its bounded response has
+only local references `left=0`, `right=1` and an enumerated relationship. Invalid
+references, extra properties and unknown relations fail without canonical writes.
+Neither a cached judgment nor an equivalent response authorizes a mutation by
+itself. Publication still requires exact current source and revision checks.
+
+Decision-cache rows contain hashes and relation labels. Bounded sentence-proposal
+cache rows contain redacted proposed text and never become canonical without
+independent validation. Actual provider
+transport dispatches reserve rolling Vault-scoped request/byte capacity, including
+retries; failed requests cannot refund possibly billable capacity. ADR-0030 introduces an automatic semantic publishing worker; it requires no
+public merge endpoint or per-merge user approval. Formal publication rechecks exact source eligibility and expected revisions; every incoming support must validate the complete body. Prompt-injected actions, unknown references, relatedness and uncertainty cannot authorize a merge. Multi-source deletion is local and independent of provider availability.

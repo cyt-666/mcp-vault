@@ -273,6 +273,33 @@ describe('Admin 管理界面', () => {
     expect(message).not.toContain('请使用更长且不常见的密码');
   });
 
+  it('自动整理回队后显示实际进度与错误，而不是未报告', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(async () => root.render(
+      <ManagementPage page="jobs" data={{ queued: [{
+        id: 'dedup-job', job_type: 'memory.deduplicate', status: 'queued',
+        attempts: 0, max_attempts: 10, progress: {
+          phase: 'memory_dedup', stage: 'checking_sentences', sentence_checked: 6, slices_completed: 3, checked_pairs: 8, pending_pairs: 12,
+          wait_reason: 'memory_conflict', maintenance_status: 'memory_conflict', resume_at: 1788690000000,
+        },
+      }] }} onRefresh={() => undefined} />,
+    ));
+    expect(container.textContent).toContain('自动记忆去重与合并');
+    expect(container.textContent).toContain('已检查 8 组，待比较 12 组');
+    expect(container.textContent).toContain('检查记忆条目的重复表述');
+    expect(container.textContent).toContain('累计条目检查 6 次');
+    expect(container.textContent).not.toContain('已运行 3 批');
+    expect(container.textContent).toContain('下次可执行');
+    expect(container.textContent).not.toContain('进度 未报告');
+    await act(async () => root.render(
+      <ManagementPage page="memory" data={{ memories: [], extraction: { dedup: { status: 'memory_state_error', adopted: false, retry_at: 1788690000000 } } }} onRefresh={() => undefined} />,
+    ));
+    expect(container.textContent).toContain('memory_state_error');
+    expect(container.textContent).not.toContain('等待后台重试或下一轮检查');
+    await act(async () => root.unmount());
+  });
+
   it('任务页面优先展示中文摘要并默认折叠原始 JSON', async () => {
     const container = document.createElement('div');
     const root = createRoot(container);
