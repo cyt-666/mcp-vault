@@ -149,6 +149,11 @@ impl StateStore {
         OutboxRepository::new(self.pool.clone())
     }
 
+    /// Return derived calibration state and durable request accounting.
+    pub fn calibrations(&self) -> crate::CalibrationRepository {
+        crate::CalibrationRepository::new(self.pool.clone())
+    }
+
     /// Return the persistent job queue repository.
     pub fn jobs(&self) -> JobRepository {
         JobRepository::new(self.pool.clone())
@@ -573,7 +578,7 @@ mod tests {
         let report = store.integrity_check().await.unwrap();
         assert!(report.integrity_ok);
         assert_eq!(report.foreign_key_violations, 0);
-        assert_eq!(report.migration_version, 15);
+        assert_eq!(report.migration_version, 17);
         assert!(store.foreign_keys_enabled().await.unwrap());
     }
 
@@ -695,7 +700,7 @@ mod tests {
         }
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 15);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 17);
     }
 
     #[tokio::test]
@@ -737,7 +742,7 @@ mod tests {
         assert!(jwks.is_none());
         assert_eq!(enabled, 0);
         assert!(store.has_table("installation_key_checks").await.unwrap());
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 15);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 17);
     }
 
     #[tokio::test]
@@ -788,7 +793,7 @@ mod tests {
         assert_eq!(store.integrity_check().await.unwrap().migration_version, 10);
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 15);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 17);
     }
 
     #[tokio::test]
@@ -944,7 +949,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(pipeline_column, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 15);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 17);
     }
 
     #[tokio::test]
@@ -1006,7 +1011,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(retained, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 15);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 17);
     }
 
     #[tokio::test]
@@ -1091,7 +1096,7 @@ mod tests {
         .unwrap();
         assert_eq!(reason.as_deref(), Some("source_unavailable"));
         assert_eq!(changed_at, Some(20));
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 15);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 17);
     }
 
     #[tokio::test]
@@ -1229,7 +1234,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(fts_row, (String::new(), "keep canonical memory".to_owned()));
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 15);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 17);
     }
 
     #[tokio::test]
@@ -1352,6 +1357,44 @@ mod tests {
         insert_job(&store, Some(vault), "global-scan")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn migration_0016_preserves_prepared_snapshot_and_accepts_local_model_less_delete() {
+        let store = StateStore::connect("sqlite::memory:").await.unwrap();
+        let mut prior = sqlx::migrate::Migrator::DEFAULT;
+        prior.migrations = std::borrow::Cow::Owned(
+            crate::migrations::MIGRATOR
+                .iter()
+                .filter(|migration| migration.version <= 15)
+                .cloned()
+                .collect(),
+        );
+        prior.run(&store.pool).await.unwrap();
+        let vault = VaultId::new();
+        insert_vault(&store, vault, "snapshot-upgrade").await;
+        sqlx::query("INSERT INTO file_entries (id,vault_id,path,entry_type,current_revision,size,modified_at,created_at,updated_at) VALUES ('source',?,'source.md','file',1,0,1,1,1)")
+            .bind(vault.to_string()).execute(&store.pool).await.unwrap();
+        sqlx::query("INSERT INTO providers (id,name,provider_type,base_url,settings_json,enabled,revision,created_at,updated_at) VALUES ('provider','test','embedding_http','http://localhost/','{}',1,1,1,1)")
+            .execute(&store.pool).await.unwrap();
+        sqlx::query("INSERT INTO models (id,provider_id,external_model_id,capability_json,settings_json,enabled,revision,created_at,updated_at) VALUES ('model','provider','test','{}','{}',1,1,1,1)")
+            .execute(&store.pool).await.unwrap();
+        sqlx::query("INSERT INTO memory_note_set_snapshots (id,vault_id,note_set_id,source_file_id,source_path,source_content_hash,source_revision,proposed_set_revision,items_json,canonical_bytes_hash,canonical_path,profile_hash,prompt_version,provider_id,model_id,status,created_at) VALUES ('snapshot',?,'set','source','source.md','hash',1,1,'[]','bytes','current.md','profile','v1','provider','model','prepared',1)")
+            .bind(vault.to_string()).execute(&store.pool).await.unwrap();
+        let before: String = sqlx::query_scalar("SELECT json_object('items',items_json,'hash',canonical_bytes_hash,'status',status,'provider',provider_id,'model',model_id) FROM memory_note_set_snapshots").fetch_one(&store.pool).await.unwrap();
+        store.migrate().await.unwrap();
+        let after: String = sqlx::query_scalar("SELECT json_object('items',items_json,'hash',canonical_bytes_hash,'status',status,'provider',provider_id,'model',model_id) FROM memory_note_set_snapshots").fetch_one(&store.pool).await.unwrap();
+        assert_eq!(before, after);
+        sqlx::query("UPDATE memory_note_set_snapshots SET provider_id=NULL, model_id=NULL, extraction_paused=1 WHERE vault_id=? AND id='snapshot'")
+            .bind(vault.to_string()).execute(&store.pool).await.unwrap();
+        assert!(
+            store
+                .integrity_check()
+                .await
+                .unwrap()
+                .foreign_key_violations
+                == 0
+        );
     }
 
     async fn insert_vault(store: &StateStore, id: VaultId, slug: &str) {

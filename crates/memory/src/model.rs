@@ -561,6 +561,9 @@ pub struct RecallResult {
     pub degraded: Vec<String>,
     /// Versioned hash of lexical, chunking, and semantic-admission policy.
     pub retrieval_profile_hash: String,
+    /// Optional scoped counts, admission policy and applicable calibration identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<Value>,
 }
 
 /// A rebuildable cue that points an Agent back to canonical note source.
@@ -568,6 +571,10 @@ pub struct RecallResult {
 pub struct RelatedNoteView {
     /// Stable canonical file identity.
     pub file_id: FileId,
+    /// Canonical read resource included in the response budget.
+    pub resource_uri: String,
+    /// Winning section coordinates in the analyzed projection.
+    pub matched_section: Option<mcp_vault_indexer::NoteSectionMatch>,
     /// Current Vault-relative path.
     pub path: VaultPath,
     /// Canonical revision represented by the cue.

@@ -64,6 +64,7 @@ struct CurrentSetModelState {
     mode: AtomicUsize,
     started: Notify,
     release: Notify,
+    requests: tokio::sync::Mutex<Vec<Value>>,
 }
 
 async fn current_set_model(
@@ -91,6 +92,7 @@ async fn current_set_model(
             Json(json!({"error": "unexpected current-set extraction contract"})),
         );
     }
+    state.requests.lock().await.push(request.clone());
     state.calls.fetch_add(1, Ordering::SeqCst);
     let mode = state.mode.load(Ordering::SeqCst);
     if mode == MODEL_INVALID_ROOT {
@@ -1674,12 +1676,13 @@ async fn recall_gates_unrelated_queries_and_never_exposes_another_vault() {
                     ..RecallContext::default()
                 },
                 include_related_notes: false,
-                max_tokens: 128,
+                max_tokens: 320,
                 ..RecallRequest::default()
             },
         )
         .await
         .unwrap();
+    assert!(serde_json::to_vec(&budgeted).unwrap().len() <= 320 * 4);
     assert_eq!(budgeted.candidate_memory_count, 2);
     assert_eq!(budgeted.relevant_memory_count, 2);
     assert!(budgeted.truncated);
@@ -1710,7 +1713,7 @@ async fn recall_gates_unrelated_queries_and_never_exposes_another_vault() {
                 query: "shared reclaim marker".to_owned(),
                 include_related_notes: true,
                 max_related_notes: 5,
-                max_tokens: 220,
+                max_tokens: 500,
                 ..RecallRequest::default()
             },
         )
@@ -1720,5 +1723,1189 @@ async fn recall_gates_unrelated_queries_and_never_exposes_another_vault() {
         shared_budget.memories.first().map(|memory| memory.id),
         Some(reclaimable.id),
         "unused related-note reservation must return to the shared response budget"
+    );
+}
+
+#[tokio::test]
+async fn derived_forget_works_after_rebuild_without_original_provider() {
+    let (_directory, state, context, core, service) = fixture("local-delete").await;
+    let model_state = Arc::new(CurrentSetModelState::default());
+    configure_extraction(&state, &context, &service, model_state.clone()).await;
+    let path = VaultPath::parse("source.md").unwrap();
+    let source = core
+        .create_bytes(
+            &context,
+            &path,
+            b"# FIRST\nAlpha backend decisions.",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap()
+        .file;
+    service.extract_note(&context, &core, &path).await.unwrap();
+    let mut set = state
+        .current_memory()
+        .get_note_set_by_source(&context, source.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut bundles = state
+        .current_memory()
+        .list_note_set_items(&context, set.id)
+        .await
+        .unwrap();
+    // This is the supported projection shape after restoring canonical Markdown
+    // into an installation where its original model no longer exists.
+    set.provider_id = None;
+    set.model_id = None;
+    for bundle in &mut bundles {
+        bundle.note_set = Some(set.clone());
+    }
+    state
+        .current_memory()
+        .restore_note_set_projection(&context, &set, &bundles)
+        .await
+        .unwrap();
+    let calls = model_state.calls.load(Ordering::SeqCst);
+    let deleted = service
+        .forget(
+            &context,
+            &core,
+            bundles[0].memory.id,
+            bundles[0].memory.revision,
+        )
+        .await
+        .unwrap();
+    assert!(deleted.source_extraction_paused);
+    assert!(matches!(
+        service.get(&context, deleted.id).await,
+        Err(MemoryError::NotFound)
+    ));
+    let remaining = service.get(&context, bundles[1].memory.id).await.unwrap();
+    assert_eq!(remaining.content, bundles[1].memory.content);
+    assert_eq!(remaining.revision, bundles[1].memory.revision);
+    service
+        .forget(&context, &core, remaining.id, remaining.revision)
+        .await
+        .unwrap();
+    let empty = state
+        .current_memory()
+        .get_note_set_by_source(&context, source.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(empty.extraction_paused);
+    assert!(
+        state
+            .current_memory()
+            .list_note_set_items(&context, empty.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(model_state.calls.load(Ordering::SeqCst), calls);
+}
+
+async fn configure_test_embeddings(
+    state: &StateStore,
+    context: &VaultContext,
+) -> (ProviderService, ModelId) {
+    configure_test_embeddings_with_gate(state, context, Arc::new(CurrentSetModelState::default()))
+        .await
+}
+
+async fn configure_test_embeddings_with_gate(
+    state: &StateStore,
+    context: &VaultContext,
+    gate: Arc<CurrentSetModelState>,
+) -> (ProviderService, ModelId) {
+    async fn embeddings(
+        AxumState(gate): AxumState<Arc<CurrentSetModelState>>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        if gate.mode.load(Ordering::SeqCst) == MODEL_BLOCKED
+            && body["input"]
+                .as_array()
+                .is_some_and(|inputs| inputs.len() == 1)
+        {
+            gate.started.notify_one();
+            gate.release.notified().await;
+        }
+        let corpus: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/memory-quality/calibration.json"
+        ))
+        .unwrap();
+        let documents = corpus["documents"].as_array().unwrap();
+        let queries = corpus["queries"].as_array().unwrap();
+        Json(
+            json!({"data": body["input"].as_array().unwrap().iter().enumerate().map(|(index,input)| {
+            let text=input.as_str().unwrap();
+            let doc=documents.iter().position(|doc|text.to_lowercase().contains(&doc["content"].as_str().unwrap().to_lowercase()));
+            let query=queries.iter().find(|query|query["query"].as_str()==Some(text));
+            let coordinate=doc.or_else(||query.and_then(|query|query["relevant"][0].as_str()).and_then(|id|documents.iter().position(|doc|doc["id"].as_str()==Some(id))))
+                .unwrap_or(if query.is_some(){63}else{60});
+            let mut vector=vec![0.0_f32;64]; vector[coordinate]=1.0;
+            json!({"index":index,"embedding":vector})
+        }).collect::<Vec<_>>()}),
+        )
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/v1/embeddings", post(embeddings))
+                .with_state(gate),
+        )
+        .await
+        .unwrap();
+    });
+    let providers = ProviderService::new(
+        state.clone(),
+        AuthService::new(
+            state.auth(),
+            MasterKeyRing::from_bytes(1, &[23_u8; 32]).unwrap(),
+        ),
+    );
+    providers
+        .set_provider_mode(context, ProviderMode::LocalOnly, None)
+        .await
+        .unwrap();
+    let provider = providers
+        .create_provider(ProviderInput {
+            name: "test-embedding".into(),
+            kind: ProviderKind::EmbeddingHttp,
+            base_url: url::Url::parse(&format!("http://{address}/v1/")).unwrap(),
+            settings: ProviderSettings::default(),
+            enabled: true,
+            secret: None,
+        })
+        .await
+        .unwrap();
+    let model = providers
+        .register_model(ModelInput {
+            provider_id: provider.id,
+            external_model_id: "contract-embedding".into(),
+            capabilities: ModelCapabilities {
+                embeddings: true,
+                dimension: Some(64),
+                ..Default::default()
+            },
+            settings: ModelSettings::default(),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    providers
+        .bind_model(Some(context), "embedding_memory", model.id, json!({}), None)
+        .await
+        .unwrap();
+    (providers, model.id)
+}
+
+#[tokio::test]
+async fn semantic_recall_respects_type_validity_and_importance() {
+    let (_dir, state, context, core, service) = fixture("semantic-filter").await;
+    let (_providers, model_id) = configure_test_embeddings(&state, &context).await;
+    let mut expected = None;
+    for (index, (kind, from, to, importance)) in [
+        (MemoryType::Fact, Some(100), Some(200), 0.8),
+        (MemoryType::Preference, None, None, 0.8),
+        (MemoryType::Fact, Some(101), None, 0.8),
+        (MemoryType::Fact, None, Some(100), 0.8),
+        (MemoryType::Fact, None, None, 0.1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let memory = service
+            .remember(
+                &context,
+                &core,
+                RememberInput {
+                    content: format!("Synthetic assertion number {index} about an orchard."),
+                    memory_type: Some(kind),
+                    valid_from: from,
+                    valid_to: to,
+                    importance: Some(importance),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .memory
+            .unwrap();
+        if index == 0 {
+            expected = Some(memory.id);
+        }
+        let bundle = state
+            .current_memory()
+            .get(&context, memory.id)
+            .await
+            .unwrap()
+            .unwrap();
+        service
+            .reembed_sources(
+                &context,
+                model_id,
+                &[mcp_vault_providers::EmbeddingSourceRef {
+                    object_type: "memory".into(),
+                    object_id: memory.id.to_string(),
+                    chunk_key: "body-v3:0000".into(),
+                    content_hash: bundle.memory.content_hash,
+                }],
+            )
+            .await
+            .unwrap();
+    }
+    let profile = service
+        .calibration_profile(&context, "memory")
+        .await
+        .unwrap()
+        .unwrap();
+    let report = service
+        .execute_retrieval_calibration(&context, &profile)
+        .await
+        .unwrap();
+    assert!(
+        report.passed,
+        "contract embeddings must pass the actual calculation: {}",
+        serde_json::to_string(&report).unwrap()
+    );
+    let result = service
+        .recall(
+            &context,
+            RecallRequest {
+                query: "完全不同的语义查询".into(),
+                types: vec![MemoryType::Fact],
+                valid_at: Some(100),
+                min_importance: 0.5,
+                include_related_notes: false,
+                include_score_breakdown: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result
+            .memories
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        vec![expected.unwrap()]
+    );
+    assert!(
+        result.memories[0]
+            .score_breakdown
+            .as_ref()
+            .unwrap()
+            .contains_key("semantic_cosine")
+    );
+}
+
+#[tokio::test]
+async fn context_only_relevant_candidate_survives_admission() {
+    let (_dir, state, context, core, service) = fixture("context-window").await;
+    for index in 0..51 {
+        service
+            .remember(
+                &context,
+                &core,
+                RememberInput {
+                    content: format!("orchard schedule orchard schedule {index}"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let target = service
+        .remember(
+            &context,
+            &core,
+            RememberInput {
+                content: format!("orchard schedule {}", "background details ".repeat(80)),
+                entities: vec!["target-project".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .memory
+        .unwrap();
+    let unrelated = service
+        .remember(
+            &context,
+            &core,
+            RememberInput {
+                content: "unrelated telescope installation".into(),
+                entities: vec!["target-project".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .memory
+        .unwrap();
+    let fts = state
+        .current_memory()
+        .search_fts(
+            &context,
+            "\"orchard\" OR \"schedule\"",
+            &Default::default(),
+            50,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !fts.iter().any(|hit| hit.memory.id == target.id),
+        "fixture must reach outside FTS window"
+    );
+    let result = service
+        .recall(
+            &context,
+            RecallRequest {
+                query: "orchard schedule".into(),
+                context: RecallContext {
+                    entities: vec!["target-project".into()],
+                    ..Default::default()
+                },
+                max_results: 100,
+                max_tokens: 32000,
+                include_related_notes: false,
+                include_score_breakdown: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let hit = result
+        .memories
+        .iter()
+        .find(|hit| hit.id == target.id)
+        .expect("relevant context candidate should survive despite a small ranking contribution");
+    assert!(
+        !hit.score_breakdown
+            .as_ref()
+            .unwrap()
+            .contains_key("lexical_rrf")
+    );
+    assert!(!result.memories.iter().any(|hit| hit.id == unrelated.id));
+}
+
+#[tokio::test]
+async fn semantic_memory_rank_is_invariant_to_duplicate_chunks() {
+    let (_dir, state, context, core, service) = fixture("semantic-object-rank").await;
+    let (_providers, model_id) = configure_test_embeddings(&state, &context).await;
+    let mut ids = Vec::new();
+    for content in ["orchard ".repeat(8000), "Synthetic second object".into()] {
+        let memory = service
+            .remember(
+                &context,
+                &core,
+                RememberInput {
+                    content,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .memory
+            .unwrap();
+        let bundle = state
+            .current_memory()
+            .get(&context, memory.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let sources = (0..32)
+            .map(|ordinal| mcp_vault_providers::EmbeddingSourceRef {
+                object_type: "memory".into(),
+                object_id: memory.id.to_string(),
+                chunk_key: format!("body-v3:{ordinal:04}"),
+                content_hash: bundle.memory.content_hash.clone(),
+            })
+            .collect::<Vec<_>>();
+        service
+            .reembed_sources(&context, model_id, &sources)
+            .await
+            .unwrap();
+        ids.push(memory.id);
+    }
+    let records = state
+        .providers()
+        .list_embeddings(&context, model_id, "memory", 100, 0)
+        .await
+        .unwrap();
+    let duplicates = records
+        .iter()
+        .filter(|row| row.object_id == ids[0].to_string() && row.chunk_key != "body-v3:0000")
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(duplicates.len() >= 30);
+    let mut a = vec![0.0_f32; 64];
+    a[60] = 1.0;
+    let mut b = vec![0.0_f32; 64];
+    b[60] = 0.9;
+    b[61] = 0.19_f32.sqrt();
+    for row in &records {
+        state
+            .providers()
+            .upsert_embedding(
+                &context,
+                row,
+                if row.object_id == ids[0].to_string() {
+                    &a
+                } else {
+                    &b
+                },
+            )
+            .await
+            .unwrap();
+    }
+    for row in &duplicates {
+        state
+            .providers()
+            .delete_embedding(&context, row.id)
+            .await
+            .unwrap();
+    }
+    let profile = service
+        .calibration_profile(&context, "memory")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        service
+            .execute_retrieval_calibration(&context, &profile)
+            .await
+            .unwrap()
+            .passed
+    );
+    let request = RecallRequest {
+        query: "完全无字面重合的查询".into(),
+        include_related_notes: false,
+        include_score_breakdown: true,
+        ..Default::default()
+    };
+    let before = service.recall(&context, request.clone()).await.unwrap();
+    for row in &duplicates {
+        state
+            .providers()
+            .upsert_embedding(&context, row, &a)
+            .await
+            .unwrap();
+    }
+    let after = service.recall(&context, request).await.unwrap();
+    let score = |result: &mcp_vault_memory::RecallResult| {
+        result
+            .memories
+            .iter()
+            .find(|memory| memory.id == ids[1])
+            .unwrap()
+            .score_breakdown
+            .clone()
+            .unwrap()
+    };
+    assert_eq!(score(&before)["semantic_object_rank"], 2.0);
+    assert_eq!(
+        score(&before)["semantic_rrf"],
+        score(&after)["semantic_rrf"]
+    );
+    assert_eq!(score(&after)["semantic_object_rank"], 2.0);
+}
+
+#[tokio::test]
+async fn recall_budget_counts_actual_heading_text_and_metadata() {
+    let (_dir, state, context, core, service) = fixture("heading-budget").await;
+    let long_path = VaultPath::parse("long-heading-source.md").unwrap();
+    let mut content = String::from("# orchard schedule\norchard schedule\n");
+    for i in 0..60 {
+        content.push_str(&format!(
+            "\n## heading-{i} {}\norchard schedule background\n",
+            "x".repeat(100)
+        ));
+    }
+    for (path, body) in [
+        (&long_path, content.as_str()),
+        (
+            &VaultPath::parse("short.md").unwrap(),
+            "# orchard schedule\norchard schedule concise assertion",
+        ),
+    ] {
+        core.create_bytes(
+            &context,
+            path,
+            body.as_bytes(),
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    mcp_vault_indexer::IndexService::new(state.clone())
+        .rebuild_vault(&core, &context)
+        .await
+        .unwrap();
+    let result = service
+        .recall(
+            &context,
+            RecallRequest {
+                query: "orchard schedule".into(),
+                max_tokens: 600,
+                include_score_breakdown: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(serde_json::to_vec(&result).unwrap().len() <= 600 * 4);
+    assert_eq!(result.related_notes.len(), 1);
+    assert_eq!(result.related_notes[0].path.as_str(), "short.md");
+    assert!(result.truncated);
+    let no_answer = service
+        .recall(
+            &context,
+            RecallRequest {
+                query: "orbital telescope launch".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(no_answer.memories.is_empty());
+    assert!(no_answer.related_notes.is_empty());
+}
+
+#[tokio::test]
+async fn calibration_controls_cancel_retry_pause_and_signature_changes_are_real() {
+    let (_dir, state, context, _core, service) = fixture("calibration-controls").await;
+    let (providers, _model) = configure_test_embeddings(&state, &context).await;
+    let job = service
+        .request_retrieval_calibration(&context, "memory")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        service
+            .request_retrieval_calibration(&context, "memory")
+            .await
+            .unwrap(),
+        Some(job)
+    );
+    service
+        .cancel_retrieval_calibration(&context, job)
+        .await
+        .unwrap();
+    let status = service
+        .calibration_status(&context, "memory")
+        .await
+        .unwrap();
+    assert_eq!(status.run.unwrap().status, "cancelled");
+    assert!(
+        service
+            .ensure_retrieval_calibration(&context)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let retry = service
+        .request_retrieval_calibration(&context, "memory")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(retry, job);
+    let profile = service
+        .calibration_profile(&context, "memory")
+        .await
+        .unwrap()
+        .unwrap();
+    let report = service
+        .execute_retrieval_calibration(&context, &profile)
+        .await
+        .unwrap();
+    assert!(report.passed);
+    // Simulate a crash after saving the passed report but before publishing it.
+    state
+        .settings()
+        .set_vault(
+            &context,
+            &format!("retrieval.calibration.active.memory.{}", profile.signature),
+            &Value::Null,
+            mcp_vault_domain::WritePrecondition::Unconditional,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !service
+            .calibration_status(&context, "memory")
+            .await
+            .unwrap()
+            .active
+    );
+    let repeated = service
+        .execute_retrieval_calibration(&context, &profile)
+        .await
+        .unwrap();
+    assert_eq!(
+        repeated.requests, report.requests,
+        "completed report must not cause network replay"
+    );
+    assert!(
+        service
+            .calibration_status(&context, "memory")
+            .await
+            .unwrap()
+            .active
+    );
+    providers
+        .bind_model(
+            Some(&context),
+            "embedding_note",
+            profile.model_id,
+            json!({}),
+            None,
+        )
+        .await
+        .unwrap();
+    let note_profile = service
+        .calibration_profile(&context, "note")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(profile.signature, note_profile.signature);
+    let note_report = service
+        .execute_retrieval_calibration(&context, &note_profile)
+        .await
+        .unwrap();
+    assert!(
+        note_report.passed,
+        "{}",
+        serde_json::to_string(&note_report).unwrap()
+    );
+    service
+        .set_calibration_maintenance(&context, false)
+        .await
+        .unwrap();
+    assert!(
+        service
+            .calibration_status(&context, "memory")
+            .await
+            .unwrap()
+            .active,
+        "maintenance pause must preserve applicable query state"
+    );
+    assert!(
+        service
+            .execute_retrieval_calibration(&context, &profile)
+            .await
+            .is_err()
+    );
+    providers
+        .set_provider_mode(&context, ProviderMode::Disabled, None)
+        .await
+        .unwrap();
+    let disabled = service
+        .calibration_status(&context, "memory")
+        .await
+        .unwrap();
+    assert!(!disabled.active);
+    assert!(disabled.blockers.contains(&"provider_disabled".into()));
+    configure_test_embeddings(&state, &context).await;
+    assert!(
+        !service
+            .calibration_status(&context, "memory")
+            .await
+            .unwrap()
+            .active
+    );
+    assert!(
+        service
+            .execute_retrieval_calibration(&context, &profile)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn individually_passing_channels_cannot_bypass_joint_no_answer_gate() {
+    let (_dir, state, context, _core, service) = fixture("joint-quality").await;
+    let (providers, model) = configure_test_embeddings(&state, &context).await;
+    providers
+        .bind_model(Some(&context), "embedding_note", model, json!({}), None)
+        .await
+        .unwrap();
+    let corpus: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/memory-quality/calibration.json"
+    ))
+    .unwrap();
+    let failures: Vec<_> = corpus["queries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|q| q["split"] == "holdout" && q["relevant"].as_array().unwrap().is_empty())
+        .map(|q| q["id"].as_str().unwrap().to_owned())
+        .collect();
+    for (index, channel) in ["memory", "note"].into_iter().enumerate() {
+        let profile = service
+            .calibration_profile(&context, channel)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut report = service
+            .execute_retrieval_calibration(&context, &profile)
+            .await
+            .unwrap();
+        assert!(report.passed);
+        // Test-only injection at the persisted-report boundary: two individually
+        // legal 1/20 error sets are disjoint. No Admin API accepts these metrics.
+        report.holdout.no_answer_false_returns = 1;
+        report.holdout.no_answer_false_return_rate = 0.05;
+        report.holdout.failed_cases = vec![failures[index].clone()];
+        state
+            .settings()
+            .set_vault(
+                &context,
+                &format!(
+                    "retrieval.calibration.active.{channel}.{}",
+                    profile.signature
+                ),
+                &json!(report),
+                mcp_vault_domain::WritePrecondition::Unconditional,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    for channel in ["memory", "note"] {
+        let status = service.calibration_status(&context, channel).await.unwrap();
+        assert!(!status.active);
+        assert!(
+            status.report.unwrap().passed,
+            "keep the channel report for diagnosis"
+        );
+        assert!(
+            status
+                .blockers
+                .contains(&"joint_no_answer_quality_failed".into())
+        );
+        assert_eq!(status.joint_no_answer.unwrap().false_return_rate, 0.10);
+    }
+    assert!(
+        service
+            .ensure_retrieval_calibration(&context)
+            .await
+            .unwrap()
+            .is_none(),
+        "joint quality failure must not create an automatic retry storm"
+    );
+}
+
+#[tokio::test]
+async fn generation_receives_full_source_language_and_coverage_contract_without_forced_reextract() {
+    let (_dir, state, context, core, service) = fixture("generation-coverage").await;
+    let model_state = Arc::new(CurrentSetModelState::default());
+    model_state.mode.store(MODEL_EMPTY_SET, Ordering::SeqCst);
+    configure_extraction(&state, &context, &service, model_state.clone()).await;
+    let corpus: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/memory-quality/generation-coverage.json"
+    ))
+    .unwrap();
+    let cases = corpus["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 15);
+    for (i, case) in cases.iter().enumerate() {
+        let path = VaultPath::parse(&format!("coverage-{i}.md")).unwrap();
+        let source = case["source"].as_str().unwrap();
+        core.create_bytes(
+            &context,
+            &path,
+            source.as_bytes(),
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+        service.extract_note(&context, &core, &path).await.unwrap();
+        let calls = model_state.calls.load(Ordering::SeqCst);
+        service.extract_note(&context, &core, &path).await.unwrap();
+        assert_eq!(
+            model_state.calls.load(Ordering::SeqCst),
+            calls,
+            "unchanged current source cannot trigger full extraction"
+        );
+        let requests = model_state.requests.lock().await;
+        let request = requests.last().unwrap();
+        assert!(
+            request["messages"][1]["content"]
+                .as_str()
+                .unwrap()
+                .contains(source),
+            "frontmatter, middle and final section must reach the real adapter"
+        );
+        let system = request["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("primary language"));
+        assert!(system.contains("completed work"));
+        assert!(system.contains("next planned stage"));
+    }
+}
+
+#[tokio::test]
+async fn positive_cosine_hard_negative_is_rejected_while_lexical_answer_survives() {
+    let (_dir, state, context, core, service) = fixture("positive-hard-negative").await;
+    let (providers, model) = configure_test_embeddings(&state, &context).await;
+    let item = service
+        .remember(
+            &context,
+            &core,
+            RememberInput {
+                content: "orchard irrigation schedule".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .memory
+        .unwrap();
+    let current = state
+        .current_memory()
+        .get(&context, item.id)
+        .await
+        .unwrap()
+        .unwrap();
+    service
+        .reembed_sources(
+            &context,
+            model,
+            &[mcp_vault_providers::EmbeddingSourceRef {
+                object_type: "memory".into(),
+                object_id: item.id.to_string(),
+                chunk_key: "body-v3:0000".into(),
+                content_hash: current.memory.content_hash,
+            }],
+        )
+        .await
+        .unwrap();
+    let row = state
+        .providers()
+        .list_embeddings(&context, model, "memory", 10, 0)
+        .await
+        .unwrap()
+        .remove(0);
+    let mut hard_negative = vec![0.0_f32; 64];
+    hard_negative[60] = 0.2;
+    hard_negative[61] = 0.96_f32.sqrt();
+    state
+        .providers()
+        .upsert_embedding(&context, &row, &hard_negative)
+        .await
+        .unwrap();
+    let profile = service
+        .calibration_profile(&context, "memory")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        service
+            .execute_retrieval_calibration(&context, &profile)
+            .await
+            .unwrap()
+            .passed
+    );
+    providers
+        .bind_model(Some(&context), "embedding_note", model, json!({}), None)
+        .await
+        .unwrap();
+    let note_path = VaultPath::parse("orchard.md").unwrap();
+    core.create_bytes(
+        &context,
+        &note_path,
+        b"# Orchard
+orchard irrigation schedule",
+        Actor::system(),
+        SourcePlane::System,
+        None,
+    )
+    .await
+    .unwrap();
+    let index = mcp_vault_indexer::IndexService::with_provider_service(state.clone(), providers);
+    index.rebuild_vault(&core, &context).await.unwrap();
+    assert!(
+        index
+            .schedule_note_embeddings(&context)
+            .await
+            .unwrap()
+            .source_chunks
+            > 0
+    );
+    for job in state
+        .jobs()
+        .list(&context, None, Some("embedding.rebuild"), 100, 0)
+        .await
+        .unwrap()
+    {
+        let sources: Vec<mcp_vault_providers::EmbeddingSourceRef> =
+            serde_json::from_value(job.payload["sources"].clone()).unwrap();
+        let notes = sources
+            .into_iter()
+            .filter(|source| source.object_type == "note")
+            .collect::<Vec<_>>();
+        if !notes.is_empty() {
+            index
+                .reembed_note_sources(&context, model, &notes)
+                .await
+                .unwrap();
+        }
+    }
+    let note_profile = service
+        .calibration_profile(&context, "note")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        service
+            .execute_retrieval_calibration(&context, &note_profile)
+            .await
+            .unwrap()
+            .passed
+    );
+    let note_vectors = state
+        .providers()
+        .list_embeddings(&context, model, "note", 100, 0)
+        .await
+        .unwrap();
+    assert!(!note_vectors.is_empty());
+    for vector in note_vectors {
+        state
+            .providers()
+            .upsert_embedding(&context, &vector, &hard_negative)
+            .await
+            .unwrap();
+    }
+    let unrelated = service
+        .recall(
+            &context,
+            RecallRequest {
+                query: "orchard telescope launch".into(),
+                include_related_notes: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(unrelated.memories.is_empty());
+    assert!(unrelated.related_notes.is_empty());
+    let lexical = service
+        .recall(
+            &context,
+            RecallRequest {
+                query: "orchard irrigation schedule".into(),
+                include_related_notes: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(lexical.memories[0].id, item.id);
+    service
+        .forget(&context, &core, item.id, item.revision)
+        .await
+        .unwrap();
+    let note_only = service
+        .recall(
+            &context,
+            RecallRequest {
+                query: "orchard irrigation schedule".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(note_only.memories.is_empty());
+    assert_eq!(note_only.related_notes.len(), 1);
+    assert_eq!(note_only.related_notes[0].path, note_path);
+}
+
+#[tokio::test]
+async fn source_resume_replays_canonical_commit_and_queues_extraction_exactly_once() {
+    let (_dir, state, context, core, service) = fixture("resume-recovery").await;
+    let model = Arc::new(CurrentSetModelState::default());
+    configure_extraction(&state, &context, &service, model.clone()).await;
+    let path = VaultPath::parse("resume.md").unwrap();
+    let source = core
+        .create_bytes(
+            &context,
+            &path,
+            b"# FIRST\nAlpha backend",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap()
+        .file;
+    service.extract_note(&context, &core, &path).await.unwrap();
+    let set = state
+        .current_memory()
+        .get_note_set_by_source(&context, source.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let item = state
+        .current_memory()
+        .list_note_set_items(&context, set.id)
+        .await
+        .unwrap()
+        .remove(0)
+        .memory;
+    service
+        .forget(&context, &core, item.id, item.revision)
+        .await
+        .unwrap();
+    let paused = state
+        .current_memory()
+        .get_note_set_by_source(&context, source.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let failing = core
+        .clone()
+        .with_failure_injector(Arc::new(FailOnceAt::new(CommitPhase::MetadataCommitted)));
+    let intent_id = service
+        .resume_note_extraction(
+            &context,
+            &failing,
+            source.id,
+            paused.set_revision,
+            Actor::system(),
+        )
+        .await
+        .unwrap();
+    let intent = state
+        .jobs()
+        .get(&context, intent_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(intent.job_type, "memory.source_resume");
+    assert!(
+        state
+            .current_memory()
+            .get_note_set_by_source(&context, source.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .extraction_paused
+    );
+    let calls = model.calls.load(Ordering::SeqCst);
+    let extraction = service
+        .complete_note_extraction_resume(&context, &core, &intent.payload)
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .jobs()
+            .get(&context, extraction)
+            .await
+            .unwrap()
+            .unwrap()
+            .job_type,
+        "memory.extract"
+    );
+    assert_eq!(
+        service
+            .complete_note_extraction_resume(&context, &core, &intent.payload)
+            .await
+            .unwrap(),
+        extraction
+    );
+    assert!(
+        !state
+            .current_memory()
+            .get_note_set_by_source(&context, source.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .extraction_paused
+    );
+    assert_eq!(
+        model.calls.load(Ordering::SeqCst),
+        calls,
+        "resume publication itself must not call a Provider"
+    );
+}
+
+#[tokio::test]
+async fn recall_revalidates_current_objects_after_related_note_provider_wait() {
+    let (_dir, state, context, core, service) = fixture("final-current-check").await;
+    let gate = Arc::new(CurrentSetModelState::default());
+    let (providers, model) =
+        configure_test_embeddings_with_gate(&state, &context, gate.clone()).await;
+    providers
+        .bind_model(Some(&context), "embedding_note", model, json!({}), None)
+        .await
+        .unwrap();
+    let profile = service
+        .calibration_profile(&context, "note")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        service
+            .execute_retrieval_calibration(&context, &profile)
+            .await
+            .unwrap()
+            .passed
+    );
+    let item = service
+        .remember(
+            &context,
+            &core,
+            RememberInput {
+                content: "orchard irrigation schedule".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .memory
+        .unwrap();
+    gate.mode.store(MODEL_BLOCKED, Ordering::SeqCst);
+    let recall = tokio::spawn({
+        let service = service.clone();
+        let context = context.clone();
+        async move {
+            service
+                .recall(
+                    &context,
+                    RecallRequest {
+                        query: "orchard irrigation schedule".into(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap()
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.started.notified())
+        .await
+        .unwrap();
+    service
+        .forget(&context, &core, item.id, item.revision)
+        .await
+        .unwrap();
+    gate.release.notify_one();
+    let result = recall.await.unwrap();
+    assert!(result.memories.is_empty());
+    assert!(
+        result
+            .degraded
+            .contains(&"candidate_changed_before_response".into())
     );
 }

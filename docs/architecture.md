@@ -771,3 +771,11 @@ The architecture is preserved when:
 - WebDAV and MCP writes produce the same revision/audit/event behavior;
 - the Admin listener can be absent from all public proxy routes;
 - an Agent connection cannot change Vault by tool argument.
+
+
+## Bounded calibration application service
+
+The memory application service owns synthetic evaluation and publication; state repositories own checkpoints and atomic request accounting. The server registers the bounded retrieval.calibrate worker and startup/periodic compensation. The Provider transport enforces accounting at actual dispatch. Neither protocol handlers nor UI compute quality metrics.
+
+The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
+specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).

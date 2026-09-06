@@ -61,6 +61,35 @@ pub trait VectorIndex: Send + Sync {
     ) -> Result<u64, ProviderError>;
 }
 
+/// The exact finite cosine calculation shared by retrieval and calibration.
+pub fn exact_cosine_similarity(left: &[f32], right: &[f32]) -> Result<f32, ProviderError> {
+    if left.is_empty() || left.len() != right.len() {
+        return Err(ProviderError::DimensionMismatch);
+    }
+    if left.iter().chain(right).any(|value| !value.is_finite()) {
+        return Err(ProviderError::InvalidResponse(
+            "vector contains non-finite value",
+        ));
+    }
+    let norm = |values: &[f32]| values.iter().map(|value| value * value).sum::<f32>().sqrt();
+    let left_norm = norm(left);
+    let right_norm = norm(right);
+    if !left_norm.is_finite()
+        || !right_norm.is_finite()
+        || left_norm <= f32::EPSILON
+        || right_norm <= f32::EPSILON
+    {
+        return Err(ProviderError::InvalidResponse("vector magnitude invalid"));
+    }
+    Ok((left
+        .iter()
+        .zip(right)
+        .map(|(left, right)| left * right)
+        .sum::<f32>()
+        / (left_norm * right_norm))
+        .clamp(-1.0, 1.0))
+}
+
 /// Mandatory SQLite exact-cosine backend.
 #[derive(Clone)]
 pub struct SqliteVectorIndex {
@@ -159,26 +188,7 @@ impl VectorIndex for SqliteVectorIndex {
                 .await?;
             let page_len = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
             hits.extend(candidates.into_iter().filter_map(|candidate| {
-                let candidate_norm = candidate
-                    .vector
-                    .iter()
-                    .map(|value| value * value)
-                    .sum::<f32>()
-                    .sqrt();
-                if candidate.vector.len() != dimension as usize
-                    || candidate.vector.iter().any(|value| !value.is_finite())
-                    || !candidate_norm.is_finite()
-                    || candidate_norm <= f32::EPSILON
-                {
-                    return None;
-                }
-                let dot = candidate
-                    .vector
-                    .iter()
-                    .zip(query)
-                    .map(|(left, right)| left * right)
-                    .sum::<f32>();
-                let score = (dot / (query_norm * candidate_norm)).clamp(-1.0, 1.0);
+                let score = exact_cosine_similarity(query, &candidate.vector).ok()?;
                 Some(VectorHit {
                     embedding: candidate.embedding,
                     score,

@@ -3,6 +3,8 @@
 //! Canonical bytes are read through Vault Core. SQL projection writes and
 //! queries are delegated to the state repository.
 
+pub mod relevance;
+
 use std::{
     collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
     time::{SystemTime, UNIX_EPOCH},
@@ -26,6 +28,7 @@ use mcp_vault_state::{
     LinkProjectionInput, NoteEmbeddingSourceRecord, NoteProjectionInput, NoteSearchRecord,
     StateError, TagProjectionInput,
 };
+use serde::Serialize;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -187,6 +190,24 @@ pub struct NoteRetrievalHit {
     pub score: f64,
     /// Stable component scores when requested.
     pub score_breakdown: Option<BTreeMap<String, f64>>,
+    /// Actual winning section when one can be located.
+    pub matched_section: Option<NoteSectionMatch>,
+}
+
+/// Stable locator within the analyzed plain-text projection, not raw Markdown
+/// line coordinates. Vector text/profile bytes remain unchanged.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct NoteSectionMatch {
+    /// Stable winning vector/projection chunk key.
+    pub chunk_key: String,
+    /// Nearest heading at the matching snippet's start.
+    pub heading_path: Vec<String>,
+    /// Inclusive UTF-8 byte start in the indexed plain-text projection.
+    pub projection_start_byte: usize,
+    /// Exclusive UTF-8 byte end in that projection.
+    pub projection_end_byte: usize,
+    /// Revision represented by this locator.
+    pub revision: Revision,
 }
 
 /// Bounded note retrieval result with explicit degradation.
@@ -194,6 +215,10 @@ pub struct NoteRetrievalHit {
 pub struct NoteRetrievalResult {
     /// Ranked current note cues.
     pub hits: Vec<NoteRetrievalHit>,
+    /// Unique current objects collected before request-scope/relevance admission.
+    pub candidate_count: u32,
+    /// Current objects satisfying the requested scope, before relevance admission.
+    pub eligible_count: u32,
     /// Candidates available before pagination.
     pub available_result_count: u32,
     /// Stable optional-capability degradation codes.
@@ -236,6 +261,7 @@ pub struct NoteSemanticStatus {
 
 #[derive(Clone, Debug)]
 struct RankedNote {
+    matched_section: Option<NoteSectionMatch>,
     note: NoteSearchRecord,
     score: f64,
     components: BTreeMap<String, f64>,
@@ -243,6 +269,7 @@ struct RankedNote {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NoteEmbeddingChunk {
+    section: NoteSectionMatch,
     key: String,
     text: String,
     snippet: String,
@@ -251,6 +278,7 @@ struct NoteEmbeddingChunk {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CurrentNoteEmbeddingChunk {
+    section: NoteSectionMatch,
     snippet: String,
     content_hash: String,
     input_hash: String,
@@ -933,7 +961,7 @@ pub fn quote_fts_query(query: &str) -> Result<String, IndexError> {
     quote_fts_query_with(query, " AND ")
 }
 
-fn quote_fts_query_any(query: &str) -> Result<String, IndexError> {
+pub fn quote_fts_query_any(query: &str) -> Result<String, IndexError> {
     quote_fts_query_with(query, " OR ")
 }
 
@@ -1066,6 +1094,53 @@ impl IndexService {
         offset: u32,
         include_score_breakdown: bool,
     ) -> Result<NoteRetrievalResult, IndexError> {
+        self.retrieve_notes_with_admission(
+            context,
+            query,
+            mode,
+            scope,
+            limit,
+            offset,
+            include_score_breakdown,
+            None,
+        )
+        .await
+    }
+
+    /// Recall-specific candidate collection. Missing calibration allows only
+    /// strong lexical evidence; this internal service API is not an MCP option.
+    pub async fn retrieve_notes_for_recall(
+        &self,
+        context: &VaultContext,
+        query: &str,
+        min_cosine: Option<f64>,
+        limit: u32,
+    ) -> Result<NoteRetrievalResult, IndexError> {
+        self.retrieve_notes_with_admission(
+            context,
+            query,
+            NoteRetrievalMode::Hybrid,
+            &NoteRetrievalScope::default(),
+            limit,
+            0,
+            true,
+            Some(min_cosine),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn retrieve_notes_with_admission(
+        &self,
+        context: &VaultContext,
+        query: &str,
+        mode: NoteRetrievalMode,
+        scope: &NoteRetrievalScope,
+        limit: u32,
+        offset: u32,
+        include_score_breakdown: bool,
+        recall_floor: Option<Option<f64>>,
+    ) -> Result<NoteRetrievalResult, IndexError> {
         if limit == 0 || limit > 100 || offset.saturating_add(limit) > 500 {
             return Err(IndexError::InvalidInput(
                 "note retrieval page exceeds the fused candidate bound",
@@ -1083,6 +1158,8 @@ impl IndexService {
         }
         let pool_limit = offset.saturating_add(limit).clamp(50, 500);
         let mut ranked = HashMap::<FileId, RankedNote>::new();
+        let mut candidates = HashSet::new();
+        let mut eligible = HashSet::new();
         if !matches!(mode, NoteRetrievalMode::Semantic) {
             let lexical = if matches!(mode, NoteRetrievalMode::Lexical) {
                 self.search_notes_scoped(
@@ -1102,15 +1179,30 @@ impl IndexService {
                     .await?
             };
             for (rank, note) in lexical.into_iter().enumerate() {
-                let component = reciprocal_rank(1.0, rank);
+                candidates.insert(note.file_id);
+                eligible.insert(note.file_id);
+                if recall_floor.is_some()
+                    && !relevance::lexical_relevance(
+                        query,
+                        &note.snippet,
+                        &note.tags,
+                        &note.title.iter().cloned().collect::<Vec<_>>(),
+                    )
+                    .admitted
+                {
+                    continue;
+                }
+                let component = relevance::note_lexical_contribution(rank);
                 let mut components = BTreeMap::new();
                 components.insert("lexical_rrf".to_owned(), component);
+                components.insert("lexical_rrf_contribution".to_owned(), component);
                 if let Some(raw) = note.score {
                     components.insert("lexical_bm25".to_owned(), raw);
                 }
                 ranked.insert(
                     note.file_id,
                     RankedNote {
+                        matched_section: None,
                         note,
                         score: component,
                         components,
@@ -1120,7 +1212,7 @@ impl IndexService {
         }
 
         let mut degraded = Vec::new();
-        if !matches!(mode, NoteRetrievalMode::Lexical) {
+        if !matches!(mode, NoteRetrievalMode::Lexical) && recall_floor != Some(None) {
             self.add_semantic_note_hits(
                 context,
                 query,
@@ -1128,10 +1220,39 @@ impl IndexService {
                 pool_limit,
                 &mut ranked,
                 &mut degraded,
+                recall_floor.flatten(),
+                &mut candidates,
+                &mut eligible,
             )
             .await?;
         }
 
+        for value in ranked
+            .values_mut()
+            .filter(|value| value.matched_section.is_none())
+        {
+            if let Some(source) = self
+                .repository()
+                .get_note_embedding_source(context, value.note.file_id)
+                .await?
+            {
+                if source.revision != value.note.revision {
+                    continue;
+                }
+                let best = note_embedding_chunks(&source)
+                    .into_iter()
+                    .filter_map(|chunk| {
+                        let evidence =
+                            relevance::lexical_relevance(query, &chunk.text, &value.note.tags, &[]);
+                        evidence.admitted.then_some((chunk, evidence.coverage))
+                    })
+                    .max_by(|left, right| left.1.total_cmp(&right.1));
+                if let Some((chunk, _)) = best {
+                    value.matched_section = Some(chunk.section);
+                    value.note.snippet = chunk.snippet;
+                }
+            }
+        }
         let mut ranked = ranked.into_values().collect::<Vec<_>>();
         ranked.sort_by(|left, right| {
             right
@@ -1149,12 +1270,15 @@ impl IndexService {
                 note: ranked.note,
                 score: ranked.score,
                 score_breakdown: include_score_breakdown.then_some(ranked.components),
+                matched_section: ranked.matched_section,
             })
             .collect();
         degraded.sort();
         degraded.dedup();
         Ok(NoteRetrievalResult {
             hits,
+            candidate_count: candidates.len() as u32,
+            eligible_count: eligible.len() as u32,
             available_result_count,
             degraded,
         })
@@ -1396,6 +1520,7 @@ impl IndexService {
         Ok(records.len() as u64)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn add_semantic_note_hits(
         &self,
         context: &VaultContext,
@@ -1404,6 +1529,9 @@ impl IndexService {
         pool_limit: u32,
         ranked: &mut HashMap<FileId, RankedNote>,
         degraded: &mut Vec<String>,
+        min_cosine: Option<f64>,
+        candidates: &mut HashSet<FileId>,
+        eligible: &mut HashSet<FileId>,
     ) -> Result<(), IndexError> {
         let Some(providers) = self.providers.as_ref() else {
             degraded.push("semantic_provider_unavailable".to_owned());
@@ -1493,10 +1621,10 @@ impl IndexService {
         let mut current_note_vectors = 0_usize;
         let mut saw_non_negative_candidate = false;
         for hit in vector_hits {
-            if hit.score < 0.0 {
-                break;
+            if !hit.score.is_finite() {
+                continue;
             }
-            saw_non_negative_candidate = true;
+            saw_non_negative_candidate |= hit.score >= 0.0;
             if hit.embedding.object_type != "note" {
                 continue;
             }
@@ -1520,6 +1648,7 @@ impl IndexService {
                                 (
                                     chunk.key.clone(),
                                     CurrentNoteEmbeddingChunk {
+                                        section: chunk.section,
                                         snippet: chunk.snippet,
                                         input_hash: embedding_input_hash(
                                             &profile_hash,
@@ -1561,16 +1690,25 @@ impl IndexService {
                 excluded_notes.insert(file_id);
                 continue;
             };
+            candidates.insert(file_id);
             if !note_matches_scope(&note, scope) {
                 excluded_notes.insert(file_id);
                 continue;
             }
-            let Some(component) = semantic_note_rank_score(hit.score, semantic_rank) else {
+            eligible.insert(file_id);
+            let contribution = match min_cosine {
+                Some(floor) => {
+                    relevance::calibrated_semantic_rank_score(hit.score, semantic_rank, floor)
+                }
+                None => semantic_note_rank_score(hit.score, semantic_rank),
+            };
+            let Some(component) = contribution else {
                 continue;
             };
             let entry = ranked.entry(file_id).or_insert_with(|| {
                 note.snippet = snippet.clone();
                 RankedNote {
+                    matched_section: None,
                     note,
                     score: 0.0,
                     components: BTreeMap::new(),
@@ -1580,9 +1718,10 @@ impl IndexService {
                 selected_notes.insert(file_id);
                 continue;
             }
-            if !entry.components.contains_key("lexical_rrf") {
-                entry.note.snippet = snippet;
-            }
+            // The winning semantic chunk owns the semantic snippet even when
+            // an incidental lexical hit already created this note candidate.
+            entry.note.snippet = snippet;
+            entry.matched_section = Some(chunk.section.clone());
             entry.score += component;
             entry
                 .components
@@ -1590,6 +1729,13 @@ impl IndexService {
             entry
                 .components
                 .insert("semantic_cosine".to_owned(), f64::from(hit.score));
+            entry
+                .components
+                .insert("semantic_rrf_contribution".to_owned(), component);
+            entry.components.insert(
+                "semantic_object_rank".to_owned(),
+                (semantic_rank + 1) as f64,
+            );
             selected_notes.insert(file_id);
             semantic_rank = semantic_rank.saturating_add(1);
             if selected_notes.len() >= pool_limit as usize {
@@ -1959,6 +2105,20 @@ fn note_matches_scope(note: &NoteSearchRecord, scope: &NoteRetrievalScope) -> bo
         .all(|topic| note.topic_ids.contains(topic))
 }
 
+/// Prepare an isolated evaluation document through the identical production
+/// note projection rules. This does not publish any note or vector.
+pub fn note_evaluation_inputs(source: &NoteEmbeddingSourceRecord) -> Vec<String> {
+    note_embedding_chunks(source)
+        .into_iter()
+        .map(|chunk| chunk.text)
+        .collect()
+}
+
+/// Apply the production note query input envelope without changing its profile.
+pub fn note_evaluation_query(query: &str) -> String {
+    truncate_utf8_bytes(query, NOTE_EMBEDDING_MAX_INPUT_BYTES).to_owned()
+}
+
 fn note_embedding_chunks(source: &NoteEmbeddingSourceRecord) -> Vec<NoteEmbeddingChunk> {
     let body = source.plain_text.trim();
     if body.is_empty() {
@@ -1967,6 +2127,13 @@ fn note_embedding_chunks(source: &NoteEmbeddingSourceRecord) -> Vec<NoteEmbeddin
             return Vec::new();
         }
         return vec![NoteEmbeddingChunk {
+            section: NoteSectionMatch {
+                chunk_key: format!("{NOTE_EMBEDDING_CHUNK_PROFILE}:0000"),
+                heading_path: source.title.iter().cloned().collect(),
+                projection_start_byte: 0,
+                projection_end_byte: 0,
+                revision: source.revision,
+            },
             key: format!("{NOTE_EMBEDDING_CHUNK_PROFILE}:0000"),
             snippet: source
                 .title
@@ -2003,6 +2170,18 @@ fn note_embedding_chunks(source: &NoteEmbeddingSourceRecord) -> Vec<NoteEmbeddin
         debug_assert!(text.len() <= NOTE_EMBEDDING_MAX_INPUT_BYTES);
         let ordinal = chunks.len();
         chunks.push(NoteEmbeddingChunk {
+            section: NoteSectionMatch {
+                chunk_key: format!("{NOTE_EMBEDDING_CHUNK_PROFILE}:{ordinal:04}"),
+                heading_path: heading_offsets
+                    .iter()
+                    .rev()
+                    .find(|(offset, _)| *offset <= start)
+                    .map(|(_, heading)| vec![heading.clone()])
+                    .unwrap_or_default(),
+                projection_start_byte: start,
+                projection_end_byte: end,
+                revision: source.revision,
+            },
             key: format!("{NOTE_EMBEDDING_CHUNK_PROFILE}:{ordinal:04}"),
             text: text.clone(),
             snippet: body_chunk.chars().take(280).collect(),
@@ -3221,8 +3400,11 @@ mod tests {
             .into_iter()
             .find(|hit| hit.note.path.as_str() == "snippets/hybrid.md")
             .unwrap();
-        assert!(hybrid_snippet.note.snippet.contains("keywordneedle"));
-        assert!(!hybrid_snippet.note.snippet.contains("semantic-tail"));
+        assert!(hybrid_snippet.note.snippet.contains("semantic-tail"));
+        assert_eq!(
+            hybrid_snippet.matched_section,
+            semantic_snippet.matched_section
+        );
         assert!(
             hybrid_snippet
                 .score_breakdown

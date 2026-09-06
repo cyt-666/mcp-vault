@@ -1131,7 +1131,7 @@ describe('Admin 管理界面', () => {
     });
 
     expect(container.querySelector('button[aria-label="删除当前记忆 memory-1"]')).toBeNull();
-    expect(container.textContent).toContain('长期记忆（1）');
+    expect(container.textContent).toContain('长期记忆（已加载 1 条）');
     const removeSecond = container.querySelector(
       'button[aria-label="删除当前记忆 memory-2"]',
     ) as HTMLButtonElement;
@@ -1143,7 +1143,7 @@ describe('Admin 管理界面', () => {
       method: 'DELETE',
     });
     expect(container.querySelector('button[aria-label="删除当前记忆 memory-2"]')).toBeNull();
-    expect(container.textContent).toContain('长期记忆（0）');
+    expect(container.textContent).toContain('长期记忆（已加载 0 条）');
     expect(confirm).toHaveBeenCalledTimes(2);
     expect(onRefresh).toHaveBeenCalledTimes(2);
 

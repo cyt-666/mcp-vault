@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 
 import { adminApi } from './api';
+import { MemoryManagement, MemoryEditor } from './memory-management';
 import {
   CopyField,
   EmptyState,
@@ -1413,8 +1414,24 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
   const [newContent, setNewContent] = useState('');
   const [newKind, setNewKind] = useState('');
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<JsonObject | null>(null);
+  const [nextOffset, setNextOffset] = useState<unknown>(data?.next_offset);
+  useEffect(() => setNextOffset(data?.next_offset), [data?.next_offset]);
 
-  useEffect(() => setMemories(arrayRecords(data?.memories)), [data?.memories]);
+  const loadedPages = useRef(1);
+  const vaultSlug = stringValue(data?.vault_slug, '');
+  useEffect(() => {
+    let cancelled = false;
+    const first = arrayRecords(data?.memories);
+    if (loadedPages.current === 1) { setMemories(first); return; }
+    const prefix = vaultSlug ? `/vaults/${encodeURIComponent(vaultSlug)}` : '';
+    void Promise.all(Array.from({ length: loadedPages.current - 1 }, (_, index) => adminApi.request<JsonObject>(`${prefix}/memories?limit=50&offset=${(index + 1) * 50}`))).then((pages) => {
+      if (cancelled) return;
+      setMemories([first, ...pages.map((page) => arrayRecords(page.memories))].flat());
+      setNextOffset(pages.at(-1)?.next_offset);
+    }).catch(() => { /* Keep the loaded collection; page-level errors remain visible. */ });
+    return () => { cancelled = true; };
+  }, [data?.memories, vaultSlug]);
 
   async function deleteMemory(memory: JsonObject) {
     const id = stringValue(memory.id, '');
@@ -1475,6 +1492,8 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
       <Notice tone="info">每篇来源笔记只拥有一套当前记忆。内容变化会立即让旧集合退出读取；移动不会调用模型。显式记忆则直接保存，不经过提取或整理。</Notice>
       <MemoryExtractionPanel data={extraction} jobs={memoryJobs} notify={notify} onRefresh={onRefresh} />
       <MemoryEmbeddingPanel data={embedding} notify={notify} onRefresh={onRefresh} />
+      <MemoryManagement data={data} notify={notify} onRefresh={onRefresh} />
+      {editing ? <Panel title="编辑当前显式记忆"><MemoryEditor memory={editing} data={data} notify={notify} onRefresh={onRefresh} onClose={() => setEditing(null)} /></Panel> : null}
       <Panel title="添加显式记忆" eyebrow="直接写入" description="可选类型只是元数据；服务不会补造重要性、置信度或来源。">
         <form className="compact-form" onSubmit={(event) => void createMemory(event)}>
           <label>内容<textarea required rows={4} value={newContent} onChange={(event) => setNewContent(event.target.value)} /></label>
@@ -1491,7 +1510,7 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
           <div className="button-row"><button className="primary-button" disabled={creating || !newContent.trim()} type="submit">{creating ? '正在保存…' : '保存当前记忆'}</button></div>
         </form>
       </Panel>
-      <Panel title={`长期记忆（${memories.length}）`} eyebrow="有来源的上下文" description="默认召回不调用在线模型。">
+      <Panel title={`长期记忆（已加载 ${memories.length} 条）`} eyebrow="有来源的上下文" description="默认召回不调用在线模型。">
         {memories.length === 0 ? (
           <EmptyState title="还没有长期记忆" detail="Agent 主动记住或系统从普通笔记自动识别出的耐久信息会出现在这里。" />
         ) : (
@@ -1521,6 +1540,7 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
                     </details>
                   ) : <small>来源：已认证的显式记忆输入。</small>}
                   <div className="button-row">
+                    {!derived ? <button type="button" className="secondary-button" aria-label={`编辑显式记忆 ${stringValue(memory.id)}`} onClick={() => setEditing(memory)}>编辑</button> : null}
                     <button aria-label={`删除当前记忆 ${stringValue(memory.id)}`} className="danger-button" disabled={memoryActionId === stringValue(memory.id)} type="button" onClick={() => void deleteMemory(memory)}>删除</button>
                   </div>
                 </article>
@@ -1528,6 +1548,12 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
             })}
           </div>
         )}
+        {typeof nextOffset === 'number' ? <button type="button" className="secondary-button" onClick={() => {
+          void adminApi.request<JsonObject>(`/memories?limit=50&offset=${nextOffset}`).then((result) => {
+            loadedPages.current += 1;
+            setMemories((current) => [...current, ...arrayRecords(result.memories)]); setNextOffset(result.next_offset);
+          }).catch((error: unknown) => notify(formatRequestError(error), 'danger'));
+        }}>加载更多记忆</button> : null}
       </Panel>
     </div>
   );
@@ -1568,7 +1594,7 @@ function MemoryEmbeddingPanel({ data, notify, onRefresh }: { data: JsonObject; n
       </div>
       {!configured ? <Notice tone="info">在“AI 服务”中绑定“记忆向量”模型后即可生成；未生成向量时，具有明确词法或实体证据的结果仍可检索。</Notice> : null}
       {configured && blockers.length > 0 ? <Notice tone="warning">记忆语义召回尚未完全就绪：{blockers.map(memoryEmbeddingBlockerLabel).join('；')}。</Notice> : null}
-      {configured && blockers.length === 0 ? <Notice tone="success">当前可召回记忆均已有所选模型的语义向量。</Notice> : null}
+      {configured && blockers.length === 0 ? <Notice tone="success">当前记忆向量覆盖完整；语义检索是否启用请查看独立的校准状态。</Notice> : null}
     </Panel>
   );
 }

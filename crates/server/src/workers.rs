@@ -1458,8 +1458,10 @@ pub fn vault_initialize_job_handler(
     state: StateStore,
     history_root: std::path::PathBuf,
     core_runtime: mcp_vault_core::VaultCoreRuntime,
+    memory: MemoryService,
 ) -> JobHandler {
     Arc::new(move |job, shutdown| {
+        let memory = memory.clone();
         let state = state.clone();
         let history_root = history_root.clone();
         let core_runtime = core_runtime.clone();
@@ -1523,6 +1525,7 @@ pub fn vault_initialize_job_handler(
                     "managed Vault initialization could not schedule optional note embeddings"
                 );
             }
+            let _ = memory.ensure_retrieval_calibration(&context).await;
             JobOutcome::Complete
         })
     })
@@ -1577,6 +1580,111 @@ pub fn vault_reconcile_job_handler(
                     delay: Duration::from_secs(10),
                     code: "reconcile_failed",
                 },
+            }
+        })
+    })
+}
+
+/// Execute bounded calibration through the actual application/Provider engine.
+/// Two global slots; the database permits one active calibration job per Vault.
+pub fn retrieval_calibration_job_handler(state: StateStore, memory: MemoryService) -> JobHandler {
+    let slots = Arc::new(tokio::sync::Semaphore::new(2));
+    Arc::new(move |job, shutdown| {
+        let state = state.clone();
+        let memory = memory.clone();
+        let slots = slots.clone();
+        Box::pin(async move {
+            let permit = tokio::select! {
+                _=shutdown.cancelled()=>return JobOutcome::Cancelled,
+                permit=slots.acquire()=>permit,
+            };
+            let Ok(_permit) = permit else {
+                return JobOutcome::Failed {
+                    code: "calibration_worker_closed",
+                };
+            };
+            let Some(vault_id) = job.vault_id else {
+                return JobOutcome::Failed {
+                    code: "calibration_vault_missing",
+                };
+            };
+            let context = match state.vaults().find_by_id(vault_id).await {
+                Ok(Some(vault)) => match vault.context() {
+                    Ok(context) => context,
+                    Err(_) => {
+                        return JobOutcome::Failed {
+                            code: "calibration_context_invalid",
+                        };
+                    }
+                },
+                _ => {
+                    return JobOutcome::Failed {
+                        code: "calibration_vault_missing",
+                    };
+                }
+            };
+            let mut quality_failed = false;
+            let mut terminal_error = None;
+            for channel in ["memory", "note"] {
+                let profile = match memory.calibration_profile(&context, channel).await {
+                    Ok(Some(profile)) => profile,
+                    Ok(None) => continue,
+                    Err(error) => return JobOutcome::Failed { code: error.code() },
+                };
+                if !job.payload["signatures"]
+                    .as_array()
+                    .is_some_and(|signatures| {
+                        signatures
+                            .iter()
+                            .any(|value| value.as_str() == Some(&profile.signature))
+                    })
+                {
+                    continue;
+                }
+                let result = tokio::select! {
+                    _=shutdown.cancelled()=> {
+                        // Graceful process shutdown retains a resumable checkpoint;
+                        // explicit durable Admin cancellation stops this signature.
+                        if state.jobs().get(&context, job.id).await.ok().flatten().is_some_and(|job| job.cancel_requested) {
+                            let _ = state.calibrations().finish(&context, channel, &profile.signature, "cancelled", &json!({"error_code":"calibration_cancelled"})).await;
+                        }
+                        return JobOutcome::Cancelled;
+                    },
+                    result=memory.execute_retrieval_calibration(&context,&profile)=>result,
+                };
+                match result {
+                    Ok(report) => {
+                        quality_failed |= !report.passed;
+                    }
+                    Err(error) if error.retryable() && job.attempts < job.max_attempts => {
+                        return JobOutcome::Retry {
+                            delay: Duration::from_secs(30),
+                            code: error.code(),
+                        };
+                    }
+                    Err(error) => {
+                        let _ = state
+                            .calibrations()
+                            .finish(
+                                &context,
+                                channel,
+                                &profile.signature,
+                                "failed",
+                                &json!({"error_code":error.code()}),
+                            )
+                            .await;
+                        terminal_error = Some(error.code());
+                    }
+                }
+            }
+            if let Some(code) = terminal_error {
+                JobOutcome::Failed { code }
+            } else if quality_failed {
+                JobOutcome::Failed {
+                    code: "calibration_quality_not_passed",
+                }
+            } else {
+                JobOutcome::Complete
             }
         })
     })
@@ -2461,6 +2569,62 @@ pub(crate) async fn retire_legacy_memory_jobs(
     Ok(())
 }
 
+/// Recover one explicitly authorized source resume across canonical/DB commit.
+pub fn memory_source_resume_job_handler(
+    state: StateStore,
+    history_root: std::path::PathBuf,
+    core_runtime: mcp_vault_core::VaultCoreRuntime,
+    memory: MemoryService,
+) -> JobHandler {
+    Arc::new(move |job, shutdown| {
+        let state = state.clone();
+        let history_root = history_root.clone();
+        let core_runtime = core_runtime.clone();
+        let memory = memory.clone();
+        Box::pin(async move {
+            let Some(vault_id) = job.vault_id else {
+                return JobOutcome::Failed {
+                    code: "memory_resume_vault_missing",
+                };
+            };
+            let vault = match state.vaults().find_by_id(vault_id).await {
+                Ok(Some(vault)) => vault,
+                _ => {
+                    return JobOutcome::Failed {
+                        code: "memory_resume_vault_missing",
+                    };
+                }
+            };
+            let context = match vault.context() {
+                Ok(context) => context,
+                Err(_) => {
+                    return JobOutcome::Failed {
+                        code: "memory_resume_context_invalid",
+                    };
+                }
+            };
+            let core = match super::core_for_vault(&state, &history_root, &vault, &core_runtime) {
+                Ok(core) => core,
+                Err(_) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "memory_resume_core_unavailable",
+                    };
+                }
+            };
+            let result = tokio::select! { _=shutdown.cancelled()=>return JobOutcome::Cancelled, result=memory.complete_note_extraction_resume(&context,&core,&job.payload)=>result };
+            match result {
+                Ok(_) => JobOutcome::Complete,
+                Err(error) if error.retryable() => JobOutcome::Retry {
+                    delay: Duration::from_secs(5),
+                    code: error.code(),
+                },
+                Err(error) => JobOutcome::Failed { code: error.code() },
+            }
+        })
+    })
+}
+
 /// Reconcile one source identity/hash change before optional extraction.
 pub fn memory_source_reconcile_job_handler(
     state: StateStore,
@@ -2700,6 +2864,9 @@ pub fn embedding_job_handler(
                         _ = shutdown.cancelled() => return JobOutcome::Cancelled,
                         result = index.reembed_note_sources(&context, model_id, &sources) => result,
                     };
+                    if result.is_ok() {
+                        let _ = memory.ensure_retrieval_calibration(&context).await;
+                    }
                     note_embedding_error_outcome(result)
                 }
                 Some("memory") => {
@@ -2707,6 +2874,9 @@ pub fn embedding_job_handler(
                         _ = shutdown.cancelled() => return JobOutcome::Cancelled,
                         result = memory.reembed_sources(&context, model_id, &sources) => result,
                     };
+                    if result.is_ok() {
+                        let _ = memory.ensure_retrieval_calibration(&context).await;
+                    }
                     memory_embedding_error_outcome(result)
                 }
                 _ => JobOutcome::Failed {
@@ -2883,6 +3053,7 @@ mod tests {
             state.clone(),
             root.path().join("history"),
             VaultCoreRuntime::default(),
+            test_memory_service(&state),
         ))(created.initialization_job, Cancellation::default())
         .await;
 

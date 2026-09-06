@@ -5,6 +5,17 @@ release. A checked code path is not enough: every required external or
 operational assertion needs an evidence artifact tied to the source revision
 and, for container checks, the image digest.
 
+## Current memory administration change
+
+The local memory review change adds automatic startup calibration, independent memory
+and note preparation with a combined no-answer gate, five connected Admin workflows,
+current-set deletion/recovery fixes, and complete response budgeting/section diagnostics.
+Forward migrations 0016–0017 preserve existing canonical knowledge and valid vectors.
+See the [task acceptance report](exec-plans/reports/memory-review-autocalibration-admin-fix.md)
+and [upgrade/rollback procedure](memory-autocalibration-operations.md#upgrade-and-rollback).
+This engineering evidence does not sign off deployment-model quality, the platform's
+optional ONNX runtime linkage, or unexecuted interoperability gates below.
+
 ## Required gates
 
 - [ ] No open critical/high security defect; threat-model review is signed off.

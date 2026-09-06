@@ -789,3 +789,11 @@ The Admin UI and CLI must support:
 - verify latest backup.
 
 No emergency action should require editing SQLite manually.
+
+
+## Automatic calibration data and authorization
+
+Calibration sends only the bundled non-private synthetic corpus through existing ProviderMode, encrypted credentials, SSRF and capability controls. Every retry reserves a persisted request budget before dispatch. Admin GET is read-only; maintenance, cancellation, retry and migration require the existing session/CSRF/Origin checks. Raw synthetic embeddings are omitted from Admin DTOs; no private source bodies enter calibration reports.
+
+The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
+specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).

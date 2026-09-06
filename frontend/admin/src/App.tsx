@@ -84,22 +84,30 @@ async function loadPage(page: Page, vaultSlug: string): Promise<JsonObject> {
   }
 
   if (page === 'memory') {
-    const [memoryData, extractionData, embeddingData, jobsOverview] = await Promise.all([
-      adminApi.request<JsonObject>(scopedPath(vaultSlug, '/memories?limit=50')),
-      adminApi.request<JsonObject>(scopedPath(vaultSlug, '/memory/extraction')),
-      adminApi.request<JsonObject>(scopedPath(vaultSlug, '/memory/embeddings')),
-      adminApi.request<JsonObject>(scopedPath(vaultSlug, '/jobs/overview?limit=50')),
-    ]);
+    const paths = { memories: '/memories?limit=50', extraction: '/memory/extraction', embedding: '/memory/embeddings', jobs: '/jobs/overview?limit=50', calibration: '/memory/semantic-calibration', sources: '/memory/extraction/sources?paused=true&limit=50&offset=0' };
+    const results = await Promise.allSettled(Object.values(paths).map((path) => adminApi.request<JsonObject>(scopedPath(vaultSlug, path))));
+    const values: Record<string, JsonObject> = {};
+    const loadErrors: JsonObject = {};
+    Object.keys(paths).forEach((key, index) => {
+      const result = results[index];
+      if (result.status === 'fulfilled') values[key] = result.value;
+      else { values[key] = {}; loadErrors[key] = formatRequestError(result.reason); }
+    });
+    const { memories: memoryData, extraction: extractionData, embedding: embeddingData, jobs: jobsOverview } = values;
     const memoryJobs = ['running', 'queued', 'retry_wait', 'history']
       .flatMap((group) => Array.isArray(jobsOverview[group]) ? jobsOverview[group] : [])
       .filter((job) => (
         typeof job === 'object'
         && job !== null
         && 'job_type' in job
-        && String(job.job_type).startsWith('memory.')
+        && (String(job.job_type).startsWith('memory.') || job.job_type === 'retrieval.calibrate')
       ));
     return {
       ...memoryData,
+      vault_slug: vaultSlug,
+      calibration: values.calibration,
+      sources: values.sources,
+      load_errors: loadErrors,
       extraction: extractionData,
       embedding: embeddingData,
       memory_jobs: memoryJobs,

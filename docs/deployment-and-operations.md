@@ -20,6 +20,11 @@ The application container includes:
 - background workers;
 - optional local embedding runtime support.
 
+The Rust builder also needs `tests/fixtures/memory-quality/calibration.json`:
+the production calibration engine embeds this bundled benchmark with `include_str!`.
+The Dockerfile copies that file explicitly before compiling. It is included in the
+server binary; the runtime container does not need a fixture directory or mount.
+
 Do not require a separate database, message broker, vector service, or reverse
 proxy for application initialization.
 
@@ -912,3 +917,11 @@ migration version and last verified backup, and identify any unverified
 Obsidian plugin/client or provider integration. A tag is not ready while a
 required Litmus, full-scale performance, clean-host restore, proxy separation,
 or security review item is merely assumed.
+
+
+## Upgrading existing embedding deployments
+
+The first post-recovery server reconciliation tick schedules missing calibration for configured, permitted embedding roles. Do not regenerate memories or rebind a model merely to clear missing calibration. Quality failure keeps semantic recall disabled; effective business vectors remain intact. Forward-only schema upgrades require a coordinated database/Vault/history backup for binary rollback.
+
+The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
+specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).

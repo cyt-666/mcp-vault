@@ -14,6 +14,7 @@ mcp-vault-domain = { path = "../domain" }
 mcp-vault-indexer = { path = "../indexer" }
 mcp-vault-providers = { path = "../providers" }
 mcp-vault-state = { path = "../state" }
+percent-encoding = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

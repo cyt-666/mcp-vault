@@ -29,7 +29,10 @@ pub use service::{
     ModelInput, ProviderInput, ProviderModeState, ProviderService, embedding_input_hash,
 };
 pub use transport::{
-    AuthStyle, JsonResponse, ProviderTransport, RequestOptions, endpoint_url, retryable_status,
-    validate_endpoint,
+    AuthStyle, JsonResponse, ProviderTransport, RequestBudget, RequestOptions, endpoint_url,
+    retryable_status, validate_endpoint,
 };
-pub use vector::{EmbeddingSourceRef, SqliteVectorIndex, VectorHit, VectorIndex, new_embedding_id};
+pub use vector::{
+    EmbeddingSourceRef, SqliteVectorIndex, VectorHit, VectorIndex, exact_cosine_similarity,
+    new_embedding_id,
+};

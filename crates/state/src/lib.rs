@@ -34,8 +34,8 @@ pub use backups::{BackupRecord, BackupRepository, BackupStatus};
 pub use current_memory::{
     CurrentExplicitReservation, CurrentMemoryBundle, CurrentMemoryCounts, CurrentMemoryFilter,
     CurrentMemoryOwnership, CurrentMemoryRecord, CurrentMemoryRepository, CurrentMemorySearchHit,
-    CurrentMemorySourceRecord, MemoryNoteSetRecord, MemoryNoteSetSnapshotRecord,
-    MemoryV2MigrationPreflight,
+    CurrentMemorySourceRecord, CurrentMemorySourceSetView, MemoryNoteSetRecord,
+    MemoryNoteSetSnapshotRecord, MemoryV2MigrationPreflight,
 };
 pub use error::{IntegrityReport, StateError};
 pub use files::{
@@ -78,3 +78,9 @@ pub(crate) fn now_millis() -> Result<i64, StateError> {
     i64::try_from(elapsed.as_millis())
         .map_err(|_| StateError::InvalidInput("system clock exceeds SQLite timestamp range"))
 }
+
+mod calibration;
+pub use calibration::{
+    CalibrationBudget, CalibrationDocument, CalibrationLexicalIndex, CalibrationRepository,
+    CalibrationRun,
+};

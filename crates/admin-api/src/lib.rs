@@ -619,6 +619,15 @@ fn vault_admin_routes() -> Router<AdminApiState> {
         .route("/memory/migration/execute", post(execute_memory_migration))
         .route("/memory/embeddings", get(get_memory_embeddings))
         .route(
+            "/memory/semantic-calibration/run",
+            post(run_memory_semantic_calibration),
+        )
+        .route(
+            "/memory/semantic-calibration/maintenance",
+            put(set_memory_calibration_maintenance),
+        )
+        .route("/memory/extraction/sources", get(list_memory_sources))
+        .route(
             "/memory/semantic-calibration",
             get(get_memory_semantic_calibration).put(put_memory_semantic_calibration),
         )
@@ -862,6 +871,10 @@ fn request_id(headers: &HeaderMap) -> String {
 }
 
 fn auth_error(error: AuthError, request_id: String) -> Response {
+    if let AuthError::State(StateError::Database(database)) = &error {
+        tracing::warn!(event = "admin_auth_state_unavailable", database_code = ?database.as_database_error().and_then(|error| error.code()), "Admin authentication state operation failed");
+    }
+
     let (status, code, message) = match error {
         AuthError::OriginRejected => (
             StatusCode::FORBIDDEN,
@@ -3302,6 +3315,7 @@ async fn put_provider_mode(
         .await
     {
         Ok(setting) => {
+            let _ = state.memory().ensure_retrieval_calibration(&context).await;
             state
                 .append_admin_audit(
                     Some(&context),
@@ -3573,6 +3587,14 @@ async fn update_provider(
         .await
     {
         Ok(provider) => {
+            if let Ok(vaults) = state.list_vaults().await {
+                for vault in vaults {
+                    if let Ok(context) = vault.context() {
+                        let _ = state.memory().ensure_retrieval_calibration(&context).await;
+                    }
+                }
+            }
+
             state
                 .append_admin_audit(
                     None,
@@ -3977,6 +3999,22 @@ async fn update_model_binding(
         .await
     {
         Ok(binding) => {
+            if matches!(role.as_str(), "embedding_memory" | "embedding_note") {
+                let targets = if binding.vault_id.is_some() {
+                    vec![context.clone()]
+                } else {
+                    state
+                        .list_vaults()
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|vault| vault.context().ok())
+                        .collect()
+                };
+                for target in targets {
+                    let _ = state.memory().ensure_retrieval_calibration(&target).await;
+                }
+            }
             state
                 .append_admin_audit(
                     binding_context,
@@ -4811,9 +4849,193 @@ async fn get_memory_semantic_calibration(
             );
         }
     };
-    match state.memory().semantic_calibration(&context).await {
-        Ok(status) => api_ok(StatusCode::OK, status, request_id.0),
+    let memory = state.memory();
+    match (
+        memory.semantic_calibration(&context).await,
+        memory.calibration_status(&context, "memory").await,
+        memory.calibration_status(&context, "note").await,
+    ) {
+        (Ok(legacy), Ok(memory), Ok(note)) => {
+            let mut value = serde_json::to_value(legacy).unwrap_or_else(|_| json!({}));
+            value["channels"] = json!([memory, note]);
+            api_ok(StatusCode::OK, value, request_id.0)
+        }
+        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+            memory_error(error, request_id.0)
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunCalibrationRequest {
+    channel: String,
+}
+async fn run_memory_semantic_calibration(
+    State(state): State<AdminApiState>,
+    headers: HeaderMap,
+    Extension(principal): Extension<AdminPrincipal>,
+    Extension(request_id): Extension<RequestId>,
+    Json(input): Json<RunCalibrationRequest>,
+) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
+        return auth_error(error, request_id.0);
+    }
+    let vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    let context = match vault.context() {
+        Ok(context) => context,
+        Err(_) => {
+            return state_error(
+                StateError::InvalidInput("Vault context is invalid"),
+                request_id.0,
+            );
+        }
+    };
+    match state
+        .memory()
+        .request_retrieval_calibration(&context, &input.channel)
+        .await
+    {
+        Ok(job_id) => {
+            state
+                .append_admin_audit(
+                    Some(&context),
+                    &request_id.0,
+                    &principal.actor,
+                    "admin.retrieval_calibration.requested",
+                    Some("channel"),
+                    Some(&input.channel),
+                    json!({"job_id":job_id}),
+                )
+                .await;
+            api_ok(
+                StatusCode::ACCEPTED,
+                json!({"job_id":job_id,"channel":input.channel,"admitted":job_id.is_some()}),
+                request_id.0,
+            )
+        }
         Err(error) => memory_error(error, request_id.0),
+    }
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CalibrationMaintenanceRequest {
+    enabled: bool,
+    budget: Option<mcp_vault_state::CalibrationBudget>,
+}
+async fn set_memory_calibration_maintenance(
+    State(state): State<AdminApiState>,
+    headers: HeaderMap,
+    Extension(principal): Extension<AdminPrincipal>,
+    Extension(request_id): Extension<RequestId>,
+    Json(input): Json<CalibrationMaintenanceRequest>,
+) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::PUT) {
+        return auth_error(error, request_id.0);
+    }
+    let vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    let context = match vault.context() {
+        Ok(context) => context,
+        Err(_) => {
+            return state_error(
+                StateError::InvalidInput("Vault context is invalid"),
+                request_id.0,
+            );
+        }
+    };
+    if let Some(budget) = input.budget {
+        if budget.validate().is_err() {
+            return api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_failed",
+                "The calibration engineering budget is invalid.",
+                None,
+                request_id.0,
+            );
+        }
+        if let Err(error) = state
+            .memory()
+            .set_calibration_budget(&context, budget)
+            .await
+        {
+            return memory_error(error, request_id.0);
+        }
+    }
+    match state
+        .memory()
+        .set_calibration_maintenance(&context, input.enabled)
+        .await
+    {
+        Ok(()) => {
+            state
+                .append_admin_audit(
+                    Some(&context),
+                    &request_id.0,
+                    &principal.actor,
+                    "admin.retrieval_calibration.maintenance",
+                    None,
+                    None,
+                    json!({"enabled":input.enabled}),
+                )
+                .await;
+            api_ok(
+                StatusCode::OK,
+                json!({"enabled":input.enabled}),
+                request_id.0,
+            )
+        }
+        Err(error) => memory_error(error, request_id.0),
+    }
+}
+#[derive(Debug, Deserialize)]
+struct MemorySourcesQuery {
+    paused: Option<bool>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+}
+async fn list_memory_sources(
+    State(state): State<AdminApiState>,
+    Query(query): Query<MemorySourcesQuery>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    let vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    let context = match vault.context() {
+        Ok(context) => context,
+        Err(_) => {
+            return state_error(
+                StateError::InvalidInput("Vault context is invalid"),
+                request_id.0,
+            );
+        }
+    };
+    let (limit, offset) = match page_params(&PageQuery {
+        limit: query.limit,
+        offset: query.offset,
+    }) {
+        Ok(page) => page,
+        Err(response) => return response,
+    };
+    match state
+        .state
+        .current_memory()
+        .list_source_sets(&context, query.paused, limit, offset)
+        .await
+    {
+        Ok(sources) => api_ok(
+            StatusCode::OK,
+            json!({"next_offset":(sources.len()==limit as usize).then_some(offset.saturating_add(limit)),"sources":sources}),
+            request_id.0,
+        ),
+        Err(error) => state_error(error, request_id.0),
     }
 }
 
@@ -4991,7 +5213,7 @@ async fn resume_memory_extraction(
         Ok(core) => core,
         Err(error) => return state_error(error, request_id.0),
     };
-    if let Err(error) = state
+    match state
         .memory()
         .resume_note_extraction(
             &context,
@@ -5002,45 +5224,7 @@ async fn resume_memory_extraction(
         )
         .await
     {
-        return memory_error(error, request_id.0);
-    }
-    let file = match state.state.files().get_by_id(&context, file_id).await {
-        Ok(Some(file)) if file.is_active() => file,
-        Ok(_) => {
-            return api_error(
-                StatusCode::CONFLICT,
-                "memory_source_not_current",
-                "The source note is no longer current.",
-                None,
-                request_id.0,
-            );
-        }
-        Err(error) => return state_error(error, request_id.0),
-    };
-    let dedup = format!(
-        "vault:{}:admin-memory-resume:{}:{}",
-        context.id(),
-        file_id,
-        mcp_vault_domain::EventId::new()
-    );
-    let job = state
-        .enqueue_vault_job(
-            &context,
-            "memory.extract",
-            &dedup,
-            &json!({
-                "memory_contract_generation": mcp_vault_memory::MEMORY_CONTRACT_GENERATION,
-                "pipeline_version": mcp_vault_memory::EXTRACTION_PIPELINE_VERSION,
-                "path": file.path.as_str(),
-                "reason": "admin_source_resume",
-                "include_evaluated": true,
-            }),
-            4,
-            5,
-        )
-        .await;
-    match job {
-        Ok(job) => {
+        Ok(job_id) => {
             state
                 .append_admin_audit(
                     Some(&context),
@@ -5049,16 +5233,16 @@ async fn resume_memory_extraction(
                     "admin.memory_extraction.source_resumed",
                     Some("file"),
                     Some(&file_id.to_string()),
-                    json!({"job_id": job.id.to_string()}),
+                    json!({"job_id":job_id}),
                 )
                 .await;
             api_ok(
                 StatusCode::ACCEPTED,
-                json!({"resumed": true, "job": job_admission_summary(&job, "queued")}),
+                json!({"resume_accepted":true,"job":{"id":job_id,"status":"queued"}}),
                 request_id.0,
             )
         }
-        Err(error) => state_error(error, request_id.0),
+        Err(error) => memory_error(error, request_id.0),
     }
 }
 
@@ -5739,6 +5923,21 @@ async fn cancel_job(
             );
         }
     };
+    if state
+        .state
+        .jobs()
+        .get(&context, id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|job| job.job_type == "retrieval.calibrate")
+        && let Err(error) = state
+            .memory()
+            .cancel_retrieval_calibration(&context, id)
+            .await
+    {
+        return memory_error(error, request_id.0);
+    }
     match state.cancel_job_for(&context, id).await {
         Ok(()) => {
             state
@@ -7340,6 +7539,104 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(audit.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn calibration_and_source_management_require_auth_csrf_and_validate_input() {
+        let (router, _root, _maintenance, cookie, csrf) = authenticated_fixture().await;
+        for (method, path, body) in [
+            (
+                "POST",
+                "/memory/semantic-calibration/run",
+                json!({"channel":"memory"}),
+            ),
+            (
+                "PUT",
+                "/memory/semantic-calibration/maintenance",
+                json!({"enabled":false}),
+            ),
+        ] {
+            let rejected = router
+                .clone()
+                .oneshot(request(method, path, body.clone(), Some(&cookie), None))
+                .await
+                .unwrap();
+            assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+            let unauthenticated = router
+                .clone()
+                .oneshot(request(method, path, body, None, None))
+                .await
+                .unwrap();
+            assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        }
+        let (status, value) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    "/memory/semantic-calibration",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        assert_eq!(value["data"]["channels"].as_array().unwrap().len(), 2);
+        assert!(
+            value["data"]["channels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|channel| channel["run"].is_null())
+        );
+        let (status, value) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/memory/semantic-calibration/run",
+                    json!({"channel":"invalid"}),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{value}");
+        let (status, value) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "PUT",
+                    "/memory/semantic-calibration/maintenance",
+                    json!({"enabled":true,"budget":{"max_requests":0}}),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{value}");
+        let (status, value) = json_response(
+            router
+                .oneshot(request(
+                    "GET",
+                    "/memory/extraction/sources?paused=true&limit=50&offset=0",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        assert!(value["data"]["sources"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

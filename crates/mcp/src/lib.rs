@@ -1305,7 +1305,7 @@ impl McpHandler {
     #[tool(
         name = "search_notes",
         title = "Search Vault notes",
-        description = "Use this when you need to find Vault notes that match keywords, concepts, paths, topics, tags, or modification times. Pass the search phrase in query; choose lexical for exact text, semantic for meaning-based matches, or hybrid for both. On success, `data.results` contains each note's `file_id`, `path`, current `revision`, `title`, matching `snippet`, tags, headings, links, score, and `resource_uri`; `data.mode`, `result_granularity`, `available_result_count`, `index_revision`, `coverage`, `degraded`, `degradation_reasons`, `next_cursor`, and `truncated` describe how to interpret or continue the results. Use read_note for exact content and recall instead when the question depends on previously saved personal or project context.",
+        description = "Use this when you need to find Vault notes that match keywords, concepts, paths, topics, tags, or modification times. Pass the search phrase in query; choose lexical for exact text, semantic for meaning-based matches, or hybrid for both. On success, `data.results` contains each note's `file_id`, `path`, current `revision`, `title`, matching `snippet`, tags, headings, links, score, and `resource_uri`; `data.mode`, `result_granularity`, `available_result_count`, `index_revision`, `coverage`, `degraded`, `degradation_reasons`, `next_cursor`, and `truncated` describe how to interpret or continue the results. With section granularity, matched_section identifies the winning current chunk, heading and byte interval in the indexed plain-text projection; an unlocated result remains note-level. Use read_note for exact Markdown and recall instead when the question depends on previously saved personal or project context.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -2935,7 +2935,11 @@ async fn search_data(
         },
         "degraded": !result.degraded.is_empty(),
         "degradation_reasons": result.degraded,
-        "results": result.hits.iter().map(note_retrieval_json).collect::<Vec<_>>(),
+        "results": result.hits.iter().map(|hit| {
+            let mut value = note_retrieval_json(hit);
+            value["result_granularity"] = json!(if result_granularity == "section" && hit.matched_section.is_some() { "section" } else { "note" });
+            value
+        }).collect::<Vec<_>>(),
         "available_result_count": result.available_result_count,
         "index_revision": status.index_revision.value(),
         "coverage": status.coverage,
@@ -3005,6 +3009,15 @@ fn note_retrieval_json(hit: &NoteRetrievalHit) -> Value {
     let mut value = note_search_json(&hit.note);
     if let Some(object) = value.as_object_mut() {
         object.insert("score".to_owned(), json!(hit.score));
+        object.insert("matched_section".to_owned(), json!(hit.matched_section));
+        object.insert(
+            "result_granularity".to_owned(),
+            json!(if hit.matched_section.is_some() {
+                "section"
+            } else {
+                "note"
+            }),
+        );
         if let Some(breakdown) = hit.score_breakdown.as_ref() {
             object.insert("score_breakdown".to_owned(), json!(breakdown));
         }

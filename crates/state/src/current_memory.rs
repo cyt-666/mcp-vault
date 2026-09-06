@@ -5,13 +5,13 @@
 //! memory as readable only while its canonical Markdown and (for note-derived
 //! items) exact source content are still current.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool, Transaction};
 
 use mcp_vault_domain::{
-    FileId, MemoryId, MemorySetId, MemorySetSnapshotId, MemorySourceId, ModelId, ProviderId,
+    FileId, JobId, MemoryId, MemorySetId, MemorySetSnapshotId, MemorySourceId, ModelId, ProviderId,
     Revision, VaultContext, VaultId, VaultPath,
 };
 
@@ -20,7 +20,7 @@ use crate::{StateError, memory_search_terms, now_millis};
 const MAX_MEMORY_LIMIT: u32 = 200;
 
 /// Ownership determines which object controls replacement and deletion.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum CurrentMemoryOwnership {
     /// A direct user/Agent/Admin assertion with its own canonical Markdown.
     Explicit,
@@ -49,7 +49,7 @@ impl CurrentMemoryOwnership {
 }
 
 /// One current memory item. There is deliberately no lifecycle status.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CurrentMemoryRecord {
     /// Stable current-item identity.
     pub id: MemoryId,
@@ -104,7 +104,7 @@ pub struct CurrentMemoryRecord {
 }
 
 /// Provenance for one current item.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CurrentMemorySourceRecord {
     /// Stable source-row identity.
     pub id: MemorySourceId,
@@ -220,15 +220,32 @@ pub struct MemoryNoteSetSnapshotRecord {
     /// Structured extraction contract version.
     pub prompt_version: String,
     /// Provider used for the one model call.
-    pub provider_id: ProviderId,
+    pub provider_id: Option<ProviderId>,
     /// Model used for the one model call.
-    pub model_id: ModelId,
+    pub model_id: Option<ModelId>,
     /// prepared, applied, or rejected.
     pub status: String,
     /// Creation time.
     pub created_at: i64,
     /// Terminal application time.
     pub applied_at: Option<i64>,
+}
+
+/// Independent source-set management, including paused empty sets.
+#[derive(Clone, Debug, Serialize, FromRow)]
+pub struct CurrentMemorySourceSetView {
+    /// Stable source File ID.
+    pub file_id: String,
+    /// Current path, or last known path when the source is unavailable.
+    pub path: String,
+    /// Optimistic source-set revision.
+    pub set_revision: i64,
+    /// Explicit deletion pause.
+    pub paused: bool,
+    /// Current readable items only.
+    pub current_item_count: i64,
+    /// Whether a live Markdown source can be resumed.
+    pub restorable: bool,
 }
 
 /// Current-only list/search filters.
@@ -330,6 +347,30 @@ impl CurrentMemoryRepository {
         Self { pool }
     }
 
+    /// Page independently of memory items so an empty paused source stays manageable.
+    pub async fn list_source_sets(
+        &self,
+        context: &VaultContext,
+        paused: Option<bool>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<CurrentMemorySourceSetView>, StateError> {
+        self.ensure_vault_context(context).await?;
+        validate_page(limit, offset)?;
+        let sql = format!(
+            "SELECT s.source_file_id AS file_id, COALESCE(f.path,s.source_path) AS path, s.set_revision, s.extraction_paused AS paused, (SELECT count(*) FROM memory_current_items i WHERE i.vault_id=s.vault_id AND i.note_set_id=s.id AND {}) AS current_item_count, (f.deleted_at IS NULL AND f.id IS NOT NULL AND lower(f.path) LIKE '%.md') AS restorable FROM memory_note_sets s LEFT JOIN file_entries f ON f.vault_id=s.vault_id AND f.id=s.source_file_id WHERE s.vault_id=? AND (? IS NULL OR s.extraction_paused=?) ORDER BY s.source_path,s.source_file_id LIMIT ? OFFSET ?",
+            current_eligibility_sql()
+        );
+        Ok(sqlx::query_as(&sql)
+            .bind(context.id().to_string())
+            .bind(paused.map(i64::from))
+            .bind(paused.map(i64::from))
+            .bind(i64::from(limit))
+            .bind(i64::from(offset))
+            .fetch_all(&self.pool)
+            .await?)
+    }
+
     /// Return one readable current item. Stale canonical/source state is
     /// indistinguishable from a missing item at this boundary.
     pub async fn get(
@@ -346,6 +387,29 @@ impl CurrentMemoryRepository {
         let row = sqlx::query_as::<_, CurrentMemoryRow>(&sql)
             .bind(context.id().to_string())
             .bind(memory_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        self.bundle_from_optional_row(context, row).await
+    }
+
+    /// Read a current item using exactly the same request filters as FTS and
+    /// context retrieval. Detail reads deliberately retain their own semantics.
+    pub async fn get_filtered(
+        &self,
+        context: &VaultContext,
+        memory_id: MemoryId,
+        filter: &CurrentMemoryFilter,
+    ) -> Result<Option<CurrentMemoryBundle>, StateError> {
+        self.ensure_vault_context(context).await?;
+        let mut query = QueryBuilder::<Sqlite>::new(item_select());
+        query
+            .push(" WHERE i.vault_id = ")
+            .push_bind(context.id().to_string());
+        query.push(" AND i.id = ").push_bind(memory_id.to_string());
+        query.push(" AND ").push(current_eligibility_sql());
+        append_filter(&mut query, filter);
+        let row = query
+            .build_query_as::<CurrentMemoryRow>()
             .fetch_optional(&self.pool)
             .await?;
         self.bundle_from_optional_row(context, row).await
@@ -885,8 +949,8 @@ impl CurrentMemoryRepository {
         .bind(snapshot.canonical_path.as_str())
         .bind(&snapshot.profile_hash)
         .bind(&snapshot.prompt_version)
-        .bind(snapshot.provider_id.to_string())
-        .bind(snapshot.model_id.to_string())
+        .bind(snapshot.provider_id.map(|id| id.to_string()))
+        .bind(snapshot.model_id.map(|id| id.to_string()))
         .bind(snapshot.created_at)
         .execute(&self.pool)
         .await?;
@@ -1171,7 +1235,8 @@ impl CurrentMemoryRepository {
         context: &VaultContext,
         updated_set: &MemoryNoteSetRecord,
         expected_set_revision: Revision,
-    ) -> Result<bool, StateError> {
+        job_payload: &Value,
+    ) -> Result<JobId, StateError> {
         validate_note_set(context, updated_set)?;
         if updated_set.extraction_paused
             || updated_set.set_revision != expected_set_revision.next()?
@@ -1192,8 +1257,18 @@ impl CurrentMemoryRepository {
         let _ = current;
         let mut transaction = self.pool.begin().await?;
         update_note_set(&mut transaction, updated_set, true).await?;
+        let job_id = JobId::new();
+        let now = now_millis()?;
+        let dedup = format!(
+            "vault:{}:source-resume:{}:{}",
+            context.id(),
+            updated_set.source_file_id,
+            updated_set.set_revision.value()
+        );
+        sqlx::query("INSERT INTO jobs (id,vault_id,job_type,dedup_key,payload_json,status,priority,max_attempts,available_at,created_at,updated_at) VALUES (?,?,'memory.extract',?,?,'queued',4,5,?,?,?)")
+            .bind(job_id.to_string()).bind(context.id().to_string()).bind(dedup).bind(serde_json::to_string(job_payload)?).bind(now).bind(now).bind(now).execute(&mut *transaction).await?;
         transaction.commit().await?;
-        Ok(true)
+        Ok(job_id)
     }
 
     /// Update only the navigable source path after a same-File-ID, same-hash
@@ -2041,6 +2116,8 @@ fn validate_snapshot(
 ) -> Result<(), StateError> {
     if snapshot.vault_id != context.id()
         || snapshot.status != "prepared"
+        || (!snapshot.extraction_paused
+            && (snapshot.provider_id.is_none() || snapshot.model_id.is_none()))
         || snapshot.source_content_hash.trim().is_empty()
         || snapshot.canonical_bytes_hash.trim().is_empty()
         || snapshot.profile_hash.trim().is_empty()
@@ -2170,8 +2247,8 @@ struct MemoryNoteSetSnapshotRow {
     canonical_path: String,
     profile_hash: String,
     prompt_version: String,
-    provider_id: String,
-    model_id: String,
+    provider_id: Option<String>,
+    model_id: Option<String>,
     status: String,
     created_at: i64,
     applied_at: Option<i64>,
@@ -2321,8 +2398,12 @@ fn row_to_snapshot(
         canonical_path: VaultPath::parse(&row.canonical_path)?,
         profile_hash: row.profile_hash,
         prompt_version: row.prompt_version,
-        provider_id: ProviderId::parse(&row.provider_id)?,
-        model_id: ModelId::parse(&row.model_id)?,
+        provider_id: row
+            .provider_id
+            .as_deref()
+            .map(ProviderId::parse)
+            .transpose()?,
+        model_id: row.model_id.as_deref().map(ModelId::parse).transpose()?,
         status: row.status,
         created_at: row.created_at,
         applied_at: row.applied_at,

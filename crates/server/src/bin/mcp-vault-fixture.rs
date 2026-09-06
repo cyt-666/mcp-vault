@@ -8,6 +8,8 @@
 //! not know MCP Vault's credential issuance flow, can exercise the real MCP
 //! transport without weakening production authentication.
 
+mod fixture_memory;
+
 use std::{
     collections::BTreeSet,
     error::Error,
@@ -67,6 +69,12 @@ struct FixtureManifest {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    if std::env::var_os("MCP_VAULT_FIXTURE_MEMORY_ADMIN").is_some() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_target(false)
+            .try_init();
+    }
     let directory = tempfile::tempdir()?;
     let content_root = directory.path().join("vault");
     let history_root = directory.path().join("history");
@@ -179,6 +187,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state.clone(),
         provider_service.clone(),
     );
+    if std::env::var_os("MCP_VAULT_FIXTURE_MEMORY_ADMIN").is_some() {
+        fixture_memory::prepare(
+            &state,
+            &context,
+            &auth,
+            &provider_service,
+            &memory_service,
+            &history_root,
+            &core_runtime,
+        )
+        .await?;
+    }
     let index_service = mcp_vault_indexer::IndexService::with_provider_service(
         state.clone(),
         provider_service.clone(),

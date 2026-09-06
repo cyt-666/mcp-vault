@@ -72,9 +72,9 @@ Return tools in deterministic order, use server discovery instructions, validate
 
 `recall` is not a synonym for text search. It returns durable context relevant to the current task.
 
-Every durable memory must carry provenance, confidence, temporal validity, lifecycle status, and Vault identity.
+Every current memory carries provenance, ownership, and Vault identity. Optional confidence and temporal validity preserve caller intent; ADR-0026 forbids model-readable lifecycle history.
 
-LLM output is an untrusted proposal. Validate structured output, deduplicate, detect contradictions, and apply promotion policy before materializing a canonical memory.
+LLM output is an untrusted complete source-set proposal. Validate structured output, deduplicate within that source, and check current source/revision eligibility before materializing canonical Markdown.
 
 Normal recall must not require a live LLM request.
 
@@ -109,7 +109,7 @@ Backend workspace modules should preserve these responsibilities even if crate b
 - `webdav`: DAV adapter and authentication;
 - `mcp`: RMCP server, tools, resources, discovery instructions;
 - `indexer`: Markdown analysis, FTS, links, topics;
-- `memory`: extraction, lifecycle, consolidation, recall;
+- `memory`: current source-owned extraction, explicit memory, deletion/pause, recall;
 - `providers`: LLM, embedding, reranker adapters;
 - `auth`: Admin, WebDAV, PAT, OAuth resource-server validation;
 - `admin-api`: control-plane API;

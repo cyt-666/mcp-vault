@@ -357,6 +357,16 @@ impl VaultRepository {
         rows.into_iter().map(row_to_record).collect()
     }
 
+    /// Bounded deterministic registry page for background compensation.
+    pub async fn list_page(&self, limit: u32, offset: u32) -> Result<Vec<VaultRecord>, StateError> {
+        if !(1..=200).contains(&limit) {
+            return Err(StateError::InvalidInput("Vault registry page is invalid"));
+        }
+        let rows=sqlx::query_as::<_,VaultRow>("SELECT id,slug,name,content_root,reserved_root,status,created_at,updated_at,settings_revision FROM vaults ORDER BY slug ASC LIMIT ? OFFSET ?")
+            .bind(limit).bind(offset).fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_record).collect()
+    }
+
     /// Resolve effective availability without treating optional Provider or
     /// derived-feature degradation as a canonical Vault outage.
     pub async fn availability(&self, vault: &VaultRecord) -> Result<VaultAvailability, StateError> {

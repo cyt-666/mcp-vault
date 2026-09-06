@@ -432,3 +432,11 @@ The service is complete for the first release when:
     deterministic corpus, including at least 10 no-answer cases, without a
     query-time LLM call; the 15-case generation fixture reports subject,
     condition/negation, support, coverage, type, and duplicate metrics.
+
+
+## Automatic retrieval preparation
+
+Existing deployments with permitted embedding roles must prepare missing calibration after startup without Admin interaction or regeneration. Semantic eligibility requires a current server evaluation, independently for memory and note roles. Coverage, calibration, source pauses and reviewed legacy migration are separate operator concerns.
+
+The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
+specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).

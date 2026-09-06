@@ -1335,3 +1335,11 @@ remains available for recovery.
 - Admin HTTP breaking changes require `/api/v2`.
 - WebDAV behavior is protocol-defined; compatibility fixes require regression tests.
 - Database schema versions are independent from public API versions.
+
+
+## Current memory preparation and section diagnostics
+
+Admin adds read-only per-channel preparation status, bounded run/retry and maintenance operations, and an independently paginated paused-source collection. Explicit PATCH preserves omitted metadata. MCP section evidence identifies a winning current projection chunk and its byte interval; offsets are not Markdown line numbers. Recall estimates the complete serialized response budget.
+
+The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
+specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).

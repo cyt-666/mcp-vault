@@ -65,3 +65,5 @@ When documents conflict:
 ## Scope statement
 
 These documents specify the intended complete service. `implementation-plan.md` breaks that target into work packages, but completion of an early package does not redefine the product as an MVP.
+
+- [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md): startup preparation, Admin workflows, quality interpretation, upgrade and rollback.

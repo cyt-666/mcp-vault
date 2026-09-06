@@ -13,4 +13,6 @@ cargo test -p mcp-vault-state migration_0011_discards_only_prerelease_memory_sta
 cargo test -p mcp-vault-state migration_0012_adds_builtin_oauth_without_changing_existing_credentials -- --nocapture
 cargo test -p mcp-vault-state migration_0013_fail_closes_legacy_note_sources_without_losing_memory -- --nocapture
 cargo test -p mcp-vault-state migration_0014_adds_only_rebuildable_retrieval_state_and_preserves_history -- --nocapture
+cargo test --locked -p mcp-vault-state migration_0016 -- --nocapture
+cargo test --locked -p mcp-vault-state budget_checkpoint_stop_retry_and_vault_isolation -- --nocapture
 echo "migration fixture checks passed"

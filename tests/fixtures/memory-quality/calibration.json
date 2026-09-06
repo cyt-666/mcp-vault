@@ -1,0 +1,1408 @@
+{
+  "version": "builtin-retrieval-v1",
+  "provenance": "synthetic_non_private_developer_authored",
+  "documents": [
+    {
+      "id": "calibration-d00",
+      "split": "calibration",
+      "content": "The cedar greenhouse irrigates its seedlings with collected rainwater.",
+      "title": "Research record 1",
+      "path": "calibration/record-1.md"
+    },
+    {
+      "id": "calibration-d01",
+      "split": "calibration",
+      "content": "The Marlin team keeps rollback packages for fourteen days after release.",
+      "title": "Research record 2",
+      "path": "calibration/record-2.md"
+    },
+    {
+      "id": "calibration-d02",
+      "split": "calibration",
+      "content": "The observatory closes its roof whenever the wind exceeds twelve metres per second.",
+      "title": "Research record 3",
+      "path": "calibration/record-3.md"
+    },
+    {
+      "id": "calibration-d03",
+      "split": "calibration",
+      "content": "The library digitizes fragile manuscripts using overhead cameras rather than flatbed scanners.",
+      "title": "Research record 4",
+      "path": "calibration/record-4.md"
+    },
+    {
+      "id": "calibration-d04",
+      "split": "calibration",
+      "content": "The bronze workshop measures furnace temperature with an optical pyrometer.",
+      "title": "Research record 5",
+      "path": "calibration/record-5.md"
+    },
+    {
+      "id": "calibration-d05",
+      "split": "calibration",
+      "content": "The Acorn service requires an exact revision match before changing a stored document.",
+      "title": "Research record 6",
+      "path": "calibration/record-6.md"
+    },
+    {
+      "id": "calibration-d06",
+      "split": "calibration",
+      "content": "The river monitoring station samples dissolved oxygen every thirty minutes.",
+      "title": "Research record 7",
+      "path": "calibration/record-7.md"
+    },
+    {
+      "id": "calibration-d07",
+      "split": "calibration",
+      "content": "The compact inference prototype stores previous attention keys and values to avoid recomputing earlier tokens.",
+      "title": "Research record 8",
+      "path": "calibration/record-8.md"
+    },
+    {
+      "id": "calibration-d08",
+      "split": "calibration",
+      "content": "The museum labels replica exhibits with a blue triangle.",
+      "title": "Research record 9",
+      "path": "calibration/record-9.md"
+    },
+    {
+      "id": "calibration-d09",
+      "split": "calibration",
+      "content": "The mountain rescue team uses paper maps when satellite navigation is unavailable.",
+      "title": "Research record 10",
+      "path": "calibration/record-10.md"
+    },
+    {
+      "id": "calibration-d10",
+      "split": "calibration",
+      "content": "木兰项目的夜间备份保存在独立的只读存储卷上。",
+      "title": "Research record 11",
+      "path": "calibration/record-11.md"
+    },
+    {
+      "id": "calibration-d11",
+      "split": "calibration",
+      "content": "实验中的稀疏专家模型只激活部分专家，但所有专家权重仍需占用存储空间。",
+      "title": "Research record 12",
+      "path": "calibration/record-12.md"
+    },
+    {
+      "id": "calibration-d12",
+      "split": "calibration",
+      "content": "珊瑚育苗池采用缓慢滴流来适应新的盐度。",
+      "title": "Research record 13",
+      "path": "calibration/record-13.md"
+    },
+    {
+      "id": "calibration-d13",
+      "split": "calibration",
+      "content": "银杏小组已完成数据清洗，下阶段将评估样本偏差。",
+      "title": "Research record 14",
+      "path": "calibration/record-14.md"
+    },
+    {
+      "id": "calibration-d14",
+      "split": "calibration",
+      "content": "旧城档案室禁止使用闪光灯拍摄彩绘地图。",
+      "title": "Research record 15",
+      "path": "calibration/record-15.md"
+    },
+    {
+      "id": "calibration-d15",
+      "split": "calibration",
+      "content": "黑鹭协议只允许持有有效租约的节点提交领导者写入。",
+      "title": "Research record 16",
+      "path": "calibration/record-16.md"
+    },
+    {
+      "id": "calibration-d16",
+      "split": "calibration",
+      "content": "蓝鲸实验只在本地合成数据上验证压缩，没有宣称生产效果。",
+      "title": "Research record 17",
+      "path": "calibration/record-17.md"
+    },
+    {
+      "id": "calibration-d17",
+      "split": "calibration",
+      "content": "远山电站通过增加蓄水量储存多余电能。",
+      "title": "Research record 18",
+      "path": "calibration/record-18.md"
+    },
+    {
+      "id": "calibration-d18",
+      "split": "calibration",
+      "content": "橙树课题组没有采纳把审计日志关闭的建议。",
+      "title": "Research record 19",
+      "path": "calibration/record-19.md"
+    },
+    {
+      "id": "calibration-d19",
+      "split": "calibration",
+      "content": "溪谷学校把天文观测课改在周五日落后进行。",
+      "title": "Research record 20",
+      "path": "calibration/record-20.md"
+    },
+    {
+      "id": "holdout-d00",
+      "split": "holdout",
+      "content": "The dune research camp insulates battery boxes with cork to reduce overnight heat loss.",
+      "title": "Research record 1",
+      "path": "holdout/record-1.md"
+    },
+    {
+      "id": "holdout-d01",
+      "split": "holdout",
+      "content": "The Elm compiler caches syntax trees only when the complete source checksum matches.",
+      "title": "Research record 2",
+      "path": "holdout/record-2.md"
+    },
+    {
+      "id": "holdout-d02",
+      "split": "holdout",
+      "content": "The harbour laboratory sterilizes sampling bottles with steam before seawater collection.",
+      "title": "Research record 3",
+      "path": "holdout/record-3.md"
+    },
+    {
+      "id": "holdout-d03",
+      "split": "holdout",
+      "content": "The amber orchard uses pheromone traps to monitor moth populations.",
+      "title": "Research record 4",
+      "path": "holdout/record-4.md"
+    },
+    {
+      "id": "holdout-d04",
+      "split": "holdout",
+      "content": "The fog ferry suspends crossings when visibility drops below two hundred metres.",
+      "title": "Research record 5",
+      "path": "holdout/record-5.md"
+    },
+    {
+      "id": "holdout-d05",
+      "split": "holdout",
+      "content": "The Pine scheduler retries interrupted jobs from their last durable checkpoint.",
+      "title": "Research record 6",
+      "path": "holdout/record-6.md"
+    },
+    {
+      "id": "holdout-d06",
+      "split": "holdout",
+      "content": "The glacier expedition records snow depth along a fixed transect every morning.",
+      "title": "Research record 7",
+      "path": "holdout/record-7.md"
+    },
+    {
+      "id": "holdout-d07",
+      "split": "holdout",
+      "content": "The ceramic studio lets glazed test tiles cool inside the closed kiln.",
+      "title": "Research record 8",
+      "path": "holdout/record-8.md"
+    },
+    {
+      "id": "holdout-d08",
+      "split": "holdout",
+      "content": "The moonfish service isolates each customer cache by an account identifier.",
+      "title": "Research record 9",
+      "path": "holdout/record-9.md"
+    },
+    {
+      "id": "holdout-d09",
+      "split": "holdout",
+      "content": "The vineyard measures grape sugar with a handheld refractometer.",
+      "title": "Research record 10",
+      "path": "holdout/record-10.md"
+    },
+    {
+      "id": "holdout-d10",
+      "split": "holdout",
+      "content": "白桦小组计划试用新的追踪工具，目前尚未安装。",
+      "title": "Research record 11",
+      "path": "holdout/record-11.md"
+    },
+    {
+      "id": "holdout-d11",
+      "split": "holdout",
+      "content": "晨星实验使用半精度权重降低内存需求，未改变训练样本。",
+      "title": "Research record 12",
+      "path": "holdout/record-12.md"
+    },
+    {
+      "id": "holdout-d12",
+      "split": "holdout",
+      "content": "红杉水库在暴雨预警后先降低蓄水位。",
+      "title": "Research record 13",
+      "path": "holdout/record-13.md"
+    },
+    {
+      "id": "holdout-d13",
+      "split": "holdout",
+      "content": "海燕项目已完成权限审计，下一阶段处理依赖更新。",
+      "title": "Research record 14",
+      "path": "holdout/record-14.md"
+    },
+    {
+      "id": "holdout-d14",
+      "split": "holdout",
+      "content": "古桥修复组只使用可逆胶粘剂固定临时传感器。",
+      "title": "Research record 15",
+      "path": "holdout/record-15.md"
+    },
+    {
+      "id": "holdout-d15",
+      "split": "holdout",
+      "content": "石榴客户端在离线期间将编辑保存在本地待发送队列。",
+      "title": "Research record 16",
+      "path": "holdout/record-16.md"
+    },
+    {
+      "id": "holdout-d16",
+      "split": "holdout",
+      "content": "紫藤农场用遮阳网保护新移栽的茶苗。",
+      "title": "Research record 17",
+      "path": "holdout/record-17.md"
+    },
+    {
+      "id": "holdout-d17",
+      "split": "holdout",
+      "content": "流萤渲染器只在相机静止时复用上帧的阴影结果。",
+      "title": "Research record 18",
+      "path": "holdout/record-18.md"
+    },
+    {
+      "id": "holdout-d18",
+      "split": "holdout",
+      "content": "翠鸟团队否决了把测试数据库连到公网的提案。",
+      "title": "Research record 19",
+      "path": "holdout/record-19.md"
+    },
+    {
+      "id": "holdout-d19",
+      "split": "holdout",
+      "content": "高原医疗站把冷藏药品运输箱的温度每十分钟记录一次。",
+      "title": "Research record 20",
+      "path": "holdout/record-20.md"
+    }
+  ],
+  "queries": [
+    {
+      "id": "calibration-q00",
+      "split": "calibration",
+      "query": "What water supplies the cedar greenhouse seedlings?",
+      "relevant": [
+        "calibration-d00"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q01",
+      "split": "calibration",
+      "query": "雪松温室里的幼苗用什么水灌溉？",
+      "relevant": [
+        "calibration-d00"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q02",
+      "split": "calibration",
+      "query": "How long does Marlin retain rollback packages?",
+      "relevant": [
+        "calibration-d01"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q03",
+      "split": "calibration",
+      "query": "马林团队发布后保留回退安装包多久？",
+      "relevant": [
+        "calibration-d01"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q04",
+      "split": "calibration",
+      "query": "When does high wind close the observatory roof?",
+      "relevant": [
+        "calibration-d02"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q05",
+      "split": "calibration",
+      "query": "风速达到什么条件会关闭天文台屋顶？",
+      "relevant": [
+        "calibration-d02"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q06",
+      "split": "calibration",
+      "query": "How are fragile library manuscripts digitized?",
+      "relevant": [
+        "calibration-d03"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q07",
+      "split": "calibration",
+      "query": "图书馆怎样把脆弱的手稿转成数字副本？",
+      "relevant": [
+        "calibration-d03"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q08",
+      "split": "calibration",
+      "query": "Which instrument measures bronze workshop furnace heat?",
+      "relevant": [
+        "calibration-d04"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q09",
+      "split": "calibration",
+      "query": "青铜工坊用什么仪器测量熔炉温度？",
+      "relevant": [
+        "calibration-d04"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q10",
+      "split": "calibration",
+      "query": "What precondition protects Acorn document updates?",
+      "relevant": [
+        "calibration-d05"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q11",
+      "split": "calibration",
+      "query": "橡果服务更改已存文档前必须满足什么版本条件？",
+      "relevant": [
+        "calibration-d05"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q12",
+      "split": "calibration",
+      "query": "How frequently does the river station sample dissolved oxygen?",
+      "relevant": [
+        "calibration-d06"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q13",
+      "split": "calibration",
+      "query": "河流监测站多久检测一次溶解氧？",
+      "relevant": [
+        "calibration-d06"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q14",
+      "split": "calibration",
+      "query": "How does the prototype avoid recalculating earlier attention tokens?",
+      "relevant": [
+        "calibration-d07"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q15",
+      "split": "calibration",
+      "query": "小型推理原型怎样避免重复计算之前词元的注意力？",
+      "relevant": [
+        "calibration-d07"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q16",
+      "split": "calibration",
+      "query": "How can museum visitors identify replica exhibits?",
+      "relevant": [
+        "calibration-d08"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q17",
+      "split": "calibration",
+      "query": "博物馆用什么标记区分复制展品？",
+      "relevant": [
+        "calibration-d08"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q18",
+      "split": "calibration",
+      "query": "What navigation backup does mountain rescue use?",
+      "relevant": [
+        "calibration-d09"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q19",
+      "split": "calibration",
+      "query": "山区救援队在卫星导航失效时靠什么辨认路线？",
+      "relevant": [
+        "calibration-d09"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q20",
+      "split": "calibration",
+      "query": "木兰项目的夜间备份存放在哪里？",
+      "relevant": [
+        "calibration-d10"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q21",
+      "split": "calibration",
+      "query": "Where are the magnolia project nightly backups stored?",
+      "relevant": [
+        "calibration-d10"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q22",
+      "split": "calibration",
+      "query": "稀疏专家实验为什么仍要存放全部专家权重？",
+      "relevant": [
+        "calibration-d11"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q23",
+      "split": "calibration",
+      "query": "Why does activating only some specialists not eliminate storage for the other expert weights?",
+      "relevant": [
+        "calibration-d11"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q24",
+      "split": "calibration",
+      "query": "珊瑚幼苗如何适应新盐度？",
+      "relevant": [
+        "calibration-d12"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q25",
+      "split": "calibration",
+      "query": "How does the coral nursery acclimate seedlings to a new salinity?",
+      "relevant": [
+        "calibration-d12"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q26",
+      "split": "calibration",
+      "query": "银杏小组当前完成了什么以及下一步做什么？",
+      "relevant": [
+        "calibration-d13"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q27",
+      "split": "calibration",
+      "query": "What has the ginkgo group finished and what will it evaluate next?",
+      "relevant": [
+        "calibration-d13"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q28",
+      "split": "calibration",
+      "query": "旧城档案室拍摄彩绘地图有什么限制？",
+      "relevant": [
+        "calibration-d14"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q29",
+      "split": "calibration",
+      "query": "What photography restriction protects painted maps in the old town archive?",
+      "relevant": [
+        "calibration-d14"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q30",
+      "split": "calibration",
+      "query": "黑鹭协议中什么节点能提交领导者写入？",
+      "relevant": [
+        "calibration-d15"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q31",
+      "split": "calibration",
+      "query": "Which nodes may commit leader writes in the black heron protocol?",
+      "relevant": [
+        "calibration-d15"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q32",
+      "split": "calibration",
+      "query": "蓝鲸压缩实验的验证范围是什么？",
+      "relevant": [
+        "calibration-d16"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q33",
+      "split": "calibration",
+      "query": "What evidence scope limits the blue whale compression experiment?",
+      "relevant": [
+        "calibration-d16"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q34",
+      "split": "calibration",
+      "query": "远山电站怎样储存剩余电力？",
+      "relevant": [
+        "calibration-d17"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q35",
+      "split": "calibration",
+      "query": "How does the distant mountain power station store surplus electricity?",
+      "relevant": [
+        "calibration-d17"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q36",
+      "split": "calibration",
+      "query": "橙树课题组是否采纳关闭审计日志的建议？",
+      "relevant": [
+        "calibration-d18"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q37",
+      "split": "calibration",
+      "query": "Did the orange tree group adopt the suggestion to disable audit logs?",
+      "relevant": [
+        "calibration-d18"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-q38",
+      "split": "calibration",
+      "query": "溪谷学校什么时候上天文观测课？",
+      "relevant": [
+        "calibration-d19"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-q39",
+      "split": "calibration",
+      "query": "When does the creek valley school now hold its astronomy observation class?",
+      "relevant": [
+        "calibration-d19"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "calibration-n00",
+      "split": "calibration",
+      "query": "cedar greenhouse invoice retention",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n01",
+      "split": "calibration",
+      "query": "Marlin payroll encryption algorithm",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n02",
+      "split": "calibration",
+      "query": "observatory cafeteria menu",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n03",
+      "split": "calibration",
+      "query": "library manuscript insurance premium",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n04",
+      "split": "calibration",
+      "query": "bronze workshop delivery address",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n05",
+      "split": "calibration",
+      "query": "Acorn marketing conversion rate",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n06",
+      "split": "calibration",
+      "query": "river station telescope aperture",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n07",
+      "split": "calibration",
+      "query": "museum replica ticket discount",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n08",
+      "split": "calibration",
+      "query": "mountain rescue pension rate",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n09",
+      "split": "calibration",
+      "query": "木兰项目承包商地址",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n10",
+      "split": "calibration",
+      "query": "银杏小组食堂价格",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n11",
+      "split": "calibration",
+      "query": "旧城档案室采购预算",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n12",
+      "split": "calibration",
+      "query": "黑鹭协议销售合同",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n13",
+      "split": "calibration",
+      "query": "蓝鲸实验负责人生日",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n14",
+      "split": "calibration",
+      "query": "橙树课题组快递单号",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n15",
+      "split": "calibration",
+      "query": "Which asteroid has a diamond ocean?",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n16",
+      "split": "calibration",
+      "query": "What recipe makes a transparent cheesecake?",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n17",
+      "split": "calibration",
+      "query": "火星地下地铁什么时候开通？",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n18",
+      "split": "calibration",
+      "query": "海王星旅游签证多少钱？",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "calibration-n19",
+      "split": "calibration",
+      "query": "How do unicorns renew passports?",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q00",
+      "split": "holdout",
+      "query": "How does the dune camp keep its batteries warm overnight?",
+      "relevant": [
+        "holdout-d00"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q01",
+      "split": "holdout",
+      "query": "沙丘研究营地怎样减少电池箱夜间热量流失？",
+      "relevant": [
+        "holdout-d00"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q02",
+      "split": "holdout",
+      "query": "When may the Elm compiler reuse a cached syntax tree?",
+      "relevant": [
+        "holdout-d01"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q03",
+      "split": "holdout",
+      "query": "榆树编译器在什么条件下才能复用已缓存的语法树？",
+      "relevant": [
+        "holdout-d01"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q04",
+      "split": "holdout",
+      "query": "How are harbour lab seawater sampling bottles sterilized?",
+      "relevant": [
+        "holdout-d02"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q05",
+      "split": "holdout",
+      "query": "港口实验室采海水前如何给采样瓶消毒？",
+      "relevant": [
+        "holdout-d02"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q06",
+      "split": "holdout",
+      "query": "How does the amber orchard monitor moth numbers?",
+      "relevant": [
+        "holdout-d03"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q07",
+      "split": "holdout",
+      "query": "琥珀果园怎样监测飞蛾数量？",
+      "relevant": [
+        "holdout-d03"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q08",
+      "split": "holdout",
+      "query": "Which visibility limit suspends the fog ferry?",
+      "relevant": [
+        "holdout-d04"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q09",
+      "split": "holdout",
+      "query": "能见度降到多少会让雾港渡轮停航？",
+      "relevant": [
+        "holdout-d04"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q10",
+      "split": "holdout",
+      "query": "Where does the Pine scheduler resume interrupted work?",
+      "relevant": [
+        "holdout-d05"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q11",
+      "split": "holdout",
+      "query": "松树调度器从哪里恢复被中断的任务？",
+      "relevant": [
+        "holdout-d05"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q12",
+      "split": "holdout",
+      "query": "How does the glacier expedition record daily snow depth?",
+      "relevant": [
+        "holdout-d06"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q13",
+      "split": "holdout",
+      "query": "冰川考察队每天怎样记录积雪深度？",
+      "relevant": [
+        "holdout-d06"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q14",
+      "split": "holdout",
+      "query": "Where do glazed test tiles cool after firing?",
+      "relevant": [
+        "holdout-d07"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q15",
+      "split": "holdout",
+      "query": "陶瓷工作室烧好的釉面测试片在哪里冷却？",
+      "relevant": [
+        "holdout-d07"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q16",
+      "split": "holdout",
+      "query": "How does moonfish keep customer caches separate?",
+      "relevant": [
+        "holdout-d08"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q17",
+      "split": "holdout",
+      "query": "月鱼服务怎样隔离不同客户的缓存？",
+      "relevant": [
+        "holdout-d08"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q18",
+      "split": "holdout",
+      "query": "Which instrument measures vineyard grape sugar?",
+      "relevant": [
+        "holdout-d09"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q19",
+      "split": "holdout",
+      "query": "葡萄园用什么工具测量葡萄的含糖量？",
+      "relevant": [
+        "holdout-d09"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q20",
+      "split": "holdout",
+      "query": "白桦小组的新追踪工具安装了吗？",
+      "relevant": [
+        "holdout-d10"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q21",
+      "split": "holdout",
+      "query": "Has the birch group installed its proposed tracing tool yet?",
+      "relevant": [
+        "holdout-d10"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q22",
+      "split": "holdout",
+      "query": "晨星实验如何降低内存需求？",
+      "relevant": [
+        "holdout-d11"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q23",
+      "split": "holdout",
+      "query": "How does the morning star experiment reduce memory use without changing training samples?",
+      "relevant": [
+        "holdout-d11"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q24",
+      "split": "holdout",
+      "query": "红杉水库遇到暴雨预警怎样处置？",
+      "relevant": [
+        "holdout-d12"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q25",
+      "split": "holdout",
+      "query": "What does the redwood reservoir do after a heavy rain warning?",
+      "relevant": [
+        "holdout-d12"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q26",
+      "split": "holdout",
+      "query": "海燕项目完成什么以及下阶段做什么？",
+      "relevant": [
+        "holdout-d13"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q27",
+      "split": "holdout",
+      "query": "What has the storm petrel project finished and what comes next?",
+      "relevant": [
+        "holdout-d13"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q28",
+      "split": "holdout",
+      "query": "古桥修复组用什么固定临时传感器？",
+      "relevant": [
+        "holdout-d14"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q29",
+      "split": "holdout",
+      "query": "How are temporary sensors attached during restoration of the ancient bridge?",
+      "relevant": [
+        "holdout-d14"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q30",
+      "split": "holdout",
+      "query": "石榴客户端断网时怎样保存编辑？",
+      "relevant": [
+        "holdout-d15"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q31",
+      "split": "holdout",
+      "query": "Where does the pomegranate client keep edits while disconnected?",
+      "relevant": [
+        "holdout-d15"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q32",
+      "split": "holdout",
+      "query": "紫藤农场怎样保护刚移栽的茶苗？",
+      "relevant": [
+        "holdout-d16"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q33",
+      "split": "holdout",
+      "query": "How does the wisteria farm protect newly transplanted tea seedlings?",
+      "relevant": [
+        "holdout-d16"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q34",
+      "split": "holdout",
+      "query": "流萤渲染器什么时候可以复用阴影结果？",
+      "relevant": [
+        "holdout-d17"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q35",
+      "split": "holdout",
+      "query": "When may the firefly renderer reuse shadows from the previous frame?",
+      "relevant": [
+        "holdout-d17"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q36",
+      "split": "holdout",
+      "query": "翠鸟团队是否同意公开测试数据库？",
+      "relevant": [
+        "holdout-d18"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q37",
+      "split": "holdout",
+      "query": "Did the kingfisher team accept exposing its test database to the public network?",
+      "relevant": [
+        "holdout-d18"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-q38",
+      "split": "holdout",
+      "query": "高原医疗站多久记录药品运输温度？",
+      "relevant": [
+        "holdout-d19"
+      ],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-q39",
+      "split": "holdout",
+      "query": "How often does the plateau clinic record refrigerated medicine transport temperature?",
+      "relevant": [
+        "holdout-d19"
+      ],
+      "pure_semantic": true,
+      "cross_language": true
+    },
+    {
+      "id": "holdout-n00",
+      "split": "holdout",
+      "query": "dune camp dividend policy",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n01",
+      "split": "holdout",
+      "query": "Elm compiler cafeteria menu",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n02",
+      "split": "holdout",
+      "query": "harbour laboratory taxi fare",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n03",
+      "split": "holdout",
+      "query": "amber orchard pension allocation",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n04",
+      "split": "holdout",
+      "query": "fog ferry captain birthdate",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n05",
+      "split": "holdout",
+      "query": "Pine scheduler marketing revenue",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n06",
+      "split": "holdout",
+      "query": "glacier expedition invoice currency",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n07",
+      "split": "holdout",
+      "query": "ceramic studio payroll retention",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n08",
+      "split": "holdout",
+      "query": "moonfish service office address",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n09",
+      "split": "holdout",
+      "query": "vineyard insurance deductible",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n10",
+      "split": "holdout",
+      "query": "白桦小组公司估值",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n11",
+      "split": "holdout",
+      "query": "晨星实验停车收费",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n12",
+      "split": "holdout",
+      "query": "红杉水库外卖电话",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n13",
+      "split": "holdout",
+      "query": "海燕项目采购发票",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n14",
+      "split": "holdout",
+      "query": "古桥修复组邮政编码",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n15",
+      "split": "holdout",
+      "query": "What is the treaty governing dragon migration?",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n16",
+      "split": "holdout",
+      "query": "Which comet manufactures smartphones?",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n17",
+      "split": "holdout",
+      "query": "金星的云端火车票在哪里买？",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n18",
+      "split": "holdout",
+      "query": "土星光环便利店几点关门？",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    },
+    {
+      "id": "holdout-n19",
+      "split": "holdout",
+      "query": "How many moons does an imaginary clock grow?",
+      "relevant": [],
+      "pure_semantic": false,
+      "cross_language": false
+    }
+  ]
+}

@@ -1046,3 +1046,11 @@ migration 0015 define the active current-only model.
   rows are retained and never auto-promoted or deleted; an authenticated Admin
   explicitly preflights and executes migration.
 - Every migration must preserve Vault IDs and credential bindings.
+
+
+## Migrations 0016–0017: local deletion and calibration
+
+Migration 0016 preserves prepared snapshots and allows null Provider/model identity for local deletion. Migration 0017 adds Vault/channel/signature calibration runs, frozen engineering budgets, cumulative dispatch accounting, bounded checkpoints and reports, plus a partial unique index for active retrieval.calibrate jobs. These changes do not rewrite canonical content or business vectors.
+
+The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
+specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).

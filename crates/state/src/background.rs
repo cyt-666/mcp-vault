@@ -308,7 +308,6 @@ impl OutboxRepository {
         validate_worker(worker_id)?;
         validate_lease(now, lease_until)?;
         let limit = validate_batch(limit)?;
-        let mut transaction = self.pool.begin().await?;
         let candidates = sqlx::query_as::<_, OutboxRow>(
             "SELECT id, vault_id, event_type, aggregate_type, aggregate_id,
                     payload_json, created_at, available_at, claimed_by,
@@ -324,8 +323,15 @@ impl OutboxRepository {
         .bind(now)
         .bind(now)
         .bind(i64::from(limit))
-        .fetch_all(&mut *transaction)
+        .fetch_all(&self.pool)
         .await?;
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        // No write lock on idle polls. Claim selected rows under an immediate
+        // transaction; each UPDATE repeats the eligibility predicate so races
+        // between selection and reservation cannot produce duplicate leases.
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let mut claimed = Vec::with_capacity(candidates.len());
         for candidate in candidates {
@@ -706,7 +712,6 @@ impl JobRepository {
         validate_worker(worker_id)?;
         validate_lease(now, lease_until)?;
         let limit = validate_batch(limit)?;
-        let mut transaction = self.pool.begin().await?;
         let candidates = sqlx::query_as::<_, JobRow>(
             "WITH eligible AS (
                SELECT id, vault_id, job_type, dedup_key, payload_json, status,
@@ -734,8 +739,15 @@ impl JobRepository {
         .bind(now)
         .bind(now)
         .bind(i64::from(limit))
-        .fetch_all(&mut *transaction)
+        .fetch_all(&self.pool)
         .await?;
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        // No write lock on idle polls. Claim selected rows under an immediate
+        // transaction; each UPDATE repeats the eligibility predicate so races
+        // between selection and reservation cannot produce duplicate leases.
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut claimed = Vec::with_capacity(candidates.len());
         for candidate in candidates {
             let result = sqlx::query(

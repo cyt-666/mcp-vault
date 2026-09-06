@@ -3,8 +3,10 @@
 //! Retrieval cases execute the real local `MemoryService::recall` path against
 //! an isolated in-memory database. Generation cases evaluate labeled fake
 //! Provider output only; they prove fixture/schema accounting, not model
-//! semantic quality. Real-provider evaluation is deliberately not implemented
-//! by this default command because it requires explicit data/cost consent.
+//! semantic quality. A separate local synthetic adapter runs the same bundled
+//! calibration engine as the server worker; deployment quality remains pending.
+
+mod quality_contract;
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -494,8 +496,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         && metadata_rate == 1.0
         && support_precision >= 0.95
         && critical_fact_coverage >= 0.90;
+    let calibration_contract = quality_contract::evaluate().await?;
     let report = json!({
-        "schema_version": 1,
+        "schema_version": 2,
+        "calibration_contract": calibration_contract,
         "mode": "deterministic",
         "corpus_version": corpus.version,
         "dataset_fingerprint": dataset_fingerprint(&corpus_path, &bytes),

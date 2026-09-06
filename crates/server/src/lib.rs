@@ -293,6 +293,7 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
                 state.clone(),
                 history_root.clone(),
                 core_runtime.clone(),
+                memory_service.clone(),
             ),
         )
         .map_err(|failure| ServerError::Workers(failure.code))?;
@@ -319,8 +320,25 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         .map_err(|failure| ServerError::Workers(failure.code))?;
     supervisor
         .register_job_handler(
+            "retrieval.calibrate",
+            workers::retrieval_calibration_job_handler(state.clone(), memory_service.clone()),
+        )
+        .map_err(|failure| ServerError::Workers(failure.code))?;
+    supervisor
+        .register_job_handler(
             "memory.extract",
             workers::memory_extract_job_handler(
+                state.clone(),
+                history_root.clone(),
+                core_runtime.clone(),
+                memory_service.clone(),
+            ),
+        )
+        .map_err(|failure| ServerError::Workers(failure.code))?;
+    supervisor
+        .register_job_handler(
+            "memory.source_resume",
+            workers::memory_source_resume_job_handler(
                 state.clone(),
                 history_root.clone(),
                 core_runtime.clone(),
@@ -365,6 +383,7 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
     let reconciliation_shutdown = workers::Cancellation::default();
     let reconciliation_task = tokio::spawn(run_reconciliation_loop(
         state.clone(),
+        memory_service.clone(),
         config.reconciliation_interval,
         maintenance.clone(),
         reconciliation_shutdown.clone(),
@@ -674,13 +693,15 @@ pub async fn reconcile_vault_once(
 
 async fn run_reconciliation_loop(
     state: mcp_vault_state::StateStore,
+    memory: mcp_vault_memory::MemoryService,
     interval: std::time::Duration,
     maintenance: MaintenanceGate,
     shutdown: workers::Cancellation,
 ) {
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    ticker.tick().await;
+    // Tokio's first tick is immediate: existing configured deployments are
+    // admitted after recovery/worker registration, without an Admin request.
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => break,
@@ -688,13 +709,16 @@ async fn run_reconciliation_loop(
                 if !maintenance.allows_write() {
                     continue;
                 }
-                let vaults = match state.vaults().list().await {
+                let mut offset = 0_u32;
+                loop {
+                let vaults = match state.vaults().list_page(64, offset).await {
                     Ok(vaults) => vaults,
                     Err(_) => {
                         warn!("periodic reconciliation could not list Vaults");
-                        continue;
+                        break;
                     }
                 };
+                let more = vaults.len() == 64;
                 for vault in vaults {
                     let availability = match state.vaults().availability(&vault).await {
                         Ok(availability) => availability,
@@ -714,6 +738,9 @@ async fn run_reconciliation_loop(
                             continue;
                         }
                     };
+                    if memory.ensure_retrieval_calibration(&context).await.is_err() {
+                        warn!(vault_id=%context.id(),error_code="calibration_admission_failed","calibration compensation will retry");
+                    }
                     match state.jobs().find_active_by_type(&context, "vault.reconcile").await {
                         Ok(None) => {
                             let dedup = format!(
@@ -747,6 +774,9 @@ async fn run_reconciliation_loop(
                     {
                         warn!(vault_id = %vault_id, "periodic legacy memory-job retirement failed");
                     }
+                }
+                if !more || shutdown.is_cancelled() { break; }
+                offset = offset.saturating_add(64);
                 }
             }
         }
@@ -1255,3 +1285,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod calibration_startup_tests;

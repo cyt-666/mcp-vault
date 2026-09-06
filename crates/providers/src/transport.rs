@@ -64,11 +64,19 @@ pub struct JsonResponse {
     pub body: Value,
 }
 
+/// Durable per-request budget checked at the existing transport boundary.
+#[async_trait::async_trait]
+pub trait RequestBudget: Send + Sync {
+    /// Reserve one network attempt and its actual serialized body size.
+    async fn reserve(&self, body_bytes: usize) -> Result<(), ProviderError>;
+}
+
 /// Bounded transport shared by provider adapters.
 #[derive(Clone)]
 pub struct ProviderTransport {
     settings: ProviderSettings,
     concurrency: Arc<Semaphore>,
+    budget: Option<Arc<dyn RequestBudget>>,
 }
 
 impl ProviderTransport {
@@ -82,7 +90,15 @@ impl ProviderTransport {
         Ok(Self {
             settings,
             concurrency,
+            budget: None,
         })
+    }
+
+    /// Attach operation accounting while preserving the shared concurrency gate,
+    /// endpoint validation, authentication and retry policy.
+    pub fn with_budget(mut self, budget: Arc<dyn RequestBudget>) -> Self {
+        self.budget = Some(budget);
+        self
     }
 
     /// Send a bounded JSON request with transient retry policy.
@@ -187,6 +203,9 @@ impl ProviderTransport {
                 }
                 AuthStyle::None => {}
             }
+        }
+        if let Some(budget) = &self.budget {
+            budget.reserve(body.len()).await?;
         }
         let response = request
             .send()
@@ -344,4 +363,75 @@ pub async fn validate_endpoint(
     settings: &ProviderSettings,
 ) -> Result<IpAddr, ProviderError> {
     Ok(validated_socket(endpoint, mode, settings).await?.1.ip())
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct TwoAttempts(AtomicUsize);
+    #[async_trait::async_trait]
+    impl RequestBudget for TwoAttempts {
+        async fn reserve(&self, bytes: usize) -> Result<(), ProviderError> {
+            assert_eq!(bytes, 7);
+            if self.0.fetch_add(1, Ordering::SeqCst) >= 2 {
+                return Err(ProviderError::Transport {
+                    code: "test_budget_exhausted",
+                    retryable: false,
+                });
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_transport_retries_each_reserve_budget_before_dispatch() {
+        let sent = Arc::new(AtomicUsize::new(0));
+        let count = sent.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = Url::parse(&format!(
+            "http://{}/embeddings",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/embeddings",
+                    axum::routing::post(move || {
+                        let count = count.clone();
+                        async move {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            axum::http::StatusCode::TOO_MANY_REQUESTS
+                        }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let budget = Arc::new(TwoAttempts(AtomicUsize::new(0)));
+        let transport = ProviderTransport::new(ProviderSettings {
+            max_retries: 5,
+            ..Default::default()
+        })
+        .unwrap()
+        .with_budget(budget.clone());
+        let error = transport
+            .request_json(
+                Method::POST,
+                &endpoint,
+                ProviderMode::LocalOnly,
+                &serde_json::json!({"x":1}),
+                RequestOptions::new(AuthStyle::None, None),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "test_budget_exhausted");
+        assert_eq!(sent.load(Ordering::SeqCst), 2);
+        assert_eq!(budget.0.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
 }

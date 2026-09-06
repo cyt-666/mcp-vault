@@ -492,6 +492,32 @@ impl ProviderService {
         Ok(result)
     }
 
+    /// Execute real embedding adapters with persistent per-attempt accounting.
+    /// All ordinary Provider authorization and model checks still apply.
+    pub async fn embed_with_budget(
+        &self,
+        context: &VaultContext,
+        model_id: ModelId,
+        request: &EmbeddingRequest,
+        budget: Arc<dyn crate::RequestBudget>,
+    ) -> Result<EmbeddingResult, ProviderError> {
+        let runtime = self.runtime(context, model_id).await?;
+        let transport = runtime.transport.with_budget(budget);
+        let result = runtime
+            .adapter
+            .embed(
+                &transport,
+                &runtime.base_url,
+                runtime.mode,
+                &runtime.settings,
+                runtime.secret.as_ref(),
+                request,
+            )
+            .await?;
+        validate_model_dimensions(&runtime.model, &result)?;
+        Ok(result)
+    }
+
     /// Test one provider and update its redacted health row.
     pub async fn test_provider(
         &self,
@@ -866,9 +892,22 @@ impl EmbeddingService {
         sources: &[EmbeddingSourceRef],
         resolver: &R,
     ) -> Result<Vec<EmbeddingRecord>, ProviderError> {
+        let profile_hash = self.profile_hash(model_id).await?;
+        let mut records = Vec::new();
         let mut inputs = Vec::new();
         for source in sources {
             if let Some(text) = resolver.resolve_source(context, source).await? {
+                let input_hash = embedding_input_hash(&profile_hash, source, &text);
+                if let Some(existing) = self
+                    .provider
+                    .state
+                    .providers()
+                    .find_valid_embedding_by_input(context, model_id, &profile_hash, &input_hash)
+                    .await?
+                {
+                    records.push(existing);
+                    continue;
+                }
                 inputs.push(EmbeddingInput {
                     source: source.clone(),
                     text,
@@ -876,10 +915,10 @@ impl EmbeddingService {
             }
         }
         if inputs.is_empty() {
-            return Ok(Vec::new());
+            return Ok(records);
         }
         let prepared = self.prepare_embeddings(context, model_id, &inputs).await?;
-        let mut records = Vec::with_capacity(prepared.len());
+        records.reserve(prepared.len());
         for ((record, vector), input) in prepared.into_iter().zip(&inputs) {
             let still_current = resolver
                 .resolve_source(context, &input.source)

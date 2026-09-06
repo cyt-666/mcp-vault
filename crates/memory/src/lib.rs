@@ -18,3 +18,8 @@ pub use model::{
 pub use service::{
     EXTRACTION_PIPELINE_VERSION, MEMORY_CONTRACT_GENERATION, MemoryRebuildReport, MemoryService,
 };
+
+mod calibration;
+pub use calibration::{
+    CalibrationMetrics, CalibrationProfile, CalibrationReport, CalibrationStatus,
+};

@@ -255,3 +255,11 @@ quality. Real-provider evaluation is opt-in only and requires explicit data and
 cost authorization. Required integration coverage includes Vault isolation,
 hash invalidation, move-without-model, whole-set replacement, delete/pause,
 explicit resume, exact-vector freshness, output budgets, and crash adoption.
+
+
+## Current-set calibration and source-language preservation
+
+ADR-0027 adds automatic synthetic calibration within ADR-0026 current-set ownership. It does not restore lifecycle history or global consolidation. The extraction prompt preserves source language, progress, environment, conditional results and future plans; unchanged source sets are not re-extracted merely because the prompt version changes.
+
+The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
+specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).

@@ -904,6 +904,37 @@ impl ProviderRepository {
         row.map(row_to_embedding).transpose()
     }
 
+    /// Reuse an exact prepared input only when its stored vector is valid.
+    /// The input hash includes source identity/content and the preparation profile.
+    pub async fn find_valid_embedding_by_input(
+        &self,
+        context: &VaultContext,
+        model_id: ModelId,
+        profile_hash: &str,
+        input_hash: &str,
+    ) -> Result<Option<EmbeddingRecord>, StateError> {
+        let row = sqlx::query_as::<_, EmbeddingRow>("SELECT e.id,e.vault_id,e.object_type,e.object_id,e.chunk_key,e.provider_id,e.model_id,e.dimension,e.content_hash,e.profile_hash,e.input_hash,e.vector_backend_key,e.created_at,e.updated_at,v.vector_blob FROM embedding_records e JOIN embedding_vectors v ON v.vault_id=e.vault_id AND v.embedding_id=e.id WHERE e.vault_id=? AND e.model_id=? AND e.profile_hash=? AND e.input_hash=? LIMIT 1")
+            .bind(context.id().to_string()).bind(model_id.to_string()).bind(profile_hash).bind(input_hash).fetch_optional(&self.pool).await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let Ok(candidate) = row_to_candidate(row) else {
+            return Ok(None);
+        };
+        let norm = candidate
+            .vector
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>();
+        if !norm.is_finite()
+            || norm <= f32::EPSILON
+            || candidate.vector.iter().any(|value| !value.is_finite())
+        {
+            return Ok(None);
+        }
+        Ok(Some(candidate.embedding))
+    }
+
     /// List bounded embedding metadata without loading vector blobs.
     pub async fn list_embeddings(
         &self,
