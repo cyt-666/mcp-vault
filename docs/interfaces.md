@@ -315,6 +315,44 @@ valid for both the 2026-07-28 and negotiated dated MCP schemas. Error results
 set `ok` to `false` and provide a bounded structured `error` object instead of
 leaking SQL, filesystem, provider, or secret details.
 
+### Compact tool results (2026-09-06 amendment)
+
+All 17 tools accept `include_details` (default false). Default responses preserve
+information needed for the next action: IDs/paths, memory/file revisions, content or
+snippets, applicable confidence/validity, pagination, truncation/degradation and mutation
+side effects. Full metadata remains available with `include_details:true`; the detailed
+examples/field inventories below describe this extended form unless stated otherwise.
+`get_memory` intentionally returns a full single record without requiring this flag.
+`include_score_breakdown:true` also selects the extended search/recall output.
+
+Search/browse omit complete heading/link graphs and default scores. Recall/list omit
+internal memory-set IDs, managed-file paths/revisions and ranking internals. Mutation
+receipts keep path/file ID/current revision, active state, operation paths/timestamp and
+ETag, while omitting internal actor, Vault, revision-row and content-hash metadata.
+Overview omits redundant internal IDs/revisions. Recent changes and history return
+compact operation records; history is paginated newest-first (default 25, maximum 100).
+Exact `read_note` content remains bounded by max_bytes and its metadata describes the
+selected revision, including historical reads. Its file_id can be used as provenance.
+
+`recall.include_sources` defaults **true**. `memories[].sources[].path` is a source note
+path usable directly with `read_note`; no intermediate search is required. Compact
+sources contain paths only; detailed mode includes revision/heading/line metadata.
+Explicit false omits sources. Explicit memories may legitimately have no source.
+Use get_memory for missing details, then search only if a source is missing/unreadable
+or more evidence is needed. `related_notes` are additional cues, not guaranteed sources
+of a returned memory. Detailed `canonical_path` is managed memory Markdown, not the
+source note; do not pass it to read_note. Use memory `revision`, not canonical_revision,
+for memory updates/deletion. Source reads still require vault:read.
+
+Unsupported read selections and permanent deletion are not advertised as enum choices;
+legacy requests still receive their existing unsupported errors. Update-memory omitted
+fields preserve values, null clears nullable metadata, and [] clears tags/entities.
+Browse depth 0 returns the node and optional candidates without child expansion.
+
+RMCP 3.0.1 emits matching JSON in text content and structuredContent for compatibility;
+this is one logical result, not two distinct results to process. We retain that SDK
+behavior and compact both representations together. No extra prose copy is appended.
+
 ### 6.1 `vault_overview`
 
 Purpose: provide a bounded map of the Vault before exact retrieval.
@@ -546,11 +584,9 @@ options. There is no historical flag.
 Output keeps two collections distinct:
 
 - `memories`: current atomic durable memories with ownership, optional kind,
-  confidence/importance/validity, provenance, calibrated score, and optional
-  score components;
+  confidence/importance/validity and source paths (scores and complete provenance in detailed mode);
 - `related_notes`: note cues with stable file ID, current readable path, the
-  analyzed revision, title, bounded matching snippet, tags/topics/headings,
-  score, and resource URI. Before a rebuild, path may already reflect a move
+  analyzed revision, title, bounded matching snippet and resource URI (tags/topics/headings and score in detailed mode). Before a rebuild, path may already reflect a move
   while revision still identifies the projection that produced the snippet.
 
 `related_notes` is populated only when the credential also has `vault:read`.
@@ -558,7 +594,7 @@ The caller may bound it independently with `max_related_notes`. A cue is not an
 accepted fact; the Agent reads the canonical note before relying on exact
 details.
 
-The response also contains `candidate_memory_count`,
+With include_details:true the response also contains `candidate_memory_count`,
 `relevant_memory_count`, `available_memory_count`,
 `available_related_note_count`, `available_result_count`, `truncated`,
 `degraded`, and `retrieval_profile_hash`. `score` is a calibrated fusion value;
@@ -680,7 +716,7 @@ Default is `trash` where configured. Permanent deletion still retains revision h
 
 Scope: `vault:history`.
 
-Returns revision metadata and optional bounded diffs. It does not return every full historical blob by default.
+Returns newest-first revision metadata with limit (default 25, range 1–100), cursor, next_cursor and truncated. Reuse the same path/limit for pagination. Diffs and historical bodies are not returned; use read_note with a selected revision.
 Reserved managed paths are rejected even with `vault:history`; this permission
 does not turn retained recovery history into model-readable memory.
 

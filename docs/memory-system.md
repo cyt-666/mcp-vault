@@ -271,3 +271,12 @@ ADR-0028 supersedes ADR-0027 automatic synthetic calibration: evaluations are op
 
 The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
 specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).
+
+## MCP source navigation and compact presentation
+
+MCP recall defaults include_sources to true and exposes original note paths as
+memories[].sources[].path; use read_note directly for evidence. Related-note cues
+are separate from memory provenance. Compact recall/list omit internal ranking and
+managed-memory-file metadata; include_details returns the extended record, while
+get_memory is always a full single-record read. Internal service/Admin contracts and
+complete-object token-budget accounting remain unchanged. No evaluation pass is required.

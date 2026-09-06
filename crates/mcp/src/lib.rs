@@ -1,5 +1,7 @@
 //! Stateless RMCP adapter for the Vault data plane.
 
+mod presentation;
+
 use std::{path::PathBuf, sync::Arc};
 
 use axum::{
@@ -665,20 +667,26 @@ fn oauth_public_error(
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct VaultOverviewInput {
+    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
+    #[serde(default)]
+    include_details: Option<bool>,
     /// Include newest-first revision metadata in the overview. Defaults to false.
     #[serde(default)]
     include_recent: Option<bool>,
-    /// Maximum number of direct entries and recent changes to return. Range 1-100; default 25.
+    /// Maximum top-level topics and, separately, recent revisions. Range 1-100; default 25.
     #[serde(default)]
     limit: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct BrowseIndexInput {
+    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
+    #[serde(default)]
+    include_details: Option<bool>,
     /// Stable index node ID to expand. Omit to browse the root; reuse IDs returned by this tool.
     #[serde(default)]
     node_id: Option<String>,
-    /// Number of child levels to expand. Range 0-2; default 1.
+    /// Child levels: 0 returns only the selected node and optional notes; 1 lists children; 2 also lists grandchildren. Default 1.
     #[serde(default)]
     depth: Option<u8>,
     /// Maximum number of children to return. Range 1-100; default 50.
@@ -694,6 +702,9 @@ struct BrowseIndexInput {
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct RecentChangesInput {
+    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
+    #[serde(default)]
+    include_details: Option<bool>,
     /// Maximum number of newest-first revisions to return. Range 1-100; default 50.
     #[serde(default)]
     limit: Option<u32>,
@@ -701,6 +712,9 @@ struct RecentChangesInput {
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct SearchNotesInput {
+    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
+    #[serde(default)]
+    include_details: Option<bool>,
     /// Natural-language concept or exact keywords to find in canonical Markdown notes.
     query: String,
     /// Retrieval strategy. Defaults to lexical; semantic and hybrid may report provider degradation.
@@ -756,12 +770,15 @@ struct SearchScope {
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct ReadNoteInput {
+    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
+    #[serde(default)]
+    include_details: Option<bool>,
     /// Current Vault-relative path from search, recall, browse, or another read result.
     path: String,
     /// Retained historical revision to read. Omit to read the current revision.
     #[serde(default)]
     revision: Option<u64>,
-    /// Content selection. Omit or use `{ "kind": "full" }`; other declared kinds are reserved and currently rejected.
+    /// Omit or use {"kind":"full"}. Only full-note reads are supported; increase max_bytes if truncated. Search section offsets are not Markdown byte offsets.
     #[serde(default)]
     selection: Option<NoteSelection>,
     /// Maximum bytes to return. Defaults to 131072 and cannot exceed 1048576.
@@ -775,6 +792,7 @@ enum NoteSelection {
     /// Read the complete file subject to max_bytes.
     Full,
     /// Reserved one-based Markdown line range; the current handler rejects it.
+    #[schemars(skip)]
     LineRange {
         /// First one-based line to return.
         start_line: u32,
@@ -782,11 +800,13 @@ enum NoteSelection {
         end_line: u32,
     },
     /// Reserved Markdown heading selection; the current handler rejects it.
+    #[schemars(skip)]
     Heading {
         /// Heading text to select, without Markdown `#` markers.
         heading: String,
     },
     /// Reserved half-open byte range; the current handler rejects it.
+    #[schemars(skip)]
     ByteRange {
         /// Zero-based first byte offset.
         start: u64,
@@ -820,6 +840,9 @@ impl NoteSelection {
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct CreateNoteInput {
+    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
+    #[serde(default)]
+    include_details: Option<bool>,
     /// New Vault-relative Markdown path, for example `projects/alpha/status.md`.
     path: String,
     /// Complete UTF-8 Markdown body for the new note, up to 1048576 bytes.
@@ -834,6 +857,9 @@ struct CreateNoteInput {
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct EditNoteInput {
+    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
+    #[serde(default)]
+    include_details: Option<bool>,
     /// Existing Vault-relative note path obtained from a current read or search result.
     path: String,
     /// Current revision returned by read_note or search_notes; conflicts must be reread, not overwritten.
@@ -881,6 +907,9 @@ enum EditOperation {
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct MoveNoteInput {
+    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
+    #[serde(default)]
+    include_details: Option<bool>,
     /// Existing Vault-relative source note or directory path.
     source: String,
     /// New Vault-relative destination path, which must not already exist.
@@ -894,6 +923,9 @@ struct MoveNoteInput {
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct DeleteNoteInput {
+    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
+    #[serde(default)]
+    include_details: Option<bool>,
     /// Existing Vault-relative note path to remove.
     path: String,
     /// Current revision returned by read_note or search_notes.
@@ -913,17 +945,30 @@ enum DeleteMode {
     #[default]
     Trash,
     /// Reserved value; the current MCP surface rejects permanent note deletion.
+    #[schemars(skip)]
     Permanent,
 }
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct NoteHistoryInput {
+    /// Maximum retained revisions per page. Range 1-100; default 25, newest first.
+    #[serde(default)]
+    limit: Option<u32>,
+    /// Opaque cursor from note_history. Reuse it with the same path and limit.
+    #[serde(default)]
+    cursor: Option<String>,
+    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
+    #[serde(default)]
+    include_details: Option<bool>,
     /// Vault-relative path whose retained revision metadata should be listed.
     path: String,
 }
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct RestoreNoteRevisionInput {
+    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
+    #[serde(default)]
+    include_details: Option<bool>,
     /// Current Vault-relative note path.
     path: String,
     /// Retained historical revision whose content should become current.
@@ -937,6 +982,9 @@ struct RestoreNoteRevisionInput {
 
 #[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
 struct RecallMemoryInput {
+    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
+    #[serde(default)]
+    include_details: Option<bool>,
     /// Current user question or task, written with enough context to rank relevant durable memory.
     query: String,
     /// Optional continuity signals that disambiguate the current project, entities, and recent topics.
@@ -951,7 +999,7 @@ struct RecallMemoryInput {
     /// Minimum stored importance in the inclusive range 0-1. Defaults to 0.
     #[serde(default)]
     min_importance: Option<f64>,
-    /// Include detailed provenance in each memory result. Defaults to false to conserve context.
+    /// Return source-note paths that generated these memories; use sources[].path with read_note. Defaults to true. Explicit false omits sources; manually saved memories may have none. include_details adds source revision/heading/line metadata.
     #[serde(default)]
     include_sources: Option<bool>,
     /// Include component ranking scores for diagnostics. Defaults to false.
@@ -983,12 +1031,18 @@ struct RecallMemoryContextInput {
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct MemoryIdInput {
+    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
+    #[serde(default)]
+    include_details: Option<bool>,
     /// Stable durable-memory ID returned by recall or list_memories.
     id: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
 struct ListMemoryInput {
+    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
+    #[serde(default)]
+    include_details: Option<bool>,
     /// Memory-type filters: identity, preference, decision, constraint, fact, project, progress, event, relationship, or procedure.
     #[serde(default)]
     types: Vec<String>,
@@ -1011,6 +1065,9 @@ struct ListMemoryInput {
 
 #[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
 struct RememberMemoryInput {
+    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
+    #[serde(default)]
+    include_details: Option<bool>,
     /// One concise durable proposition, not a transcript, temporary thought, or complete note body.
     content: String,
     /// Memory type: identity, preference, decision, constraint, fact, project, progress, event, relationship, or procedure.
@@ -1046,7 +1103,7 @@ struct RememberMemoryInput {
 struct MemorySourceInputDto {
     /// Current Vault-relative source-note path.
     path: String,
-    /// Stable file ID returned by read_note or search_notes when available.
+    /// Stable file ID returned by read_note or search_notes. Omit if unavailable; never infer it from the path.
     #[serde(default)]
     file_id: Option<String>,
     /// Exact source revision returned by read_note or search_notes.
@@ -1068,14 +1125,17 @@ struct MemorySourceInputDto {
 
 #[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
 struct UpdateMemoryInput {
+    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
+    #[serde(default)]
+    include_details: Option<bool>,
     /// Stable durable-memory ID returned by get_memory, recall, or list_memories.
     id: String,
-    /// Current metadata revision returned by get_memory; conflicts must be reread, not overwritten.
+    /// Current memory revision returned by get_memory, not canonical_revision or a source-note revision. On conflict, get_memory again.
     expected_revision: u64,
     /// Replacement durable proposition. Omit to preserve the current content.
     #[serde(default)]
     content: Option<String>,
-    /// Replacement type from the supported memory-type list. Omit to preserve it.
+    /// Replacement type from the supported memory-type list. Omit to preserve; null clears it.
     #[serde(default, deserialize_with = "deserialize_patch_field")]
     memory_type: Option<Option<String>>,
     /// Replacement importance in the inclusive range 0-1. Null clears it.
@@ -1084,16 +1144,16 @@ struct UpdateMemoryInput {
     /// Replacement confidence in the inclusive range 0-1. Null clears it.
     #[serde(default, deserialize_with = "deserialize_patch_field")]
     confidence: Option<Option<f64>>,
-    /// Optional replacement validity start as Unix milliseconds.
+    /// Replacement validity start as Unix milliseconds. Omit to preserve; null clears it.
     #[serde(default, deserialize_with = "deserialize_patch_field")]
     valid_from: Option<Option<i64>>,
-    /// Optional replacement exclusive validity end as Unix milliseconds.
+    /// Replacement exclusive validity end as Unix milliseconds. Omit to preserve; null clears it.
     #[serde(default, deserialize_with = "deserialize_patch_field")]
     valid_to: Option<Option<i64>>,
-    /// Complete replacement tag set. Omit to preserve the current tags.
+    /// Complete replacement tag set. Omit to preserve; [] clears all tags.
     #[serde(default)]
     tags: Option<Vec<String>>,
-    /// Complete replacement entity set. Omit to preserve the current entities.
+    /// Complete replacement entity set. Omit to preserve; [] clears all entities.
     #[serde(default)]
     entities: Option<Vec<String>>,
 }
@@ -1108,6 +1168,9 @@ where
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 struct ForgetMemoryInput {
+    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
+    #[serde(default)]
+    include_details: Option<bool>,
     /// Stable durable-memory ID returned by get_memory, recall, or list_memories.
     id: String,
     /// Current metadata revision returned by get_memory.
@@ -1182,7 +1245,7 @@ impl McpHandler {
     #[tool(
         name = "vault_overview",
         title = "Inspect Vault overview",
-        description = "Use this when you need a high-level map of the user's Vault before choosing what to search or read. Set include_recent=true when recent activity may matter. On success, `data` contains `vault`, `statistics`, top-level `topics`, `index` coverage and revision state, optional `recent` changes, and `truncated`. Pass a returned topic ID to browse_index for deeper navigation; use search_notes when you already know the subject to find.",
+        description = "Use this when you need an overview of the Vault. Optionally include recent changes. On success, `data` contains statistics, topics, index coverage and optional recent revisions. Pass a topic id to browse_index; read a known path directly with read_note. Do not repeatedly request the overview for a known note.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1192,6 +1255,13 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
+        let include_details = input.include_details.unwrap_or(false);
+        let success = |data| {
+            success_result(
+                &context,
+                presentation::tool_data("vault_overview", data, include_details),
+            )
+        };
         if let Err(error) = require_permission(&request.principal, Permission::DiscoverVault) {
             return Ok(error_result(&context, error));
         }
@@ -1200,7 +1270,7 @@ impl McpHandler {
             Err(error) => return Ok(error_result(&context, error)),
         };
         match overview_data(&request, input.include_recent.unwrap_or(false), limit).await {
-            Ok(data) => Ok(success_result(&context, data)),
+            Ok(data) => Ok(success(data)),
             Err(error) => Ok(error_result(&context, error)),
         }
     }
@@ -1208,7 +1278,7 @@ impl McpHandler {
     #[tool(
         name = "browse_index",
         title = "Browse knowledge index",
-        description = "Use this when you need to explore the Vault's topic tree without relying on exact keywords. Omit node_id to start at the root, or pass an ID returned by vault_overview or a previous browse_index call; set include_note_candidates=true to see notes under the node. On success, `data` contains `node`, `children`, `note_candidates`, `index_revision`, `coverage`, `next_cursor`, and `truncated`. Follow `next_cursor` when present; use search_notes for content-based matching.",
+        description = "Use this when exploring topics without known keywords. Omit node_id for root; reuse returned IDs. On success, `data.children` contains expandable topics and optional note_candidates have paths. Pass a child id back here or a note path to read_note. Continue with next_cursor and unchanged filters; use search_notes only when content matching is needed.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1218,6 +1288,13 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
+        let include_details = input.include_details.unwrap_or(false);
+        let success = |data| {
+            success_result(
+                &context,
+                presentation::tool_data("browse_index", data, include_details),
+            )
+        };
         if let Err(error) = require_permission(&request.principal, Permission::DiscoverVault) {
             return Ok(error_result(&context, error));
         }
@@ -1250,7 +1327,7 @@ impl McpHandler {
         )
         .await
         {
-            Ok(data) => Ok(success_result(&context, data)),
+            Ok(data) => Ok(success(data)),
             Err(error) => Ok(error_result(&context, error)),
         }
     }
@@ -1258,7 +1335,7 @@ impl McpHandler {
     #[tool(
         name = "recent_changes",
         title = "View recent Vault changes",
-        description = "Use this when the user asks what changed recently or when recent edits may affect the task. Pass limit to bound the newest-first history. On success, `data.changes` contains revision records with `operation`, `revision`, `path_before`, `path_after`, actor/source information, and `created_at`, while `data.limit` reports the applied bound; note bodies are not included. Use read_note to inspect an active note and note_history to inspect all retained revisions of one note.",
+        description = "Use this when recent edits matter. Set limit for newest-first revisions. On success, `data.changes` contains operation, revision, paths and timestamp. Read path_after with read_note for an active note; for a deletion use path_before with note_history. No bodies or pagination are included; note_history gives the retained versions of a known path.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1268,6 +1345,13 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
+        let include_details = input.include_details.unwrap_or(false);
+        let success = |data| {
+            success_result(
+                &context,
+                presentation::tool_data("recent_changes", data, include_details),
+            )
+        };
         if let Err(error) = require_permission(&request.principal, Permission::DiscoverVault) {
             return Ok(error_result(&context, error));
         }
@@ -1293,19 +1377,16 @@ impl McpHandler {
                 ));
             }
         };
-        Ok(success_result(
-            &context,
-            json!({
-                "changes": revisions.iter().map(revision_json).collect::<Vec<_>>(),
-                "limit": limit,
-            }),
-        ))
+        Ok(success(json!({
+            "changes": revisions.iter().map(revision_json).collect::<Vec<_>>(),
+            "limit": limit,
+        })))
     }
 
     #[tool(
         name = "search_notes",
         title = "Search Vault notes",
-        description = "Use this when you need to find Vault notes that match keywords, concepts, paths, topics, tags, or modification times. Pass the search phrase in query; choose lexical for exact text, semantic for meaning-based matches, or hybrid for both. On success, `data.results` contains each note's `file_id`, `path`, current `revision`, `title`, matching `snippet`, tags, headings, links, score, and `resource_uri`; `data.mode`, `result_granularity`, `available_result_count`, `index_revision`, `coverage`, `degraded`, `degradation_reasons`, `next_cursor`, and `truncated` describe how to interpret or continue the results. With section granularity, matched_section identifies the winning current chunk, heading and byte interval in the indexed plain-text projection; an unlocated result remains note-level. Use read_note for exact Markdown and recall instead when the question depends on previously saved personal or project context.",
+        description = "Use this when the note path is unknown and you need keyword or semantic matching. mode defaults to lexical; hybrid combines lexical and semantic matches. On success, `data.results` contains path, file_id, revision, title, snippet and resource_uri. Read a returned path directly with read_note instead of searching again. next_cursor continues with unchanged query and filters. Section matches are indexed plain-text coordinates, not Markdown byte offsets; read_note currently reads full Markdown. degradation_reasons explains degraded results; truncated means incomplete. include_details or include_score_breakdown adds diagnostic metadata.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1315,6 +1396,14 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
+        let include_details = input.include_details.unwrap_or(false)
+            || input.include_score_breakdown.unwrap_or(false);
+        let success = |data| {
+            success_result(
+                &context,
+                presentation::tool_data("search_notes", data, include_details),
+            )
+        };
         if let Err(error) = require_permission(&request.principal, Permission::ReadVault) {
             return Ok(error_result(&context, error));
         }
@@ -1335,7 +1424,7 @@ impl McpHandler {
         }
         let mode = input.mode.unwrap_or_default();
         match search_data(&request, &input, &scope, mode, limit, offset).await {
-            Ok(data) => Ok(success_result(&context, data)),
+            Ok(data) => Ok(success(data)),
             Err(error) => Ok(error_result(&context, error)),
         }
     }
@@ -1343,7 +1432,7 @@ impl McpHandler {
     #[tool(
         name = "read_note",
         title = "Read a Vault note",
-        description = "Use this when you know a Vault-relative path and need the exact current note or a retained historical revision. Pass path, optionally revision, and a max_bytes limit; only full-note selection is currently supported. On success, `data` contains `path`, selected `revision`, `selection`, `content`, `content_hash`, `size`, `binary`, `truncated`, and `resource_uri`. Use the revision from a current read as expected_revision before edit_note, move_note, or delete_note; use search_notes or browse_index when the path is unknown.",
+        description = "Use this when you know a note path, including sources[].path from a memory. Pass the path directly; no search is required. Omit revision for current content or pass one from note_history. On success, `data` contains content, file_id, path, selected revision, size, content_hash and truncated. If truncated, raise max_bytes up to 1048576; do not claim the excerpt is complete. Binary content is not text. Only full selection is supported. Before a write use a current read revision, never a historical one; on not_found search for a moved note.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1353,6 +1442,13 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
+        let include_details = input.include_details.unwrap_or(false);
+        let success = |data| {
+            success_result(
+                &context,
+                presentation::tool_data("read_note", data, include_details),
+            )
+        };
         if let Err(error) = require_permission(&request.principal, Permission::ReadVault) {
             return Ok(error_result(&context, error));
         }
@@ -1392,11 +1488,21 @@ impl McpHandler {
                 Err(error) => return Ok(error_result(&context, vault_error(error))),
             },
         };
-        let (file, revision, reader) = match read {
-            ReadSource::Current(read) => {
-                (read.file.clone(), read.file.current_revision, read.reader)
-            }
-            ReadSource::Historical(read) => (read.file, read.revision.revision, read.reader),
+        let (file, revision, size, hash, reader) = match read {
+            ReadSource::Current(read) => (
+                read.file.clone(),
+                read.file.current_revision,
+                Some(read.file.size),
+                read.file.content_hash.clone(),
+                read.reader,
+            ),
+            ReadSource::Historical(read) => (
+                read.file,
+                read.revision.revision,
+                read.revision.size,
+                read.revision.content_hash.clone(),
+                read.reader,
+            ),
         };
         let (bytes, truncated) = match read_bounded(reader, max_bytes).await {
             Ok(value) => value,
@@ -1409,26 +1515,24 @@ impl McpHandler {
         };
         let text = String::from_utf8(bytes).ok();
         let binary = text.is_none();
-        Ok(success_result(
-            &context,
-            json!({
-                "path": path.as_str(),
-                "revision": revision.value(),
-                "selection": {"kind": "full"},
-                "size": file.size,
-                "content_hash": file.content_hash,
-                "truncated": truncated,
-                "content": text,
-                "binary": binary,
-                "resource_uri": note_resource_uri(&path),
-            }),
-        ))
+        Ok(success(json!({
+            "file_id": file.id.to_string(),
+            "path": path.as_str(),
+            "revision": revision.value(),
+            "selection": {"kind": "full"},
+            "size": size,
+            "content_hash": hash,
+            "truncated": truncated,
+            "content": text,
+            "binary": binary,
+            "resource_uri": note_resource_uri(&path),
+        })))
     }
 
     #[tool(
         name = "recall",
         title = "Recall relevant memory",
-        description = "Use this proactively before answering when the current request may depend on information the user previously saved, such as preferences, decisions, constraints, project state, progress, relationships, procedures, or past work. Pass the current question or task in its natural language as query. On success, `data.memories` contains current long-term context that passed the relevance gate, while `data.related_notes` contains candidate source notes with paths, revisions, and snippets; candidate/relevant/available counts, `retrieval_profile_hash`, `degraded`, and `truncated` explain policy, coverage, and budget limits. Semantic-only matches are admitted only for an evaluated embedding profile; strong lexical matches remain available during degradation. Call read_note when exact source wording or more detail matters, and use search_notes instead for general document or quotation search.",
+        description = "Use this proactively before answering questions about saved decisions, preferences, constraints or past work. Pass the task in natural language. On success, `data.memories` contains context and sources[].path, the source-note paths that generated each memory; include_sources defaults to true. When original wording or more detail matters, pass that path directly to read_note, without another search. `data.related_notes` are additional retrieval cues, not necessarily sources of a memory. If sources are absent, get_memory by id; search_notes only if a source is missing, unreadable or more evidence is needed. Explicit memories may have no source. Degraded or truncated results have incomplete coverage.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1438,6 +1542,14 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
+        let include_details = input.include_details.unwrap_or(false)
+            || input.include_score_breakdown.unwrap_or(false);
+        let success = |data| {
+            success_result(
+                &context,
+                presentation::tool_data("recall", data, include_details),
+            )
+        };
         if let Err(error) = require_permission(&request.principal, Permission::ReadMemory) {
             return Ok(error_result(&context, error));
         }
@@ -1469,7 +1581,7 @@ impl McpHandler {
                     types,
                     valid_at: input.valid_at,
                     min_importance: input.min_importance.unwrap_or(0.0),
-                    include_sources: input.include_sources.unwrap_or(false),
+                    include_sources: input.include_sources.unwrap_or(true),
                     include_score_breakdown: input.include_score_breakdown.unwrap_or(false),
                     include_related_notes,
                     max_results: input.max_results.unwrap_or(12),
@@ -1483,7 +1595,7 @@ impl McpHandler {
             )
             .await;
         match result {
-            Ok(result) => Ok(success_result(&context, recall_json(result))),
+            Ok(result) => Ok(success(recall_json(result))),
             Err(error) => Ok(error_result(&context, memory_error(error))),
         }
     }
@@ -1491,7 +1603,7 @@ impl McpHandler {
     #[tool(
         name = "get_memory",
         title = "Inspect a durable memory",
-        description = "Use this when you already have a current long-term memory ID from recall or list_memories and need the complete stored record. Pass that ID. Deleted, replaced, source-invalidated, and legacy historical records always return not found. On success, `data` includes ownership, current revision, content, optional kind/importance/confidence, tags, entities, source references, and managed Markdown location. Use its revision before update_memory or forget_memory; use read_note on a returned source path when exact evidence matters.",
+        description = "Use this when you know a memory id and need its complete record or source details. On success, `data` includes content, revision, ownership and sources[].path. Read that source path directly with read_note. canonical_path is the system-managed memory Markdown file, NOT the original note and not a read_note target; canonical_revision is not the revision for memory edits. Use revision for update_memory or forget_memory. Replaced/deleted memories return not_found; recall again rather than using an obsolete ID.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1501,6 +1613,13 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
+        let include_details = input.include_details.unwrap_or(false);
+        let success = |data| {
+            success_result(
+                &context,
+                presentation::tool_data("get_memory", data, include_details),
+            )
+        };
         if let Err(error) = require_permission(&request.principal, Permission::ReadMemory) {
             return Ok(error_result(&context, error));
         }
@@ -1509,8 +1628,7 @@ impl McpHandler {
             Err(error) => return Ok(error_result(&context, error)),
         };
         match request.memory.get(&request.vault, id).await {
-            Ok(memory) => Ok(success_result(
-                &context,
+            Ok(memory) => Ok(success(
                 serde_json::to_value(memory).unwrap_or_else(|_| json!({})),
             )),
             Err(error) => Ok(error_result(&context, memory_error(error))),
@@ -1520,7 +1638,7 @@ impl McpHandler {
     #[tool(
         name = "list_memories",
         title = "List durable memories",
-        description = "Use this when the user explicitly wants to browse current long-term memories, or when you need records matching an optional kind, tag, entity, or source path. Legacy, deleted, replaced, and source-invalidated records are never listed. On success, `data.memories` contains the current matching records and `data.next_cursor` is the optional cursor for the next page. Reuse that cursor for pagination. Use get_memory for one known ID and recall when the goal is context relevant to a task.",
+        description = "Use this when browsing current memories by type, tag, entity or source path. On success, `data.memories` contains IDs, content, memory revisions and source paths; next_cursor continues with the same filters. Read sources[].path directly with read_note for evidence, or get_memory by id for full metadata. Use recall for task relevance rather than paging through all memories.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1530,6 +1648,13 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
+        let include_details = input.include_details.unwrap_or(false);
+        let success = |data| {
+            success_result(
+                &context,
+                presentation::tool_data("list_memories", data, include_details),
+            )
+        };
         if let Err(error) = require_permission(&request.principal, Permission::ReadMemory) {
             return Ok(error_result(&context, error));
         }
@@ -1563,14 +1688,11 @@ impl McpHandler {
             )
             .await
         {
-            Ok(memories) => Ok(success_result(
-                &context,
-                json!({
-                    "memories": memories,
-                    "next_cursor": (memories.len() == limit as usize).then(|| format!("offset:{}", offset.saturating_add(limit))),
-                    "truncated": memories.len() == limit as usize
-                }),
-            )),
+            Ok(memories) => Ok(success(json!({
+                "memories": memories,
+                "next_cursor": (memories.len() == limit as usize).then(|| format!("offset:{}", offset.saturating_add(limit))),
+                "truncated": memories.len() == limit as usize
+            }))),
             Err(error) => Ok(error_result(&context, memory_error(error))),
         }
     }
@@ -1578,7 +1700,7 @@ impl McpHandler {
     #[tool(
         name = "remember",
         title = "Save a durable memory",
-        description = "Use this only when the user has authorized saving one concise durable proposition for future conversations. Pass content; memory_type, importance, and confidence are optional metadata and omission is preserved. Include exact source-note details only when verified, and provide idempotency_key for safe retries. On success, `data.memory` is already materialized as Markdown and immediately available to get/list/recall, and `data.outcome` reports whether it was newly stored or an idempotent retry; there is no later consolidation phase. Use create_note or edit_note when the user wants ordinary Vault note content changed.",
+        description = "Use this only when the user authorizes saving a durable proposition. Supply content and only supported metadata; source_note must be verified by a prior source read. On success, `data.memory` contains the saved id, content, revision and available source paths; it is immediately available, and outcome identifies a new save or idempotent retry. Reuse the id with get_memory or update_memory. Use create_note/edit_note for ordinary note changes. Reuse idempotency_key only for the identical logical save.",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1588,6 +1710,13 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
+        let include_details = input.include_details.unwrap_or(false);
+        let success = |data| {
+            success_result(
+                &context,
+                presentation::tool_data("remember", data, include_details),
+            )
+        };
         if let Err(error) = require_writable(&request) {
             return Ok(error_result(&context, error));
         }
@@ -1665,13 +1794,10 @@ impl McpHandler {
             )
             .await
         {
-            Ok(result) => Ok(success_result(
-                &context,
-                json!({
-                    "outcome": result.outcome,
-                    "memory": result.memory,
-                }),
-            )),
+            Ok(result) => Ok(success(json!({
+                "outcome": result.outcome,
+                "memory": result.memory,
+            }))),
             Err(error) => Ok(error_result(&context, memory_error(error))),
         }
     }
@@ -1679,7 +1805,7 @@ impl McpHandler {
     #[tool(
         name = "update_memory",
         title = "Update a durable memory",
-        description = "Use this only when the user has authorized correcting an existing long-term memory. First call get_memory, then pass its id and current revision as expected_revision together with only the fields that should change. On success, `data` contains the updated memory record and its new revision. If a revision conflict occurs, call get_memory again and reconsider the change instead of overwriting newer content. This does not edit the source note; use edit_note for note content and remember for a new memory.",
+        description = "Use this only when correcting a memory with user authorization. First call get_memory; use its revision as expected_revision. Omitted fields stay unchanged; null clears nullable metadata, [] clears tags/entities. On success, `data` contains the updated id, content and revision. On conflict get_memory again and reconsider. This does not edit its source note: use read_note then edit_note for that. Use forget_memory for deletion.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1689,6 +1815,13 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
+        let include_details = input.include_details.unwrap_or(false);
+        let success = |data| {
+            success_result(
+                &context,
+                presentation::tool_data("update_memory", data, include_details),
+            )
+        };
         if let Err(error) = require_writable(&request) {
             return Ok(error_result(&context, error));
         }
@@ -1727,8 +1860,7 @@ impl McpHandler {
             )
             .await
         {
-            Ok(memory) => Ok(success_result(
-                &context,
+            Ok(memory) => Ok(success(
                 serde_json::to_value(memory).unwrap_or_else(|_| json!({})),
             )),
             Err(error) => Ok(error_result(&context, memory_error(error))),
@@ -1738,7 +1870,7 @@ impl McpHandler {
     #[tool(
         name = "forget_memory",
         title = "Forget a durable memory",
-        description = "Use this only when the user explicitly asks to forget a known current long-term memory. First call get_memory, then pass its id and current revision as expected_revision. This physically deletes the current memory; there is no archive or historical retrieval switch. Deleting a note-derived item rewrites its source-owned set and pauses automatic extraction for that source until an explicit resume. On success, `data` contains only the deleted ID, ownership, deletion flag, and source-pause effect, never the deleted body.",
+        description = "Use this only when the user explicitly asks to forget a memory. First get_memory and use its revision as expected_revision. On success, `data` contains id, deleted, ownership and source_extraction_paused. Deleting a note-derived item rewrites its source set and pauses automatic extraction for that source; it does not delete the original note. There is no memory undo/archive tool. On conflict get_memory again; source extraction can be resumed explicitly in Admin.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1748,6 +1880,13 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
+        let include_details = input.include_details.unwrap_or(false);
+        let success = |data| {
+            success_result(
+                &context,
+                presentation::tool_data("forget_memory", data, include_details),
+            )
+        };
         if let Err(error) = require_writable(&request) {
             return Ok(error_result(&context, error));
         }
@@ -1768,8 +1907,7 @@ impl McpHandler {
             )
             .await
         {
-            Ok(memory) => Ok(success_result(
-                &context,
+            Ok(memory) => Ok(success(
                 serde_json::to_value(memory).unwrap_or_else(|_| json!({})),
             )),
             Err(error) => Ok(error_result(&context, memory_error(error))),
@@ -1779,7 +1917,7 @@ impl McpHandler {
     #[tool(
         name = "create_note",
         title = "Create a Vault note",
-        description = "Use this when the user has authorized creating a new Markdown note and search confirms that no existing note should be updated instead. Pass a new Vault-relative path and the complete initial Markdown content; provide idempotency_key for safe retries. On success, `data.file` contains the new file ID, path, and current revision, `data.revision` describes the create operation, and `data.etag` identifies the resulting content. If the path already exists, use read_note and edit_note rather than replacing it.",
+        description = "Use this when the user authorizes a new Markdown note and no known existing note should be updated. Supply path and full content; if_absent must be true or omitted. On success, `data.file` gives path, file_id and revision; data.revision records the operation and data.etag the result. Reuse the returned path directly for read_note or an authorized edit. If already_exists, read the existing note and reconsider. Reuse idempotency_key only for the identical create.",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1789,6 +1927,13 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
+        let include_details = input.include_details.unwrap_or(false);
+        let success = |data| {
+            success_result(
+                &context,
+                presentation::tool_data("create_note", data, include_details),
+            )
+        };
         if let Err(error) = require_writable(&request) {
             return Ok(error_result(&context, error));
         }
@@ -1831,7 +1976,7 @@ impl McpHandler {
             )
             .await
         {
-            Ok(result) => Ok(success_result(&context, mutation_json(&result))),
+            Ok(result) => Ok(success(mutation_json(&result))),
             Err(error) => Ok(error_result(&context, vault_error(error))),
         }
     }
@@ -1839,7 +1984,7 @@ impl McpHandler {
     #[tool(
         name = "edit_note",
         title = "Edit a Vault note",
-        description = "Use this when the user has authorized changing an existing Markdown note, including correcting facts or updating decisions, constraints, and project progress. First call read_note, then pass its path and current revision as expected_revision and choose the narrowest operation: replace_all, apply_unified_diff, append, insert_after_heading, or replace_heading_section. On success, `data.file` contains the updated path and revision, `data.revision` describes the edit, and `data.etag` identifies the result. On conflict, reread and reconsider; use remember only to save a separate long-term memory.",
+        description = "Use this when the user authorizes a note change. First call read_note for current content and revision. Choose replace_all, apply_unified_diff, append, insert_after_heading or replace_heading_section. On success, `data.file` contains the path and new revision, with operation receipt in data.revision and data.etag. Use the new revision for a subsequent authorized edit. On conflict reread and reconsider, never overwrite blindly. Heading text must match uniquely; replacement sections must contain the desired heading and body.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1849,6 +1994,13 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
+        let include_details = input.include_details.unwrap_or(false);
+        let success = |data| {
+            success_result(
+                &context,
+                presentation::tool_data("edit_note", data, include_details),
+            )
+        };
         if let Err(error) = require_writable(&request) {
             return Ok(error_result(&context, error));
         }
@@ -1949,7 +2101,7 @@ impl McpHandler {
             }
         };
         match result {
-            Ok(result) => Ok(success_result(&context, mutation_json(&result))),
+            Ok(result) => Ok(success(mutation_json(&result))),
             Err(error) => Ok(error_result(&context, vault_error(error))),
         }
     }
@@ -1957,7 +2109,7 @@ impl McpHandler {
     #[tool(
         name = "move_note",
         title = "Move or rename a Vault note",
-        description = "Use this only when the user explicitly requests renaming or moving an existing note or directory. Pass the current source path, a new destination path that does not exist, and the source's current revision as expected_revision; provide idempotency_key for safe retries. On success, `data.file.path` is the new path, `data.revision` records path_before and path_after, and `data.etag` identifies the moved entry. On conflict, reread the source state; do not reorganize the Vault merely because another layout seems preferable.",
+        description = "Use this only when the user explicitly requests a move or rename. Supply source, an absent destination, and the current source revision. On success, `data.file.path` is the new path and data.file.revision is current; data.revision records both paths. Use the new path for subsequent reads/writes. On conflict reread and reconsider; never reorganize the Vault without authorization. Reuse idempotency_key only for the identical move.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1967,6 +2119,13 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
+        let include_details = input.include_details.unwrap_or(false);
+        let success = |data| {
+            success_result(
+                &context,
+                presentation::tool_data("move_note", data, include_details),
+            )
+        };
         if let Err(error) = require_writable(&request) {
             return Ok(error_result(&context, error));
         }
@@ -1994,7 +2153,7 @@ impl McpHandler {
             )
             .await
         {
-            Ok(result) => Ok(success_result(&context, mutation_json(&result))),
+            Ok(result) => Ok(success(mutation_json(&result))),
             Err(error) => Ok(error_result(&context, vault_error(error))),
         }
     }
@@ -2002,7 +2161,7 @@ impl McpHandler {
     #[tool(
         name = "delete_note",
         title = "Delete a Vault note",
-        description = "Use this only when the user explicitly requests removing an existing note. First call read_note, then pass its path and current revision as expected_revision; use mode=trash because permanent note deletion is not supported. On success, `data.file` represents the inactive entry, `data.revision` records the deletion, and `data.etag` identifies the tombstone. The note remains recoverable through its retained history; on conflict, reread instead of guessing a revision.",
+        description = "Use this only when the user explicitly requests note deletion. First read_note; pass its current revision. mode must be trash or omitted. On success, `data.file.active` is false and data.revision records the deletion. To inspect retained content use note_history and read_note with a historical revision. Restoration requires explicit authorization and restore_note_revision. On conflict reread and reconsider; this does not mean permanent erasure of retained history.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -2012,6 +2171,13 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
+        let include_details = input.include_details.unwrap_or(false);
+        let success = |data| {
+            success_result(
+                &context,
+                presentation::tool_data("delete_note", data, include_details),
+            )
+        };
         if let Err(error) = require_writable(&request) {
             return Ok(error_result(&context, error));
         }
@@ -2044,7 +2210,7 @@ impl McpHandler {
             )
             .await
         {
-            Ok(result) => Ok(success_result(&context, mutation_json(&result))),
+            Ok(result) => Ok(success(mutation_json(&result))),
             Err(error) => Ok(error_result(&context, vault_error(error))),
         }
     }
@@ -2052,7 +2218,7 @@ impl McpHandler {
     #[tool(
         name = "note_history",
         title = "View note revision history",
-        description = "Use this when the user asks how a note changed, when you need to audit its edits, or before choosing a version to restore. Pass the current Vault-relative path. On success, `data.path` identifies the note and `data.revisions` lists retained versions with revision number, operation, paths before and after, content hash, size, actor/source, and timestamp; note bodies are not included. Pass a selected revision to read_note to inspect its content before considering restore_note_revision.",
+        description = "Use this when inspecting edits or selecting a retained version to restore, including a deleted note. Supply its current or last path. On success, `data.revisions` lists revision, operation, paths and timestamp. Read a chosen version with read_note(path, revision) before considering restoration. next_cursor continues with the same path and limit. Default 25 revisions, newest first. Use only the latest live/tombstone revision as a write precondition; older revisions are for historical reads. No bodies are included.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -2062,6 +2228,13 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
+        let include_details = input.include_details.unwrap_or(false);
+        let success = |data| {
+            success_result(
+                &context,
+                presentation::tool_data("note_history", data, include_details),
+            )
+        };
         if let Err(error) = require_permission(&request.principal, Permission::ReadHistory) {
             return Ok(error_result(&context, error));
         }
@@ -2069,14 +2242,21 @@ impl McpHandler {
             Ok(path) => path,
             Err(error) => return Ok(error_result(&context, error)),
         };
+        let limit = match bounded_limit(input.limit, 25) {
+            Ok(value) => value,
+            Err(error) => return Ok(error_result(&context, error)),
+        };
+        let offset = match parse_cursor(input.cursor.as_deref()) {
+            Ok(value) => value,
+            Err(error) => return Ok(error_result(&context, error)),
+        };
         match request.core.history(&request.vault, &path).await {
-            Ok(history) => Ok(success_result(
-                &context,
-                json!({
-                    "path": path.as_str(),
-                    "revisions": history.iter().map(revision_json).collect::<Vec<_>>(),
-                }),
-            )),
+            Ok(history) => Ok(success(json!({
+                "path": path.as_str(),
+                "next_cursor": (offset.saturating_add(limit) < history.len() as u32).then(|| format!("offset:{}",offset.saturating_add(limit))),
+                "truncated": offset.saturating_add(limit) < history.len() as u32,
+                "revisions": history.iter().rev().skip(offset as usize).take(limit as usize).map(revision_json).collect::<Vec<_>>(),
+            }))),
             Err(error) => Ok(error_result(&context, vault_error(error))),
         }
     }
@@ -2084,7 +2264,7 @@ impl McpHandler {
     #[tool(
         name = "restore_note_revision",
         title = "Restore a note revision",
-        description = "Use this only when the user explicitly authorizes restoring a retained historical note version. First call note_history, inspect the target with read_note(revision), and read the current note; then pass path, the target revision, and the current live revision as expected_current_revision. On success, `data.file` contains the restored current state, `data.revision` records a new restore operation, and `data.etag` identifies the result. On conflict, repeat the reads and reconsider instead of overwriting newer work.",
+        description = "Use this only when the user authorizes restoration. Inspect note_history then read_note with the target revision. Supply revision for the target and expected_current_revision for the latest live/tombstone state; for a deleted note use its deletion receipt or latest history. On success, `data.file` contains the new current revision and path, and data.revision records restoration. Read the restored path directly if verification is needed. On conflict refresh state and reconsider.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -2094,6 +2274,13 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
+        let include_details = input.include_details.unwrap_or(false);
+        let success = |data| {
+            success_result(
+                &context,
+                presentation::tool_data("restore_note_revision", data, include_details),
+            )
+        };
         if let Err(error) = require_writable(&request) {
             return Ok(error_result(&context, error));
         }
@@ -2119,7 +2306,7 @@ impl McpHandler {
             )
             .await
         {
-            Ok(result) => Ok(success_result(&context, mutation_json(&result))),
+            Ok(result) => Ok(success(mutation_json(&result))),
             Err(error) => Ok(error_result(&context, vault_error(error))),
         }
     }
@@ -2138,8 +2325,8 @@ impl ServerHandler for McpHandler {
         .with_instructions(
             "This server is the user's persistent Markdown knowledge Vault.\n\
              Use vault_overview or browse_index when you need to understand the available knowledge.\n\
-             Use recall proactively when the task may depend on prior decisions, preferences, constraints, project state, past work, or knowledge that may already exist in the Vault. Pass the task in its natural language; persisted multilingual metadata handles covered cross-language recall without query-time translation. Treat related_notes as retrieval cues, then use read_note to verify exact source material.\n\
-             When the user requests or clearly authorizes a persistent note change, search for the existing note, read its current revision, and use the narrowest mutation; create a note only when no existing note should be updated. Never overwrite a revision conflict.\n\
+             Use recall proactively when the task may depend on prior decisions, preferences, constraints, project state, past work, or knowledge that may already exist in the Vault. Pass the task in its natural language; persisted multilingual metadata handles covered cross-language recall without query-time translation. Memory sources[].path identifies the original note: pass it directly to read_note when evidence is needed, without searching again. related_notes are additional cues, not guaranteed memory provenance. canonical_path in detailed memory records is a managed memory file, not an original note path. Results are compact by default; include_details retrieves extended metadata. get_memory gives a complete known record.\n\
+             When the user requests or clearly authorizes a persistent note change, use a known source path directly; search only if the path is unknown. Read its current revision, and use the narrowest mutation; create a note only when no existing note should be updated. Never overwrite a revision conflict.\n\
              Every result has request_id and ok. On success consume data; on failure inspect error.code and error.retryable, and retry the same logical operation only when retryable is true. Treat degraded or truncated results as incomplete coverage.",
         )
     }
@@ -2801,11 +2988,15 @@ async fn browse_data(
 ) -> Result<Value, ToolErrorBody> {
     let status = indexed_status(request).await?;
     let parent = (node != "root").then_some(node);
-    let children = request
-        .index
-        .list_nodes(&request.vault, parent, limit, offset)
-        .await
-        .map_err(index_error)?;
+    let children = if depth == 0 {
+        Vec::new()
+    } else {
+        request
+            .index
+            .list_nodes(&request.vault, parent, limit, offset)
+            .await
+            .map_err(index_error)?
+    };
     let mut children_json = Vec::with_capacity(children.len());
     for child in &children {
         let mut value = index_node_json(child);
@@ -3222,6 +3413,161 @@ mod tests {
         assert_eq!(set.confidence, Some(Some(0.8)));
     }
 
+    #[tokio::test]
+    async fn default_recall_sources_read_directly_and_details_are_opt_in() {
+        let (router, token, _root) = configured_memory_router().await;
+        let created = call_tool_json(&router, &token, 101, "create_note", json!({"path":"notes/amber.md","content":"# Amber\n\nAmber rollout requires approval."})).await;
+        assert_tool_ok(&created, "create_note");
+        let saved = call_tool_json(&router, &token, 102, "remember", json!({"content":"Amber rollout requires approval.","source_note":{"path":"notes/amber.md","revision":1}})).await;
+        assert_tool_ok(&saved, "remember");
+        let recalled = call_tool_json(
+            &router,
+            &token,
+            103,
+            "recall",
+            json!({"query":"Amber rollout approval","max_related_notes":0}),
+        )
+        .await;
+        assert_tool_ok(&recalled, "recall");
+        let data = &recalled["result"]["structuredContent"]["data"];
+        let item = &data["memories"][0];
+        assert_eq!(item["sources"][0]["path"], "notes/amber.md");
+        assert!(item.get("canonical_path").is_none());
+        assert!(data.get("retrieval_profile_hash").is_none());
+        let read = call_tool_json(
+            &router,
+            &token,
+            104,
+            "read_note",
+            json!({"path":item["sources"][0]["path"]}),
+        )
+        .await;
+        assert_tool_ok(&read, "read_note");
+        assert!(
+            read["result"]["structuredContent"]["data"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("requires approval")
+        );
+        let full =
+            call_tool_json(&router, &token, 105, "get_memory", json!({"id":item["id"]})).await;
+        assert_tool_ok(&full, "get_memory");
+        assert_ne!(
+            full["result"]["structuredContent"]["data"]["canonical_path"],
+            item["sources"][0]["path"]
+        );
+        let hidden = call_tool_json(
+            &router,
+            &token,
+            106,
+            "recall",
+            json!({"query":"Amber rollout approval","include_sources":false,"max_related_notes":0}),
+        )
+        .await;
+        assert!(
+            hidden["result"]["structuredContent"]["data"]["memories"][0]["sources"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let detailed = call_tool_json(
+            &router,
+            &token,
+            107,
+            "recall",
+            json!({"query":"Amber rollout approval","include_details":true,"max_related_notes":0}),
+        )
+        .await;
+        assert!(
+            detailed["result"]["structuredContent"]["data"]
+                .get("retrieval_profile_hash")
+                .is_some()
+        );
+        assert!(
+            serde_json::to_vec(data).unwrap().len()
+                < serde_json::to_vec(&detailed["result"]["structuredContent"]["data"])
+                    .unwrap()
+                    .len()
+        );
+        println!(
+            "recall payload bytes: compact={} detailed={}",
+            serde_json::to_vec(data).unwrap().len(),
+            serde_json::to_vec(&detailed["result"]["structuredContent"]["data"])
+                .unwrap()
+                .len()
+        );
+        let listed = call_tool_json(&router, &token, 108, "list_memories", json!({})).await;
+        assert_eq!(
+            listed["result"]["structuredContent"]["data"]["memories"][0]["sources"][0]["path"],
+            "notes/amber.md"
+        );
+        let text: serde_json::Value =
+            serde_json::from_str(recalled["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(text, recalled["result"]["structuredContent"]);
+    }
+
+    #[tokio::test]
+    async fn historical_read_reports_selected_content_metadata() {
+        let (router, token, _root) = configured_router().await;
+        let created = call_tool_json(
+            &router,
+            &token,
+            201,
+            "create_note",
+            json!({"path":"past.md","content":"old"}),
+        )
+        .await;
+        assert_tool_ok(&created, "create_note");
+        let old =
+            call_tool_json(&router, &token, 202, "read_note", json!({"path":"past.md"})).await;
+        let edited=call_tool_json(&router,&token,203,"edit_note",json!({"path":"past.md","expected_revision":1,"operation":{"kind":"replace_all","content":"a much longer replacement"}})).await;
+        assert_tool_ok(&edited, "edit_note");
+        let historical = call_tool_json(
+            &router,
+            &token,
+            204,
+            "read_note",
+            json!({"path":"past.md","revision":1}),
+        )
+        .await;
+        assert_tool_ok(&historical, "read_note");
+        let actual = &historical["result"]["structuredContent"]["data"];
+        assert_eq!(actual["size"], 3);
+        assert_eq!(
+            actual["content_hash"],
+            old["result"]["structuredContent"]["data"]["content_hash"]
+        );
+        assert_eq!(actual["content"], "old");
+        let first = call_tool_json(
+            &router,
+            &token,
+            205,
+            "note_history",
+            json!({"path":"past.md","limit":1}),
+        )
+        .await;
+        let page = &first["result"]["structuredContent"]["data"];
+        assert_eq!(page["revisions"][0]["revision"], 2);
+        assert_eq!(page["truncated"], true);
+        let second = call_tool_json(
+            &router,
+            &token,
+            206,
+            "note_history",
+            json!({"path":"past.md","limit":1,"cursor":page["next_cursor"]}),
+        )
+        .await;
+        assert_eq!(
+            second["result"]["structuredContent"]["data"]["revisions"][0]["revision"],
+            1
+        );
+        assert_eq!(
+            second["result"]["structuredContent"]["data"]["truncated"],
+            false
+        );
+    }
+
     #[test]
     fn tool_metadata_is_model_facing_selection_and_result_guidance() {
         let tools = McpHandler::default().tool_router.list_all();
@@ -3293,6 +3639,11 @@ mod tests {
                 "{} has no input properties",
                 tool.name
             );
+            assert!(
+                properties.contains_key("include_details"),
+                "{} must support detailed output",
+                tool.name
+            );
             for (property, schema) in properties {
                 assert!(
                     schema
@@ -3319,7 +3670,8 @@ mod tests {
         assert!(description("recall").contains("`data.memories`"));
         assert!(description("recall").contains("`data.related_notes`"));
         assert!(description("recall").contains("natural language"));
-        assert!(description("recall").contains("candidate/relevant/available counts"));
+        assert!(description("recall").contains("sources[].path"));
+        assert!(!description("recall").contains("evaluated embedding profile"));
         assert!(description("remember").contains("`data.memory`"));
         assert!(description("remember").contains("immediately available"));
         assert!(description("edit_note").contains("First call read_note"));
@@ -4723,7 +5075,7 @@ mod tests {
                 12,
                 "recall",
                 serde_json::json!({
-                    "query": "WebDAV conflict handling",
+                    "include_details": true, "query": "WebDAV conflict handling",
                     "max_results": 5,
                     "max_related_notes": 5,
                     "max_tokens": 500
@@ -4763,7 +5115,7 @@ mod tests {
                 13,
                 "recall",
                 serde_json::json!({
-                    "query": "WebDAV conflict handling",
+                    "include_details": true, "query": "WebDAV conflict handling",
                     "max_results": 5,
                     "max_related_notes": 5,
                     "max_tokens": 500
@@ -4863,7 +5215,7 @@ mod tests {
                     "confidence": 0.99,
                     "tags": ["architecture"],
                     "entities": ["MCP Vault"],
-                    "idempotency_key": "mcp-memory-1"
+                    "idempotency_key": "mcp-memory-1", "include_details": true
                 }),
             ))
             .await

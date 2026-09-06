@@ -74,3 +74,5 @@ When architecture changes, do not rewrite historical rationale. Add a new ADR th
 ADR-0028 makes bundled evaluation diagnostic-only and adds optional persisted
 model grouping of note source units, amending ADR-0026/0027 retrieval admission.
 See [ADR-0028](0028-model-guided-chunks-and-diagnostic-evaluation.md).
+
+- [ADR-0029: Actionable compact MCP tool results](0029-actionable-compact-mcp-results.md)
