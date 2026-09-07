@@ -931,3 +931,39 @@ Litmus 临时 harness 从生产 fixture 获取测试 URL/凭据，再调用仓�
 3. 本次新修复尚未由本 Agent 部署。下一步需在用户授权的运行环境验证新版本的阶段、已检查组合和条目检查计数持续前进，重启/超时后从检查点继续。不能因本地假模型测试通过就宣称用户实例已修复，也不要求重新生成/重新绑定或手工迁移。
 4. M7-B 真实模型质量和生产验收仍 pending；未经授权不访问生产凭据、付费调用或修改真实 Vault。M7-A 的既有 Litmus props/locks 失败及官方套件不覆盖部分旧协议的限制仍按第 19 节保留，不冒充全绿。
 5. 只有出现新的失败证据才继续扩大修改；正常 recall/list/get 与来源资格、删除不复活、原笔记不变仍为回归重点。
+
+
+## 23. 2026-09-07 吞吐、新记忆优先处理与中断轮转
+
+以 9e585bb 为本轮起点，保留 lefthook.yml。用户实例截图显示已检查 164、待判断 9529，状态等待预算恢复。确认本地硬编码的 256 次请求/4 MiB 滚动日额度被比较、正文检查和 HTTP 重试共用，不能把这个状态解释成模型平台余额不足。用户明确要求不设次数限制，并同意新提取记忆优先比较。
+
+已实现：取消本地每日调用次数/输入字节上限，保留实际 dispatch 记账、并发 2、16 请求 slice、300 秒超时和 Provider 失败退避。0023 前向迁移仅清除旧 memory_equivalence_budget_exhausted 的等待状态，已有判断、候选和其他 Provider 退避不动。新贡献在来源发布同一事务进入持久发现队列，绕过历史扫描游标；新候选优先于未尝试的历史组合。生成与合并仍异步，不宣称提取返回时已经完成全库语义去重，也不要求重新生成旧记忆。
+
+新增比较中断复现原实现失败：三次取消/重建服务反复选择同一组合，日志 /tmp/dedup-pair-rotation-red.log。修复将尝试顺序在外部调用前持久推进，未成功仍保持 pending；同一测试修复后通过，恢复后所有组合可完成。新记忆积压回归预装 10000 历史候选后提取等价条目，重建服务，第一轮在历史队列未清空时合并成功、来源原笔记字节不变，/tmp/dedup-fresh-backlog.log。
+
+升级验收新增 schema-22 日次数/字节均耗尽且未来 retry_at 的快照，走真实 migration、startup admission、worker 完成旧库同篇及跨文档合并，无手工重置或提取。state 回归覆盖额度取消、24 小时记账清理、判断缓存保留、0022→0023 候选保留及跨 Vault 轮转隔离。迁移测试保持其他 Provider 的 retry_at。
+
+本轮验证进行中。首次独立 startup 测试三项中一项遇到 attempts=2（原断言要求正常续跑=1），原日志 /tmp/dedup-throughput-upgrade.log 保留；同轮完整 all-features 测试通过，仍需在最终变更后重跑检查。未部署或调用真实付费模型；真实质量与部署验收及先前 Litmus 限制继续保留，不将假模型通过当作生产效果证明。
+
+
+最终验证：隔离 Docker 的 locked/offline/workspace/all-features 退出 0，共 355 项通过（/tmp/dedup-throughput-final.log）；最终增量队列失效项清理后，完整 memory_v2_1 的 34 项再次通过（/tmp/dedup-throughput-memory-final.log），Clippy 全工作区 all-targets/all-features 零警告。前端 lint、36 项测试、build 通过；fmt、文档检查、git diff --check、14 项迁移 gates 通过。旧库接管、旧日额度耗尽、Provider 恢复三个启动测试全部通过，未放宽 worker lease 断言。首次单独启动测试的 attempts=2 失败保留，最终全量未复现；不将它从记录中删除。
+
+命令沿用第 19 节 Docker 命令；本轮定向命令为 `cargo test --locked -p mcp-vault-memory --test memory_v2_1`、`cargo test --locked -p mcp-vault-server memory_dedup_startup_tests -- --nocapture`、`bash scripts/release/check-migrations.sh`。原始日志复制到 target/automatic-memory-dedup-validation/，该目录忽略提交。没有改动 DAV/MCP 协议，本轮未重跑其既有外部兼容性套件，原限制仍见第 19 节。当前变更尚未提交、push 或部署，lefthook.yml 未改动。
+
+
+## 24. 2026-09-07 必要字段校验与按需触发
+
+用户同意只要求必要信息完整，并要求自动整理仅在存在未检查/变更/待续跑工作时触发。模型回复额外解释字段不再触发拒绝：新增调用者显式开启的顶层额外字段容忍，wire JSON Schema 保持严格格式，只有比较/正文精简启用；必要字段、类型、关系枚举和 0/1 引用仍验证。额外 delete 等字段只被忽略，绝不执行。错误比较保持双方且缓存 uncertain，继续后续候选；错误正文保留原文继续，真实 Provider 故障仍退避。没有清空已有成功缓存或强制全库重问。
+
+按需触发：空/仅显式记忆 Vault 不创建语义任务；retry_at 未到不提前创建。使用现有 maintenance.fingerprint 保存成功轮次开始时的输入摘要；当前摘要一致且 covered、无 pending pairs/new contributions/recovery operation 时直接跳过 admission。摘要分页读取源/规范哈希和修订、贡献、正式记忆、向量版本及模型配置，不读笔记正文、不调用模型。保存开始状态而非事后状态，避免把轮次中发生的并发改动误记为已覆盖。新贡献仍由发布事务确保可触发。
+
+定向回归：稳定集合完成并取消历史活跃 fixture 任务后，连续三次重建服务/admission 不增加任务数或模型调用；新提取一篇后自动创建任务。额外字段兼容测试证明默认严格行为不变、启用后接受解释字段但拒绝缺失/错误类型，wire schema 不变。非法比较的原测试现在要求立即返回 uncertain、后续候选继续清空并保留缓存。首次新增 provider 测试漏引入 Value 导致编译失败，已改为全限定类型，原始日志 dedup-trigger-workspace.log 保留。完整测试进行中。
+
+全量首轮运行还发现旧 worker 测试要求空记忆也创建一个 completed dedup job（实际 4 个任务、旧断言要求 5 个）。按用户新要求改为精确断言 4 个任务且无 memory.deduplicate，保留原 5 秒清空期限和其他断言。定向测试通过 1.52 秒，日志 dedup-trigger-empty-vault.log。旧失败完整日志 dedup-trigger-workspace-final.log 保留；最终全量重跑中。
+
+最终验证：全工作区 locked/offline/all-features 在隔离容器退出 0，共 358 项通过，日志 dedup-trigger-verified.log；Clippy 全工作区 all-targets/all-features、fmt、文档和 diff 检查通过。Provider 额外字段契约、记忆关系解析、稳定集合 admission、新记忆 10000 候选优先处理、旧日额度耗尽升级、Provider 恢复和空记忆真实 worker 都通过。前端本轮未再修改，沿用第 23 节的 36 项/lint/build 结果；迁移文件本轮未变，沿用 14 项 gates，同时完整 workspace 重新覆盖所有 migration tests。没有重新运行外部 DAV/MCP 套件或真实付费模型，既有边界仍保留。变更及进度均在本地工作树，未提交或部署。
+
+
+## 25. 2026-09-07 提交交接
+
+用户要求提交当前代码。本次包含第 23–24 节实现、0023 迁移、测试及文档；保留 lefthook.yml，不 push、不部署。最近反馈的“超过下次可执行时间仍未启动”已核对代码：非短退避错误结束当前任务，依赖默认 300 秒的 reconciliation 周期重新 admission；retry_at 是最早可调度时间，不是定时启动承诺。本次没有改为到期精确唤醒；用户实例具体超时多久、实际配置和队列状态尚未核实，后续不能宣称该实例问题已修复。工程验证沿用第 24 节最终 358 项全工作区、36 项前端和相关检查结果。

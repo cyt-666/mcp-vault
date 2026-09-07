@@ -1081,7 +1081,8 @@ without canonical prose. The exact request, extraction profile and judgment rule
 version determine its hash; the first committed decision wins for a key.
 `memory_equivalence_dispatches` records actual transport dispatch byte counts and
 timestamps under a Vault foreign key. An immediate transaction removes expired
-accounting and admits at most 256 requests and 4 MiB within a rolling 24 hours.
+accounting. Migration 0023 retires the former 256-request/4-MiB daily cap;
+actual dispatches continue to be recorded without enforcing a daily total.
 Failed or interrupted requests retain their reservation. No manual budget reset
 is required when old reservations expire. This forward migration preserves all
 source sets, explicit records, vectors, pauses and pending snapshots. It is not a
@@ -1116,3 +1117,18 @@ operational checkpoints without memory bodies; migration preserves existing
 formal objects, candidate decisions, retry deadlines and jobs. Cancellation may
 leave the cursor past an interrupted item; that current item remains eligible
 on the next sweep. Canonical memory formats remain v2.1 source sets/v2.2 facts.
+
+Migration 0023 adds `attempt_sequence` and `priority` to `memory_formal_pairs`.
+Pending work sorts by attempt sequence, descending priority, then stable key;
+a Vault-scoped atomic update rotates an attempt before network I/O. Completion
+is recorded separately. `memory_dedup_new_contributions` persists newly published
+contribution IDs in the publication transaction. Discovery consumes these IDs
+and promotes their candidate pairs transactionally. Existing projections and
+successful decisions are retained; only the retired local-budget failure's retry
+deadline is cleared automatically. Provider backoff remains unchanged.
+
+`memory_formal_maintenance.fingerprint` now checkpoints the metadata/profile seen
+at the start of a completed pass. Admission compares it with current metadata
+and requires covered status plus no pending pairs, new contributions or recovery
+operations before skipping a job. Fingerprinting pages metadata in batches of
+128; no note bodies, secrets or model calls are involved.

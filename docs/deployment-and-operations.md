@@ -957,7 +957,7 @@ Migrations 0020–0021 also install automatic semantic maintenance and formal
 projections. Startup, periodic ready-Vault reconciliation and source events admit
 `memory.deduplicate`. Existing extraction credentials/bindings and valid vectors
 are reused; a dedicated merge model is not required. Admin displays current
-adoption, candidate backlog and retry state. Waiting for a model or budget does
+adoption, candidate backlog and retry state. Waiting for an available model does
 not block local adoption/deletion, and maintenance resumes automatically.
 
 Before rollout, back up the operational database and Vault together. The first
@@ -974,8 +974,29 @@ Automatic memory maintenance has priority 100 (ordinary reconciliation/index
 jobs use 0). Startup also raises an existing active dedup job's old priority,
 without resetting its retry deadline or checkpoints. Normal bounded slices
 continue on the same worker lease; they do not voluntarily return to the queue.
-Cancellation and provider/day-budget waits remain effective. Each finished slice
+Cancellation and provider failure backoff remain effective. Each finished slice
 persists content-free counters and its actual wait reason in job progress. A
 changing job timestamp alone is not evidence that merging is advancing: inspect
 checked/pending pairs, adoption status and the reported error code. The Admin
 memory page preserves unknown error codes and shows the next eligible time.
+
+### Automatic memory throughput upgrade (0023)
+
+Upgrade startup automatically clears the former local daily-budget pause and
+retains existing candidates, successful judgments and canonical memories. No
+re-extraction, rebinding, manual SQL or Admin action is required. Automatic
+maintenance no longer stops at 256 daily calls or 4 MiB input; provider-side rate
+limits, request timeouts, bounded concurrency and failure backoff still apply.
+Newly extracted contributions enter persistent priority discovery and comparison
+work, without waiting for historical candidate coverage. Interrupted comparisons
+rotate to allow later candidates to progress. Extraction completion and semantic
+merge completion remain separate; observe checked/pending combinations and stage.
+
+A covered, unchanged memory set now remains idle: startup and periodic admission
+compare metadata/profile fingerprints without model calls and do not create a
+new job. Empty or explicit-only Vaults also skip semantic jobs. New contributions,
+changed source/profile/vector versions, unfinished candidates and recovery work
+remain eligible; provider retry deadlines are honored. Different/uncertain pairs
+are examined outcomes, not evidence that a merge is still pending. Extra model
+explanation fields are ignored when required fields validate; malformed proposals
+retain original memories and do not halt subsequent comparisons.

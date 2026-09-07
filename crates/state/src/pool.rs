@@ -634,7 +634,7 @@ mod tests {
         let report = store.integrity_check().await.unwrap();
         assert!(report.integrity_ok);
         assert_eq!(report.foreign_key_violations, 0);
-        assert_eq!(report.migration_version, 22);
+        assert_eq!(report.migration_version, 23);
         assert!(store.foreign_keys_enabled().await.unwrap());
     }
 
@@ -756,7 +756,7 @@ mod tests {
         }
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 22);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 23);
     }
 
     #[tokio::test]
@@ -798,7 +798,7 @@ mod tests {
         assert!(jwks.is_none());
         assert_eq!(enabled, 0);
         assert!(store.has_table("installation_key_checks").await.unwrap());
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 22);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 23);
     }
 
     #[tokio::test]
@@ -849,7 +849,7 @@ mod tests {
         assert_eq!(store.integrity_check().await.unwrap().migration_version, 10);
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 22);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 23);
     }
 
     #[tokio::test]
@@ -1005,7 +1005,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(pipeline_column, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 22);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 23);
     }
 
     #[tokio::test]
@@ -1067,7 +1067,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(retained, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 22);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 23);
     }
 
     #[tokio::test]
@@ -1152,7 +1152,7 @@ mod tests {
         .unwrap();
         assert_eq!(reason.as_deref(), Some("source_unavailable"));
         assert_eq!(changed_at, Some(20));
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 22);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 23);
     }
 
     #[tokio::test]
@@ -1290,7 +1290,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(fts_row, (String::new(), "keep canonical memory".to_owned()));
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 22);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 23);
     }
 
     #[tokio::test]
@@ -1416,6 +1416,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migration_0023_preserves_pairs_and_rotates_interrupted_work_per_vault() {
+        let store = StateStore::connect("sqlite::memory:").await.unwrap();
+        let mut prior = sqlx::migrate::Migrator::DEFAULT;
+        prior.migrations = std::borrow::Cow::Owned(
+            crate::migrations::MIGRATOR
+                .iter()
+                .filter(|migration| migration.version <= 22)
+                .cloned()
+                .collect(),
+        );
+        prior.run(&store.pool).await.unwrap();
+        let vault = VaultId::new();
+        let other = VaultId::new();
+        for id in [vault, other] {
+            insert_vault(&store, id, &id.to_string()).await;
+            for (key, done) in [("a", 0), ("b", 0), ("c", 1)] {
+                sqlx::query("INSERT INTO memory_formal_pairs(vault_id,pair_key,left_id,right_id,done) VALUES(?,?,?,?,?)")
+                    .bind(id.to_string()).bind(key)
+                    .bind(mcp_vault_domain::MemoryId::new().to_string())
+                    .bind(mcp_vault_domain::MemoryId::new().to_string()).bind(done)
+                    .execute(&store.pool).await.unwrap();
+            }
+        }
+        for (id, code) in [
+            (vault, "memory_equivalence_budget_exhausted"),
+            (other, "provider_unavailable"),
+        ] {
+            sqlx::query("INSERT INTO memory_formal_maintenance(vault_id,status,retry_at) VALUES(?,?,9999999999999)")
+                .bind(id.to_string()).bind(code).execute(&store.pool).await.unwrap();
+        }
+        store.migrate().await.unwrap();
+        let context = store
+            .vaults()
+            .find_by_id(vault)
+            .await
+            .unwrap()
+            .unwrap()
+            .context()
+            .unwrap();
+        let other = store
+            .vaults()
+            .find_by_id(other)
+            .await
+            .unwrap()
+            .unwrap()
+            .context()
+            .unwrap();
+        assert!(
+            store
+                .current_memory()
+                .start_formal_pair(&context, "a")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .current_memory()
+                .start_formal_pair(&context, "c")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .current_memory()
+                .start_formal_pair(&context, "missing")
+                .await
+                .unwrap()
+        );
+        // Recreate repository: scheduling progress lives in SQLite, not an in-memory cursor.
+        let pending = store
+            .current_memory()
+            .pending_formal_pairs(&context, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            pending.iter().map(|p| p.0.as_str()).collect::<Vec<_>>(),
+            ["b", "a"]
+        );
+        let pending_other = store
+            .current_memory()
+            .pending_formal_pairs(&other, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            pending_other
+                .iter()
+                .map(|p| p.0.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        let status = store
+            .current_memory()
+            .formal_status(&context)
+            .await
+            .unwrap();
+        assert_eq!(status.status, "pending");
+        assert_eq!(status.retry_at, 0);
+        let other_status = store.current_memory().formal_status(&other).await.unwrap();
+        assert_eq!(other_status.status, "provider_unavailable");
+        assert_eq!(other_status.retry_at, 9999999999999);
+        assert_eq!(status.pending_pairs, 2);
+        assert_eq!(status.checked_pairs, 1);
+        store
+            .current_memory()
+            .finish_formal_pair(&context, "b")
+            .await
+            .unwrap();
+        let pending = store
+            .current_memory()
+            .pending_formal_pairs(&context, 10)
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, "a");
+    }
+
+    #[tokio::test]
     async fn migration_0022_preserves_active_dedup_state_and_isolates_sentence_checkpoints() {
         let store = StateStore::connect("sqlite::memory:").await.unwrap();
         let mut prior = sqlx::migrate::Migrator::DEFAULT;
@@ -1431,7 +1548,7 @@ mod tests {
         let other = VaultId::new();
         insert_vault(&store, vault, "progress-upgrade").await;
         insert_vault(&store, other, "progress-other").await;
-        sqlx::query("INSERT INTO memory_formal_maintenance(vault_id,cursor,status,retry_at) VALUES(?,'existing-pair-cursor','memory_equivalence_budget_exhausted',123456)")
+        sqlx::query("INSERT INTO memory_formal_maintenance(vault_id,cursor,status,retry_at) VALUES(?,'existing-pair-cursor','provider_unavailable',123456)")
             .bind(vault.to_string()).execute(&store.pool).await.unwrap();
         store.migrate().await.unwrap();
         let existing: (String, String, i64) = sqlx::query_as(
@@ -1445,7 +1562,7 @@ mod tests {
             existing,
             (
                 "existing-pair-cursor".into(),
-                "memory_equivalence_budget_exhausted".into(),
+                "provider_unavailable".into(),
                 123456
             )
         );
@@ -1825,7 +1942,7 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 22);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 23);
     }
 
     async fn insert_vault(store: &StateStore, id: VaultId, slug: &str) {

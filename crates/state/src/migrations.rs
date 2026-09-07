@@ -163,7 +163,7 @@ mod tests {
             .fetch_one(&store)
             .await
             .unwrap();
-        assert_eq!(version, 22);
+        assert_eq!(version, 23);
     }
     #[tokio::test]
     async fn unknown_checksum_and_known_checksum_with_schema_drift_fail_closed() {

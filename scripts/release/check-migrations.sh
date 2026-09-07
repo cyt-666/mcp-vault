@@ -19,3 +19,4 @@ cargo test --locked -p mcp-vault-state budget_checkpoint_stop_retry_and_vault_is
 cargo test --locked -p mcp-vault-state migration_0019 -- --nocapture
 cargo test --locked -p mcp-vault-state migration_0022 -- --nocapture
 echo "migration fixture checks passed"
+cargo test --locked -p mcp-vault-state migration_0023 -- --nocapture

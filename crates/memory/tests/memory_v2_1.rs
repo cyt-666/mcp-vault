@@ -3627,6 +3627,212 @@ async fn formal_merge_and_forget_recover_after_canonical_commit_without_resurrec
 }
 
 #[tokio::test]
+async fn newly_extracted_memory_merges_before_ten_thousand_historical_pairs_after_restart() {
+    let (_dir, state, context, core, service) = fixture("fresh-before-backlog").await;
+    let model = Arc::new(CurrentSetModelState::default());
+    configure_extraction(&state, &context, &service, model.clone()).await;
+    for i in 0..2 {
+        let path = VaultPath::parse(&format!("backlog/{i}.md")).unwrap();
+        core.create_bytes(
+            &context,
+            &path,
+            format!("# FAIRNESS:{i}\nIndependent project {i}.").as_bytes(),
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+        service.extract_note(&context, &core, &path).await.unwrap();
+    }
+    for _ in 0..10 {
+        if !service
+            .maintain_memory_dedup(&context, &core)
+            .await
+            .unwrap()
+        {
+            break;
+        }
+    }
+    let old = state
+        .current_memory()
+        .contributions(&context, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(old.len(), 2);
+    // Simulate a large persistent historical queue; all sort before hashed fresh keys.
+    let backlog = (0..10_000)
+        .map(|i| {
+            (
+                format!("000-backlog-{i:05}"),
+                old[0].memory.id,
+                old[1].memory.id,
+            )
+        })
+        .collect::<Vec<_>>();
+    state
+        .current_memory()
+        .queue_formal_pairs(&context, MemoryId::new(), "historical", &backlog)
+        .await
+        .unwrap();
+    let path = VaultPath::parse("new/duplicate.md").unwrap();
+    let note = b"# FAIRNESS:0\nIndependent project 0.";
+    core.create_bytes(
+        &context,
+        &path,
+        note,
+        Actor::system(),
+        SourcePlane::System,
+        None,
+    )
+    .await
+    .unwrap();
+    service.extract_note(&context, &core, &path).await.unwrap();
+    assert_eq!(
+        state
+            .current_memory()
+            .new_dedup_contributions(&context, 16)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let restarted = MemoryService::new(
+        state.clone(),
+        AuthService::new(
+            state.auth(),
+            MasterKeyRing::from_bytes(1, &[23; 32]).unwrap(),
+        ),
+    );
+    assert!(
+        restarted
+            .maintain_memory_dedup(&context, &core)
+            .await
+            .unwrap()
+    );
+    let visible = restarted
+        .list(&context, vec![], None, None, None, 20, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        visible.len(),
+        2,
+        "fresh duplicate must merge without draining historical backlog"
+    );
+    let status = state
+        .current_memory()
+        .formal_status(&context)
+        .await
+        .unwrap();
+    assert!(status.pending_pairs >= 10_000);
+    assert!(
+        state
+            .current_memory()
+            .new_dedup_contributions(&context, 16)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let mut read = core.read(&context, &path).await.unwrap();
+    let mut bytes = Vec::new();
+    read.reader.read_to_end(&mut bytes).await.unwrap();
+    assert_eq!(bytes, note);
+}
+
+#[tokio::test]
+async fn interrupted_pair_does_not_block_later_pairs_after_restart() {
+    let (_dir, state, context, core, service) = fixture("pair-rotation").await;
+    let model = Arc::new(CurrentSetModelState::default());
+    configure_extraction(&state, &context, &service, model.clone()).await;
+    for i in 0..3 {
+        let path = VaultPath::parse(&format!("rotation/{i}.md")).unwrap();
+        core.create_bytes(
+            &context,
+            &path,
+            format!("# FAIRNESS:{i}\nIndependent project {i}.").as_bytes(),
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+        service.extract_note(&context, &core, &path).await.unwrap();
+    }
+    model.mode.store(MODEL_JUDGMENT_BLOCKED, Ordering::SeqCst);
+    let mut attempted = Vec::new();
+    for _ in 0..3 {
+        let restarted = MemoryService::new(
+            state.clone(),
+            AuthService::new(
+                state.auth(),
+                MasterKeyRing::from_bytes(1, &[23; 32]).unwrap(),
+            ),
+        );
+        let work = tokio::spawn({
+            let context = context.clone();
+            let core = core.clone();
+            async move { restarted.maintain_memory_dedup(&context, &core).await }
+        });
+        tokio::time::timeout(Duration::from_secs(10), model.started.notified())
+            .await
+            .unwrap();
+        let request = model.requests.lock().await.last().unwrap().clone();
+        let pair: Value =
+            serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
+        attempted.push((
+            pair["left"]["content"].clone(),
+            pair["right"]["content"].clone(),
+        ));
+        work.abort();
+        assert!(work.await.unwrap_err().is_cancelled());
+        model.release.notify_waiters();
+    }
+    assert_ne!(
+        attempted[0], attempted[1],
+        "restart repeatedly selected the same unfinished pair"
+    );
+    assert_ne!(attempted[0], attempted[2]);
+    assert_ne!(attempted[1], attempted[2]);
+    let status = state
+        .current_memory()
+        .formal_status(&context)
+        .await
+        .unwrap();
+    assert_eq!(
+        status.pending_pairs, 3,
+        "interrupted pairs must remain pending, not become fake successes"
+    );
+    assert_eq!(status.checked_pairs, 0);
+    model.mode.store(MODEL_NORMAL, Ordering::SeqCst);
+    for _ in 0..10 {
+        if !service
+            .maintain_memory_dedup(&context, &core)
+            .await
+            .unwrap()
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        state
+            .current_memory()
+            .formal_status(&context)
+            .await
+            .unwrap()
+            .pending_pairs,
+        0
+    );
+    assert_eq!(
+        service
+            .list(&context, vec![], None, None, None, 20, 0)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[tokio::test]
 async fn unchanged_memory_bodies_cannot_starve_pairs_and_interrupted_checks_resume_after_cursor() {
     let (_dir, state, context, core, service) = fixture("dedup-fairness").await;
     let model = Arc::new(CurrentSetModelState::default());
@@ -4081,15 +4287,99 @@ async fn changed_judging_profile_splits_and_revalidates_existing_groups_automati
 }
 
 #[tokio::test]
+async fn covered_memories_do_not_enqueue_again_until_new_contributions_arrive() {
+    let (_dir, state, context, core, service, model, _files, _ids) =
+        two_formal_sources("idle-admission").await;
+    // Complete work and settle checkpoints after canonical changes from the first pass.
+    for _ in 0..20 {
+        service
+            .maintain_memory_dedup(&context, &core)
+            .await
+            .unwrap();
+        if state
+            .current_memory()
+            .formal_status(&context)
+            .await
+            .unwrap()
+            .pending_pairs
+            == 0
+        {
+            service
+                .maintain_memory_dedup(&context, &core)
+                .await
+                .unwrap();
+            break;
+        }
+    }
+    state
+        .jobs()
+        .request_cancel_type(&context, "memory.deduplicate")
+        .await
+        .unwrap();
+    let calls = model.calls.load(Ordering::SeqCst);
+    let jobs_before = state
+        .jobs()
+        .list(&context, None, Some("memory.deduplicate"), 100, 0)
+        .await
+        .unwrap()
+        .len();
+    for _ in 0..3 {
+        let restarted = MemoryService::new(
+            state.clone(),
+            AuthService::new(
+                state.auth(),
+                MasterKeyRing::from_bytes(1, &[23; 32]).unwrap(),
+            ),
+        );
+        restarted
+            .ensure_memory_dedup_scheduled(&context)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        state
+            .jobs()
+            .list(&context, None, Some("memory.deduplicate"), 100, 0)
+            .await
+            .unwrap()
+            .len(),
+        jobs_before
+    );
+    assert_eq!(model.calls.load(Ordering::SeqCst), calls);
+    let path = VaultPath::parse("new/trigger.md").unwrap();
+    core.create_bytes(
+        &context,
+        &path,
+        b"# FIRST\nAlpha requires Rust 1.94.",
+        Actor::system(),
+        SourcePlane::System,
+        None,
+    )
+    .await
+    .unwrap();
+    service.extract_note(&context, &core, &path).await.unwrap();
+    assert!(
+        state
+            .jobs()
+            .list(&context, None, Some("memory.deduplicate"), 100, 0)
+            .await
+            .unwrap()
+            .len()
+            > jobs_before
+    );
+}
+
+#[tokio::test]
 async fn malformed_pair_is_retained_without_repeated_paid_judgment() {
-    let (_dir, _state, context, core, service, model, _files, ids) =
+    let (_dir, state, context, core, service, model, _files, ids) =
         two_formal_sources("bad-pair-cache").await;
     model.mode.store(MODEL_INVALID_PAIR, Ordering::SeqCst);
-    assert!(
+    assert_eq!(
         service
             .judge_memory_equivalence(&context, ids[0], ids[1])
             .await
-            .is_err()
+            .unwrap(),
+        mcp_vault_memory::MemoryRelation::Uncertain
     );
     let calls = model.calls.load(Ordering::SeqCst);
     assert_eq!(
@@ -4110,6 +4400,24 @@ async fn malformed_pair_is_retained_without_repeated_paid_judgment() {
     );
     assert_eq!(
         service.rebuild(&context, &core).await.unwrap().quarantined,
+        0
+    );
+    for _ in 0..12 {
+        if !service
+            .maintain_memory_dedup(&context, &core)
+            .await
+            .unwrap()
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        state
+            .current_memory()
+            .formal_status(&context)
+            .await
+            .unwrap()
+            .pending_pairs,
         0
     );
 }

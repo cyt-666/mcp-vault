@@ -126,15 +126,20 @@ fn service(state: &StateStore) -> MemoryService {
 
 #[tokio::test]
 async fn upgrade_existing_current_source_sets_auto_dedups_without_user_actions() {
-    run_upgrade(false).await;
+    run_upgrade(false, false).await;
 }
 
 #[tokio::test]
 async fn upgraded_worker_resumes_after_provider_recovers_without_user_actions() {
-    run_upgrade(true).await;
+    run_upgrade(true, false).await;
 }
 
-async fn run_upgrade(simulated_outage: bool) {
+#[tokio::test]
+async fn upgrade_daily_limited_installation_resumes_automatically_without_reset() {
+    run_upgrade(false, true).await;
+}
+
+async fn run_upgrade(simulated_outage: bool, exhausted_daily_cap: bool) {
     let dir = tempfile::tempdir().unwrap();
     let database = format!("sqlite://{}", dir.path().join("seed.sqlite").display());
     let state = StateStore::connect_and_migrate(&database).await.unwrap();
@@ -363,6 +368,9 @@ async fn run_upgrade(simulated_outage: bool) {
     state.snapshot_to(&old_path).await.unwrap();
     let old_database = format!("sqlite://{}", old_path.display());
     snapshot::strip_new_dedup_schema(&old_database).await;
+    if exhausted_daily_cap {
+        snapshot::apply_exhausted_schema_22(&old_database, &context.id().to_string()).await;
+    }
     let extraction_calls = calls.extraction.load(Ordering::SeqCst);
     calls.offline.store(simulated_outage, Ordering::SeqCst);
     // From here on only application startup and normal reads: no generation,
@@ -428,9 +436,13 @@ async fn run_upgrade(simulated_outage: bool) {
             .await
             .unwrap()
             .into_iter()
-            .find(|job| job.status != mcp_vault_state::JobStatus::Completed)
-            .expect("startup must admit a maintenance job")
-            .id;
+            .find(|job| job.status != mcp_vault_state::JobStatus::Completed);
+        let Some(admitted_job) = admitted_job else {
+            assert_eq!(restart, 1, "initial upgrade must admit maintenance");
+            assert_eq!(calls.judgment.load(Ordering::SeqCst), before);
+            continue;
+        };
+        let admitted_job = admitted_job.id;
         let stop = Cancellation::default();
         let runner = tokio::spawn({
             let worker = supervisor.clone();

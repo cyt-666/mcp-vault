@@ -302,6 +302,7 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
                     "required": ["answer"],
                     "additionalProperties": false
                 }),
+                allow_additional_output_properties: false,
                 missing_required_string_fallbacks: Vec::new(),
                 max_output_tokens: 32,
                 temperature: Some(0.0),
@@ -326,6 +327,7 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
                     "required": ["answer"],
                     "additionalProperties": false
                 }),
+                allow_additional_output_properties: false,
                 missing_required_string_fallbacks: Vec::new(),
                 max_output_tokens: 32,
                 temperature: None,
@@ -913,6 +915,7 @@ async fn provider_service_sends_first_class_vendor_structured_generation_contrac
                         "required": ["answer"],
                         "additionalProperties": false
                     }),
+                    allow_additional_output_properties: false,
                     missing_required_string_fallbacks: Vec::new(),
                     max_output_tokens: 8_192,
                     temperature: Some(0.0),
@@ -1285,6 +1288,7 @@ async fn generation_budget_blocks_retries_and_cloned_service_dispatch() {
         user: "local test".into(),
         schema_name: "answer".into(),
         schema: json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}),
+        allow_additional_output_properties: false,
         missing_required_string_fallbacks: Vec::new(),
         max_output_tokens: 32,
         temperature: None,

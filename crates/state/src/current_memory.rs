@@ -388,13 +388,13 @@ impl CurrentMemoryRepository {
         Ok(())
     }
 
-    /// Atomically reserve one real dispatch against a rolling 24-hour Vault
-    /// limit. Expiration needs no administrator action or budget reset.
-    pub async fn reserve_equivalence_dispatch(
+    /// Record actual dispatches per Vault, including retries, without a daily cap.
+    /// Expire accounting older than 24 hours; preserve judgment caches.
+    pub async fn record_equivalence_dispatch(
         &self,
         context: &VaultContext,
         input_bytes: usize,
-    ) -> Result<bool, StateError> {
+    ) -> Result<(), StateError> {
         self.ensure_vault_context(context).await?;
         let bytes = i64::try_from(input_bytes)
             .map_err(|_| StateError::InvalidInput("equivalence request is too large"))?;
@@ -408,16 +408,10 @@ impl CurrentMemoryRepository {
         .bind(cutoff)
         .execute(&mut *tx)
         .await?;
-        let (requests, used): (i64, i64) = sqlx::query_as("SELECT count(*),coalesce(sum(input_bytes),0) FROM memory_equivalence_dispatches WHERE vault_id=?")
-            .bind(context.id().to_string()).fetch_one(&mut *tx).await?;
-        if requests >= 256 || bytes > (4 * 1024 * 1024) - used {
-            tx.commit().await?;
-            return Ok(false);
-        }
         sqlx::query("INSERT INTO memory_equivalence_dispatches(vault_id,dispatched_at,input_bytes) VALUES(?,?,?)")
             .bind(context.id().to_string()).bind(now).bind(bytes).execute(&mut *tx).await?;
         tx.commit().await?;
-        Ok(true)
+        Ok(())
     }
 
     /// Page independently of memory items so an empty paused source stays manageable.
@@ -1140,6 +1134,11 @@ impl CurrentMemoryRepository {
             )
             .await?;
             insert_item_fts(&mut transaction, &bundle.memory).await?;
+        }
+        for bundle in items {
+            sqlx::query("INSERT INTO memory_dedup_new_contributions(vault_id,contribution_id) VALUES(?,?) ON CONFLICT DO NOTHING")
+                .bind(context.id().to_string()).bind(bundle.memory.id.to_string())
+                .execute(&mut *transaction).await?;
         }
         let applied = sqlx::query(
             "UPDATE memory_note_set_snapshots\n\

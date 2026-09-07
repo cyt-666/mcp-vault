@@ -3,7 +3,7 @@ use sqlx::{Connection, SqliteConnection};
 
 pub async fn strip_new_dedup_schema(database: &str) {
     let mut connection = SqliteConnection::connect(database).await.unwrap();
-    sqlx::raw_sql("PRAGMA foreign_keys=OFF; DROP VIEW memory_valid_formal_supports; DROP VIEW memory_public_items; DROP INDEX memory_dedup_one_active_job;
+    sqlx::raw_sql("PRAGMA foreign_keys=OFF; DROP TABLE memory_dedup_new_contributions; DROP VIEW memory_valid_formal_supports; DROP VIEW memory_public_items; DROP INDEX memory_dedup_one_active_job;
         DROP TABLE memory_formal_identity_reservations; DROP TABLE memory_formal_supports; DROP TABLE memory_formal_items; DROP TABLE memory_formal_mode; DROP TABLE memory_formal_operations;
         DROP TABLE memory_dedup_progress; DROP TABLE memory_formal_maintenance; DROP TABLE memory_formal_examined; DROP TABLE memory_formal_pairs; DROP TABLE memory_equivalence_rewrites;
         DROP TABLE memory_equivalence_decisions; DROP TABLE memory_equivalence_dispatches;
@@ -36,5 +36,26 @@ pub async fn assert_public_fts_only(database: &str, vault_id: &str, expected: i6
         (expected, expected),
         "hidden contributions polluted FTS"
     );
+    connection.close().await.unwrap();
+}
+
+/// Build a schema-22 installation paused by the former daily request/input cap.
+pub async fn apply_exhausted_schema_22(database: &str, vault_id: &str) {
+    let mut connection = SqliteConnection::connect(database).await.unwrap();
+    let mut migrator = sqlx::migrate!("../../migrations");
+    migrator.migrations = std::borrow::Cow::Owned(
+        migrator
+            .iter()
+            .filter(|migration| migration.version <= 22)
+            .cloned()
+            .collect(),
+    );
+    migrator.run(&mut connection).await.unwrap();
+    sqlx::query("INSERT INTO memory_formal_maintenance(vault_id,status,retry_at) VALUES(?,'memory_equivalence_budget_exhausted',9999999999999)")
+        .bind(vault_id).execute(&mut connection).await.unwrap();
+    for _ in 0..256 {
+        sqlx::query("INSERT INTO memory_equivalence_dispatches(vault_id,dispatched_at,input_bytes) VALUES(?,CAST(strftime('%s','now') AS INTEGER)*1000,16384)")
+            .bind(vault_id).execute(&mut connection).await.unwrap();
+    }
     connection.close().await.unwrap();
 }

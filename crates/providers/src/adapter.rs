@@ -46,6 +46,8 @@ pub struct StructuredGenerationRequest {
     pub schema_name: String,
     /// JSON Schema subset required for the response.
     pub schema: Value,
+    /// Accept extra top-level response properties locally; wire schema stays strict.
+    pub allow_additional_output_properties: bool,
     /// Caller-authorized missing-string repairs applied before full validation.
     pub missing_required_string_fallbacks: Vec<MissingRequiredStringFallback>,
     /// Maximum generated token estimate.
@@ -432,9 +434,13 @@ fn structured_result_for_request(
     request: &StructuredGenerationRequest,
     allow_envelope_repair: bool,
 ) -> Result<StructuredGenerationResult, ProviderError> {
+    let mut response_schema = request.schema.clone();
+    if request.allow_additional_output_properties {
+        response_schema["additionalProperties"] = Value::Bool(true);
+    }
     structured_result_with_repairs(
         body,
-        &request.schema,
+        &response_schema,
         allow_envelope_repair,
         &request.missing_required_string_fallbacks,
     )
@@ -1099,10 +1105,28 @@ mod tests {
                 "required": ["memories"],
                 "additionalProperties": false
             }),
+            allow_additional_output_properties: false,
             missing_required_string_fallbacks: Vec::new(),
             max_output_tokens: 8_192,
             temperature: Some(0.0),
             timeout: None,
+        }
+    }
+
+    #[test]
+    fn optional_extra_output_fields_preserve_required_validation_and_wire_schema() {
+        let mut request = generation_request("fake");
+        let body = |value: serde_json::Value| json!({"choices":[{"message":{"content":value.to_string()}}]});
+        let extra = body(json!({"memories":[],"explanation":"extra","delete":"untrusted"}));
+        assert!(super::structured_result_for_request(&extra, &request, false).is_err());
+        request.allow_additional_output_properties = true;
+        assert!(super::structured_result_for_request(&extra, &request, false).is_ok());
+        assert_eq!(request.schema["additionalProperties"], false);
+        for invalid in [
+            json!({"explanation":"missing"}),
+            json!({"memories":"wrong type"}),
+        ] {
+            assert!(super::structured_result_for_request(&body(invalid), &request, false).is_err());
         }
     }
 

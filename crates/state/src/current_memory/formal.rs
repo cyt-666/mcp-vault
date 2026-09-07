@@ -502,6 +502,62 @@ pub struct FormalMaintenanceStatus {
 }
 
 impl CurrentMemoryRepository {
+    /// Explicit-only or empty Vaults have no automatic semantic work.
+    pub async fn has_dedup_work(&self, context: &VaultContext) -> Result<bool, StateError> {
+        Ok(sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM memory_current_items WHERE vault_id=?1 AND ownership='note_derived') OR EXISTS(SELECT 1 FROM memory_formal_items WHERE vault_id=?1) OR EXISTS(SELECT 1 FROM memory_formal_operations WHERE vault_id=?1) OR EXISTS(SELECT 1 FROM memory_formal_pairs WHERE vault_id=?1 AND done=0)")
+            .bind(context.id().to_string()).fetch_one(&self.pool).await? != 0)
+    }
+    /// Metadata-only admission fingerprint; never reads note bodies or invokes a model.
+    pub async fn dedup_input_fingerprint(
+        &self,
+        context: &VaultContext,
+        profile: &str,
+    ) -> Result<String, StateError> {
+        let mut digest = Sha256::new();
+        digest.update(profile.as_bytes());
+        let mut cursor = String::new();
+        loop {
+            let rows: Vec<String> = sqlx::query_scalar("SELECT entry FROM (
+                SELECT json_array('source',s.id,s.source_content_hash,s.set_revision,s.extraction_paused,f.content_hash,f.deleted_at,c.content_hash) AS entry FROM memory_note_sets s LEFT JOIN file_entries f ON f.vault_id=s.vault_id AND f.id=s.source_file_id LEFT JOIN file_entries c ON c.vault_id=s.vault_id AND c.id=s.canonical_file_id WHERE s.vault_id=?1
+                UNION ALL SELECT json_array('item',id,semantic_hash) FROM memory_current_items WHERE vault_id=?1 AND ownership='note_derived'
+                UNION ALL SELECT json_array('formal',id,revision,content_hash) FROM memory_formal_items WHERE vault_id=?1
+                UNION ALL SELECT json_array('vector',id,model_id,content_hash,updated_at) FROM embedding_records WHERE vault_id=?1 AND object_type='memory'
+            ) WHERE entry>?2 ORDER BY entry LIMIT 128")
+                .bind(context.id().to_string()).bind(&cursor).fetch_all(&self.pool).await?;
+            if rows.is_empty() {
+                break;
+            }
+            for row in &rows {
+                digest.update(row.as_bytes());
+                digest.update([0]);
+            }
+            cursor = rows.last().unwrap().clone();
+        }
+        Ok(format!("sha256:{:x}", digest.finalize()))
+    }
+    /// Stable covered inputs need no new semantic job; unfinished work always wins.
+    pub async fn dedup_inputs_covered(
+        &self,
+        context: &VaultContext,
+        fingerprint: &str,
+    ) -> Result<bool, StateError> {
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM memory_formal_maintenance m WHERE m.vault_id=? AND m.status='covered_candidates' AND m.fingerprint=? AND NOT EXISTS(SELECT 1 FROM memory_formal_pairs p WHERE p.vault_id=m.vault_id AND p.done=0) AND NOT EXISTS(SELECT 1 FROM memory_dedup_new_contributions n WHERE n.vault_id=m.vault_id) AND NOT EXISTS(SELECT 1 FROM memory_formal_operations o WHERE o.vault_id=m.vault_id)")
+            .bind(context.id().to_string()).bind(fingerprint).fetch_one(&self.pool).await?;
+        Ok(count == 1)
+    }
+    /// Save the inputs seen before a successful pass; concurrent changes remain dirty.
+    pub async fn checkpoint_dedup_inputs(
+        &self,
+        context: &VaultContext,
+        fingerprint: &str,
+    ) -> Result<(), StateError> {
+        sqlx::query("UPDATE memory_formal_maintenance SET fingerprint=? WHERE vault_id=?")
+            .bind(fingerprint)
+            .bind(context.id().to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
     /// Exact input/profile examination checkpoint, independent of public IDs.
     pub async fn formal_examined(
         &self,
@@ -510,6 +566,34 @@ impl CurrentMemoryRepository {
         fingerprint: &str,
     ) -> Result<bool, StateError> {
         Ok(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM memory_formal_examined WHERE vault_id=? AND contribution_id=? AND fingerprint=?").bind(context.id().to_string()).bind(id.to_string()).bind(fingerprint).fetch_one(&self.pool).await?==1)
+    }
+    /// Newly published contributions bypass the historical discovery cursor.
+    pub async fn new_dedup_contributions(
+        &self,
+        context: &VaultContext,
+        limit: u32,
+    ) -> Result<Vec<MemoryId>, StateError> {
+        validate_page(limit, 0)?;
+        let ids: Vec<String> = sqlx::query_scalar("SELECT contribution_id FROM memory_dedup_new_contributions WHERE vault_id=? ORDER BY contribution_id LIMIT ?")
+            .bind(context.id().to_string()).bind(i64::from(limit)).fetch_all(&self.pool).await?;
+        ids.iter()
+            .map(|id| MemoryId::parse(id).map_err(StateError::from))
+            .collect()
+    }
+    /// Retire obsolete or already examined incremental inputs.
+    pub async fn finish_new_dedup_contribution(
+        &self,
+        context: &VaultContext,
+        id: MemoryId,
+    ) -> Result<(), StateError> {
+        sqlx::query(
+            "DELETE FROM memory_dedup_new_contributions WHERE vault_id=? AND contribution_id=?",
+        )
+        .bind(context.id().to_string())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
     /// Persist candidates before marking an input examined; crashes cannot lose work.
     pub async fn queue_formal_pairs(
@@ -520,9 +604,18 @@ impl CurrentMemoryRepository {
         pairs: &[(String, MemoryId, MemoryId)],
     ) -> Result<(), StateError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let priority: i64 = sqlx::query_scalar("SELECT count(*) FROM memory_dedup_new_contributions WHERE vault_id=? AND contribution_id=?")
+            .bind(context.id().to_string()).bind(id.to_string()).fetch_one(&mut *tx).await?;
         for (key, left, right) in pairs {
-            sqlx::query("INSERT INTO memory_formal_pairs(vault_id,pair_key,left_id,right_id) VALUES(?,?,?,?) ON CONFLICT(vault_id,pair_key) DO NOTHING").bind(context.id().to_string()).bind(key).bind(left.to_string()).bind(right.to_string()).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO memory_formal_pairs(vault_id,pair_key,left_id,right_id,priority) VALUES(?,?,?,?,?) ON CONFLICT(vault_id,pair_key) DO UPDATE SET priority=max(priority,excluded.priority)").bind(context.id().to_string()).bind(key).bind(left.to_string()).bind(right.to_string()).bind(priority).execute(&mut *tx).await?;
         }
+        sqlx::query(
+            "DELETE FROM memory_dedup_new_contributions WHERE vault_id=? AND contribution_id=?",
+        )
+        .bind(context.id().to_string())
+        .bind(id.to_string())
+        .execute(&mut *tx)
+        .await?;
         sqlx::query("INSERT INTO memory_formal_examined(vault_id,contribution_id,fingerprint) VALUES(?,?,?) ON CONFLICT(vault_id,contribution_id) DO UPDATE SET fingerprint=excluded.fingerprint").bind(context.id().to_string()).bind(id.to_string()).bind(fingerprint).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(())
@@ -534,10 +627,24 @@ impl CurrentMemoryRepository {
         limit: u32,
     ) -> Result<Vec<(String, MemoryId, MemoryId)>, StateError> {
         validate_page(limit, 0)?;
-        let rows:Vec<(String,String,String)>=sqlx::query_as("SELECT pair_key,left_id,right_id FROM memory_formal_pairs WHERE vault_id=? AND done=0 ORDER BY pair_key LIMIT ?").bind(context.id().to_string()).bind(i64::from(limit)).fetch_all(&self.pool).await?;
+        let rows:Vec<(String,String,String)>=sqlx::query_as("SELECT pair_key,left_id,right_id FROM memory_formal_pairs WHERE vault_id=? AND done=0 ORDER BY attempt_sequence,priority DESC,pair_key LIMIT ?").bind(context.id().to_string()).bind(i64::from(limit)).fetch_all(&self.pool).await?;
         rows.into_iter()
             .map(|(k, l, r)| Ok((k, MemoryId::parse(&l)?, MemoryId::parse(&r)?)))
             .collect()
+    }
+    /// Persist a candidate's turn before I/O, without treating interruption as completion.
+    pub async fn start_formal_pair(
+        &self,
+        context: &VaultContext,
+        key: &str,
+    ) -> Result<bool, StateError> {
+        let result = sqlx::query("UPDATE memory_formal_pairs SET attempt_sequence=(SELECT coalesce(max(attempt_sequence),0)+1 FROM memory_formal_pairs WHERE vault_id=? AND done=0) WHERE vault_id=? AND pair_key=? AND done=0")
+            .bind(context.id().to_string())
+            .bind(context.id().to_string())
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() == 1)
     }
     /// Checkpoint one completed candidate without exposing text or model output.
     pub async fn finish_formal_pair(
@@ -772,7 +879,7 @@ impl CurrentMemoryRepository {
 mod budget_tests {
     use super::*;
     #[tokio::test]
-    async fn expired_dispatch_window_reopens_automatically_and_keeps_decisions() {
+    async fn dispatch_accounting_does_not_cap_daily_work_and_expires_without_losing_decisions() {
         let state = crate::StateStore::connect_and_migrate("sqlite::memory:")
             .await
             .unwrap();
@@ -795,18 +902,26 @@ mod budget_tests {
             .save_equivalence_decision(&context, &key, "uncertain")
             .await
             .unwrap();
-        assert!(
+        // Exceed both former daily limits; real attempts remain accounted for.
+        repository
+            .record_equivalence_dispatch(&context, 4 * 1024 * 1024 + 1)
+            .await
+            .unwrap();
+        for _ in 0..300 {
             repository
-                .reserve_equivalence_dispatch(&context, 4 * 1024 * 1024)
+                .record_equivalence_dispatch(&context, 1)
                 .await
-                .unwrap()
-        );
-        assert!(
-            !repository
-                .reserve_equivalence_dispatch(&context, 1)
-                .await
-                .unwrap()
-        );
+                .unwrap();
+        }
+        let (count, bytes): (i64, i64) = sqlx::query_as(
+            "SELECT count(*),sum(input_bytes) FROM memory_equivalence_dispatches WHERE vault_id=?",
+        )
+        .bind(context.id().to_string())
+        .fetch_one(&repository.pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 301);
+        assert_eq!(bytes, 4 * 1024 * 1024 + 301);
         // Simulate wall-clock passage in the synthetic repository fixture;
         // production reserve logic uses exactly the same rolling predicate.
         sqlx::query("UPDATE memory_equivalence_dispatches SET dispatched_at=? WHERE vault_id=?")
@@ -815,12 +930,18 @@ mod budget_tests {
             .execute(&repository.pool)
             .await
             .unwrap();
-        assert!(
-            repository
-                .reserve_equivalence_dispatch(&context, 1)
-                .await
-                .unwrap()
-        );
+        repository
+            .record_equivalence_dispatch(&context, 1)
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM memory_equivalence_dispatches WHERE vault_id=?",
+        )
+        .bind(context.id().to_string())
+        .fetch_one(&repository.pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
         assert_eq!(
             repository
                 .equivalence_decision(&context, &key)

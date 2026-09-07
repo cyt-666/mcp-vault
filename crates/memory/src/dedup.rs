@@ -29,19 +29,11 @@ impl mcp_vault_providers::RequestBudget for DispatchBudget {
                 retryable: true,
             });
         }
-        if self
-            .state
+        self.state
             .current_memory()
-            .reserve_equivalence_dispatch(&self.context, bytes)
-            .await?
-        {
-            Ok(())
-        } else {
-            Err(mcp_vault_providers::ProviderError::Transport {
-                code: "memory_equivalence_budget_exhausted",
-                retryable: false,
-            })
-        }
+            .record_equivalence_dispatch(&self.context, bytes)
+            .await?;
+        Ok(())
     }
 }
 
@@ -84,7 +76,6 @@ impl MemoryRelation {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct PairOutput {
     left: u8,
     right: u8,
@@ -145,12 +136,17 @@ mod tests {
             json!({"left":0,"right":0,"relation":"equivalent"}),
             json!({"left":0,"right":2,"relation":"equivalent"}),
             json!({"left":0,"right":1,"relation":"merge"}),
-            json!({"left":0,"right":1,"relation":"equivalent","delete":"anything"}),
             json!({"left":"0","right":1,"relation":"equivalent"}),
             json!([]),
         ] {
             assert!(parse_relation(value).is_err());
         }
+    }
+
+    #[test]
+    fn extra_explanations_are_ignored_without_becoming_actions() {
+        assert_eq!(parse_relation(json!({"left":0,"right":1,"relation":"equivalent","reason":"same fact","delete":"untrusted","confidence":0.99})).unwrap(), MemoryRelation::Equivalent);
+        assert!(parse_relation(json!({"left":0,"right":1,"reason":"equivalent"})).is_err());
     }
 
     #[test]

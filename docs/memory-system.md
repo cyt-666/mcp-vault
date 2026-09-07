@@ -305,7 +305,7 @@ accounting. Formal publication and background admission are described below.
 
 ## Automatic formal-memory maintenance (v2.2, ADR 0030)
 
-Normal startup upgrades schema and admits one `memory.deduplicate` job per ready
+Normal startup upgrades schema and admits at most one `memory.deduplicate` job per ready
 Vault. It recovers local operations, reconciles source identities, compacts exact
 same-source duplicates, and adopts old v2.1 contributions as singleton facts
 without generation. The public view switches atomically after eligible inputs are
@@ -326,9 +326,10 @@ Larger corpora report candidate coverage, never a proof of global semantic uniqu
 Source and contribution scans use stable keyset cursors. Candidate fingerprints,
 completed judgments and dispatch reservations survive restart. Installation-wide
 semantic concurrency is 2; each Vault has one active job; a slice permits 16
-actual transports; rolling 24-hour limits are 256 transports or 4 MiB input.
-Model unavailability and exhausted budgets defer semantic work while local cleanup
-remains automatic. Normal recall performs no generation.
+actual transports and continues immediately at the slice boundary. There is no
+daily request-count or input-byte cap. Actual transports (including retries) are
+accounted per Vault for 24 hours. Provider unavailability or rate limits defer
+semantic work while local cleanup remains automatic. Normal recall performs no generation.
 
 Facts live in `memory/current/facts/{id}.md`. Supports identify exact contribution
 ID, source File ID/hash and semantic metadata hash. Pending multi-file publications
@@ -360,3 +361,30 @@ these content-free metrics every two seconds. Whole-slice timeout reports
 `memory_equivalence_slice_exhausted` and can continue in the same worker.
 Pair counts measure candidate combinations, not memory objects or successful
 merges; one memory may participate in many comparisons.
+
+Newly published source contributions enter a durable incremental discovery queue
+in the same transaction as publication. They bypass the historical scan cursor;
+their unattempted comparison candidates precede unattempted historical candidates.
+Comparison turns are persisted before external I/O, so cancellation rotates an
+unfinished pair instead of counting it as complete or blocking the queue head.
+Extraction remains asynchronous with respect to semantic merging: a duplicate can
+be briefly visible until its candidate is checked. This is not a synchronous
+all-memory comparison or a guarantee of finding every semantic equivalent.
+
+Automatic admission is driven by unfinished or changed inputs. Empty/explicit-only
+Vaults and unchanged covered inputs do not create new semantic jobs. A bounded
+metadata-only database scan fingerprints source revisions/hashes, contributions,
+formal facts, memory vector versions and the extraction profile/rule. Pending
+pairs, newly published contributions and recovery operations prevent idle
+suppression. A successful pass checkpoints its starting fingerprint, so changes
+during processing cannot be mistaken for covered inputs. Provider retry deadlines
+also suppress premature admission. No admission check invokes a model.
+
+Equivalence and memory-body proposals accept extra top-level response properties
+locally and ignore them; the requested wire schema remains strict for provider
+compatibility. Required fields, types, relation enum and local pair references
+remain validated. Invalid pair proposals are cached as uncertain and preserve
+both memories while subsequent pairs continue. Invalid body proposals preserve
+the original and allow subsequent work; transport/provider failures still back off.
+Uncertain and different outcomes count as examined, not successful merges; they
+are not repeatedly questioned when their inputs remain unchanged.

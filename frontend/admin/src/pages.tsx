@@ -1500,8 +1500,8 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
   return (
     <div className="page-stack">
       <Notice tone="info">来源笔记的当前贡献会自动整理为正式记忆；等价内容共享一个 ID，并保留全部支持来源。来源内容变化会立即使旧贡献失效。显式记忆直接保存。</Notice>
-      <Panel title="自动记忆整理" description="升级启动后自动接管已有记忆；模型暂不可用或额度耗尽时保留当前内容，稍后自动继续。">
-        <p>状态：{({ pending: '等待后台接管', processing: '整理中', covered_candidates: '本轮候选已处理', waiting_for_extraction_model: '等待提取模型', memory_equivalence_budget_exhausted: '等待预算恢复' } as Record<string, string>)[stringValue(dedup?.status, '')] ?? (dedup?.status ? `等待重试：${jobErrorLabel(dedup.status)}（${stringValue(dedup.status)}）` : '等待后台接管')}</p>
+      <Panel title="自动记忆整理" description="升级启动后自动接管已有记忆，不设每日调用总量上限；模型暂不可用或限流时保留当前内容，稍后自动继续。">
+        <p>状态：{({ pending: '等待后台接管', processing: '整理中', covered_candidates: '本轮候选已处理', waiting_for_extraction_model: '等待提取模型', memory_equivalence_budget_exhausted: '旧版本本地限额暂停，升级后自动继续' } as Record<string, string>)[stringValue(dedup?.status, '')] ?? (dedup?.status ? `等待重试：${jobErrorLabel(dedup.status)}（${stringValue(dedup.status)}）` : '等待后台接管')}</p>
         {numberValue(dedup?.retry_at) > 0 ? <p>下次可执行：{formatTime(dedup?.retry_at)}</p> : null}
         <p>已有记忆：{dedup?.adopted === true ? '已接管' : '等待接管'} · 待比较组合：{String(dedup?.pending_pairs ?? 0)} · 已检查组合：{String(dedup?.checked_pairs ?? 0)}</p>
         <p>当前阶段：{dedupStageLabel(dedup?.phase)} · 累计条目检查：{numberValue(dedup?.sentence_checked)}</p>
@@ -1938,7 +1938,7 @@ function jobProgressDetail(job: JsonObject): string {
       memory_dedup_checkpoint: '分批处理，自动续跑',
       memory_equivalence_slice_exhausted: '本轮请求数达到上限，继续处理',
       memory_equivalence_slice_timeout: '本轮处理超时，将从检查点重试',
-      memory_equivalence_budget_exhausted: '等待自动整理预算恢复',
+      memory_equivalence_budget_exhausted: '旧版本本地限额暂停，升级后自动继续',
     };
     detail = `${dedupStageLabel(progress.stage)} · 累计条目检查 ${numberValue(progress.sentence_checked)} 次 · 已检查 ${numberValue(progress.checked_pairs)} 组，待比较 ${numberValue(progress.pending_pairs)} 组`;
     if (reason) detail += ` · ${labels[reason] ?? jobErrorLabel(reason)}`;

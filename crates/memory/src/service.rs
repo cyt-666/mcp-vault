@@ -620,6 +620,7 @@ impl MemoryService {
             user,
             schema_name: "memory_equivalence".to_owned(),
             schema: crate::dedup::schema(),
+            allow_additional_output_properties: true,
             missing_required_string_fallbacks: Vec::new(),
             max_output_tokens: 256,
             temperature: Some(0.0),
@@ -644,18 +645,19 @@ impl MemoryService {
                         .current_memory()
                         .save_equivalence_decision(context, &input_hash, "uncertain")
                         .await?;
+                    return Ok(crate::MemoryRelation::Uncertain);
                 }
                 return Err(error.into());
             }
         };
         let relation = match crate::dedup::parse_relation(output.value) {
             Ok(relation) => relation,
-            Err(error) => {
+            Err(_) => {
                 self.state
                     .current_memory()
                     .save_equivalence_decision(context, &input_hash, "uncertain")
                     .await?;
-                return Err(error);
+                return Ok(crate::MemoryRelation::Uncertain);
             }
         };
         let label = serde_json::to_value(relation)
@@ -2388,6 +2390,7 @@ impl MemoryService {
             ),
             schema_name: "current_memory_set".to_owned(),
             schema: current_extraction_schema(),
+            allow_additional_output_properties: false,
             missing_required_string_fallbacks: Vec::new(),
             max_output_tokens,
             temperature: Some(0.0),

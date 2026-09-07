@@ -2774,9 +2774,7 @@ pub fn memory_dedup_job_handler(
                     },
                     Ok(false) => JobOutcome::Complete,
                     Err(e) => {
-                        let delay = if e.code() == "memory_equivalence_budget_exhausted" {
-                            3600
-                        } else if e.code() == "memory_equivalence_slice_exhausted" {
+                        let delay = if e.code() == "memory_equivalence_slice_exhausted" {
                             1
                         } else if e.retryable() {
                             5
@@ -4662,12 +4660,9 @@ mod tests {
             .list(&context, None, None, 10, 0)
             .await
             .unwrap();
-        assert_eq!(jobs.len(), 5);
-        assert!(
-            jobs.iter()
-                .any(|job| job.job_type == "memory.deduplicate"
-                    && job.status == JobStatus::Completed)
-        );
+        assert_eq!(jobs.len(), 4);
+        // Extraction failed before publishing any memories: no semantic job is needed.
+        assert!(!jobs.iter().any(|job| job.job_type == "memory.deduplicate"));
         assert!(
             jobs.iter()
                 .all(|job| matches!(job.status, JobStatus::Completed | JobStatus::Failed))

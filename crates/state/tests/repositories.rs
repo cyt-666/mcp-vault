@@ -688,7 +688,7 @@ async fn legacy_retrieval_rows_remain_vault_scoped_for_backup_migration() {
 }
 
 #[tokio::test]
-async fn equivalence_cache_and_dispatch_budget_are_vault_scoped_and_bounded() {
+async fn equivalence_cache_and_dispatch_accounting_are_vault_scoped_without_daily_caps() {
     let store = store().await;
     let a = context("dedup-a", "/srv/dedup-a");
     let b = context("dedup-b", "/srv/dedup-b");
@@ -719,30 +719,12 @@ async fn equivalence_cache_and_dispatch_budget_are_vault_scoped_and_bounded() {
             .unwrap()
             .is_none()
     );
-    for _ in 0..256 {
-        assert!(
-            repository
-                .reserve_equivalence_dispatch(&a, 1)
-                .await
-                .unwrap()
-        );
+    for _ in 0..300 {
+        repository.record_equivalence_dispatch(&a, 1).await.unwrap();
     }
-    assert!(
-        !repository
-            .reserve_equivalence_dispatch(&a, 1)
-            .await
-            .unwrap()
-    );
-    assert!(
-        repository
-            .reserve_equivalence_dispatch(&b, 4 * 1024 * 1024)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !repository
-            .reserve_equivalence_dispatch(&b, 1)
-            .await
-            .unwrap()
-    );
+    repository
+        .record_equivalence_dispatch(&b, 4 * 1024 * 1024 + 1)
+        .await
+        .unwrap();
+    repository.record_equivalence_dispatch(&b, 1).await.unwrap();
 }
