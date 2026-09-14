@@ -500,7 +500,7 @@ impl IndexRepository {
         let vault_id = context.id().to_string();
         let file_id = file_id.to_string();
         let mut transaction = self.pool.begin().await?;
-        for table in ["note_headings", "note_tags", "note_links", "note_fts"] {
+        for table in ["note_headings", "note_tags", "note_fts"] {
             let sql = format!("DELETE FROM {table} WHERE vault_id = ? AND file_id = ?");
             sqlx::query(&sql)
                 .bind(&vault_id)
@@ -508,6 +508,11 @@ impl IndexRepository {
                 .execute(&mut *transaction)
                 .await?;
         }
+        sqlx::query("DELETE FROM note_links WHERE vault_id=? AND source_file_id=?")
+            .bind(&vault_id)
+            .bind(&file_id)
+            .execute(&mut *transaction)
+            .await?;
         sqlx::query("DELETE FROM index_memberships WHERE vault_id = ? AND file_id = ?")
             .bind(&vault_id)
             .bind(&file_id)
@@ -882,6 +887,18 @@ impl IndexRepository {
         }
     }
 
+    /// Return a bounded scope title only for the exact current analyzed content.
+    pub async fn current_scope_title(
+        &self,
+        context: &VaultContext,
+        file_id: FileId,
+        content_hash: &str,
+    ) -> Result<Option<String>, StateError> {
+        let title: Option<Option<String>> = sqlx::query_scalar("SELECT substr(n.title,1,160) FROM notes n JOIN file_entries f ON f.vault_id=n.vault_id AND f.id=n.file_id AND f.deleted_at IS NULL AND f.content_hash=n.analyzed_content_hash WHERE n.vault_id=? AND n.file_id=? AND n.analyzed_content_hash=?")
+            .bind(context.id().to_string()).bind(file_id.to_string()).bind(content_hash).fetch_optional(&self.pool).await?;
+        Ok(title.flatten())
+    }
+
     /// Return one indexed note as a bounded retrieval cue.
     pub async fn get_note_for_retrieval(
         &self,
@@ -915,6 +932,7 @@ impl IndexRepository {
         context: &VaultContext,
         fts_query: &str,
         path_prefix: Option<&str>,
+        exact_source_path: Option<&str>,
         tags: &[String],
         topic_keys: &[String],
         modified_after: Option<i64>,
@@ -943,6 +961,10 @@ impl IndexRepository {
         query.push_bind(&vault_id);
         query.push(" AND note_fts MATCH ");
         query.push_bind(fts_query);
+        if let Some(path) = exact_source_path {
+            query.push(" AND file_state.path = ");
+            query.push_bind(path);
+        }
         if let Some(path_prefix) = path_prefix {
             query.push(" AND file_state.path LIKE ");
             query.push_bind(format!("{path_prefix}%"));

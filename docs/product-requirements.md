@@ -108,44 +108,21 @@ The service MUST make Vault content usable as durable Agent memory.
 
 It MUST provide:
 
-- proactive-recall instructions through MCP server discovery;
-- current-only `recall` with relevance-gated hybrid ranking and task context;
-- separately typed related-note cues so an Agent can remember that ordinary
-  Vault knowledge exists without promoting article contents to durable facts;
-- direct `remember` for an independently owned explicit memory, without a model
-  or background consolidation step;
-- optional memory kinds, confidence, importance, tags, entities, provenance,
-  and temporal validity, with omitted metadata remaining omitted;
-- Vault-level automatic memory generation from ordinary Markdown without
-  requiring note authors to add service-specific markers, tags, or folders;
-- exactly one current memory set owned by each source File ID, replaced in full
-  from one bounded structured generation call shaped as `{memories:[...]}`;
-- exact source identity and full-content-hash eligibility so a changed/deleted
-  source immediately hides its old set, while a same-ID/same-hash move updates
-  navigation without a model call;
-- optional line/heading anchors for explicit or imported provenance, without
-  requiring the automatic extraction model to generate them;
-- application-owned IDs, provenance, revisions, history, canonical paths, and
-  atomic whole-set publication; model output MUST remain an untrusted
-  content/kind/tag proposal;
-- canonical Markdown for every explicit memory and source-owned set;
-- revision-aware explicit updates and physical current deletion rather than a
-  model-visible archive/supersede lifecycle;
-- note-derived item deletion by whole-set rewrite plus automatic-extraction
-  pause until an authenticated explicit resume;
-- recall that never requires a live LLM call and never exposes historical IDs;
-- rebuildable embeddings accepted only for the exact model/profile/content/
-  prepared-input hash, with raw cosine distinguished from calibrated score;
-- complete output budgeting, including the first item, which skips oversized
-  candidates rather than stopping selection;
-- non-destructive authenticated migration preflight and execution: preserve
-  unambiguous explicit IDs, regenerate note-derived rows, and report mixed or
-  unsupported ownership without guessing or auto-deleting legacy data.
+- discovery instructions encouraging task-relevant current-only recall;
+- exact submitted explicit bodies, optional metadata and revision-aware edits;
+- source-owned complete original units for preferences, constraints, adopted decisions, task state and practical experiences;
+- application-generated candidate IDs, source coordinates, full-source hashes and provenance; model output contains only selected IDs, optional types and retrieval hints;
+- bounded batches, durable checkpoints and atomic complete source-set publication after every batch finishes;
+- immediate source-hash/identity eligibility, same-identity move recovery, source-deletion invalidation and local deletion with explicit source resume;
+- no generated body rewriting or cross-source consolidation; similarity only ranks candidates;
+- canonical v3 Markdown, rebuildable indexes and no predecessor data conversion or legacy format reads;
+- automatic-body access requiring both `memory:read` and `vault:read`, with explicit units available to memory-only readers;
+- complete output budgeting (default 4096 Tokens, 12 units, 4 note cues), oversized-unit read pointers and no clipped bodies;
+- query-time recall without a generative model, optional embeddings/reranking and lexical fallback;
+- source-path/topic navigation and separately identified, dependency-validated generated overviews with deterministic fallback;
+- offline exclusive initialization that discards all predecessor memory data and pauses new generation until protocol smoke checks finish, while preserving ordinary files, history, Vaults, accounts, credentials and Provider/model configuration.
 
-The memory domain MUST NOT expose archive, restore, supersede, merge,
-candidate-review, raw-staging, global-consolidation, source-health-audit, or
-historical-recall interfaces. Retained revision history and backups are
-operational recovery data, not a model-readable memory lifecycle.
+There is no project configuration, model-readable lifecycle, archive, supersession, merge, candidate review, synthetic semantic calibration or legacy conversion API. File history and paired backups remain operational recovery data. The detailed normative contract is [Source-preserving memory units](memory-system.md).
 
 Related-note cues are derived, rebuildable, revision-bound source pointers and
 require Vault read permission. They are not durable memories and MUST remain
@@ -282,10 +259,7 @@ updates the source path and canonical set without model work. Cross-File-ID,
 filename, semantic/vector, LLM, ambiguous, truncated, and cross-Vault rebinding
 MUST NOT occur.
 
-Admin MUST expose current-memory CRUD, extraction status/run, explicit
-source-resume, embedding status/rebuild, and non-destructive migration
-preflight/execute. It MUST NOT expose lifecycle, consolidation, candidate,
-source-health-audit, or retrieval-alias backfill controls.
+Admin MUST expose current original bodies and sources, explicit editing, copying automatic units to explicit memory, source pause/resume, generation run/pause/resume, batch/skipped-unit progress, overview navigation and vector coverage. Legacy organization, conversion and calibration controls are removed.
 
 The Admin UI and Admin API MUST run on a separate listener that is not publicly exposed by default. Network restriction does not replace authentication.
 
@@ -436,7 +410,4 @@ The service is complete for the first release when:
 
 ## Automatic retrieval preparation
 
-Existing deployments with permitted embedding roles must prepare missing calibration after startup without Admin interaction or regeneration. Semantic eligibility requires a current server evaluation, independently for memory and note roles. Coverage, calibration, source pauses and reviewed legacy migration are separate operator concerns.
-
-The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
-specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).
+Existing deployments require the offline v3 initialization described in [Source-preserving memory units](memory-system.md). Model and Provider bindings remain unchanged. Embedding coverage, current source eligibility and generated overview dependencies are independent readiness concerns; no synthetic calibration gates normal recall.

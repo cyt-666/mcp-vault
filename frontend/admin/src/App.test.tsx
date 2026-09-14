@@ -273,32 +273,10 @@ describe('Admin 管理界面', () => {
     expect(message).not.toContain('请使用更长且不常见的密码');
   });
 
-  it('自动整理回队后显示实际进度与错误，而不是未报告', async () => {
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    await act(async () => root.render(
-      <ManagementPage page="jobs" data={{ queued: [{
-        id: 'dedup-job', job_type: 'memory.deduplicate', status: 'queued',
-        attempts: 0, max_attempts: 10, progress: {
-          phase: 'memory_dedup', stage: 'checking_sentences', sentence_checked: 6, slices_completed: 3, checked_pairs: 8, pending_pairs: 12,
-          wait_reason: 'memory_conflict', maintenance_status: 'memory_conflict', resume_at: 1788690000000,
-        },
-      }] }} onRefresh={() => undefined} />,
-    ));
-    expect(container.textContent).toContain('自动记忆去重与合并');
-    expect(container.textContent).toContain('已检查 8 组，待比较 12 组');
-    expect(container.textContent).toContain('检查记忆条目的重复表述');
-    expect(container.textContent).toContain('累计条目检查 6 次');
-    expect(container.textContent).not.toContain('已运行 3 批');
-    expect(container.textContent).toContain('下次可执行');
-    expect(container.textContent).not.toContain('进度 未报告');
-    await act(async () => root.render(
-      <ManagementPage page="memory" data={{ memories: [], extraction: { dedup: { status: 'memory_state_error', adopted: false, retry_at: 1788690000000 } } }} onRefresh={() => undefined} />,
-    ));
-    expect(container.textContent).toContain('memory_state_error');
-    expect(container.textContent).not.toContain('等待后台重试或下一轮检查');
-    await act(async () => root.unmount());
-  });
+
+
+
+
 
   it('任务页面优先展示中文摘要并默认折叠原始 JSON', async () => {
     const container = document.createElement('div');
@@ -605,7 +583,7 @@ describe('Admin 管理界面', () => {
     expect(container.textContent).toContain('Google Gemini');
     expect(container.textContent).toContain('阿里千问 / DashScope');
     expect(container.textContent).toContain('模型用途');
-    expect(container.textContent).toContain('自动生成长期记忆');
+    expect(container.textContent).toContain('选择长期记忆原文');
     expect(container.textContent).toContain('已绑定');
 
     const providerTypeSelect = Array.from(container.querySelectorAll('label'))
@@ -816,7 +794,7 @@ describe('Admin 管理界面', () => {
     );
 
     expect(container.textContent).toContain('笔记当前记忆集合');
-    expect(container.textContent).toContain('每篇模型调用1 次');
+    expect(container.textContent).toContain('模型调用每批最多 1 次');
     expect(container.textContent).not.toContain('跨语言检索');
     expect(container.textContent).not.toContain('回填现有记忆');
     expect(request).not.toHaveBeenCalled();
@@ -926,8 +904,8 @@ describe('Admin 管理界面', () => {
     );
 
     expect(container.textContent).toContain('笔记当前记忆集合');
-    expect(container.textContent).toContain('一次提取 · 整体替换');
-    expect(container.textContent).toContain('每篇笔记一次模型调用');
+    expect(container.textContent).toContain('原文选择 · 分批续跑');
+    expect(container.textContent).toContain('每批最多 1 次，保存断点后继续');
     expect(container.textContent).toContain('按来源完整集合原子替换');
     expect(container.textContent).not.toContain('两阶段长期记忆');
     expect(container.textContent).not.toContain('候选审核');
@@ -1080,7 +1058,7 @@ describe('Admin 管理界面', () => {
       run.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    expect(confirm.mock.calls[0][0]).toContain('再次调用一次提取模型');
+    expect(confirm.mock.calls[0][0]).toContain('按批次调用选择模型');
     expect(request).toHaveBeenCalledWith('/memory/extraction/run', {
       method: 'POST',
       body: { include_evaluated: true },
@@ -1101,7 +1079,7 @@ describe('Admin 管理界面', () => {
       content: 'Admin 登录认证始终保留。',
       memory_type: 'decision',
       ownership: 'explicit',
-      canonical_path: '_mcp-vault/memory/current/explicit/memory-1.md',
+      canonical_path: '_mcp-vault/memory-v3/explicit/memory-1.md',
       updated_at: 1,
       revision: 7,
       sources: [{
@@ -1118,7 +1096,7 @@ describe('Admin 管理界面', () => {
       ...memory,
       id: 'memory-2',
       content: '第二条长期记忆。',
-      canonical_path: '_mcp-vault/memory/current/explicit/memory-2.md',
+      canonical_path: '_mcp-vault/memory-v3/explicit/memory-2.md',
       revision: 9,
     };
     const extraction = {
@@ -1138,12 +1116,12 @@ describe('Admin 管理界面', () => {
 
     expect(container.textContent).toContain('查看来源笔记与证据定位（1）');
     expect(container.textContent).toContain(
-      '规范文件 _mcp-vault/memory/current/explicit/memory-1.md',
+      '规范文件 _mcp-vault/memory-v3/explicit/memory-1.md',
     );
     expect(container.textContent).toContain('notes/security.md');
     expect(container.textContent).toContain('修订 4');
     expect(container.textContent).toContain('第 12–14 行');
-    expect(container.textContent).toContain('原文仍保留在对应笔记及其修订历史中');
+    expect(container.textContent).toContain('自动记忆正文来自原始笔记的完整单元');
 
     const remove = container.querySelector(
       'button[aria-label="删除当前记忆 memory-1"]',

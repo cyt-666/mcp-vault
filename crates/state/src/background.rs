@@ -595,6 +595,17 @@ impl JobRepository {
         }
     }
 
+    /// Wake queued/retry-wait work after an explicit run without replacing its lease or progress.
+    pub async fn expedite_active(
+        &self,
+        context: &VaultContext,
+        job_type: &str,
+    ) -> Result<(), StateError> {
+        sqlx::query("UPDATE jobs SET available_at=?,updated_at=? WHERE vault_id=? AND job_type=? AND status IN ('queued','retry_wait')")
+            .bind(now_millis()?).bind(now_millis()?).bind(context.id().to_string()).bind(job_type).execute(&self.pool).await?;
+        Ok(())
+    }
+
     /// Raise existing active work to the caller's current scheduling priority.
     /// Preserve its identity, lease, checkpoint and retry deadline.
     pub async fn promote_active_priority(
@@ -1015,7 +1026,7 @@ impl JobRepository {
              SET status = 'queued', available_at = ?, lease_owner = NULL,
                  lease_until = NULL, attempts = 0,
                  progress_json = CASE
-                     WHEN job_type = 'memory.extract' THEN progress_json
+                     WHEN job_type IN ('memory.extract','memory.overview') THEN progress_json
                      ELSE NULL
                  END,
                  cancel_requested = 0, last_error = NULL, completed_at = NULL,
@@ -1120,22 +1131,44 @@ impl JobRepository {
     ) -> Result<bool, StateError> {
         self.ensure_context(context).await?;
         validate_job_labels(job_type, "coalesce-check")?;
-        let exists: i64 = sqlx::query_scalar(
-            "SELECT EXISTS(
-                 SELECT 1 FROM jobs
-                 WHERE vault_id = ? AND job_type = ?
-                   AND status IN ('queued', 'running', 'retry_wait')
-                   AND (created_at > ? OR (created_at = ? AND id > ?))
-             )",
-        )
-        .bind(context.id().to_string())
-        .bind(job_type)
-        .bind(created_at)
-        .bind(created_at)
-        .bind(job_id.to_string())
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(exists != 0)
+        if job_type != "index.rebuild" {
+            let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM jobs WHERE vault_id=? AND job_type=? AND status IN ('queued','running','retry_wait') AND (created_at>? OR (created_at=? AND id>?)))")
+                .bind(context.id().to_string()).bind(job_type).bind(created_at).bind(created_at).bind(job_id.to_string()).fetch_one(&self.pool).await?;
+            return Ok(exists);
+        }
+        let root: String = sqlx::query_scalar("SELECT reserved_root FROM vaults WHERE id=?")
+            .bind(context.id().to_string())
+            .fetch_one(&self.pool)
+            .await?;
+        let policy = mcp_vault_domain::VaultPathPolicy::new(
+            mcp_vault_domain::VaultPath::parse(&root)?,
+            Default::default(),
+        )?;
+        let mut cursor_time = created_at;
+        let mut cursor_id = job_id.to_string();
+        loop {
+            let rows:Vec<(String,i64,String)>=sqlx::query_as("SELECT id,created_at,payload_json FROM jobs WHERE vault_id=? AND job_type=? AND status IN ('queued','running','retry_wait') AND (created_at>? OR (created_at=? AND id>?)) ORDER BY created_at,id LIMIT 128")
+                .bind(context.id().to_string()).bind(job_type).bind(cursor_time).bind(cursor_time).bind(&cursor_id).fetch_all(&self.pool).await?;
+            let more = rows.len() == 128;
+            for (id, time, payload) in rows {
+                cursor_id = id;
+                cursor_time = time;
+                let payload: Value = serde_json::from_str(&payload)?;
+                let managed = payload.get("aggregate_type").and_then(Value::as_str) == Some("file")
+                    && payload
+                        .get("payload")
+                        .and_then(|p| p.get("path"))
+                        .and_then(Value::as_str)
+                        .and_then(|path| mcp_vault_domain::VaultPath::parse(path).ok())
+                        .is_some_and(|path| policy.is_reserved(&path));
+                if !managed {
+                    return Ok(true);
+                }
+            }
+            if !more {
+                return Ok(false);
+            }
+        }
     }
 
     /// Release a worker's job leases for immediate restart reclaim.

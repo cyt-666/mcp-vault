@@ -12,6 +12,31 @@ MCP Vault exposes three independent interfaces.
 
 All URLs are versioned. Examples use `v1`.
 
+### Admin memory initialization
+
+For the selected, authenticated Vault, the control plane exposes:
+
+```text
+GET  /memory/initialization
+POST /memory/initialization   (refresh preview)
+POST /memory/initialization/start
+POST /memory/initialization/resume
+```
+
+The routes require an Admin session. State-changing requests require the
+validated Admin Origin and `X-CSRF-Token`. Vault selection is derived from the
+current Admin scope; handlers do not accept an arbitrary `vault_id`.
+
+The status and preview response includes the initialization phase, legacy
+record/file counts, durable manifest progress, task state, resumability and a
+safe error code. `start` and `resume` require
+`{"confirm_discard_legacy_memory":true}`. A newly accepted task returns
+`202 Accepted`; `ready` returns an idempotent status without touching new
+memory units. A failed task is resumable only when `task.resumable` is true.
+Normal service restart does not start cleanup. Maintenance Offline keeps these
+status, confirmation and resume routes available while ordinary Admin writes
+and data-plane writes remain blocked.
+
 ## 2. Vault binding
 
 Data-plane endpoints identify one Vault:
@@ -575,65 +600,23 @@ Output:
 
 ### 6.7 `recall`
 
-Purpose: retrieve durable context useful for the current task, not documents that merely contain the query.
+Purpose: retrieve complete current context useful for a task. Requires `memory:read`; automatic units, their navigation pointers and related notes additionally require `vault:read`.
 
-Scope: `memory:read`.
+Input includes `query`, optional `context.paths/entities/recent_topics` ranking hints, exact `source_path`, optional types/validity/importance filters and budgets. Defaults: `max_tokens:4096`, `max_results:12`, `max_related_notes:4`; maximum Token budget: 32000. Context hints do not exclude other scopes. There is no project registry or historical flag.
 
-The complete schema and ranking behavior are in `memory-system.md`.
+Output contains `memories` with complete original bodies, ownership, revision, optional metadata and current source coordinates; `pointers` for complete units exceeding the remaining budget; and separately typed `related_notes` with current source navigation. Read a pointer using `get_memory`; use `read_note` for original note evidence. Descriptions and snippets do not establish that the source answers the task.
 
-Input includes query, optional current project/entities/topics, kind filters,
-validity point, importance threshold, result/token budgets, and source/score
-options. There is no historical flag.
-
-Output keeps two collections distinct:
-
-- `memories`: current atomic durable memories with ownership, optional kind,
-  confidence/importance/validity and source paths (scores and complete provenance in detailed mode);
-- `related_notes`: note cues with stable file ID, current readable path, the
-  analyzed revision, title, bounded matching snippet and resource URI (tags/topics/headings and score in detailed mode). Before a rebuild, path may already reflect a move
-  while revision still identifies the projection that produced the snippet.
-
-`related_notes` is populated only when the credential also has `vault:read`.
-The caller may bound it independently with `max_related_notes`. A cue is not an
-accepted fact; the Agent reads the canonical note before relying on exact
-details.
-
-With include_details:true the response also contains `candidate_memory_count`,
-`relevant_memory_count`, `available_memory_count`,
-`available_related_note_count`, `available_result_count`, `truncated`,
-`degraded`, and `retrieval_profile_hash`. `score` is a calibrated fusion value;
-`semantic_cosine`, when requested, is a separate raw component. Recall may
-return an empty array, skips complete objects that exceed the remaining budget,
-and never translates the query or invokes a generative model.
+Detailed mode retains bounded authorized candidate/eligibility counts, available counts, `truncated`, `degraded`, diagnostic metadata and score components. Scores rank candidates; a raw semantic cosine is not a correctness probability. The complete serialized service result is budgeted, including provenance and navigation. No body is clipped. Normal recall never invokes a generative model, translates the query with a model or scans canonical files.
 
 ### 6.8 `get_memory`
 
-Purpose: inspect one durable memory and its provenance.
+Purpose: read a known complete current unit and its provenance. Input: memory ID. Requires `memory:read`, plus `vault:read` for automatic units.
 
-Scope: `memory:read`.
-
-Input: memory ID.
-
-For a note source, `file_id`, exact source hash, and set eligibility identify
-current evidence while `path` is resolved from the current active file. A move
-therefore returns its new path without generation. A changed/deleted source's
-old item behaves as not found.
-
-Output includes ownership, canonical Markdown path/revision, and current
-sources. A known legacy/deleted/historical ID returns not found.
+Source eligibility uses stable File ID and exact full-source hash. Same-identity moves resolve the new path; changed/deleted sources and old/legacy IDs return not found. Output includes exact body, ownership, canonical file/revision and current source paths, headings and line coordinates. It is the explicit full-read operation for oversized recall pointers.
 
 ### 6.9 `list_memories`
 
-Purpose: browse memory records deliberately; not a replacement for recall.
-
-Scope: `memory:read`.
-
-Filters:
-
-- kind;
-- tag/entity;
-- current active source path;
-- limit/cursor.
+Purpose: deliberate browsing of current units, not task ranking. The same ownership/permission/source eligibility as get applies before paging. Filters include optional type, tag/entity, exact current source path and limit/cursor. Cursors remain Vault-scoped. No historic identities are exposed.
 
 ### 6.10 `create_note`
 
@@ -788,6 +771,14 @@ owning set without the item and pauses automatic extraction for that source.
 The response contains deletion metadata, not the deleted body. There is no
 archive/restore mode.
 
+### 6.19 `get_memory_overview`
+
+Purpose: navigate current memory units by source/directory/topic before reading exact bodies. Requires `memory:read`; automatic entries additionally require `vault:read`.
+
+Input: optional exact `source_path`, directory `path_prefix`, `topic_ids`, `after_id`, `limit` (default 40) and `max_tokens` (default 4096). `path_prefix` respects directory boundaries. `topic_ids` resolves current knowledge-map memberships; it does not create a project configuration.
+
+Output: `navigation_kind`, separately marked `generated_sections`, current `entries` with IDs/revisions/source coordinates/resource URIs, directory groups, scoped counts, `next_after_id`, `truncated`, and `degraded`. Generated descriptions are navigation only. Missing or invalid cache dependencies fall back to current deterministic entries without a model call. Read bodies using `get_memory`, and original notes using `read_note`.
+
 ## 7. MCP resources
 
 Expose resources in addition to tools for hosts that use them.
@@ -811,11 +802,10 @@ Resource lists and reads:
 - include revision/cache metadata;
 - never enumerate another Vault.
 
-Both memory resources are backed only by `memory_current_items` eligibility.
+Both memory resources use only v3 `memory_units` current eligibility.
 `vault://memory/{memory_id}` returns not found for replaced, deleted,
 source-invalidated, or legacy IDs even when the caller has Vault history
-permission. `vault://memory/context` is a compact budgeted projection of
-relevant current items; it never reads legacy summaries or raw artifacts.
+permission. `vault://memory/context` returns the bounded current overview; generated descriptions remain separate from original evidence. It never reads legacy summaries or raw artifacts.
 
 Tools remain available because not all MCP hosts automatically include resources.
 
@@ -1176,54 +1166,24 @@ POST   /api/v1/maintenance/recover
 `oauth_authorization_server_metadata_url` derived from the configured public
 data origin; no value is derived from an untrusted request `Host` header.
 
-#### Current memory Admin contract (normative v2.2)
+#### Current memory Admin contract (v3)
 
-`POST /memories` directly creates an explicit current memory and returns the
-same `RememberResult` shape as MCP. `PATCH /memories/{id}` requires
-`expected_revision` in the JSON body and applies only to explicit memory.
-Omitted optional patch fields preserve their value; a JSON `null` explicitly
-clears kind, importance, confidence, or validity, and an empty array clears
-tags/entities. `DELETE` always deletes current state. A note-derived deletion
-returns `source_extraction_paused: true` after removing its exact contributions from all known supporting sets and pausing those sources.
+`POST /memories` stores an exact explicit body. Optional `source_memory:{id,expected_revision}` copies current provenance from a selected unit into this new explicit assertion; stale/cross-Vault IDs are rejected. `PATCH /memories/{id}` requires `expected_revision` and applies only to explicit units. Omitted fields preserve metadata; supported nullable fields clear on explicit null. `DELETE` deletes the current file or rewrites its source set; automatic deletion pauses only that source and preserves other current units.
 
-`GET /memory/extraction` returns `contract:
-"current_formal_memories_v2_2"`, typed policy/revision, one extraction
-`readiness`, and the one-call/full-set/fail-closed behavior summary. `POST
-/memory/extraction/run` accepts `include_evaluated`; `true` is an explicit
-cost-bearing forced re-evaluation. `POST
-/memory/extraction/sources/{file_id}/resume` requires
-`expected_set_revision`, clears only the source pause, and queues a forced
-current-set extraction.
+`GET/PUT /memory/extraction` returns `contract:"source_preserving_memory_units_v3"`, typed policy/revision, readiness, `generation` state and a per-batch/complete-source-set behavior summary. Policy fields are `enabled` and `request_timeout_seconds`. `POST /memory/extraction/run` accepts `include_evaluated`; true explicitly forces fresh processing with additional model cost. `GET /memory/extraction/sources` pages paused source sets. `POST /memory/extraction/sources/{file_id}/resume` requires `expected_set_revision` and requests fresh selection.
 
-Migration is an authenticated state change. Preflight returns only counts,
-ambiguous IDs, and a content-free digest, never memory bodies. The confirmation
-hash binds every legacy field consumed by migration, is rechecked under the
-per-Vault write lock, and becomes stale even when content changes without
-changing classification counts. Execute requires exact confirmation
-`MIGRATE_MEMORY_V2_1`, preserves reliably classified explicit IDs, reports
-mixed/unsupported rows, does not delete legacy rows, and may enqueue full note
-regeneration when the extraction model is ready.
+`GET /memory/generation` returns initialization readiness, runtime pause and dependency generations, current counts, extraction/overview job state and recent source batch/skipped-unit progress. `POST /memory/generation` accepts `action:"run"|"pause"|"resume"`, requires Admin session/origin/CSRF and records a content-free audit event. Resume preserves validated batch checkpoints and admits full current-source backfill when automatic extraction is enabled.
 
-Memory embedding status/rebuild validates exact current object content,
-profile, prepared-input hash, model, dimension, and projection version. Jobs
-carry reference metadata rather than memory bodies.
+`GET /memory/overview` accepts `source_path`, `path_prefix`, comma-separated `topic_ids`, `after_id`, `limit`, `max_tokens` and returns the same navigation contract as the MCP tool. It never invokes a model. Memory embedding status/rebuild validates current content, profile, prepared input, model, dimension and projection version independently of extraction.
 
-#### Superseded prerelease memory API notes (non-normative)
-
-Archive/restore/merge, source-health audit, two-phase extraction,
-consolidation, retrieval-backfill, pipeline-reset, and candidate-review routes
-are not registered. Requests receive normal route-not-found behavior. Legacy
-terminal jobs may remain in bounded Admin history and are labeled retired, but
-cannot be retried into an executable handler. Their detailed wire formats are
-preserved only in superseded ADRs and released migrations.
+No organization, merge, legacy migration preflight/execute, synthetic calibration, candidate-review, archive, supersession or pipeline-reset route is registered. The authenticated Admin initialization routes and offline-exclusive CLI both require explicit predecessor-memory discard confirmation and never convert predecessor data. The Admin worker first persists a Vault-scoped manifest, terminalizes only Core intents proven wholly inside `_mcp-vault/memory/` without replaying them, then retires those manifest files through Vault Core with exact hash guards; cross-boundary or unclassifiable journals fail closed. New and retained public tool names use the explicit v3 prerelease contract recorded by ADR-0033.
 
 `GET /api/v1/index/status` and the dashboard return `indexed_notes`,
 `total_notes`, and a nullable numeric `coverage_ratio`; the structured
 `coverage` object remains the detailed analyzer/degradation record. A zero-note
 Vault reports an unknown ratio rather than a false `0%` failure.
 
-The v2.1 extraction endpoint returns the typed policy, optimistic revision, one
-extraction-model readiness object, and explicit one-call/full-set behavior.
+The v3 extraction endpoint returns the typed policy, optimistic revision, model readiness and explicit checkpointed-batch/full-set behavior.
 Manual admission requires extraction enabled, Provider policy enabled, and the
 `memory_extraction` role usable. `GET /api/v1/jobs` accepts optional `status`
 and exact `job_type` filters. Completed jobs project progress ratio `1.0`;
@@ -1241,7 +1201,7 @@ Vault-scoped and uses the same redacted `job_summary` contract as
 Current full-Vault extraction progress reports `phase`, `completed`, `total`,
 `current_index`, `current_path`, `last_completed_path`, `note_started_at`,
 `last_note_elapsed_ms`, `notes_evaluated`, `items_published`,
-`empty_sets_published`, `source_policy_skipped`,
+`empty_sets_published`, `completed_batches`, `pending_batches`, `source_policy_skipped`,
 `already_evaluated_skipped`, `source_ingestion_failures`, bounded
 `source_ingestion_failure_notes`, `generated_output_failures`, bounded
 `generated_output_failure_notes`, and nullable `error_code`.
@@ -1256,9 +1216,7 @@ code, and elapsed time; generated-output diagnostics may additionally contain
 trusted `schema_issue`/`schema_path`. A source-ingestion failure occurs before a
 Provider call and includes missing, unreadable, over-512-KiB, and non-UTF-8
 notes. A generated-output failure occurs after a Provider call and includes
-missing/invalid `memories`, invalid required content, or bounded set-output
-violations. Invalid optional kinds/tags are discarded with a bounded,
-content-free warning rather than discarding valid content. Responses
+missing/invalid `selections`, fabricated IDs, invalid kinds/hints or bounded selection-output violations. Invalid output is rejected as a complete batch. Responses
 and logs never expose arbitrary payloads, note content, prompts, Provider
 response text, or secrets.
 
@@ -1377,23 +1335,6 @@ remains available for recovery.
 - Database schema versions are independent from public API versions.
 
 
-## Current memory preparation and section diagnostics
+## V3 cutover compatibility exception
 
-Admin adds read-only per-channel preparation status, bounded run/retry and maintenance operations, and an independently paginated paused-source collection. Explicit PATCH preserves omitted metadata. MCP section evidence identifies a winning current projection chunk and its byte interval; offsets are not Markdown line numbers. Recall estimates the complete serialized response budget.
-
-The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
-specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).
-
-The extraction response additionally includes read-only `dedup` state: `adopted`
-(boolean), `pending_pairs`, `checked_pairs`, `status` and `retry_at` (epoch
-milliseconds). `covered_candidates` means the bounded candidate pass finished;
-it is not a global semantic-uniqueness claim. No run/approve action is required.
-Memory objects include `source_count`; compact list/recall responses include up to
-8 source paths. `get_memory`/details returns all bounded provenance, including
-File ID and revision. Multi-source objects omit the legacy single `note_set_id`.
-Absorbed IDs return not found and never redirect update or delete.
-
-Memory lists order by stable ID. MCP emits Vault-bound `memory:<vault>:<id>`
-cursors and continues to accept prior `offset:` cursors. Admin accepts `after_id`
-and emits `next_cursor` while retaining `next_offset` for older clients. The
-Admin memory page follows ID cursors sequentially and deduplicates visible IDs.
+ADR-0033 explicitly replaces the prerelease memory contract without old data conversion. Historical SQL migrations retain their checksums; current runtime formats and interfaces do not accept old memory ownership, merging or calibration contracts. Existing deployments require offline initialization before v3 memory access. WebDAV, ordinary knowledge APIs, account credentials and Provider/model configuration retain their established contracts.

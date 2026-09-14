@@ -159,11 +159,15 @@ mod tests {
                     .unwrap();
             assert_eq!(actual, expected);
         }
-        let version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
-            .fetch_one(&store)
-            .await
-            .unwrap();
-        assert_eq!(version, 23);
+        let applied_versions: Vec<i64> = sqlx::query_scalar(
+            "SELECT version FROM _sqlx_migrations WHERE success=1 ORDER BY version",
+        )
+        .fetch_all(&store)
+        .await
+        .unwrap();
+        let embedded_versions: Vec<i64> =
+            MIGRATOR.iter().map(|migration| migration.version).collect();
+        assert_eq!(applied_versions, embedded_versions);
     }
     #[tokio::test]
     async fn unknown_checksum_and_known_checksum_with_schema_drift_fail_closed() {

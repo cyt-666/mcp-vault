@@ -2,7 +2,7 @@
 
 Accepted ADRs are binding unless superseded by a later ADR.
 
-The current sequence includes ADR-0026. ADR-0013 keeps ADR-0007 durable memories
+The current sequence includes ADR-0032. ADR-0013 keeps ADR-0007 durable memories
 canonical and provenanced while allowing `recall` to return separately typed,
 rebuildable ordinary-note cues. ADR-0014 replaced model self-score/routine
 review defaults with exact evidence and autonomous promotion. ADR-0015 retains
@@ -80,3 +80,16 @@ See [ADR-0028](0028-model-guided-chunks-and-diagnostic-evaluation.md).
 - [ADR-0030: Automatic memory equivalence](0030-automatic-memory-equivalence.md)
   amends current source ownership for verified multi-source formal memories;
   implementation and acceptance are tracked in the active deduplication ExecPlan.
+
+
+- [ADR-0031: Incremental memory organization](0031-incremental-memory-organization.md)
+  replaces all-pairs scheduling with bounded, persistent contribution work.
+- [ADR-0032: Lossless memory consolidation](0032-lossless-memory-consolidation.md)
+  adds per-fact provenance and directional support/coverage verification while
+  retaining incremental scheduling and canonical source contributions.
+
+- [ADR-0033: Source-preserving memory units](0033-source-preserving-memory-units.md)
+  supersedes generated automatic bodies, formal consolidation and legacy conversion with complete source units, separate navigation and an exclusive offline discard.
+- [ADR-0034: Replayed create witness recovery](0034-replayed-create-witness-recovery.md)
+  adds a transactionally verified `superseded` terminal state for a replayed
+  create whose canonical result was later claimed by another File ID.

@@ -109,6 +109,12 @@ pub enum JournalState {
     RolledBack,
     /// Recovery could not prove old or new state.
     NeedsReview,
+    /// A replayed create was proven to have been superseded by a later
+    /// metadata commit with the same canonical result.
+    Superseded,
+    /// Explicit legacy-memory initialization discarded this old intent after
+    /// proving every canonical path remained inside the predecessor namespace.
+    Discarded,
 }
 
 impl JournalState {
@@ -120,6 +126,8 @@ impl JournalState {
             Self::MetadataCommitted => "metadata_committed",
             Self::RolledBack => "rolled_back",
             Self::NeedsReview => "needs_review",
+            Self::Superseded => "superseded",
+            Self::Discarded => "discarded",
         }
     }
 
@@ -130,6 +138,8 @@ impl JournalState {
             "metadata_committed" => Ok(Self::MetadataCommitted),
             "rolled_back" => Ok(Self::RolledBack),
             "needs_review" => Ok(Self::NeedsReview),
+            "superseded" => Ok(Self::Superseded),
+            "discarded" => Ok(Self::Discarded),
             _ => Err(StateError::InvalidInput("stored journal state is invalid")),
         }
     }
@@ -243,6 +253,16 @@ pub struct JournalRecord {
     pub error: Option<String>,
 }
 
+/// Aggregate view of unresolved journal work for diagnostics, including
+/// rows marked for operator review. It deliberately excludes payloads,
+/// paths, and recovery error text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IncompleteJournalSummary {
+    pub operation: FileOperation,
+    pub state: JournalState,
+    pub count: u64,
+}
+
 /// Outbox payload inserted atomically with a file revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutboxEventInput {
@@ -281,6 +301,34 @@ pub struct PrepareOperationInput {
     pub payload: Value,
     /// Optional client idempotency key.
     pub idempotency_key: Option<String>,
+}
+
+/// Evidence used to adjudicate one replayed create journal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SupersedeCreateWitness {
+    /// Old file-committed journal to adjudicate.
+    pub operation_id: OperationId,
+    /// Exact canonical destination path.
+    pub path: VaultPath,
+    /// File ID recorded by the old journal.
+    pub prior_file_id: FileId,
+    /// Later File ID currently owning the path.
+    pub replacement_file_id: FileId,
+    /// Current revision that proves the later create.
+    pub replacement_revision: Revision,
+    /// Hash recomputed from the physical canonical file.
+    pub physical_hash: String,
+}
+
+/// Result of a replayed-create witness check.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SupersedeCreateResult {
+    /// The old journal was transitioned to `superseded`.
+    Applied,
+    /// The old journal was already transitioned by an earlier identical call.
+    AlreadyApplied,
+    /// The complete witness could not be proven.
+    NotProven,
 }
 
 /// Inputs for one conditional metadata/revision commit.
@@ -1163,6 +1211,102 @@ impl FileStateRepository {
         rows.into_iter().map(row_to_journal).collect()
     }
 
+    /// List rows explicitly held for operator review. They are never returned
+    /// by `list_incomplete`, so ordinary recovery cannot retry them silently.
+    pub async fn list_needs_review(
+        &self,
+        context: &VaultContext,
+    ) -> Result<Vec<JournalRecord>, StateError> {
+        let rows = sqlx::query_as::<_, JournalRow>(
+            "SELECT id, vault_id, operation, state, source_path,
+                    destination_path, prior_file_id, expected_revision,
+                    prior_hash, proposed_hash, temp_path, payload_json,
+                    idempotency_key, created_at, updated_at, error
+             FROM operation_journal
+             WHERE vault_id = ? AND state = 'needs_review'
+             ORDER BY created_at ASC",
+        )
+        .bind(context.id().to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_journal).collect()
+    }
+
+    /// Terminalize old Core intents selected by the explicit legacy-memory
+    /// initialization flow. Vault Core must first prove their path scope and
+    /// remove any journal-owned temporary files. This CAS never changes the
+    /// canonical file, revision, audit, or outbox state.
+    pub async fn discard_legacy_memory_journals(
+        &self,
+        context: &VaultContext,
+        journals: &[JournalRecord],
+    ) -> Result<(), StateError> {
+        if journals.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        for journal in journals {
+            if journal.vault_id != context.id()
+                || !matches!(
+                    journal.state,
+                    JournalState::Prepared
+                        | JournalState::FileCommitted
+                        | JournalState::NeedsReview
+                )
+            {
+                return Err(StateError::InvalidInput(
+                    "legacy memory journal is outside the discardable state",
+                ));
+            }
+            let updated = sqlx::query(
+                "UPDATE operation_journal
+                 SET state='discarded',error='discarded by legacy memory initialization',updated_at=?
+                 WHERE vault_id=? AND id=? AND state=? AND updated_at=?",
+            )
+            .bind(now_millis()?)
+            .bind(context.id().to_string())
+            .bind(journal.id.to_string())
+            .bind(journal.state.as_str())
+            .bind(journal.updated_at)
+            .execute(&mut *tx)
+            .await?;
+            if updated.rows_affected() != 1 {
+                return Err(StateError::Conflict);
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Aggregate unresolved journal rows by trusted operation and lifecycle,
+    /// including rows marked for operator review. This query never reads the
+    /// journal payload or free-form error column.
+    pub async fn summarize_incomplete(
+        &self,
+        context: &VaultContext,
+    ) -> Result<Vec<IncompleteJournalSummary>, StateError> {
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT operation, state, count(*)
+             FROM operation_journal
+             WHERE vault_id = ? AND state IN ('prepared', 'file_committed', 'needs_review')
+             GROUP BY operation, state
+             ORDER BY operation ASC, state ASC",
+        )
+        .bind(context.id().to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|(operation, state, count)| {
+                Ok(IncompleteJournalSummary {
+                    operation: FileOperation::parse(&operation)?,
+                    state: JournalState::parse(&state)?,
+                    count: u64::try_from(count)
+                        .map_err(|_| StateError::InvalidInput("journal count is negative"))?,
+                })
+            })
+            .collect()
+    }
+
     /// Mark a journal row safely rolled back.
     pub async fn mark_rolled_back(
         &self,
@@ -1188,6 +1332,294 @@ impl FileStateRepository {
             Some(error),
         )
         .await
+    }
+
+    /// Verify and terminally adjudicate a replayed create journal.
+    ///
+    /// This automatic form only accepts a still `file_committed` row. The
+    /// explicit maintenance repair form below is for a row already marked
+    /// `needs_review` by an earlier recovery attempt.
+    pub async fn supersede_replayed_create(
+        &self,
+        context: &VaultContext,
+        witness: &SupersedeCreateWitness,
+    ) -> Result<SupersedeCreateResult, StateError> {
+        self.supersede_replayed_create_inner(context, witness, false)
+            .await
+    }
+
+    /// Verify and adjudicate a previously reviewed replayed create.
+    ///
+    /// Callers must expose this only through an explicit, authenticated
+    /// maintenance repair flow. The prior error marker is checked so an
+    /// unrelated `needs_review` row cannot be silently cleared.
+    pub async fn supersede_reviewed_replayed_create(
+        &self,
+        context: &VaultContext,
+        witness: &SupersedeCreateWitness,
+    ) -> Result<SupersedeCreateResult, StateError> {
+        self.supersede_replayed_create_inner(context, witness, true)
+            .await
+    }
+
+    async fn supersede_replayed_create_inner(
+        &self,
+        context: &VaultContext,
+        witness: &SupersedeCreateWitness,
+        allow_reviewed: bool,
+    ) -> Result<SupersedeCreateResult, StateError> {
+        let _write_permit = self.acquire_write_permit().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let journal = sqlx::query_as::<_, JournalRow>(
+            "SELECT id, vault_id, operation, state, source_path,
+                    destination_path, prior_file_id, expected_revision,
+                    prior_hash, proposed_hash, temp_path, payload_json,
+                    idempotency_key, created_at, updated_at, error
+             FROM operation_journal
+             WHERE vault_id = ? AND id = ?",
+        )
+        .bind(context.id().to_string())
+        .bind(witness.operation_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(journal) = journal else {
+            return Ok(SupersedeCreateResult::NotProven);
+        };
+        let prior_id = witness.prior_file_id.to_string();
+        let replacement_id = witness.replacement_file_id.to_string();
+        let replacement_revision = witness.replacement_revision.as_i64()?;
+        let state = JournalState::parse(&journal.state)?;
+        let eligible = state == JournalState::FileCommitted
+            || (allow_reviewed
+                && state == JournalState::NeedsReview
+                && journal.error.as_deref()
+                    == Some("recovery metadata destination already exists"));
+        if !eligible {
+            return if state == JournalState::Superseded {
+                Ok(SupersedeCreateResult::AlreadyApplied)
+            } else {
+                Ok(SupersedeCreateResult::NotProven)
+            };
+        }
+
+        // The payload is part of the original operation witness. Do not infer
+        // require_absent or File ID from mutable replacement metadata.
+        let payload: Value = match serde_json::from_str(&journal.payload_json) {
+            Ok(payload) => payload,
+            Err(_) => return Ok(SupersedeCreateResult::NotProven),
+        };
+        let payload_operation = payload.get("operation").and_then(Value::as_str);
+        let payload_file_id = payload.get("file_id").and_then(Value::as_str);
+        let payload_path = payload.get("path").and_then(Value::as_str);
+        let payload_hash = payload.get("content_hash").and_then(Value::as_str);
+        let payload_size = payload.get("size").and_then(Value::as_u64);
+        if journal.vault_id != context.id().to_string()
+            || journal.operation != FileOperation::Create.as_str()
+            || journal.destination_path.as_deref() != Some(witness.path.as_str())
+            || journal
+                .source_path
+                .as_deref()
+                .is_some_and(|source| source != witness.path.as_str())
+            || journal.prior_file_id.as_deref() != Some(prior_id.as_str())
+            || journal.expected_revision.is_some()
+            || journal.prior_hash.is_some()
+            || journal.proposed_hash.as_deref() != Some(witness.physical_hash.as_str())
+            || payload_operation != Some(FileOperation::Create.as_str())
+            || payload_file_id != Some(prior_id.as_str())
+            || payload_path != Some(witness.path.as_str())
+            || payload_hash != Some(witness.physical_hash.as_str())
+            || payload.get("operation_id").and_then(Value::as_str)
+                != Some(witness.operation_id.to_string().as_str())
+            || payload.get("entry_type").and_then(Value::as_str) != Some(EntryType::File.as_str())
+            || payload.get("path_before") != Some(&Value::Null)
+            || payload.get("path_after").and_then(Value::as_str) != Some(witness.path.as_str())
+            || payload.get("deleted_at") != Some(&Value::Null)
+            || payload.get("require_absent").and_then(Value::as_bool) != Some(true)
+        {
+            return Ok(SupersedeCreateResult::NotProven);
+        }
+
+        let entry_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM file_entries WHERE vault_id = ? AND id = ?")
+                .bind(context.id().to_string())
+                .bind(&prior_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        let revision_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM file_revisions WHERE vault_id = ? AND file_id = ?",
+        )
+        .bind(context.id().to_string())
+        .bind(&prior_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if entry_count != 0 || revision_count != 0 {
+            return Ok(SupersedeCreateResult::NotProven);
+        }
+
+        let active: Option<(String, i64, Option<String>, String, i64)> = sqlx::query_as(
+            "SELECT id, current_revision, content_hash, entry_type, size
+             FROM file_entries
+             WHERE vault_id = ? AND path = ? AND deleted_at IS NULL",
+        )
+        .bind(context.id().to_string())
+        .bind(witness.path.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some((active_id, active_revision, active_hash, active_type, active_size)) = active
+        else {
+            return Ok(SupersedeCreateResult::NotProven);
+        };
+        if active_id != replacement_id
+            || active_id == prior_id
+            || active_revision != replacement_revision
+            || active_hash.as_deref() != Some(witness.physical_hash.as_str())
+            || active_type != EntryType::File.as_str()
+            || payload_size != Some(active_size as u64)
+        {
+            return Ok(SupersedeCreateResult::NotProven);
+        }
+
+        let replacement_revision: Option<ReplacementRevisionWitness> = sqlx::query_as(
+            "SELECT operation, path_before, path_after, content_hash, size, created_at
+                 FROM file_revisions
+                 WHERE vault_id = ? AND file_id = ? AND revision = ?",
+        )
+        .bind(context.id().to_string())
+        .bind(&replacement_id)
+        .bind(replacement_revision)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some((
+            operation,
+            path_before,
+            path_after,
+            revision_hash,
+            revision_size,
+            revision_created_at,
+        )) = replacement_revision
+        else {
+            return Ok(SupersedeCreateResult::NotProven);
+        };
+        if operation != FileOperation::Create.as_str()
+            || path_before.is_some()
+            || path_after.as_deref() != Some(witness.path.as_str())
+            || revision_hash.as_deref() != Some(witness.physical_hash.as_str())
+            || revision_size != Some(active_size)
+        {
+            return Ok(SupersedeCreateResult::NotProven);
+        }
+
+        let replacement_journals: Vec<WitnessJournalRow> = sqlx::query_as(
+            "SELECT id, source_path, destination_path, prior_file_id,
+                    expected_revision, prior_hash, proposed_hash,
+                    payload_json, created_at, updated_at
+             FROM operation_journal
+             WHERE vault_id = ? AND operation = 'create'
+               AND state = 'metadata_committed' AND destination_path = ?
+               AND id != ?",
+        )
+        .bind(context.id().to_string())
+        .bind(witness.path.as_str())
+        .bind(witness.operation_id.to_string())
+        .fetch_all(&mut *transaction)
+        .await?;
+        let replacement_proven = replacement_journals.into_iter().find(|candidate| {
+            if candidate
+                .source_path
+                .as_deref()
+                .is_some_and(|source| source != witness.path.as_str())
+                || candidate.destination_path.as_deref() != Some(witness.path.as_str())
+                || candidate.prior_file_id.as_deref() != Some(replacement_id.as_str())
+                || candidate.expected_revision.is_some()
+                || candidate.prior_hash.is_some()
+                || candidate.proposed_hash.as_deref() != Some(witness.physical_hash.as_str())
+                || candidate.updated_at != revision_created_at
+                || candidate.created_at <= journal.created_at
+                || candidate.created_at > revision_created_at
+            {
+                return false;
+            }
+            let Ok(payload) = serde_json::from_str::<Value>(&candidate.payload_json) else {
+                return false;
+            };
+            let candidate_size = payload.get("size").and_then(Value::as_u64);
+            payload.get("operation").and_then(Value::as_str) == Some(FileOperation::Create.as_str())
+                && payload.get("file_id").and_then(Value::as_str) == Some(replacement_id.as_str())
+                && payload.get("path").and_then(Value::as_str) == Some(witness.path.as_str())
+                && payload.get("entry_type").and_then(Value::as_str)
+                    == Some(EntryType::File.as_str())
+                && payload.get("path_before") == Some(&Value::Null)
+                && payload.get("path_after").and_then(Value::as_str) == Some(witness.path.as_str())
+                && payload.get("deleted_at") == Some(&Value::Null)
+                && payload.get("require_absent").and_then(Value::as_bool) == Some(true)
+                && payload.get("operation_id").and_then(Value::as_str)
+                    == Some(candidate.id.as_str())
+                && candidate_size == Some(active_size as u64)
+                && payload.get("content_hash").and_then(Value::as_str)
+                    == Some(witness.physical_hash.as_str())
+        });
+        let Some(replacement_proven) = replacement_proven else {
+            return Ok(SupersedeCreateResult::NotProven);
+        };
+
+        let unfinished_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM operation_journal
+             WHERE vault_id = ? AND (source_path = ? OR destination_path = ?) AND id != ?
+               AND state IN ('prepared', 'file_committed', 'needs_review')",
+        )
+        .bind(context.id().to_string())
+        .bind(witness.path.as_str())
+        .bind(witness.path.as_str())
+        .bind(witness.operation_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if unfinished_count != 0 {
+            return Ok(SupersedeCreateResult::NotProven);
+        }
+
+        let now = now_millis()?;
+        let updated = sqlx::query(
+            "UPDATE operation_journal
+             SET state = 'superseded', updated_at = ?,
+                 error = 'superseded by verified later create'
+             WHERE vault_id = ? AND id = ? AND state = ?",
+        )
+        .bind(now)
+        .bind(context.id().to_string())
+        .bind(witness.operation_id.to_string())
+        .bind(state.as_str())
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Ok(SupersedeCreateResult::NotProven);
+        }
+        let metadata = serde_json::json!({
+            "reason": "verified_later_create",
+            "operation_id": witness.operation_id,
+            "replacement_operation_id": replacement_proven.id,
+            "replacement_file_id": witness.replacement_file_id,
+            "replacement_revision": witness.replacement_revision,
+            "content_hash": witness.physical_hash,
+        });
+        sqlx::query(
+            "INSERT INTO audit_log
+             (id, occurred_at, request_id, vault_id, plane, actor_type,
+              actor_id, action, target_type, target_id, target_path_hash,
+              result, metadata_json)
+             VALUES (?, ?, NULL, ?, 'system', 'system', NULL,
+                     'file.recovery_superseded', 'operation_journal', ?, ?,
+                     'success', ?)",
+        )
+        .bind(mcp_vault_domain::EventId::new().to_string())
+        .bind(now)
+        .bind(context.id().to_string())
+        .bind(witness.operation_id.to_string())
+        .bind(path_hash(&witness.path))
+        .bind(serde_json::to_string(&metadata)?)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(SupersedeCreateResult::Applied)
     }
 
     async fn mark_terminal(
@@ -1297,6 +1729,29 @@ struct JournalRow {
     updated_at: i64,
     error: Option<String>,
 }
+
+#[derive(Debug, FromRow)]
+struct WitnessJournalRow {
+    id: String,
+    source_path: Option<String>,
+    destination_path: Option<String>,
+    prior_file_id: Option<String>,
+    expected_revision: Option<i64>,
+    prior_hash: Option<String>,
+    proposed_hash: Option<String>,
+    payload_json: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+type ReplacementRevisionWitness = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    i64,
+);
 
 fn row_to_file(row: FileRow) -> Result<FileRecord, StateError> {
     Ok(FileRecord {

@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
 use mcp_vault_domain::{
-    ActorId, DomainError, MemoryConsolidationId, MemoryId, MemoryRawId, MemoryRetrievalProposalId,
-    ModelId, ProviderId, Revision, VaultContext, VaultId, VaultSlug, WritePrecondition,
+    ActorId, ActorType, DomainError, FileId, OperationId, Revision, SourcePlane, VaultContext,
+    VaultId, VaultPath, VaultSlug, WritePrecondition,
 };
 use mcp_vault_state::{
-    MemoryBundle, MemoryConsolidationProposalRecord, MemoryFilter, MemoryRecord,
-    MemoryRetrievalMetadataRecord, MemoryRetrievalProposalRecord, MemoryStage1OutputRecord,
-    StateStore, VaultAvailability, VaultRepository, VaultStatus, memory_search_terms,
+    CommitMutationInput, EntryType, FileOperation, NoopCommitHook, PrepareOperationInput,
+    StateStore, SupersedeCreateResult, SupersedeCreateWitness, VaultAvailability, VaultRepository,
+    VaultStatus,
 };
 use serde_json::json;
 
@@ -32,6 +32,438 @@ async fn insert(repository: &VaultRepository, context: &VaultContext) {
         .insert(context, context.slug().as_str(), VaultStatus::Active)
         .await
         .unwrap();
+}
+
+fn create_payload(
+    operation_id: OperationId,
+    file_id: FileId,
+    path: &VaultPath,
+    hash: &str,
+    size: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "operation_id": operation_id,
+        "file_id": file_id,
+        "entry_type": "file",
+        "operation": "create",
+        "path": path,
+        "path_before": serde_json::Value::Null,
+        "path_after": path,
+        "expected_revision": serde_json::Value::Null,
+        "prior_hash": serde_json::Value::Null,
+        "require_absent": true,
+        "content_hash": hash,
+        "size": size,
+        "deleted_at": serde_json::Value::Null,
+    })
+}
+
+async fn replayed_create_fixture() -> (
+    StateStore,
+    VaultContext,
+    VaultPath,
+    FileId,
+    FileId,
+    OperationId,
+    OperationId,
+    String,
+) {
+    let store = store().await;
+    let context = context("witness", "/srv/witness");
+    insert(&store.vaults(), &context).await;
+    let path = VaultPath::parse("_mcp-vault/memory/current/facts/fact.md").unwrap();
+    let hash = "a".repeat(64);
+    let size = 7_u64;
+    let old_file = FileId::new();
+    let old_operation = OperationId::new();
+    store
+        .files()
+        .prepare_operation(
+            &context,
+            PrepareOperationInput {
+                id: old_operation,
+                operation: FileOperation::Create,
+                source_path: Some(path.clone()),
+                destination_path: Some(path.clone()),
+                prior_file_id: Some(old_file),
+                expected_revision: None,
+                prior_hash: None,
+                proposed_hash: Some(hash.clone()),
+                temp_path: Some(VaultPath::parse("_mcp-vault/.tmp/fact").unwrap()),
+                payload: create_payload(old_operation, old_file, &path, &hash, size),
+                idempotency_key: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .files()
+        .mark_file_committed(&context, old_operation, Some(&hash))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let replacement_file = FileId::new();
+    let replacement_operation = OperationId::new();
+    store
+        .files()
+        .prepare_operation(
+            &context,
+            PrepareOperationInput {
+                id: replacement_operation,
+                operation: FileOperation::Create,
+                source_path: Some(path.clone()),
+                destination_path: Some(path.clone()),
+                prior_file_id: Some(replacement_file),
+                expected_revision: None,
+                prior_hash: None,
+                proposed_hash: Some(hash.clone()),
+                temp_path: Some(VaultPath::parse("_mcp-vault/.tmp/replacement").unwrap()),
+                payload: create_payload(
+                    replacement_operation,
+                    replacement_file,
+                    &path,
+                    &hash,
+                    size,
+                ),
+                idempotency_key: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .files()
+        .mark_file_committed(&context, replacement_operation, Some(&hash))
+        .await
+        .unwrap();
+    store
+        .files()
+        .commit_mutation(
+            &context,
+            CommitMutationInput {
+                operation_id: replacement_operation,
+                file_id: replacement_file,
+                entry_type: EntryType::File,
+                path: path.clone(),
+                path_before: None,
+                path_after: Some(path.clone()),
+                expected_revision: None,
+                require_absent: true,
+                tombstone_archive_path: None,
+                content_hash: Some(hash.clone()),
+                history_blob_hash: None,
+                size,
+                modified_at: 1,
+                filesystem_identity: None,
+                deleted_at: None,
+                operation: FileOperation::Create,
+                actor: mcp_vault_domain::Actor::new(ActorType::System, None),
+                source_plane: SourcePlane::System,
+                idempotency_key: None,
+                audit_action: "test.create".to_owned(),
+                audit_metadata: serde_json::json!({}),
+                request_id: None,
+                outbox_events: Vec::new(),
+            },
+            &NoopCommitHook,
+        )
+        .await
+        .unwrap();
+    (
+        store,
+        context,
+        path,
+        old_file,
+        replacement_file,
+        old_operation,
+        replacement_operation,
+        hash,
+    )
+}
+
+#[tokio::test]
+async fn replayed_create_witness_requires_real_source_and_temp_shape_and_is_idempotent() {
+    let (
+        store,
+        context,
+        path,
+        old_file,
+        replacement_file,
+        old_operation,
+        _replacement_operation,
+        hash,
+    ) = replayed_create_fixture().await;
+    let witness = SupersedeCreateWitness {
+        operation_id: old_operation,
+        path,
+        prior_file_id: old_file,
+        replacement_file_id: replacement_file,
+        replacement_revision: Revision::new(1),
+        physical_hash: hash,
+    };
+    assert_eq!(
+        store
+            .files()
+            .supersede_replayed_create(&context, &witness)
+            .await
+            .unwrap(),
+        SupersedeCreateResult::Applied
+    );
+    assert_eq!(
+        store
+            .files()
+            .supersede_replayed_create(&context, &witness)
+            .await
+            .unwrap(),
+        SupersedeCreateResult::AlreadyApplied
+    );
+    let journal = store.files().list_incomplete(&context).await.unwrap();
+    assert!(journal.is_empty());
+    let audits = store
+        .audit()
+        .list_for_vault(&context, Some("file.recovery_superseded"), None, 20, 0)
+        .await
+        .unwrap();
+    assert_eq!(audits.len(), 1);
+    assert!(
+        audits[0]
+            .metadata
+            .get("replacement_operation_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn explicit_legacy_memory_discard_terminalizes_only_selected_journals() {
+    let (
+        store,
+        context,
+        _path,
+        _old_file,
+        _replacement_file,
+        old_operation,
+        _replacement_operation,
+        _hash,
+    ) = replayed_create_fixture().await;
+    let incomplete = store.files().list_incomplete(&context).await.unwrap();
+    let selected = incomplete
+        .iter()
+        .find(|journal| journal.id == old_operation)
+        .unwrap()
+        .clone();
+    let unrelated_operation = OperationId::new();
+    let unrelated_file = FileId::new();
+    let unrelated_path = VaultPath::parse("ordinary.md").unwrap();
+    let unrelated_hash = "b".repeat(64);
+    store
+        .files()
+        .prepare_operation(
+            &context,
+            PrepareOperationInput {
+                id: unrelated_operation,
+                operation: FileOperation::Create,
+                source_path: Some(unrelated_path.clone()),
+                destination_path: Some(unrelated_path.clone()),
+                prior_file_id: Some(unrelated_file),
+                expected_revision: None,
+                prior_hash: None,
+                proposed_hash: Some(unrelated_hash.clone()),
+                temp_path: None,
+                payload: create_payload(
+                    unrelated_operation,
+                    unrelated_file,
+                    &unrelated_path,
+                    &unrelated_hash,
+                    1,
+                ),
+                idempotency_key: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    store
+        .files()
+        .discard_legacy_memory_journals(&context, std::slice::from_ref(&selected))
+        .await
+        .unwrap();
+    let remaining = store.files().list_incomplete(&context).await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, unrelated_operation);
+    assert!(matches!(
+        store
+            .files()
+            .discard_legacy_memory_journals(&context, std::slice::from_ref(&selected))
+            .await,
+        Err(mcp_vault_state::StateError::Conflict)
+    ));
+}
+
+#[tokio::test]
+async fn replayed_create_witness_rejects_hash_mismatch() {
+    let (
+        store,
+        context,
+        path,
+        old_file,
+        replacement_file,
+        old_operation,
+        _replacement_operation,
+        _hash,
+    ) = replayed_create_fixture().await;
+    let mismatch = SupersedeCreateWitness {
+        operation_id: old_operation,
+        path: path.clone(),
+        prior_file_id: old_file,
+        replacement_file_id: replacement_file,
+        replacement_revision: Revision::new(1),
+        physical_hash: "b".repeat(64),
+    };
+    assert_eq!(
+        store
+            .files()
+            .supersede_replayed_create(&context, &mismatch)
+            .await
+            .unwrap(),
+        SupersedeCreateResult::NotProven
+    );
+}
+
+#[tokio::test]
+async fn replayed_create_witness_rejects_wrong_replacement() {
+    let (
+        store,
+        context,
+        path,
+        old_file,
+        _replacement_file,
+        old_operation,
+        _replacement_operation,
+        hash,
+    ) = replayed_create_fixture().await;
+    let wrong_replacement = SupersedeCreateWitness {
+        operation_id: old_operation,
+        path: path.clone(),
+        prior_file_id: old_file,
+        replacement_file_id: FileId::new(),
+        replacement_revision: Revision::new(1),
+        physical_hash: hash.clone(),
+    };
+    assert_eq!(
+        store
+            .files()
+            .supersede_replayed_create(&context, &wrong_replacement)
+            .await
+            .unwrap(),
+        SupersedeCreateResult::NotProven
+    );
+}
+
+#[tokio::test]
+async fn replayed_create_witness_rejects_nonterminal_source_path_claim() {
+    let (
+        store,
+        context,
+        path,
+        old_file,
+        replacement_file,
+        old_operation,
+        _replacement_operation,
+        hash,
+    ) = replayed_create_fixture().await;
+    let conflicting_operation = OperationId::new();
+    let conflicting_file = FileId::new();
+    let other_path = VaultPath::parse("_mcp-vault/memory/current/facts/other.md").unwrap();
+    store
+        .files()
+        .prepare_operation(
+            &context,
+            PrepareOperationInput {
+                id: conflicting_operation,
+                operation: FileOperation::Move,
+                source_path: Some(path.clone()),
+                destination_path: Some(other_path),
+                prior_file_id: Some(conflicting_file),
+                expected_revision: Some(Revision::new(1)),
+                prior_hash: Some(hash.clone()),
+                proposed_hash: Some(hash.clone()),
+                temp_path: Some(VaultPath::parse("_mcp-vault/.tmp/other").unwrap()),
+                payload: json!({"operation":"move"}),
+                idempotency_key: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let witness = SupersedeCreateWitness {
+        operation_id: old_operation,
+        path,
+        prior_file_id: old_file,
+        replacement_file_id: replacement_file,
+        replacement_revision: Revision::new(1),
+        physical_hash: hash,
+    };
+    assert_eq!(
+        store
+            .files()
+            .supersede_replayed_create(&context, &witness)
+            .await
+            .unwrap(),
+        SupersedeCreateResult::NotProven
+    );
+    let incomplete = store.files().list_incomplete(&context).await.unwrap();
+    let original = incomplete
+        .iter()
+        .find(|journal| journal.id == old_operation)
+        .unwrap();
+    assert_eq!(original.state.as_str(), "file_committed");
+}
+
+#[tokio::test]
+async fn reviewed_replayed_create_requires_explicit_repair_entrypoint() {
+    let (
+        store,
+        context,
+        path,
+        old_file,
+        replacement_file,
+        old_operation,
+        _replacement_operation,
+        hash,
+    ) = replayed_create_fixture().await;
+    store
+        .files()
+        .mark_needs_review(
+            &context,
+            old_operation,
+            "recovery metadata destination already exists",
+        )
+        .await
+        .unwrap();
+    let witness = SupersedeCreateWitness {
+        operation_id: old_operation,
+        path,
+        prior_file_id: old_file,
+        replacement_file_id: replacement_file,
+        replacement_revision: Revision::new(1),
+        physical_hash: hash,
+    };
+    assert_eq!(
+        store
+            .files()
+            .supersede_replayed_create(&context, &witness)
+            .await
+            .unwrap(),
+        SupersedeCreateResult::NotProven
+    );
+    assert_eq!(
+        store
+            .files()
+            .supersede_reviewed_replayed_create(&context, &witness)
+            .await
+            .unwrap(),
+        SupersedeCreateResult::Applied
+    );
 }
 
 #[tokio::test]
@@ -163,6 +595,131 @@ async fn managed_initialization_job_controls_effective_vault_availability() {
         store.vaults().availability(&vault).await.unwrap(),
         VaultAvailability::Ready
     );
+}
+
+#[tokio::test]
+async fn journal_summary_includes_review_rows_without_exposing_payload() {
+    let store = store().await;
+    let context = context("journal-summary", "/srv/journal-summary");
+    insert(&store.vaults(), &context).await;
+
+    store
+        .files()
+        .prepare_operation(
+            &context,
+            PrepareOperationInput {
+                id: OperationId::new(),
+                operation: FileOperation::Replace,
+                source_path: None,
+                destination_path: None,
+                prior_file_id: None,
+                expected_revision: None,
+                prior_hash: None,
+                proposed_hash: None,
+                temp_path: None,
+                payload: json!({"opaque":"must-not-be-returned"}),
+                idempotency_key: None,
+            },
+        )
+        .await
+        .unwrap();
+    let review = store
+        .files()
+        .prepare_operation(
+            &context,
+            PrepareOperationInput {
+                id: OperationId::new(),
+                operation: FileOperation::Delete,
+                source_path: None,
+                destination_path: None,
+                prior_file_id: None,
+                expected_revision: None,
+                prior_hash: None,
+                proposed_hash: None,
+                temp_path: None,
+                payload: json!({"opaque":"must-not-be-returned"}),
+                idempotency_key: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .files()
+        .mark_needs_review(&context, review.id, "unsafe detail")
+        .await
+        .unwrap();
+
+    let summaries = store.files().summarize_incomplete(&context).await.unwrap();
+    assert!(summaries.iter().any(|item| {
+        item.operation == FileOperation::Replace
+            && item.state.as_str() == "prepared"
+            && item.count == 1
+    }));
+    assert!(summaries.iter().any(|item| {
+        item.operation == FileOperation::Delete
+            && item.state.as_str() == "needs_review"
+            && item.count == 1
+    }));
+}
+
+#[tokio::test]
+async fn initialization_task_queue_is_single_writer_under_concurrent_confirmations() {
+    let store = store().await;
+    let context = context("init-task", "/srv/init-task");
+    insert(&store.vaults(), &context).await;
+    let first = store.memory_units();
+    let second = store.memory_units();
+    let (left, right) = tokio::join!(
+        first.queue_initialization_task(&context, "task-a", 3, false, "normal"),
+        second.queue_initialization_task(&context, "task-b", 3, false, "normal"),
+    );
+    let left = left.unwrap();
+    let right = right.unwrap();
+    assert_eq!(left.task_id, right.task_id);
+    assert_eq!(
+        store
+            .memory_units()
+            .initialization_task(&context)
+            .await
+            .unwrap()
+            .unwrap()
+            .task_id,
+        left.task_id
+    );
+}
+
+#[tokio::test]
+async fn interrupted_initialization_is_marked_failed_and_resumable_on_startup() {
+    let store = store().await;
+    let context = context("init-interrupted", "/srv/init-interrupted");
+    insert(&store.vaults(), &context).await;
+    store
+        .memory_units()
+        .queue_initialization_task(&context, "task-interrupted", 2, false, "normal")
+        .await
+        .unwrap();
+    store
+        .memory_units()
+        .start_initialization_task(&context, "task-interrupted")
+        .await
+        .unwrap();
+    store
+        .memory_units()
+        .mark_interrupted_initialization_task(&context)
+        .await
+        .unwrap();
+    let task = store
+        .memory_units()
+        .initialization_task(&context)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(task.state, "failed");
+    assert_eq!(
+        task.error_code.as_deref(),
+        Some("initialization_interrupted")
+    );
+    assert!(task.resumable);
 }
 
 #[tokio::test]
@@ -334,397 +891,4 @@ async fn settings_require_a_registered_vault_context() {
         .unwrap_err();
 
     assert!(matches!(error, mcp_vault_state::StateError::Database(_)));
-}
-
-#[tokio::test]
-async fn legacy_two_phase_rows_remain_vault_scoped_for_v2_1_migration() {
-    let store = store().await;
-    let first = context("first-memory", "/srv/first-memory");
-    let second = context("second-memory", "/srv/second-memory");
-    insert(&store.vaults(), &first).await;
-    insert(&store.vaults(), &second).await;
-    let repository = store.memory();
-
-    let first_raw_id = MemoryRawId::new();
-    let second_raw_id = MemoryRawId::new();
-    let raw_output = |id, vault_id, content: &str| MemoryStage1OutputRecord {
-        id,
-        vault_id,
-        source_type: "explicit_agent".to_owned(),
-        source_key: "same-client-key".to_owned(),
-        source_file_id: None,
-        source_path: None,
-        source_revision: None,
-        profile_hash: "profile-v1".to_owned(),
-        pipeline_version: 1,
-        prompt_version: "stage1-v1".to_owned(),
-        raw_memory: content.to_owned(),
-        source_summary: format!("Summary for {content}"),
-        source_slug: Some("explicit-input".to_owned()),
-        evidence: json!([]),
-        metadata: json!({"memory_type": "decision"}),
-        output_hash: format!("hash-{content}"),
-        status: "ready".to_owned(),
-        generated_at: 10,
-        updated_at: 10,
-        usage_count: 0,
-        last_usage: None,
-        selected_for_phase2: false,
-        selected_for_phase2_hash: None,
-        selected_for_phase2_at: None,
-    };
-    let first_output = raw_output(first_raw_id, first.id(), "first");
-    let second_output = raw_output(second_raw_id, second.id(), "second");
-    repository
-        .upsert_stage1_output(&first, &first_output)
-        .await
-        .unwrap();
-    repository
-        .upsert_stage1_output(&second, &second_output)
-        .await
-        .unwrap();
-
-    assert_eq!(repository.pending_stage1_count(&first).await.unwrap(), 1);
-    assert_eq!(repository.pending_stage1_count(&second).await.unwrap(), 1);
-    let first_pending_fingerprint = repository
-        .pending_stage1_fingerprint(&first)
-        .await
-        .unwrap()
-        .unwrap();
-    let second_pending_fingerprint = repository
-        .pending_stage1_fingerprint(&second)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_ne!(first_pending_fingerprint, second_pending_fingerprint);
-    assert_eq!(
-        repository
-            .get_stage1_output(&first, "explicit_agent", "same-client-key")
-            .await
-            .unwrap()
-            .unwrap()
-            .raw_memory,
-        "first"
-    );
-    let cross_vault = repository
-        .upsert_stage1_output(&first, &second_output)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        cross_vault,
-        mcp_vault_state::StateError::InvalidInput(_)
-    ));
-
-    let proposal_id = MemoryConsolidationId::new();
-    repository
-        .insert_consolidation_proposal(
-            &first,
-            &MemoryConsolidationProposalRecord {
-                id: proposal_id,
-                vault_id: first.id(),
-                input_hash: "input-first-v1".to_owned(),
-                proposal: json!({"memory_summary": "first summary"}),
-                model_id: ModelId::new(),
-                provider_id: ProviderId::new(),
-                prompt_version: "consolidation-v1".to_owned(),
-                status: "prepared".to_owned(),
-                created_at: 20,
-                applied_at: None,
-            },
-        )
-        .await
-        .unwrap();
-    let selected = vec![(first_raw_id, first_output.output_hash.clone())];
-    let committed = repository
-        .commit_consolidation(
-            &first,
-            proposal_id,
-            "input-first-v1",
-            "first summary",
-            &selected,
-        )
-        .await
-        .unwrap();
-    let repeated = repository
-        .commit_consolidation(
-            &first,
-            proposal_id,
-            "input-first-v1",
-            "first summary",
-            &selected,
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(committed.generation, 1);
-    assert_eq!(repeated.generation, 1);
-    assert_eq!(repository.pending_stage1_count(&first).await.unwrap(), 0);
-    assert_eq!(repository.pending_stage1_count(&second).await.unwrap(), 1);
-    assert_eq!(
-        repository.pending_stage1_fingerprint(&first).await.unwrap(),
-        None
-    );
-    assert_eq!(
-        repository
-            .pending_stage1_fingerprint(&second)
-            .await
-            .unwrap(),
-        Some(second_pending_fingerprint)
-    );
-    assert!(
-        repository
-            .get_consolidation_state(&second)
-            .await
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[tokio::test]
-async fn legacy_retrieval_rows_remain_vault_scoped_for_backup_migration() {
-    let store = store().await;
-    let first = context("first-retrieval", "/srv/first-retrieval");
-    let second = context("second-retrieval", "/srv/second-retrieval");
-    insert(&store.vaults(), &first).await;
-    insert(&store.vaults(), &second).await;
-    let repository = store.memory();
-    let bundle = |vault_id, id, content: &str, hash: &str| MemoryBundle {
-        memory: MemoryRecord {
-            id,
-            vault_id,
-            memory_type: "decision".to_owned(),
-            status: "active".to_owned(),
-            status_reason: None,
-            status_changed_at: None,
-            content: content.to_owned(),
-            normalized_content: content.to_lowercase(),
-            content_hash: hash.to_owned(),
-            importance: 0.8,
-            confidence: 0.9,
-            origin: "explicit_admin".to_owned(),
-            revision: Revision::new(1),
-            canonical_file_id: None,
-            canonical_path: None,
-            canonical_revision: None,
-            valid_from: None,
-            valid_to: None,
-            extraction: json!({}),
-            created_at: 1,
-            updated_at: 1,
-            last_recalled_at: None,
-            recall_count: 0,
-        },
-        sources: Vec::new(),
-        entities: Vec::new(),
-        tags: Vec::new(),
-        relations: Vec::new(),
-    };
-    let first_id = MemoryId::new();
-    let second_id = MemoryId::new();
-    repository
-        .replace_bundle(
-            &first,
-            &bundle(first.id(), first_id, "项目使用 Rust", "hash-first"),
-            None,
-        )
-        .await
-        .unwrap();
-    repository
-        .replace_bundle(
-            &second,
-            &bundle(second.id(), second_id, "另一个项目", "hash-second"),
-            None,
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(
-        repository
-            .retrieval_coverage(&first, "profile-v1")
-            .await
-            .unwrap()
-            .pending,
-        1
-    );
-    repository
-        .mark_retrieval_backfill_pending(&first, "profile-v1")
-        .await
-        .unwrap();
-    assert_eq!(
-        repository
-            .retrieval_pending_count(&first, "profile-v1")
-            .await
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        repository
-            .retrieval_pending_count(&second, "profile-v1")
-            .await
-            .unwrap(),
-        0
-    );
-    let aliases = json!([
-        {"language": "zh-Hans", "terms": ["项目使用 Rust"]},
-        {"language": "en", "terms": ["project uses Rust"]}
-    ]);
-    let aliases_text = "项目使用 Rust project uses Rust";
-    repository
-        .upsert_retrieval_metadata(
-            &first,
-            &MemoryRetrievalMetadataRecord {
-                vault_id: first.id(),
-                memory_id: first_id,
-                content_hash: "hash-first".to_owned(),
-                profile_hash: "profile-v1".to_owned(),
-                source_language: Some("zh-Hans".to_owned()),
-                aliases,
-                aliases_text: aliases_text.to_owned(),
-                search_terms: memory_search_terms(["项目使用 Rust", aliases_text], 4096),
-                status: "ready".to_owned(),
-                last_error: None,
-                generated_at: Some(2),
-                updated_at: 2,
-            },
-        )
-        .await
-        .unwrap();
-
-    let first_hits = repository
-        .search_fts(&first, "\"project\"", &MemoryFilter::default(), 10)
-        .await
-        .unwrap();
-    let second_hits = repository
-        .search_fts(&second, "\"project\"", &MemoryFilter::default(), 10)
-        .await
-        .unwrap();
-    assert_eq!(first_hits.len(), 1);
-    assert_eq!(first_hits[0].memory.id, first_id);
-    assert!(second_hits.is_empty());
-    assert!(
-        repository
-            .get_retrieval_metadata(&second, first_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-
-    let proposal_id = MemoryRetrievalProposalId::new();
-    repository
-        .insert_retrieval_proposal(
-            &first,
-            &MemoryRetrievalProposalRecord {
-                id: proposal_id,
-                vault_id: first.id(),
-                input_hash: "sha256:first-retrieval-input".to_owned(),
-                snapshot: json!([]),
-                proposal: json!({"version": 1, "items": []}),
-                model_id: ModelId::new(),
-                provider_id: ProviderId::new(),
-                prompt_version: "memory-retrieval-v1".to_owned(),
-                status: "prepared".to_owned(),
-                applied_count: 0,
-                created_at: 3,
-                applied_at: None,
-            },
-        )
-        .await
-        .unwrap();
-    assert!(
-        repository
-            .get_retrieval_proposal_by_input(&second, "sha256:first-retrieval-input")
-            .await
-            .unwrap()
-            .is_none()
-    );
-
-    let first_job = store
-        .jobs()
-        .enqueue_singleton(
-            &first,
-            "memory.enrich_retrieval",
-            "same-retrieval-job-key",
-            &json!({"profile_hash": "profile-v1"}),
-            0,
-            3,
-            4,
-        )
-        .await
-        .unwrap();
-    let second_job = store
-        .jobs()
-        .enqueue_singleton(
-            &second,
-            "memory.enrich_retrieval",
-            "same-retrieval-job-key",
-            &json!({"profile_hash": "profile-v1"}),
-            0,
-            3,
-            4,
-        )
-        .await
-        .unwrap();
-    assert_ne!(first_job.id, second_job.id);
-    assert_eq!(
-        store
-            .jobs()
-            .find_active_by_type(&first, "memory.enrich_retrieval")
-            .await
-            .unwrap()
-            .unwrap()
-            .id,
-        first_job.id
-    );
-    assert_eq!(
-        store
-            .jobs()
-            .find_active_by_type(&second, "memory.enrich_retrieval")
-            .await
-            .unwrap()
-            .unwrap()
-            .id,
-        second_job.id
-    );
-}
-
-#[tokio::test]
-async fn equivalence_cache_and_dispatch_accounting_are_vault_scoped_without_daily_caps() {
-    let store = store().await;
-    let a = context("dedup-a", "/srv/dedup-a");
-    let b = context("dedup-b", "/srv/dedup-b");
-    insert(&store.vaults(), &a).await;
-    insert(&store.vaults(), &b).await;
-    let hash = format!("sha256:{}", "a".repeat(64));
-    let repository = store.current_memory();
-    repository
-        .save_equivalence_decision(&a, &hash, "uncertain")
-        .await
-        .unwrap();
-    repository
-        .save_equivalence_decision(&a, &hash, "equivalent")
-        .await
-        .unwrap();
-    assert_eq!(
-        repository
-            .equivalence_decision(&a, &hash)
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("uncertain")
-    );
-    assert!(
-        repository
-            .equivalence_decision(&b, &hash)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    for _ in 0..300 {
-        repository.record_equivalence_dispatch(&a, 1).await.unwrap();
-    }
-    repository
-        .record_equivalence_dispatch(&b, 4 * 1024 * 1024 + 1)
-        .await
-        .unwrap();
-    repository.record_equivalence_dispatch(&b, 1).await.unwrap();
 }

@@ -1,6 +1,8 @@
 # ADR-0030: Automatic source contributions and equivalent formal memories
 
-- Status: Accepted
+> Superseded for the current memory runtime by [ADR-0033](0033-source-preserving-memory-units.md). This document preserves historical rationale.
+
+- Status: Partially superseded by ADR-0031 (incremental organization, automatic old-state reset, no inclusion deletion/sentence rewriting/profile-change dissolution). Formal publication and source-support invariants remain accepted.
 - Date: 2026-09-06
 - Authority: explicit execution request for the automatic memory deduplication plan.
 - Amends: ADR-0026 only in its one-source formal ownership restriction and the

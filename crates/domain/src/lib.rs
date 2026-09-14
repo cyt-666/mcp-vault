@@ -23,7 +23,10 @@ pub use id::{
     OAuthGrantId, OAuthIssuerId, OAuthLocalUserId, OAuthRefreshTokenId, OAuthTokenFamilyId,
     OperationId, ProviderId, RevisionId, ScanId, SecretId, VaultId,
 };
-pub use maintenance::{MaintenanceGate, MaintenanceMode, MaintenanceOperationGuard};
+pub use maintenance::{
+    MaintenanceGate, MaintenanceLease, MaintenanceMode, MaintenanceOperationGuard,
+    MaintenancePermitToken,
+};
 pub use path::{
     FilesystemEntryKind, FilesystemPolicy, PathCaseSensitivity, PathComparisonKey, VaultPath,
     VaultPathPolicy, detect_path_collisions,

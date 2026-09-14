@@ -6,19 +6,20 @@
 
 mod assets;
 pub mod config;
-pub mod diagnostics;
+mod initialize_memory;
+pub use initialize_memory::{initialize_memory, inspect_memory_initialization};
 pub mod health;
 pub mod metrics;
 mod router;
 pub mod workers;
 
-use std::{io, net::SocketAddr, path::Path, path::PathBuf, sync::Arc};
+use std::{io, net::SocketAddr, path::Path, path::PathBuf};
 
 use axum::Router;
 use config::AppConfig;
 use mcp_vault_domain::MaintenanceGate;
 use thiserror::Error;
-use tokio::{net::TcpListener, sync::Notify, time::timeout};
+use tokio::{net::TcpListener, time::timeout};
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -30,6 +31,9 @@ pub use router::{
 /// Errors that prevent the server from starting or serving.
 #[derive(Debug, Error)]
 pub enum ServerError {
+    /// Redacted offline memory cutover failure.
+    #[error("memory initialization failed: {0}")]
+    MemoryInitialization(&'static str),
     /// Configuration was invalid before listener binding.
     #[error("invalid configuration: {0}")]
     Configuration(#[from] config::ConfigError),
@@ -79,23 +83,30 @@ pub fn init_tracing(config: &AppConfig) -> Result<(), ServerError> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     if let Some(endpoint) = config.otlp_endpoint.as_deref() {
-        return init_otlp_tracing(config, filter, endpoint);
+        init_otlp_tracing(config, filter, endpoint)?;
+    } else {
+        match config.log_format {
+            config::LogFormat::Json => fmt()
+                .with_env_filter(filter)
+                .json()
+                .with_target(true)
+                .try_init()
+                .map_err(|error| ServerError::Logging(error.to_string())),
+            config::LogFormat::Pretty => fmt()
+                .with_env_filter(filter)
+                .compact()
+                .with_target(true)
+                .try_init()
+                .map_err(|error| ServerError::Logging(error.to_string())),
+        }?;
     }
-
-    match config.log_format {
-        config::LogFormat::Json => fmt()
-            .with_env_filter(filter)
-            .json()
-            .with_target(true)
-            .try_init()
-            .map_err(|error| ServerError::Logging(error.to_string())),
-        config::LogFormat::Pretty => fmt()
-            .with_env_filter(filter)
-            .compact()
-            .with_target(true)
-            .try_init()
-            .map_err(|error| ServerError::Logging(error.to_string())),
-    }
+    // Rust's default panic hook can print a source body when a UTF-8 slice or
+    // assertion fails. Production diagnostics keep only trusted code location.
+    std::panic::set_hook(Box::new(|info| {
+        let location = info.location();
+        tracing::error!(target:"mcp_vault::panic",event="internal_panic",source_file=location.map(|location|location.file()),source_line=location.map(|location|location.line()),"internal panic; payload omitted");
+    }));
+    Ok(())
 }
 
 fn init_otlp_tracing(
@@ -139,6 +150,7 @@ fn init_otlp_tracing(
 /// Build both listeners, transition readiness, and serve until interrupted.
 pub async fn run(config: AppConfig) -> Result<(), ServerError> {
     let config = config.validate()?;
+    let _database_lock = mcp_vault_state::StateStore::acquire_process_lock(&config.database_url)?;
     let state = mcp_vault_state::StateStore::connect_and_migrate(&config.database_url).await?;
     let integrity = state.integrity_check().await?;
     if !integrity.integrity_ok || integrity.foreign_key_violations != 0 {
@@ -146,6 +158,7 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
             mcp_vault_state::StateError::IntegrityFailure,
         ));
     }
+    let initialization_offline = mark_interrupted_memory_initializations(&state).await?;
     let maintenance = MaintenanceGate::new();
     let core_runtime = mcp_vault_core::VaultCoreRuntime::new(maintenance.clone());
     let auth_keys = load_master_key_ring(&config, &state).await?;
@@ -164,6 +177,23 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         state.clone(),
         provider_service.clone(),
     );
+    for vault in state.vaults().list().await? {
+        let context = vault.context()?;
+        if vault.status == mcp_vault_state::VaultStatus::Active
+            && !state
+                .memory_units()
+                .initialization_required(&context)
+                .await?
+        {
+            let core = core_for_vault(&state, &history_root, &vault, &core_runtime)?;
+            let report = memory_service
+                .rebuild(&context, &core)
+                .await
+                .map_err(|error| ServerError::MemoryInitialization(error.diagnostic_code()))?;
+            tracing::info!(vault_id=%context.id(),projected=report.projected,quarantined=report.quarantined,"current memory projections rebuilt");
+        }
+    }
+
     let index_service = mcp_vault_indexer::IndexService::with_provider_service(
         state.clone(),
         provider_service.clone(),
@@ -239,6 +269,7 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         },
     )
     .with_provider_services(provider_service, memory_service.clone());
+    let admin_state_shutdown = admin_state.clone();
     let backup_service = admin_state.backup_service();
     let control_router = control_router_with_admin(admin_state)
         .layer(axum::middleware::from_fn(metrics::observe_control))
@@ -321,12 +352,6 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         .map_err(|failure| ServerError::Workers(failure.code))?;
     supervisor
         .register_job_handler(
-            "retrieval.calibrate",
-            workers::retrieval_calibration_job_handler(state.clone(), memory_service.clone()),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
             "memory.extract",
             workers::memory_extract_job_handler(
                 state.clone(),
@@ -360,33 +385,22 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         .map_err(|failure| ServerError::Workers(failure.code))?;
     supervisor
         .register_job_handler(
-            "memory.deduplicate_source",
-            workers::memory_source_dedup_job_handler(
-                state.clone(),
-                history_root.clone(),
-                core_runtime.clone(),
-                memory_service.clone(),
-            ),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
             "embedding.rebuild",
             workers::embedding_job_handler(state.clone(), index_service, memory_service.clone()),
         )
         .map_err(|failure| ServerError::Workers(failure.code))?;
     supervisor
         .register_job_handler(
-            "memory.deduplicate",
-            workers::memory_dedup_job_handler(
-                state.clone(),
-                history_root.clone(),
-                core_runtime.clone(),
-                memory_service.clone(),
-            ),
+            "memory.overview",
+            workers::memory_overview_job_handler(state.clone(), memory_service.clone()),
         )
         .map_err(|failure| ServerError::Workers(failure.code))?;
     admit_memory_maintenance(&state, &memory_service).await?;
+    // Allow recovery and scans for unrelated ready Vaults to complete before
+    // preserving Offline for an interrupted cleanup Vault.
+    if initialization_offline {
+        maintenance.set(mcp_vault_domain::MaintenanceMode::Offline);
+    }
     let worker_shutdown = workers::Cancellation::default();
     let worker_task = tokio::spawn({
         let supervisor = supervisor.clone();
@@ -415,8 +429,8 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         "mcp vault listeners ready"
     );
 
-    let shutdown = Arc::new(Notify::new());
-    let signal_shutdown = Arc::clone(&shutdown);
+    let shutdown = workers::Cancellation::default();
+    let signal_shutdown = shutdown.clone();
     let signal_worker_shutdown = worker_shutdown.clone();
     let signal_reconciliation_shutdown = reconciliation_shutdown.clone();
     let signal_readiness = readiness.clone();
@@ -425,10 +439,10 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         signal_readiness.mark_not_ready();
         signal_worker_shutdown.cancel();
         signal_reconciliation_shutdown.cancel();
-        signal_shutdown.notify_waiters();
+        signal_shutdown.cancel();
     });
 
-    let data_shutdown = wait_for_notification(Arc::clone(&shutdown));
+    let data_shutdown = wait_for_notification(shutdown.clone());
     let control_shutdown = wait_for_notification(shutdown);
 
     let data_server = async move {
@@ -457,6 +471,7 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
     };
 
     let serve_result = tokio::try_join!(data_server, control_server);
+    admin_state_shutdown.shutdown_initialization().await;
     worker_shutdown.cancel();
     reconciliation_shutdown.cancel();
 
@@ -512,6 +527,15 @@ async fn recover_registered_vaults(
                 continue;
             }
         };
+        if state
+            .memory_units()
+            .initialization_required(&context)
+            .await
+            .unwrap_or(false)
+        {
+            warn!(vault_id = %context.id(), "skipping startup journal recovery while memory initialization is pending");
+            continue;
+        }
         let recovery_core = match core_for_vault(state, history_root, &vault, core_runtime) {
             Ok(core) => core,
             Err(error) => {
@@ -528,11 +552,12 @@ async fn recover_registered_vaults(
             .await
         {
             Ok(report) if report.needs_review == 0 => {
-                if report.rolled_back != 0 || report.finalized != 0 {
+                if report.rolled_back != 0 || report.finalized != 0 || report.superseded != 0 {
                     info!(
                         vault_id = %context.id(),
                         rolled_back = report.rolled_back,
                         finalized = report.finalized,
+                        superseded = report.superseded,
                         "recovered Vault journal operations"
                     );
                 }
@@ -569,6 +594,14 @@ async fn run_initial_scans(
             continue;
         }
         let context = vault.context()?;
+        if state
+            .memory_units()
+            .initialization_required(&context)
+            .await?
+        {
+            info!(vault_id = %context.id(), "skipping startup Vault scan while memory initialization is pending");
+            continue;
+        }
         match reconcile_vault_once(state, history_root, &vault, "initial", core_runtime).await {
             Ok(report) => info!(
                 vault_id = %context.id(),
@@ -588,6 +621,66 @@ async fn run_initial_scans(
         }
     }
     Ok(())
+}
+
+async fn mark_interrupted_memory_initializations(
+    state: &mcp_vault_state::StateStore,
+) -> Result<bool, ServerError> {
+    let mut offline = false;
+    for vault in state.vaults().list().await? {
+        let context = vault.context()?;
+        let initialization = state.memory_units().initialization(&context).await?;
+        if initialization
+            .as_ref()
+            .is_some_and(|row| row.phase == "clearing")
+            && state
+                .memory_units()
+                .initialization_task(&context)
+                .await?
+                .is_none()
+        {
+            let total_files = initialization
+                .as_ref()
+                .and_then(|row| row.manifest.get("files"))
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len) as u64;
+            state
+                .memory_units()
+                .queue_initialization_task(
+                    &context,
+                    &mcp_vault_domain::OperationId::new().to_string(),
+                    total_files,
+                    false,
+                    "normal",
+                )
+                .await?;
+        }
+        state
+            .memory_units()
+            .mark_interrupted_initialization_task(&context)
+            .await?;
+        if initialization
+            .as_ref()
+            .is_some_and(|row| row.phase == "ready")
+        {
+            let completed_files = initialization
+                .as_ref()
+                .and_then(|row| row.manifest.get("files"))
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len) as u64;
+            state
+                .memory_units()
+                .reconcile_ready_initialization_task(&context, completed_files)
+                .await?;
+        }
+        if initialization
+            .as_ref()
+            .is_some_and(|row| row.phase == "clearing")
+        {
+            offline = true;
+        }
+    }
+    Ok(offline)
 }
 
 /// Reconcile one Vault and refresh its rebuildable Markdown index.
@@ -753,11 +846,8 @@ async fn run_reconciliation_loop(
                             continue;
                         }
                     };
-                    if memory.ensure_retrieval_calibration(&context).await.is_err() {
-                        warn!(vault_id=%context.id(),error_code="calibration_admission_failed","calibration compensation will retry");
-                    }
-                    if memory.ensure_memory_dedup_scheduled(&context).await.is_err() {
-                        warn!(vault_id=%context.id(),error_code="memory_dedup_admission_failed","memory deduplication admission will retry");
+                    if memory.ensure_memory_jobs_scheduled(&context).await.is_err() {
+                        warn!(vault_id=%context.id(),error_code="memory_overview_admission_failed","memory overview admission will retry");
                     }
                     match state.jobs().find_active_by_type(&context, "vault.reconcile").await {
                         Ok(None) => {
@@ -785,12 +875,6 @@ async fn run_reconciliation_loop(
                         }
                         Ok(Some(_)) => {}
                         Err(_) => warn!(vault_id = %vault_id, "periodic Vault reconciliation lookup failed"),
-                    }
-                    if workers::retire_legacy_memory_jobs(&state, &context)
-                        .await
-                        .is_err()
-                    {
-                        warn!(vault_id = %vault_id, "periodic legacy memory-job retirement failed");
                     }
                 }
                 if !more || shutdown.is_cancelled() { break; }
@@ -884,13 +968,35 @@ async fn validate_bootstrap_material(
     Ok(())
 }
 
-async fn wait_for_notification(notify: Arc<Notify>) {
-    notify.notified().await;
+async fn wait_for_notification(shutdown: workers::Cancellation) {
+    shutdown.cancelled().await;
 }
 
 async fn wait_for_shutdown_signal() {
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        tracing::error!(%error, "failed to listen for shutdown signal");
+    #[cfg(unix)]
+    {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    result=tokio::signal::ctrl_c()=>{if result.is_err(){tracing::error!(event="shutdown_signal_failed","failed to listen for shutdown signal");}}
+                    _=terminate.recv()=>{}
+                }
+            }
+            Err(_) => {
+                tracing::error!(
+                    event = "shutdown_signal_failed",
+                    "failed to listen for termination signal"
+                );
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    if tokio::signal::ctrl_c().await.is_err() {
+        tracing::error!(
+            event = "shutdown_signal_failed",
+            "failed to listen for shutdown signal"
+        );
     }
 }
 
@@ -899,8 +1005,60 @@ pub fn routers_for_test(readiness: health::Readiness) -> (Router, Router) {
     (data_router(readiness), control_router())
 }
 
+async fn admit_memory_maintenance(
+    state: &mcp_vault_state::StateStore,
+    memory_service: &mcp_vault_memory::MemoryService,
+) -> Result<(), ServerError> {
+    for vault in state.vaults().list().await? {
+        if state.vaults().availability(&vault).await? != mcp_vault_state::VaultAvailability::Ready {
+            continue;
+        }
+        let context = vault
+            .context()
+            .map_err(|_| ServerError::Workers("memory_context_invalid"))?;
+        if memory_service
+            .ensure_memory_jobs_scheduled(&context)
+            .await
+            .is_err()
+        {
+            tracing::warn!(vault_id=%context.id(), "memory_overview_admission_failed");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn panic_diagnostics_never_print_an_untrusted_payload() {
+        const MARKER: &str = "MCP_VAULT_TEST_PANIC_CHILD";
+        const PAYLOAD: &str = "PRIVATE_NOTE_BODY_SENTINEL_7e5024";
+        if std::env::var_os(MARKER).is_some() {
+            super::init_tracing(&super::AppConfig::default()).unwrap();
+            panic!("{PAYLOAD}");
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::panic_diagnostics_never_print_an_untrusted_payload",
+                "--nocapture",
+            ])
+            .env(MARKER, "1")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(log.contains("internal_panic"));
+        assert!(
+            !log.contains(PAYLOAD),
+            "panic logging must omit untrusted payloads"
+        );
+    }
+
     use std::path::{Path, PathBuf};
 
     use crate::workers;
@@ -910,9 +1068,9 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        config::AppConfig, load_master_key_ring, reconcile_vault_once, recover_registered_vaults,
-        remove_obsolete_managed_bootstrap_token, resolve_runtime_path, routers_for_test,
-        run_initial_scans, validate_bootstrap_material,
+        config::AppConfig, load_master_key_ring, mark_interrupted_memory_initializations,
+        reconcile_vault_once, recover_registered_vaults, remove_obsolete_managed_bootstrap_token,
+        resolve_runtime_path, routers_for_test, run_initial_scans, validate_bootstrap_material,
     };
 
     #[tokio::test]
@@ -940,6 +1098,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn startup_marks_interrupted_initialization_task_resumable() {
+        let state = mcp_vault_state::StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("interrupted").unwrap(),
+            PathBuf::from("/srv/interrupted"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Interrupted", VaultStatus::Active)
+            .await
+            .unwrap();
+        state
+            .memory_units()
+            .queue_initialization_task(&context, "task-startup", 1, false, "normal")
+            .await
+            .unwrap();
+        state
+            .memory_units()
+            .start_initialization_task(&context, "task-startup")
+            .await
+            .unwrap();
+        assert!(
+            !mark_interrupted_memory_initializations(&state)
+                .await
+                .unwrap()
+        );
+        let task = state
+            .memory_units()
+            .initialization_task(&context)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.state, "failed");
+        assert_eq!(
+            task.error_code.as_deref(),
+            Some("initialization_interrupted")
+        );
+        assert!(task.resumable);
     }
 
     #[test]
@@ -1303,32 +1507,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-mod calibration_startup_tests;
-
-async fn admit_memory_maintenance(
-    state: &mcp_vault_state::StateStore,
-    memory_service: &mcp_vault_memory::MemoryService,
-) -> Result<(), ServerError> {
-    for vault in state.vaults().list().await? {
-        if state.vaults().availability(&vault).await? != mcp_vault_state::VaultAvailability::Ready {
-            continue;
-        }
-        let context = vault
-            .context()
-            .map_err(|_| ServerError::Workers("memory_context_invalid"))?;
-        workers::retire_legacy_memory_jobs(state, &context).await?;
-        if memory_service
-            .ensure_memory_dedup_scheduled(&context)
-            .await
-            .is_err()
-        {
-            tracing::warn!(vault_id=%context.id(), "memory_dedup_admission_failed");
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod memory_dedup_startup_tests;

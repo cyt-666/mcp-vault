@@ -1,28 +1,7 @@
-//! Transparent, sourced, Vault-scoped durable memory services.
-
-mod current_markdown;
-mod dedup;
+//! Transparent, source-preserving, Vault-scoped durable memory services.
 mod error;
 mod markdown;
-mod model;
-mod service;
-
-pub use dedup::MemoryRelation;
+pub mod units;
+pub mod v3;
 pub use error::MemoryError;
-pub use model::{
-    CurrentSourceReconcileReport, ExtractionPolicy, ExtractionPolicyState, ExtractionReadiness,
-    ExtractionSourceMode, ForgetResult, MemoryEmbeddingScheduleReport, MemoryEmbeddingStatusView,
-    MemoryOrigin, MemoryOwnership, MemorySemanticCalibration, MemorySemanticCalibrationView,
-    MemorySourceInput, MemorySourceView, MemoryType, MemoryUpdateInput, MemoryV2MigrationResult,
-    MemoryView, NoteExtractionOptions, NoteExtractionResult, RecallContext, RecallRequest,
-    RecallResult, RelatedNoteView, RememberInput, RememberResult,
-};
-pub use service::{
-    EXTRACTION_PIPELINE_VERSION, MEMORY_CONTRACT_GENERATION, MemoryRebuildReport, MemoryService,
-};
-
-mod calibration;
-pub use calibration::{
-    CalibrationMetrics, CalibrationProfile, CalibrationReport, CalibrationStatus,
-    diagnose_calibration,
-};
+pub use v3::*;

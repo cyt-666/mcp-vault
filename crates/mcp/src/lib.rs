@@ -24,8 +24,8 @@ use mcp_vault_indexer::{
     IndexError, IndexService, NoteRetrievalHit, NoteRetrievalMode, NoteRetrievalScope,
 };
 use mcp_vault_memory::{
-    MemoryError, MemoryOrigin, MemoryService, MemorySourceInput, MemoryType, MemoryUpdateInput,
-    RecallContext, RecallRequest, RememberInput,
+    MemoryError, MemoryOrigin, MemoryReadAccess, MemoryService, MemorySourceInput, MemoryType,
+    MemoryUpdateInput, OverviewRequest, RecallContext, RecallRequest, RememberInput,
 };
 use mcp_vault_state::{FileRecord, FileRevisionRecord, StateStore};
 use mcp_vault_storage_fs::{ReadFile, StorageOptions};
@@ -981,16 +981,20 @@ struct RestoreNoteRevisionInput {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct RecallMemoryInput {
     /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
     #[serde(default)]
     include_details: Option<bool>,
     /// Current user question or task, written with enough context to rank relevant durable memory.
     query: String,
+    /// Explicit exact source path filter; omission includes all authorized scopes.
+    #[serde(default)]
+    source_path: Option<String>,
     /// Optional continuity signals that disambiguate the current project, entities, and recent topics.
     #[serde(default)]
     context: Option<RecallMemoryContextInput>,
-    /// Optional memory-type filter: identity, preference, decision, constraint, fact, project, progress, event, relationship, or procedure.
+    /// Optional memory-type filter: preference, constraint, decision, experience, procedure, or state.
     #[serde(default)]
     types: Vec<String>,
     /// Point in time for validity filtering as Unix milliseconds. Defaults to now.
@@ -1008,25 +1012,47 @@ struct RecallMemoryInput {
     /// Maximum durable memories to return. Range 1-100; default 12.
     #[serde(default)]
     max_results: Option<u32>,
-    /// Maximum ordinary-note retrieval cues to return. Range 0-100; default 8 when vault:read is granted.
+    /// Maximum ordinary-note retrieval cues to return. Range 0-100; default 4 when vault:read is granted.
     #[serde(default)]
     max_related_notes: Option<u32>,
-    /// Approximate combined result token budget. Range 128-32000; default 1800.
+    /// Approximate combined result token budget. Range 128-32000; default 4096.
     #[serde(default)]
     max_tokens: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct RecallMemoryContextInput {
-    /// Name or stable label of the project currently being discussed.
+    /// Current working paths; ranking signals, never implicit filters.
     #[serde(default)]
-    active_project: Option<String>,
+    paths: Vec<String>,
     /// People, systems, organizations, or other named entities active in the task.
     #[serde(default)]
     entities: Vec<String>,
     /// Recent conversation topics that help rank otherwise ambiguous memories.
     #[serde(default)]
     recent_topics: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MemoryOverviewInput {
+    /// Return scoped counts and directory grouping details; default false. Current entries and warnings are always retained.
+    #[serde(default)]
+    include_details: Option<bool>,
+    /// Optional exact source path to browse.
+    source_path: Option<String>,
+    /// Directory path prefix, matched at a path-segment boundary.
+    path_prefix: Option<String>,
+    /// Existing topic keys obtained from browse_index; all must match.
+    #[serde(default)]
+    topic_ids: Vec<String>,
+    /// Last unit ID returned by next_after_id, with the same source filter.
+    after_id: Option<String>,
+    /// Maximum navigation entries, 1-100; default 40.
+    limit: Option<u32>,
+    /// Complete response token estimate budget, 256-32000; default 4096.
+    max_tokens: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
@@ -1043,7 +1069,7 @@ struct ListMemoryInput {
     /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
     #[serde(default)]
     include_details: Option<bool>,
-    /// Memory-type filters: identity, preference, decision, constraint, fact, project, progress, event, relationship, or procedure.
+    /// Memory-type filters: preference, constraint, decision, experience, procedure, or state.
     #[serde(default)]
     types: Vec<String>,
     /// Exact tag that returned memories must carry.
@@ -1070,7 +1096,7 @@ struct RememberMemoryInput {
     include_details: Option<bool>,
     /// One concise durable proposition, not a transcript, temporary thought, or complete note body.
     content: String,
-    /// Memory type: identity, preference, decision, constraint, fact, project, progress, event, relationship, or procedure.
+    /// Memory type: preference, constraint, decision, experience, procedure, or state.
     #[serde(default)]
     memory_type: Option<String>,
     /// Optional long-term significance in the inclusive range 0-1.
@@ -1572,9 +1598,11 @@ impl McpHandler {
             .recall(
                 &request.vault,
                 RecallRequest {
+                    access: memory_read_access(&request.principal),
+                    source_path: input.source_path,
                     query: input.query,
                     context: RecallContext {
-                        active_project: continuity.active_project,
+                        paths: continuity.paths,
                         entities: continuity.entities,
                         recent_topics: continuity.recent_topics,
                     },
@@ -1586,11 +1614,11 @@ impl McpHandler {
                     include_related_notes,
                     max_results: input.max_results.unwrap_or(12),
                     max_related_notes: if include_related_notes {
-                        input.max_related_notes.unwrap_or(8)
+                        input.max_related_notes.unwrap_or(4)
                     } else {
                         0
                     },
-                    max_tokens: input.max_tokens.unwrap_or(1800),
+                    max_tokens: input.max_tokens.unwrap_or(4096),
                 },
             )
             .await;
@@ -1601,9 +1629,57 @@ impl McpHandler {
     }
 
     #[tool(
+        name = "get_memory_overview",
+        title = "Browse memory navigation",
+        description = "Use this when you need current memory scopes and unit IDs before narrowing a task. On success, `data.entries` contains source coordinates and get_memory resource URIs; `data.generated_sections` holds optional navigation descriptions and `data.next_after_id` continues the next page. Filter by source_path, path_prefix or topic_ids when scope is explicit. Generated descriptions are not source evidence; read complete units with get_memory and their original notes with read_note. No online generative model call is made. Automatic units require both memory:read and vault:read; memory-only access sees explicit units. Use recall for relevance to a specific task.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
+    )]
+    async fn get_memory_overview(
+        &self,
+        Parameters(input): Parameters<MemoryOverviewInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let request = request_context(&context)?;
+        if let Err(error) = require_permission(&request.principal, Permission::ReadMemory) {
+            return Ok(error_result(&context, error));
+        }
+        let after_id = match input.after_id.as_deref().map(parse_memory_id).transpose() {
+            Ok(id) => id,
+            Err(error) => return Ok(error_result(&context, error)),
+        };
+        match request
+            .memory
+            .get_memory_overview(
+                &request.vault,
+                OverviewRequest {
+                    access: memory_read_access(&request.principal),
+                    source_path: input.source_path,
+                    path_prefix: input.path_prefix,
+                    topic_ids: input.topic_ids,
+                    after_id,
+                    limit: input.limit.unwrap_or(40),
+                    max_tokens: input.max_tokens.unwrap_or(4096),
+                },
+            )
+            .await
+        {
+            Ok(value) => Ok(success_result(
+                &context,
+                presentation::tool_data(
+                    "get_memory_overview",
+                    json!(value),
+                    input.include_details.unwrap_or(false),
+                ),
+            )),
+            Err(error) => Ok(error_result(&context, memory_error(error))),
+        }
+    }
+
+    #[tool(
         name = "get_memory",
         title = "Inspect a durable memory",
-        description = "Use this when you know a memory id and need its complete record or source details. On success, `data` includes content, revision, ownership and sources[].path. Read that source path directly with read_note. canonical_path is the system-managed memory Markdown file, NOT the original note and not a read_note target; canonical_revision is not the revision for memory edits. Use revision for update_memory or forget_memory. Replaced/deleted memories return not_found; recall again rather than using an obsolete ID.",
+        description = "Use this when you know a memory id and need its complete record or source details. On success, `data` includes content, revision, ownership and sources[].path. Automatic units contain complete original text and require both memory:read and vault:read. Read that source path directly with read_note. canonical_path is the system-managed memory Markdown file, NOT the original note and not a read_note target; canonical_revision is not the revision for memory edits. Use revision for update_memory or forget_memory. Replaced/deleted memories return not_found; recall again rather than using an obsolete ID.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
@@ -1627,7 +1703,11 @@ impl McpHandler {
             Ok(id) => id,
             Err(error) => return Ok(error_result(&context, error)),
         };
-        match request.memory.get(&request.vault, id).await {
+        match request
+            .memory
+            .get_with_access(&request.vault, id, memory_read_access(&request.principal))
+            .await
+        {
             Ok(memory) => Ok(success(
                 serde_json::to_value(memory).unwrap_or_else(|_| json!({})),
             )),
@@ -1701,7 +1781,7 @@ impl McpHandler {
         };
         match request
             .memory
-            .list_after(
+            .list_with_access(
                 &request.vault,
                 types,
                 input.tag,
@@ -1710,6 +1790,7 @@ impl McpHandler {
                 limit,
                 offset,
                 after_id,
+                memory_read_access(&request.principal),
             )
             .await
         {
@@ -2350,7 +2431,7 @@ impl ServerHandler for McpHandler {
         .with_instructions(
             "This server is the user's persistent Markdown knowledge Vault.\n\
              Use vault_overview or browse_index when you need to understand the available knowledge.\n\
-             Use recall proactively when the task may depend on prior decisions, preferences, constraints, project state, past work, or knowledge that may already exist in the Vault. Pass the task in its natural language; persisted multilingual metadata handles covered cross-language recall without query-time translation. Memory sources[].path identifies the original note: pass it directly to read_note when evidence is needed, without searching again. related_notes are additional cues, not guaranteed memory provenance. canonical_path in detailed memory records is a managed memory file, not an original note path. Results are compact by default; include_details retrieves extended metadata. get_memory gives a complete known record.\n\
+             Use recall proactively when the task may depend on prior decisions, preferences, constraints, project state, past work, or knowledge that may already exist in the Vault. Pass the task in its natural language and use context.paths/entities/recent_topics as ranking hints; an explicit source_path filters results. Memory sources[].path identifies the original note: pass it directly to read_note when evidence is needed, without searching again. Automatic units preserve source language, conditions and order. pointers[] identify complete units that exceeded the budget; use get_memory by ID. get_memory_overview provides navigation; its generated descriptions are not source evidence. related_notes are additional cues, not guaranteed memory provenance. canonical_path in detailed memory records is a managed memory file, not an original note path. Results are compact by default; include_details retrieves extended metadata. get_memory gives a complete known record.\n\
              When the user requests or clearly authorizes a persistent note change, use a known source path directly; search only if the path is unknown. Read its current revision, and use the narrowest mutation; create a note only when no existing note should be updated. Never overwrite a revision conflict.\n\
              Every result has request_id and ok. On success consume data; on failure inspect error.code and error.retryable, and retry the same logical operation only when retryable is true. Treat degraded or truncated results as incomplete coverage.",
         )
@@ -2573,14 +2654,19 @@ impl ServerHandler for McpHandler {
                 if value == "context" {
                     let memories = request_context
                         .memory
-                        .list(&request_context.vault, Vec::new(), None, None, None, 12, 0)
+                        .get_memory_overview(
+                            &request_context.vault,
+                            OverviewRequest {
+                                access: memory_read_access(&request_context.principal),
+                                ..Default::default()
+                            },
+                        )
                         .await
                         .map_err(|_| {
                             ErrorData::internal_error("memory resource is unavailable", None)
                         })?;
                     ResourceContents::text(
-                        serde_json::to_string(&json!({"memories": memories}))
-                            .unwrap_or_else(|_| "{}".to_owned()),
+                        serde_json::to_string(&memories).unwrap_or_else(|_| "{}".to_owned()),
                         request.uri.clone(),
                     )
                     .with_mime_type("application/json")
@@ -2590,7 +2676,11 @@ impl ServerHandler for McpHandler {
                     })?;
                     let memory = request_context
                         .memory
-                        .get(&request_context.vault, memory_id)
+                        .get_with_access(
+                            &request_context.vault,
+                            memory_id,
+                            memory_read_access(&request_context.principal),
+                        )
                         .await
                         .map_err(|_| ErrorData::invalid_params("memory is not available", None))?;
                     ResourceContents::text(
@@ -2651,6 +2741,14 @@ fn parse_memory_id(value: &str) -> Result<MemoryId, ToolErrorBody> {
         .map_err(|_| ToolErrorBody::new("invalid_argument", "memory id is invalid", false))
 }
 
+fn memory_read_access(principal: &AuthPrincipal) -> MemoryReadAccess {
+    if principal.permissions.contains(Permission::ReadVault) {
+        MemoryReadAccess::All
+    } else {
+        MemoryReadAccess::ExplicitOnly
+    }
+}
+
 fn parse_memory_type(value: &str) -> Result<MemoryType, ToolErrorBody> {
     MemoryType::try_from(value)
         .map_err(|_| ToolErrorBody::new("invalid_argument", "memory type is invalid", false))
@@ -2690,7 +2788,10 @@ fn memory_error(error: MemoryError) -> ToolErrorBody {
             "optional memory provider work is unavailable",
             error.retryable(),
         ),
-        MemoryError::State(_) | MemoryError::Core(_) | MemoryError::Index(_) => ToolErrorBody::new(
+        MemoryError::State(_)
+        | MemoryError::Core(_)
+        | MemoryError::Index(_)
+        | MemoryError::InitializationFailure { .. } => ToolErrorBody::new(
             "temporarily_unavailable",
             "memory is temporarily unavailable",
             true,
@@ -2703,7 +2804,9 @@ fn tool_allowed(principal: &AuthPrincipal, name: &str) -> bool {
         "vault_overview" | "browse_index" | "recent_changes" => &[Permission::DiscoverVault][..],
         "search_notes" => &[Permission::ReadVault][..],
         "read_note" => &[Permission::ReadVault][..],
-        "recall" | "get_memory" | "list_memories" => &[Permission::ReadMemory][..],
+        "recall" | "get_memory" | "list_memories" | "get_memory_overview" => {
+            &[Permission::ReadMemory][..]
+        }
         "create_note" | "edit_note" | "move_note" => &[Permission::WriteVault][..],
         "delete_note" => &[Permission::DeleteVault][..],
         "note_history" => &[Permission::ReadHistory][..],
@@ -3129,6 +3232,7 @@ async fn search_data(
             &input.query,
             retrieval_mode,
             &NoteRetrievalScope {
+                source_path: None,
                 path_prefix,
                 tags: scope.tags.clone(),
                 topic_ids: scope.topic_ids.clone(),
@@ -3596,7 +3700,7 @@ mod tests {
     #[test]
     fn tool_metadata_is_model_facing_selection_and_result_guidance() {
         let tools = McpHandler::default().tool_router.list_all();
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 18);
 
         let mut titles = BTreeSet::new();
         for tool in &tools {
@@ -4503,6 +4607,7 @@ mod tests {
                 "remember",
                 "update_memory",
                 "forget_memory",
+                "get_memory_overview",
             ]
         );
 

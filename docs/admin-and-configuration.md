@@ -278,7 +278,9 @@ The OTLP endpoint must be an absolute HTTP(S) URL without embedded userinfo.
 
 When `MCP_VAULT_MASTER_KEY_FILE` is unset, MCP Vault atomically creates and
 reuses `<MCP_VAULT_SECRETS_DIR>/master-key`. An explicit file must contain a
-regular 32-byte raw or 64-character hex key and remains operator-managed. Once
+regular 32-byte raw or 64-character hex key and remains operator-managed. Raw
+32-byte input is recognized before newline handling; one trailing LF or CRLF is
+accepted for either encoding, with no other whitespace accepted. Once
 provider ciphertext, an MCP PAT, or an installation-key check exists, startup
 fails when the effective file is missing or its one-way verifier does not
 match; the service never replaces a lost established key.
@@ -574,8 +576,13 @@ The UI supports:
 - assign capabilities;
 - validate structured output;
 - record context/output limits;
-- record embedding dimension;
+- optionally record the expected embedding dimension for response validation;
 - test a minimal non-sensitive request.
+
+When the expected dimension is omitted, the service uses each valid response's
+actual dimension. Existing memory vectors remain eligible for current-unit retrieval; the
+organizer discovers dimensions from the current seed's exact stored input. The
+expected-dimension field does not request truncation or dimensionality reduction.
 
 Structured-generation model settings are typed and composable:
 
@@ -640,6 +647,7 @@ Configure global role bindings:
 
 ```text
 memory_extraction
+memory_overview
 note_summary
 topic_enrichment
 embedding_note
@@ -706,110 +714,25 @@ Rebuild actions must state which data is derived and which canonical data will n
 
 ## 13. Memory page
 
-Defined in detail in `memory-system.md`.
+The current v3 page exposes complete original memory units and their source paths, revisions, headings and lines. Explicit units are stored directly and edited with expected revisions. Automatic units are selected from complete source spans; their bodies are never generated or translated. They can be copied into the explicit authoring form. Deleting an automatic unit rewrites the source collection and pauses future extraction for that source, while preserving its other current units. Resume requires the current set revision.
 
-The UI includes:
+Configure `memory_extraction` for source selection, `embedding_memory` for memory vectors, and optionally `memory_overview` for navigation descriptions. The overview role falls back to the extraction model. Provider policy must allow the configured provider. No model is needed for direct explicit writes or lexical reads.
 
-- current explicit/note-derived counts and a current-only browser;
-- provenance, owning source, source-set revision, and pause state on demand;
-- one-call extraction readiness and durable job progress;
-- direct explicit create/edit and actual delete;
-- automatic-memory settings and a recall simulator;
-- prompt/provider/profile metadata;
-- migration preflight/apply status;
-- selected memory-vector model, current/stale coverage, failures, and a
-  “generate missing vectors” action that does not re-run memory extraction.
+Automatic extraction is disabled on a fresh installation. Enabling it admits future ordinary Markdown events; the action **处理新增或变化的笔记** processes existing sources. An explicit re-evaluation option reprocesses unchanged sources and can incur additional requests. A changed extraction profile also requires fresh evaluation. Requests have a typed 30–1800 second timeout, default 300 seconds, per batch. There are no old source-mode or evidence-limit compatibility fields.
 
-The page explains the distinction between automatically recallable ordinary
-notes and durable memory. Once automatic memory is enabled for the Vault,
-eligible ordinary Markdown changes may be sent to the configured model without
-requiring frontmatter, tags, special folders, or another authoring convention.
-Every ordinary note also remains available in search and `related_notes`
-recall. Legacy `explicit_only` and `all_notes` settings deserialize as aliases
-for the fixed `automatic` mode; the UI exposes no per-note source switch.
+Each invocation selects at most one uncached batch of up to 32 complete candidates within a 60 KiB JSON input bound. The complete source set publishes only after all batches finish. Progress shows processed sources, batch progress, model-output failures and skipped indivisible or sensitive units. An oversized unit remains accessible through ordinary note retrieval. Failed or pending batches do not appear as a completed partial memory set.
 
-One structured extraction call returns
-`{"memories":[{"content":"...","kind":"fact","tags":["..."]}]}`.
-Only the array and each non-empty `content` are required. The application
-generates IDs, binds the output to the current Vault/File ID/source hash, and
-atomically replaces that note's complete current set. It does not ask a model
-for lifecycle actions, source coordinates, confidence, importance, or durable
-identifiers, and there is no consolidation role or review queue.
+The generation panel uses `GET/POST /memory/generation` for status and `run`, `pause`, `resume`. Pausing preserves checkpoints and stops new source/overview dispatches and publication; source invalidation still applies immediately. Resuming admits current-source backfill and derived overview work. The overview panel distinguishes generated navigation from current original evidence and provides full-unit reads and paginated source navigation. Reads use deterministic entries if a cache is missing or stale.
 
-Automatic memory is off by default. Once enabled, non-managed Markdown
-create/update events admit `memory.extract`; move/delete/recreate behavior is
-handled first by `memory.source_reconcile`. A same-File-ID move with unchanged
-hash updates navigation without a Provider call. Content change hides the old
-set before regeneration, and source deletion removes the current derived set.
-This is event-driven; periodic reconciliation is only a restart-recovery
-fallback. Repeated full-Vault admission reuses the active job.
+Vector coverage is independent: missing current vectors can be rebuilt without selecting sources again or editing memory bodies. Normal reads fall back to lexical evidence on provider failure. Vector similarity does not prove that a source answers a question.
 
-The ordinary manual action is “处理新增或有变化的笔记”. A successful evaluation
-publishes a current source set even when it contains zero memories, so
-unchanged notes under the same extraction profile skip the model. An
-off-by-default checkbox changes the action to “重新评估所有现有笔记”; its warning
-states that unchanged notes will call the model again, may replace their
-current sets, and incur additional Token cost. This task option is separate
-from the persisted automatic-memory policy.
+Existing databases require controlled v3 initialization before memory reads/writes. Admin initialization is preferred; the alternative command `mcp-vault initialize-memory --discard-legacy-memory` requires stopped services and exclusive SQLite access, records a resumable manifest and removes all predecessor memory records and managed files. It preserves ordinary notes/attachments, unrelated managed files, history, Vault/account/credential records and Provider/model bindings. It never converts old explicit or generated memories. Once complete, repeating the command cannot delete new v3 memories. A new maintenance pause allows login, WebDAV and MCP checks before **继续生成** starts full backfill.
 
-The policy also owns a typed per-note Provider deadline from 30 through 1800
-seconds, defaulting to 300 seconds. The former evidence-anchor limit is retained
-only as a prerelease API compatibility field and is not shown in the UI. There
-are no model self-score threshold controls. The deadline does not lengthen model
-discovery, provider health, embedding, or unrelated requests.
+For the normal service workflow, use the Memory page's **旧记忆一次性初始化** panel. After updating the image, log in, select the target Vault, review the old record/file counts, and click **确认清理旧记忆**. The authenticated, Origin/CSRF-protected request returns `202` and runs through the shared maintenance lease in the background. The page polls the durable phase and progress, shows safe failure codes, and offers **确认继续初始化** only for resumable tasks. A service restart marks queued/running work as interrupted and leaves it for explicit resume; it never starts cleanup automatically. After success, generation remains paused until login, WebDAV and MCP checks pass, then **继续生成** can be clicked.
 
-Each current-memory card exposes ownership-appropriate actions. Explicit
-records can be edited with an expected revision. Delete is always an actual
-current deletion after confirmation. Deleting one note-derived item rewrites
-its owning set without that item and pauses automatic extraction for that
-source; a separate authenticated, revision-aware resume/regenerate action is
-required. The deleted body is never returned. Vault Core revision history and
-backups follow independent retention policies and are not model-readable
-current memory.
+If canonical initialization is already `ready` but task metadata was interrupted before its terminal update, maintenance recovery repairs only the task metadata and reopens the service in its normal mode. It does not delete files again. A successful initialization task restores the maintenance mode that was active before that task. After confirmation and manifest persistence, initialization does not replay Core intents in the managed legacy `_mcp-vault/memory/` namespace: it terminalizes only journals whose complete operation paths prove they stayed inside that namespace, then retires the manifest files through Vault Core with the original hash guards. A journal that crosses into ordinary/V3 paths, or whose scope cannot be proven, remains unchanged and blocks initialization. Unrelated ordinary-note journals remain available to normal Core recovery and are not changed by memory cleanup. The CLI remains available as an alternative when the Admin listener cannot be used, but it still requires the service to be stopped and SQLite to be exclusively owned.
 
-Upgrade never guesses ownership or deletes prerelease data automatically. The
-page first runs a content-free migration preflight, then requires confirmation
-`MIGRATE_MEMORY_V2_1` before applying safe explicit conversions and scheduling
-note-derived regeneration. Ambiguous/mixed rows stay excluded from current
-reads and remain in the report for operator handling.
-
-### 13.1 Memory service and runtime boundary
-
-Memory commands are application-service operations. The MCP and future Admin
-HTTP adapters authenticate the caller, resolve the endpoint-bound
-`VaultContext`, validate DTOs, and call `MemoryService`; they do not read the
-Vault filesystem, execute memory SQL, invoke providers, or update projections
-directly. The service writes canonical records below the Vault reserved root
-through Vault Core, so managed memory Markdown receives the same atomic-write,
-revision, history, audit, and outbox guarantees as other Core-managed data.
-
-The reserved memory namespace is not an ordinary WebDAV or MCP file path and
-is excluded from note indexing and normal filesystem reconciliation. Explicit
-records and one file per note-owned current set remain portable Markdown;
-ownership rows, prepared snapshots, FTS, and embeddings are operational or
-rebuildable projections.
-
-Automatic extraction is admitted as a Vault-scoped durable job containing only
-file identity, path, revision, and current profile references. The worker
-persists one validated prepared snapshot, then rechecks File ID, exact source
-hash, pause state, and expected set revision before canonical publication. A
-retry adopts only byte-identical managed output from the same snapshot.
-`embedding.rebuild` is separate; Provider outages degrade new extraction and
-semantic search but do not make existing lexical recall or canonical Vault
-writes fail.
-
-The runtime stores the following Vault-scoped settings through the typed
-configuration API rather than an unvalidated key/value editor:
-
-- automatic-memory enablement, per-note deadline, and schema/prompt version;
-- recall weights, result/token budgets, and optional embedding role binding;
-- semantic calibration, source pause state, and diagnostic policies.
-
-Changing hard bounds, bindings, or worker concurrency is hot-reloadable when
-the setting schema permits it. Changing an analyzer, embedding model, or
-taxonomy schedules a derived projection rebuild and never rewrites canonical
-memory Markdown implicitly. The WP-12 Admin API/UI exposes these operations;
-the WP-11 service boundary is already present for MCP and worker callers.
+The UI has no former organization, merge, legacy migration or synthetic calibration controls. See [Source-preserving memory units](memory-system.md) for canonical formats and authorization.
 
 ## 14. Jobs page
 

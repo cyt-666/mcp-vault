@@ -195,3 +195,15 @@ evidence.
 - Alibaba Qwen OpenAI-compatible Chat: https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions
 - Alibaba structured output: https://help.aliyun.com/zh/model-studio/qwen-structured-output
 - Alibaba thinking models: https://help.aliyun.com/zh/model-studio/deep-thinking
+
+
+### Reusing prepared embedding inputs across objects
+
+An exact prepared-input hash deliberately excludes the object ID. Identical inputs
+may reuse vector values within one Vault, selected model and exact profile, but
+must retain independent EmbeddingRecord IDs and source-object metadata. Cache
+lookups for an existing object bind that identity explicitly; copying values to a
+new object rechecks its current resolved input before publication. Values and
+references never cross Vaults. Rebuild jobs use reference_version=2 to avoid
+reusing older terminal jobs that incorrectly returned a different object's record;
+the projection/profile version remains unchanged, preserving valid vector values.

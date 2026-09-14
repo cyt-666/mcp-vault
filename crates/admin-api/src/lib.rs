@@ -41,17 +41,17 @@ use mcp_vault_domain::{
 };
 use mcp_vault_indexer::IndexService;
 use mcp_vault_memory::{
-    ExtractionPolicy, ExtractionSourceMode, MemoryOrigin, MemorySemanticCalibration, MemoryService,
-    MemoryType, MemoryUpdateInput, RememberInput,
+    ExtractionPolicy, InitializationStart, MemoryInitializationService, MemoryOrigin,
+    MemoryReadAccess, MemoryService, MemoryType, MemoryUpdateInput, OverviewRequest, RememberInput,
 };
 use mcp_vault_providers::{
     ModelCapabilities, ModelInput, ModelSettings, ProviderError, ProviderInput, ProviderKind,
     ProviderMode, ProviderService, ProviderSettings,
 };
 use mcp_vault_state::{
-    AuditRecord, BackupRecord, CurrentMemoryCounts, JobRecord, JobStatus, JobStatusCounts,
-    McpTokenRecord, ModelBindingRecord, ModelRecord, ProviderHealthRecord, ProviderRecord,
-    StateError, StateStore, VaultRecord, VaultStatus, WebDavCredentialRecord,
+    AuditRecord, BackupRecord, JobRecord, JobStatus, JobStatusCounts, McpTokenRecord,
+    ModelBindingRecord, ModelRecord, ProviderHealthRecord, ProviderRecord, StateError, StateStore,
+    UnitCounts, VaultRecord, VaultStatus, WebDavCredentialRecord,
 };
 use mcp_vault_storage_fs::StorageOptions;
 use serde::{Deserialize, Serialize};
@@ -82,6 +82,7 @@ pub struct AdminApiState {
     selected_vault: Option<VaultId>,
     providers: ProviderService,
     memory: MemoryService,
+    initialization: MemoryInitializationService,
     backup: BackupService,
     readiness: Arc<AtomicBool>,
     version: String,
@@ -134,6 +135,13 @@ impl AdminApiState {
         );
         let providers = ProviderService::new(state.clone(), auth.clone());
         let memory = MemoryService::with_provider_service(state.clone(), providers.clone());
+        let initialization = MemoryInitializationService::new(
+            state.clone(),
+            config.maintenance.clone(),
+            config.core_runtime.clone(),
+            config.history_root.clone(),
+            config.storage_options,
+        );
         let backup = BackupService::new(
             state.clone(),
             mcp_vault_backup::BackupConfig {
@@ -165,6 +173,7 @@ impl AdminApiState {
             selected_vault: None,
             providers,
             memory,
+            initialization,
             backup,
             readiness: config.readiness,
             version: config.version,
@@ -205,6 +214,12 @@ impl AdminApiState {
     /// supervisor without exposing raw state or archive paths.
     pub fn backup_service(&self) -> BackupService {
         self.backup.clone()
+    }
+
+    /// Stop in-process memory initialization workers while retaining durable
+    /// task rows for an explicit resume after restart.
+    pub async fn shutdown_initialization(&self) {
+        self.initialization.shutdown().await;
     }
 
     fn core_for_vault(&self, vault: &VaultRecord) -> Result<VaultCore, StateError> {
@@ -265,11 +280,8 @@ impl AdminApiState {
         self.state.files().list_active_entries(context).await
     }
 
-    async fn memory_counts(
-        &self,
-        context: &VaultContext,
-    ) -> Result<CurrentMemoryCounts, StateError> {
-        self.state.current_memory().counts(context).await
+    async fn memory_counts(&self, context: &VaultContext) -> Result<UnitCounts, StateError> {
+        self.state.memory_units().counts(context).await
     }
 
     async fn pending_jobs_for(&self, context: &VaultContext) -> Result<u64, StateError> {
@@ -608,29 +620,29 @@ fn vault_admin_routes() -> Router<AdminApiState> {
             get(get_memory_extraction).put(put_memory_extraction),
         )
         .route("/memory/extraction/run", post(run_memory_extraction))
+        .route("/memory/overview", get(get_memory_overview))
+        .route(
+            "/memory/generation",
+            get(get_memory_generation).post(control_memory_generation),
+        )
+        .route(
+            "/memory/initialization",
+            get(get_memory_initialization).post(preview_memory_initialization),
+        )
+        .route(
+            "/memory/initialization/start",
+            post(start_memory_initialization),
+        )
+        .route(
+            "/memory/initialization/resume",
+            post(resume_memory_initialization),
+        )
         .route(
             "/memory/extraction/sources/{file_id}/resume",
             post(resume_memory_extraction),
         )
-        .route(
-            "/memory/migration/preflight",
-            post(preflight_memory_migration),
-        )
-        .route("/memory/migration/execute", post(execute_memory_migration))
         .route("/memory/embeddings", get(get_memory_embeddings))
-        .route(
-            "/memory/semantic-calibration/run",
-            post(run_memory_semantic_calibration),
-        )
-        .route(
-            "/memory/semantic-calibration/maintenance",
-            put(set_memory_calibration_maintenance),
-        )
         .route("/memory/extraction/sources", get(list_memory_sources))
-        .route(
-            "/memory/semantic-calibration",
-            get(get_memory_semantic_calibration).put(put_memory_semantic_calibration),
-        )
         .route(
             "/memory/embeddings/rebuild",
             post(rebuild_memory_embeddings),
@@ -733,8 +745,17 @@ async fn enforce_maintenance(
     let maintenance = state.backup.maintenance();
     let recovery_path = request.uri().path().ends_with("/maintenance/recover");
     let login_path = request.method() == Method::POST && request.uri().path().ends_with("/session");
+    let initialization_path = request.uri().path().contains("/memory/initialization");
+    let identity_read_path = request.method() == Method::GET
+        && (request.uri().path().ends_with("/session")
+            || request.uri().path().ends_with("/vaults"));
+    if (recovery_path || initialization_path) && !state.backup.operation_active() {
+        // These authenticated control operations own their maintenance lease;
+        // admitting the HTTP request itself would make drain wait on itself.
+        return next.run(request).await;
+    }
     if maintenance.mode() == MaintenanceMode::Offline
-        && (recovery_path || login_path)
+        && (login_path || identity_read_path)
         && !state.backup.operation_active()
     {
         return next.run(request).await;
@@ -2118,7 +2139,7 @@ fn index_coverage_ratio(indexed_notes: u64, total_notes: u64) -> Option<f64> {
     (total_notes != 0).then(|| (indexed_notes as f64 / total_notes as f64).clamp(0.0, 1.0))
 }
 
-fn memory_counts_json(counts: &CurrentMemoryCounts) -> Value {
+fn memory_counts_json(counts: &UnitCounts) -> Value {
     json!({
         "total": counts.total,
         "current": counts.total,
@@ -3315,7 +3336,7 @@ async fn put_provider_mode(
         .await
     {
         Ok(setting) => {
-            let _ = state.memory().ensure_retrieval_calibration(&context).await;
+            let _ = state.memory().ensure_memory_jobs_scheduled(&context).await;
             state
                 .append_admin_audit(
                     Some(&context),
@@ -3590,7 +3611,7 @@ async fn update_provider(
             if let Ok(vaults) = state.list_vaults().await {
                 for vault in vaults {
                     if let Ok(context) = vault.context() {
-                        let _ = state.memory().ensure_retrieval_calibration(&context).await;
+                        let _ = state.memory().ensure_memory_jobs_scheduled(&context).await;
                     }
                 }
             }
@@ -4012,7 +4033,7 @@ async fn update_model_binding(
                         .collect()
                 };
                 for target in targets {
-                    let _ = state.memory().ensure_retrieval_calibration(&target).await;
+                    let _ = state.memory().ensure_memory_jobs_scheduled(&target).await;
                 }
             }
             state
@@ -4431,6 +4452,7 @@ struct MemoryCreateRequest {
     #[serde(default)]
     metadata: Value,
     idempotency_key: Option<String>,
+    source_memory: Option<mcp_vault_memory::MemoryCopySource>,
 }
 
 async fn create_memory(
@@ -4477,7 +4499,7 @@ async fn create_memory(
     };
     match state
         .memory()
-        .remember_as(
+        .remember_from_unit_as(
             &context,
             &core,
             principal.actor.clone(),
@@ -4496,6 +4518,7 @@ async fn create_memory(
                 origin: MemoryOrigin::ExplicitAdmin,
                 extraction: input.metadata,
             },
+            input.source_memory,
         )
         .await
     {
@@ -4837,167 +4860,6 @@ async fn get_memory_embeddings(
     }
 }
 
-async fn get_memory_semantic_calibration(
-    State(state): State<AdminApiState>,
-    Extension(request_id): Extension<RequestId>,
-) -> Response {
-    let vault = match current_vault(&state, &request_id.0).await {
-        Ok(vault) => vault,
-        Err(response) => return response,
-    };
-    let context = match vault.context() {
-        Ok(context) => context,
-        Err(_) => {
-            return state_error(
-                StateError::InvalidInput("Vault context is invalid"),
-                request_id.0,
-            );
-        }
-    };
-    let memory = state.memory();
-    match (
-        memory.semantic_calibration(&context).await,
-        memory.calibration_status(&context, "memory").await,
-        memory.calibration_status(&context, "note").await,
-    ) {
-        (Ok(legacy), Ok(memory), Ok(note)) => {
-            let mut value = serde_json::to_value(legacy).unwrap_or_else(|_| json!({}));
-            value["channels"] = json!([memory, note]);
-            api_ok(StatusCode::OK, value, request_id.0)
-        }
-        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
-            memory_error(error, request_id.0)
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RunCalibrationRequest {
-    channel: String,
-}
-async fn run_memory_semantic_calibration(
-    State(state): State<AdminApiState>,
-    headers: HeaderMap,
-    Extension(principal): Extension<AdminPrincipal>,
-    Extension(request_id): Extension<RequestId>,
-    Json(input): Json<RunCalibrationRequest>,
-) -> Response {
-    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
-        return auth_error(error, request_id.0);
-    }
-    let vault = match current_vault(&state, &request_id.0).await {
-        Ok(vault) => vault,
-        Err(response) => return response,
-    };
-    let context = match vault.context() {
-        Ok(context) => context,
-        Err(_) => {
-            return state_error(
-                StateError::InvalidInput("Vault context is invalid"),
-                request_id.0,
-            );
-        }
-    };
-    match state
-        .memory()
-        .request_retrieval_calibration(&context, &input.channel)
-        .await
-    {
-        Ok(job_id) => {
-            state
-                .append_admin_audit(
-                    Some(&context),
-                    &request_id.0,
-                    &principal.actor,
-                    "admin.retrieval_calibration.requested",
-                    Some("channel"),
-                    Some(&input.channel),
-                    json!({"job_id":job_id}),
-                )
-                .await;
-            api_ok(
-                StatusCode::ACCEPTED,
-                json!({"job_id":job_id,"channel":input.channel,"admitted":job_id.is_some()}),
-                request_id.0,
-            )
-        }
-        Err(error) => memory_error(error, request_id.0),
-    }
-}
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CalibrationMaintenanceRequest {
-    enabled: bool,
-    budget: Option<mcp_vault_state::CalibrationBudget>,
-}
-async fn set_memory_calibration_maintenance(
-    State(state): State<AdminApiState>,
-    headers: HeaderMap,
-    Extension(principal): Extension<AdminPrincipal>,
-    Extension(request_id): Extension<RequestId>,
-    Json(input): Json<CalibrationMaintenanceRequest>,
-) -> Response {
-    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::PUT) {
-        return auth_error(error, request_id.0);
-    }
-    let vault = match current_vault(&state, &request_id.0).await {
-        Ok(vault) => vault,
-        Err(response) => return response,
-    };
-    let context = match vault.context() {
-        Ok(context) => context,
-        Err(_) => {
-            return state_error(
-                StateError::InvalidInput("Vault context is invalid"),
-                request_id.0,
-            );
-        }
-    };
-    if let Some(budget) = input.budget {
-        if budget.validate().is_err() {
-            return api_error(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "validation_failed",
-                "The calibration engineering budget is invalid.",
-                None,
-                request_id.0,
-            );
-        }
-        if let Err(error) = state
-            .memory()
-            .set_calibration_budget(&context, budget)
-            .await
-        {
-            return memory_error(error, request_id.0);
-        }
-    }
-    match state
-        .memory()
-        .set_calibration_maintenance(&context, input.enabled)
-        .await
-    {
-        Ok(()) => {
-            state
-                .append_admin_audit(
-                    Some(&context),
-                    &request_id.0,
-                    &principal.actor,
-                    "admin.retrieval_calibration.maintenance",
-                    None,
-                    None,
-                    json!({"enabled":input.enabled}),
-                )
-                .await;
-            api_ok(
-                StatusCode::OK,
-                json!({"enabled":input.enabled}),
-                request_id.0,
-            )
-        }
-        Err(error) => memory_error(error, request_id.0),
-    }
-}
 #[derive(Debug, Deserialize)]
 struct MemorySourcesQuery {
     paused: Option<bool>,
@@ -5031,7 +4893,7 @@ async fn list_memory_sources(
     };
     match state
         .state
-        .current_memory()
+        .memory_units()
         .list_source_sets(&context, query.paused, limit, offset)
         .await
     {
@@ -5041,83 +4903,6 @@ async fn list_memory_sources(
             request_id.0,
         ),
         Err(error) => state_error(error, request_id.0),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PutMemorySemanticCalibrationRequest {
-    calibration: MemorySemanticCalibration,
-    #[serde(default)]
-    expected_revision: Option<i64>,
-}
-
-async fn put_memory_semantic_calibration(
-    State(state): State<AdminApiState>,
-    headers: HeaderMap,
-    Extension(principal): Extension<AdminPrincipal>,
-    Extension(request_id): Extension<RequestId>,
-    Json(input): Json<PutMemorySemanticCalibrationRequest>,
-) -> Response {
-    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::PUT) {
-        return auth_error(error, request_id.0);
-    }
-    let expected_revision = match input.expected_revision.map(Revision::try_from).transpose() {
-        Ok(revision) => revision,
-        Err(_) => {
-            return api_error(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "validation_failed",
-                "The expected calibration revision is invalid.",
-                None,
-                request_id.0,
-            );
-        }
-    };
-    let vault = match current_vault(&state, &request_id.0).await {
-        Ok(vault) => vault,
-        Err(response) => return response,
-    };
-    let context = match vault.context() {
-        Ok(context) => context,
-        Err(_) => {
-            return state_error(
-                StateError::InvalidInput("Vault context is invalid"),
-                request_id.0,
-            );
-        }
-    };
-    match state
-        .memory()
-        .set_semantic_calibration(
-            &context,
-            input.calibration.clone(),
-            expected_revision,
-            principal.actor.actor_id(),
-        )
-        .await
-    {
-        Ok(status) => {
-            state
-                .append_admin_audit(
-                    Some(&context),
-                    &request_id.0,
-                    &principal.actor,
-                    "admin.memory_semantic_calibration.updated",
-                    Some("embedding_profile"),
-                    Some(&input.calibration.embedding_profile_hash),
-                    json!({
-                        "answered_queries": input.calibration.answered_queries,
-                        "unanswered_queries": input.calibration.unanswered_queries,
-                        "recall_at_5": input.calibration.recall_at_5,
-                        "no_answer_false_return_rate": input.calibration.no_answer_false_return_rate,
-                        "report_hash": input.calibration.report_hash,
-                    }),
-                )
-                .await;
-            api_ok(StatusCode::OK, status, request_id.0)
-        }
-        Err(error) => memory_error(error, request_id.0),
     }
 }
 
@@ -5251,15 +5036,45 @@ async fn resume_memory_extraction(
     }
 }
 
-async fn preflight_memory_migration(
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryGenerationControlRequest {
+    action: MemoryGenerationAction,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MemoryGenerationAction {
+    Run,
+    Pause,
+    Resume,
+}
+
+impl MemoryGenerationAction {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+        }
+    }
+}
+
+#[derive(Default, Deserialize)]
+struct MemoryOverviewQuery {
+    source_path: Option<String>,
+    path_prefix: Option<String>,
+    topic_ids: Option<String>,
+    after_id: Option<String>,
+    limit: Option<u32>,
+    max_tokens: Option<u32>,
+}
+
+async fn get_memory_overview(
     State(state): State<AdminApiState>,
-    headers: HeaderMap,
-    Extension(principal): Extension<AdminPrincipal>,
+    Query(query): Query<MemoryOverviewQuery>,
     Extension(request_id): Extension<RequestId>,
 ) -> Response {
-    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
-        return auth_error(error, request_id.0);
-    }
     let vault = match current_vault(&state, &request_id.0).await {
         Ok(vault) => vault,
         Err(response) => return response,
@@ -5273,70 +5088,150 @@ async fn preflight_memory_migration(
             );
         }
     };
+    let after_id = match query.after_id.as_deref().map(MemoryId::parse).transpose() {
+        Ok(id) => id,
+        Err(_) => {
+            return api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_failed",
+                "The overview cursor is invalid.",
+                None,
+                request_id.0,
+            );
+        }
+    };
     match state
-        .state
-        .current_memory()
-        .migration_preflight(&context)
+        .memory()
+        .get_memory_overview(
+            &context,
+            OverviewRequest {
+                access: MemoryReadAccess::All,
+                source_path: query.source_path,
+                path_prefix: query.path_prefix,
+                topic_ids: query
+                    .topic_ids
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|key| !key.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+                after_id,
+                limit: query.limit.unwrap_or(40),
+                max_tokens: query.max_tokens.unwrap_or(4096),
+            },
+        )
         .await
     {
-        Ok(report) => {
-            let preflight_hash = match report.fingerprint() {
-                Ok(hash) => hash,
-                Err(error) => return state_error(error, request_id.0),
-            };
-            state
-                .append_admin_audit(
-                    Some(&context),
-                    &request_id.0,
-                    &principal.actor,
-                    "admin.memory_migration.preflighted",
-                    Some("vault"),
-                    Some(&context.id().to_string()),
-                    json!({
-                        "legacy_total": report.legacy_total,
-                        "safe_explicit": report.safe_explicit,
-                        "note_derived": report.note_derived,
-                        "mixed_source": report.mixed_source,
-                        "unsupported": report.unsupported,
-                    }),
-                )
-                .await;
-            api_ok(
-                StatusCode::OK,
-                json!({
-                    "report": report,
-                    "preflight_hash": preflight_hash,
-                    "required_confirmation": "MIGRATE_MEMORY_V2_1",
-                }),
+        Ok(value) => api_ok(StatusCode::OK, value, request_id.0),
+        Err(error) => memory_error(error, request_id.0),
+    }
+}
+
+async fn get_memory_generation(
+    State(state): State<AdminApiState>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    let vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    let context = match vault.context() {
+        Ok(context) => context,
+        Err(_) => {
+            return state_error(
+                StateError::InvalidInput("Vault context is invalid"),
                 request_id.0,
-            )
+            );
         }
-        Err(error) => state_error(error, request_id.0),
+    };
+    match state.memory().generation_status(&context).await {
+        Ok(status) => api_ok(StatusCode::OK, json!(status), request_id.0),
+        Err(error) => memory_error(error, request_id.0),
     }
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExecuteMemoryMigrationRequest {
-    confirmation: String,
-    preflight_hash: String,
+struct MemoryInitializationRequest {
+    confirm_discard_legacy_memory: bool,
 }
 
-async fn execute_memory_migration(
+async fn memory_initialization_json(
+    state: &AdminApiState,
+    vault: &VaultRecord,
+) -> Result<Value, mcp_vault_memory::MemoryError> {
+    state.initialization.status(vault).await
+}
+
+async fn get_memory_initialization(
+    State(state): State<AdminApiState>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    let vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    match vault.context() {
+        Ok(_) => {}
+        Err(_) => {
+            return state_error(
+                StateError::InvalidInput("Vault context is invalid"),
+                request_id.0,
+            );
+        }
+    };
+    match memory_initialization_json(&state, &vault).await {
+        Ok(value) => api_ok(StatusCode::OK, value, request_id.0),
+        Err(error) => memory_error(error, request_id.0),
+    }
+}
+
+async fn preview_memory_initialization(
     State(state): State<AdminApiState>,
     headers: HeaderMap,
-    Extension(principal): Extension<AdminPrincipal>,
     Extension(request_id): Extension<RequestId>,
-    Json(input): Json<ExecuteMemoryMigrationRequest>,
 ) -> Response {
     if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
         return auth_error(error, request_id.0);
     }
-    if input.confirmation != "MIGRATE_MEMORY_V2_1" {
+    get_memory_initialization(State(state), Extension(request_id)).await
+}
+
+async fn start_memory_initialization(
+    State(state): State<AdminApiState>,
+    headers: HeaderMap,
+    Extension(principal): Extension<AdminPrincipal>,
+    Extension(request_id): Extension<RequestId>,
+    Json(input): Json<MemoryInitializationRequest>,
+) -> Response {
+    start_memory_initialization_inner(state, headers, principal, request_id, input, false).await
+}
+
+async fn resume_memory_initialization(
+    State(state): State<AdminApiState>,
+    headers: HeaderMap,
+    Extension(principal): Extension<AdminPrincipal>,
+    Extension(request_id): Extension<RequestId>,
+    Json(input): Json<MemoryInitializationRequest>,
+) -> Response {
+    start_memory_initialization_inner(state, headers, principal, request_id, input, true).await
+}
+
+async fn start_memory_initialization_inner(
+    state: AdminApiState,
+    headers: HeaderMap,
+    principal: AdminPrincipal,
+    request_id: RequestId,
+    input: MemoryInitializationRequest,
+    resume_failed: bool,
+) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
+        return auth_error(error, request_id.0);
+    }
+    if !input.confirm_discard_legacy_memory {
         return api_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "confirmation_required",
-            "Type MIGRATE_MEMORY_V2_1 to authorize the one-time migration.",
+            "Explicit confirmation is required to discard legacy memory.",
             None,
             request_id.0,
         );
@@ -5354,106 +5249,86 @@ async fn execute_memory_migration(
             );
         }
     };
-    let current_preflight = match state
-        .state
-        .current_memory()
-        .migration_preflight(&context)
-        .await
-    {
-        Ok(report) => report,
-        Err(error) => return state_error(error, request_id.0),
-    };
-    let current_preflight_hash = match current_preflight.fingerprint() {
-        Ok(hash) => hash,
-        Err(error) => return state_error(error, request_id.0),
-    };
-    if input.preflight_hash != current_preflight_hash {
-        return api_error(
-            StatusCode::CONFLICT,
-            "memory_migration_preflight_stale",
-            "Run memory migration preflight again and confirm the unchanged report.",
-            Some(json!({"current_preflight_hash": current_preflight_hash})),
-            request_id.0,
-        );
-    }
-    let core = match state.core_for_vault(&vault) {
-        Ok(core) => core,
-        Err(error) => return state_error(error, request_id.0),
-    };
-    let migration = match state
-        .memory()
-        .migrate_legacy_v2_1(
-            &context,
-            &core,
-            &input.preflight_hash,
-            principal.actor.clone(),
-        )
-        .await
-    {
-        Ok(migration) => migration,
+    let start = match state.initialization.start(&vault, resume_failed).await {
+        Ok(start) => start,
+        Err(mcp_vault_memory::MemoryError::Configuration(code)) => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                code,
+                "Memory initialization is unavailable during maintenance recovery.",
+                None,
+                request_id.0,
+            );
+        }
         Err(error) => return memory_error(error, request_id.0),
     };
-    let mut regeneration_job = None;
-    if migration.note_derived != 0 {
-        let readiness = match state.memory().extraction_readiness(&context).await {
-            Ok(readiness) => readiness,
-            Err(error) => return memory_error(error, request_id.0),
-        };
-        if readiness.ready {
-            let dedup = format!(
-                "vault:{}:memory-v2-migration:{}",
-                context.id(),
-                mcp_vault_domain::EventId::new()
-            );
-            match state
-                .enqueue_vault_job(
-                    &context,
-                    "memory.extract",
-                    &dedup,
-                    &json!({
-                        "memory_contract_generation": mcp_vault_memory::MEMORY_CONTRACT_GENERATION,
-                        "pipeline_version": mcp_vault_memory::EXTRACTION_PIPELINE_VERSION,
-                        "scope": "all",
-                        "reason": "memory_v2_migration",
-                        "include_evaluated": false,
-                    }),
-                    4,
-                    5,
-                )
-                .await
-            {
-                Ok(job) => regeneration_job = Some(job_admission_summary(&job, "queued")),
-                Err(error) => return state_error(error, request_id.0),
-            }
-        }
-    }
+    let (status_code, body) = match start {
+        InitializationStart::Ready(value) => (StatusCode::OK, value),
+        InitializationStart::Accepted(value) => (StatusCode::ACCEPTED, value),
+    };
     state
         .append_admin_audit(
             Some(&context),
             &request_id.0,
             &principal.actor,
-            "admin.memory_migration.executed",
-            Some("vault"),
-            Some(&context.id().to_string()),
-            json!({
-                "migrated_explicit": migration.migrated_explicit,
-                "already_current": migration.already_current,
-                "note_derived": migration.note_derived,
-                "unresolved_count": migration.unresolved_ids.len(),
-                "legacy_rows_deleted": false,
-                "regeneration_queued": regeneration_job.is_some(),
-            }),
+            "admin.memory_initialization.started",
+            Some("memory_initialization"),
+            None,
+            json!({"resume":resume_failed}),
         )
         .await;
-    api_ok(
-        StatusCode::ACCEPTED,
-        json!({
-            "migration": migration,
-            "regeneration_required": migration.note_derived != 0,
-            "regeneration_job": regeneration_job,
-        }),
-        request_id.0,
-    )
+    api_ok(status_code, body, request_id.0)
+}
+
+async fn control_memory_generation(
+    State(state): State<AdminApiState>,
+    headers: HeaderMap,
+    Extension(principal): Extension<AdminPrincipal>,
+    Extension(request_id): Extension<RequestId>,
+    Json(input): Json<MemoryGenerationControlRequest>,
+) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
+        return auth_error(error, request_id.0);
+    }
+    let vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    let context = match vault.context() {
+        Ok(context) => context,
+        Err(_) => {
+            return state_error(
+                StateError::InvalidInput("Vault context is invalid"),
+                request_id.0,
+            );
+        }
+    };
+    let action = input.action.as_str();
+    match state.memory().control_generation(&context, action).await {
+        Ok(status) => {
+            state
+                .append_admin_audit(
+                    Some(&context),
+                    &request_id.0,
+                    &principal.actor,
+                    "admin.memory_generation.controlled",
+                    Some("memory_generation"),
+                    None,
+                    json!({"action":action}),
+                )
+                .await;
+            api_ok(
+                if action == "pause" {
+                    StatusCode::OK
+                } else {
+                    StatusCode::ACCEPTED
+                },
+                json!(status),
+                request_id.0,
+            )
+        }
+        Err(error) => memory_error(error, request_id.0),
+    }
 }
 
 async fn memory_extraction_json(
@@ -5463,13 +5338,14 @@ async fn memory_extraction_json(
     let policy = state.memory().extraction_policy(context).await?;
     let readiness = state.memory().extraction_readiness(context).await?;
     Ok(json!({
-        "contract": "current_formal_memories_v2_2",
-        "dedup": state.state.current_memory().formal_status(context).await?,
+        "contract": "source_preserving_memory_units_v3",
+        "generation": state.memory().generation_status(context).await?,
         "policy": policy.policy,
         "revision": policy.revision.map(Revision::value),
         "readiness": readiness,
         "behavior": {
-            "model_calls_per_note": 1,
+            "model_calls_per_batch": 1,
+            "long_note_processing": "checkpointed_complete_units",
             "publication": "full_source_set_replacement",
             "source_change_visibility": "fail_closed",
             "derived_delete_pauses_source": true,
@@ -5503,9 +5379,6 @@ async fn get_memory_extraction(
 #[derive(Debug, Deserialize)]
 struct ExtractionPolicyRequest {
     enabled: bool,
-    source_mode: Option<ExtractionSourceMode>,
-    #[serde(alias = "max_candidates_per_note")]
-    max_evidence_per_note: Option<u32>,
     request_timeout_seconds: Option<u64>,
     expected_revision: Option<i64>,
 }
@@ -5550,8 +5423,6 @@ async fn put_memory_extraction(
     };
     let policy = ExtractionPolicy {
         enabled: input.enabled,
-        source_mode: input.source_mode.unwrap_or_default(),
-        max_evidence_per_note: input.max_evidence_per_note.unwrap_or(3),
         request_timeout_seconds: input.request_timeout_seconds.unwrap_or(300),
     };
     match state
@@ -5929,21 +5800,6 @@ async fn cancel_job(
             );
         }
     };
-    if state
-        .state
-        .jobs()
-        .get(&context, id)
-        .await
-        .ok()
-        .flatten()
-        .is_some_and(|job| job.job_type == "retrieval.calibrate")
-        && let Err(error) = state
-            .memory()
-            .cancel_retrieval_calibration(&context, id)
-            .await
-    {
-        return memory_error(error, request_id.0);
-    }
     match state.cancel_job_for(&context, id).await {
         Ok(()) => {
             state
@@ -6437,7 +6293,8 @@ fn memory_error(error: mcp_vault_memory::MemoryError, request_id: String) -> Res
         ),
         mcp_vault_memory::MemoryError::State(_)
         | mcp_vault_memory::MemoryError::Core(_)
-        | mcp_vault_memory::MemoryError::Index(_) => (
+        | mcp_vault_memory::MemoryError::Index(_)
+        | mcp_vault_memory::MemoryError::InitializationFailure { .. } => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "memory_unavailable",
             "Memory state is temporarily unavailable.",
@@ -7150,7 +7007,7 @@ mod tests {
         assert_eq!(extraction["data"]["readiness"]["ready"], true);
         assert_eq!(
             extraction["data"]["contract"],
-            "current_formal_memories_v2_2"
+            "source_preserving_memory_units_v3"
         );
         assert!(
             state
@@ -7163,6 +7020,150 @@ mod tests {
             "policy updates must not conceal an implicit extraction run"
         );
     }
+    #[tokio::test]
+    async fn generation_controls_require_authentication_and_csrf_and_keep_empty_vault_idle() {
+        let (router, _root, _maintenance, cookie, csrf, state) =
+            authenticated_fixture_with_state().await;
+        let context = state
+            .list_vaults()
+            .await
+            .unwrap()
+            .remove(0)
+            .context()
+            .unwrap();
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request("GET", "/memory/generation", json!({}), None, None))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/memory/generation",
+                    json!({"action":"pause"}),
+                    Some(&cookie),
+                    None
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        for (action, paused) in [("run", false), ("pause", true), ("resume", false)] {
+            let (status, value) = json_response(
+                router
+                    .clone()
+                    .oneshot(request(
+                        "POST",
+                        "/memory/generation",
+                        json!({"action":action}),
+                        Some(&cookie),
+                        Some(&csrf),
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert!(status.is_success(), "{value}");
+            assert_eq!(value["data"]["runtime"]["paused"], paused);
+        }
+        assert!(
+            state
+                .state
+                .jobs()
+                .find_active_by_type(&context, "memory.overview")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let (status, overview) = json_response(
+            router
+                .oneshot(request(
+                    "GET",
+                    "/memory/overview",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            overview["data"]["navigation_kind"],
+            "deterministic_navigation"
+        );
+        assert!(overview["data"]["entries"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_initialization_status_is_vault_scoped_and_requires_explicit_confirmation() {
+        let (router, _root, _maintenance, cookie, csrf) = authenticated_fixture().await;
+        let (status, body) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    "/memory/initialization",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["read_only"], true);
+
+        let (status, body) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/memory/initialization/start",
+                    json!({"confirm_discard_legacy_memory": false}),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["error"]["code"], "confirmation_required");
+
+        let (status, body) = json_response(
+            router
+                .oneshot(request(
+                    "POST",
+                    "/memory/initialization/start",
+                    json!({"confirm_discard_legacy_memory": true}),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            matches!(status, StatusCode::OK | StatusCode::ACCEPTED),
+            "{body}"
+        );
+        if status == StatusCode::ACCEPTED {
+            assert!(body["data"]["task"]["task_id"].is_string());
+        } else {
+            assert_eq!(body["data"]["preview"]["phase"], "ready");
+        }
+    }
+
     #[tokio::test]
     async fn binding_extraction_model_updates_readiness_without_legacy_regeneration() {
         let (router, _root, _maintenance, cookie, csrf, state) =
@@ -7548,86 +7549,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn calibration_and_source_management_require_auth_csrf_and_validate_input() {
-        let (router, _root, _maintenance, cookie, csrf) = authenticated_fixture().await;
-        for (method, path, body) in [
-            (
-                "POST",
-                "/memory/semantic-calibration/run",
-                json!({"channel":"memory"}),
-            ),
-            (
-                "PUT",
-                "/memory/semantic-calibration/maintenance",
-                json!({"enabled":false}),
-            ),
-        ] {
-            let rejected = router
-                .clone()
-                .oneshot(request(method, path, body.clone(), Some(&cookie), None))
-                .await
-                .unwrap();
-            assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
-            let unauthenticated = router
-                .clone()
-                .oneshot(request(method, path, body, None, None))
-                .await
-                .unwrap();
-            assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
-        }
-        let (status, value) = json_response(
-            router
-                .clone()
-                .oneshot(request(
-                    "GET",
-                    "/memory/semantic-calibration",
-                    json!({}),
-                    Some(&cookie),
-                    None,
-                ))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{value}");
-        assert_eq!(value["data"]["channels"].as_array().unwrap().len(), 2);
-        assert!(
-            value["data"]["channels"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|channel| channel["run"].is_null())
-        );
-        let (status, value) = json_response(
-            router
-                .clone()
-                .oneshot(request(
-                    "POST",
-                    "/memory/semantic-calibration/run",
-                    json!({"channel":"invalid"}),
-                    Some(&cookie),
-                    Some(&csrf),
-                ))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{value}");
-        let (status, value) = json_response(
-            router
-                .clone()
-                .oneshot(request(
-                    "PUT",
-                    "/memory/semantic-calibration/maintenance",
-                    json!({"enabled":true,"budget":{"max_requests":0}}),
-                    Some(&cookie),
-                    Some(&csrf),
-                ))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{value}");
+    async fn source_management_lists_current_paused_sources_without_legacy_categories() {
+        let (router, _root, _maintenance, cookie, _csrf) = authenticated_fixture().await;
         let (status, value) = json_response(
             router
                 .oneshot(request(
@@ -7646,108 +7569,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_migration_requires_csrf_confirmation_and_an_unchanged_preflight() {
+    async fn retired_memory_contracts_are_unavailable() {
         let (router, _root, _maintenance, cookie, csrf) = authenticated_fixture().await;
-
-        let rejected = router
-            .clone()
-            .oneshot(request(
-                "POST",
-                "/memory/migration/preflight",
-                json!({}),
-                Some(&cookie),
-                None,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
-
-        let (status, preflight) = json_response(
-            router
+        for (method, path) in [
+            ("GET", "/memory/organization"),
+            ("GET", "/memory/organization/diagnostics"),
+            ("GET", "/memory/semantic-calibration"),
+            ("POST", "/memory/semantic-calibration/run"),
+            ("PUT", "/memory/semantic-calibration/maintenance"),
+            ("POST", "/memory/migration/preflight"),
+            ("POST", "/memory/migration/execute"),
+        ] {
+            let response = router
                 .clone()
-                .oneshot(request(
-                    "POST",
-                    "/memory/migration/preflight",
-                    json!({}),
-                    Some(&cookie),
-                    Some(&csrf),
-                ))
+                .oneshot(request(method, path, json!({}), Some(&cookie), Some(&csrf)))
                 .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{preflight}");
-        assert_eq!(preflight["data"]["report"]["legacy_total"], 0);
-        assert_eq!(
-            preflight["data"]["required_confirmation"],
-            "MIGRATE_MEMORY_V2_1"
-        );
-        let preflight_hash = preflight["data"]["preflight_hash"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        assert!(preflight_hash.starts_with("sha256:"));
-
-        let (status, unconfirmed) = json_response(
-            router
-                .clone()
-                .oneshot(request(
-                    "POST",
-                    "/memory/migration/execute",
-                    json!({
-                        "confirmation": "yes",
-                        "preflight_hash": &preflight_hash,
-                    }),
-                    Some(&cookie),
-                    Some(&csrf),
-                ))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{unconfirmed}");
-        assert_eq!(unconfirmed["error"]["code"], "confirmation_required");
-
-        let (status, stale) = json_response(
-            router
-                .clone()
-                .oneshot(request(
-                    "POST",
-                    "/memory/migration/execute",
-                    json!({
-                        "confirmation": "MIGRATE_MEMORY_V2_1",
-                        "preflight_hash": "sha256:stale",
-                    }),
-                    Some(&cookie),
-                    Some(&csrf),
-                ))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{stale}");
-        assert_eq!(stale["error"]["code"], "memory_migration_preflight_stale");
-
-        let (status, migrated) = json_response(
-            router
-                .oneshot(request(
-                    "POST",
-                    "/memory/migration/execute",
-                    json!({
-                        "confirmation": "MIGRATE_MEMORY_V2_1",
-                        "preflight_hash": &preflight_hash,
-                    }),
-                    Some(&cookie),
-                    Some(&csrf),
-                ))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::ACCEPTED, "{migrated}");
-        assert_eq!(migrated["data"]["migration"]["legacy_total"], 0);
-        assert_eq!(migrated["data"]["migration"]["legacy_rows_deleted"], false);
-        assert_eq!(migrated["data"]["regeneration_required"], false);
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
     }
 
     #[tokio::test]
@@ -8702,10 +8541,10 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{extraction}");
         assert_eq!(
             extraction["data"]["contract"],
-            "current_formal_memories_v2_2"
+            "source_preserving_memory_units_v3"
         );
         assert_eq!(extraction["data"]["readiness"]["ready"], true);
-        assert_eq!(extraction["data"]["behavior"]["model_calls_per_note"], 1);
+        assert_eq!(extraction["data"]["behavior"]["model_calls_per_batch"], 1);
         assert_eq!(
             extraction["data"]["behavior"]["publication"],
             "full_source_set_replacement"

@@ -59,14 +59,20 @@ if [[ -z "$package_ref" ]]; then
   git init --quiet "$package_ref"
   git -C "$package_ref" fetch --quiet --depth=1 https://github.com/modelcontextprotocol/conformance.git "$conformance_revision"
   git -C "$package_ref" checkout --quiet --detach FETCH_HEAD
-  npm --prefix "$package_ref" ci
+  (cd "$package_ref" && npm ci)
+fi
+
+conformance_command=(npx --yes "$package_ref")
+if [[ -d "$package_ref" && -f "$package_ref/dist/index.js" ]]; then
+  conformance_command=(node "$package_ref/dist/index.js")
 fi
 
 # Compilation is not part of the listener-startup timeout.
-cargo build --quiet -p mcp-vault-server --bin mcp-vault-fixture
+cargo build --quiet -p mcp-vault-server --bin mcp-vault-fixture --message-format=json >"$work_dir/build.jsonl"
+fixture_binary=$(jq -ser '[.[] | select(.reason == "compiler-artifact" and .target.name == "mcp-vault-fixture" and .executable != null) | .executable] | last // empty' "$work_dir/build.jsonl")
 
 MCP_VAULT_FIXTURE_MANIFEST="$manifest" \
-  cargo run --quiet -p mcp-vault-server --bin mcp-vault-fixture \
+  "$fixture_binary" \
   >"$work_dir/fixture.log" 2>&1 &
 fixture_pid=$!
 
@@ -100,7 +106,7 @@ echo "Target protocol version: $spec_version"
 echo "Results directory: $output_dir"
 if [[ -n "$requirements" ]]; then
   echo "Target requirements: $requirements"
-  npx --yes "$package_ref" server \
+  "${conformance_command[@]}" server \
     --url "$mcp_url" \
     --requirements "$requirements" \
     --expected-failures "$expected_failures" \
@@ -110,7 +116,7 @@ else
   for scenario in $scenarios; do
     echo "Running official scenario: $scenario"
     scenario_log="$work_dir/scenario.log"
-    npx --yes "$package_ref" server \
+    "${conformance_command[@]}" server \
       --url "$mcp_url" \
       --scenario "$scenario" \
       --spec-version "$spec_version" \

@@ -14,10 +14,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use futures_util::FutureExt;
 use mcp_vault_backup::{BackupError, BackupService};
 use mcp_vault_domain::{
-    BackupId, EventId, FileId, MaintenanceGate, MaintenanceOperationGuard, ModelId, VaultContext,
-    VaultPath, VaultPathPolicy,
+    BackupId, EventId, FileId, MaintenanceGate, MaintenanceOperationGuard, ModelId, VaultPath,
+    VaultPathPolicy,
 };
 use mcp_vault_memory::{
     MEMORY_CONTRACT_GENERATION, MemoryError, MemoryService, NoteExtractionOptions,
@@ -43,6 +44,13 @@ type JobTaskResult = (
 
 const MAX_RECORDED_MEMORY_NOTE_FAILURES: usize = 20;
 const MAX_CONSECUTIVE_MEMORY_OUTPUT_FAILURES: u32 = 3;
+
+struct AbortOnDrop(tokio::task::AbortHandle);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 /// A static, redaction-safe handler failure code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,10 +109,21 @@ impl Cancellation {
 
     /// Await a cancellation request.
     pub async fn cancelled(&self) {
-        if self.is_cancelled() {
+        wait_for_state(&self.inner.notify, || self.is_cancelled()).await;
+    }
+}
+
+async fn wait_for_state(notify: &Notify, ready: impl Fn() -> bool) {
+    loop {
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        // Subscribe before observing state. notify_waiters does not retain a
+        // permit for a future registered after the state transition.
+        notified.as_mut().enable();
+        if ready() {
             return;
         }
-        self.inner.notify.notified().await;
+        notified.await;
     }
 }
 
@@ -300,12 +319,10 @@ impl WorkerSupervisor {
 
     /// Wait until the claim loops have entered their running state.
     pub async fn wait_until_running(&self) {
-        loop {
-            if self.health().status == WorkerStatus::Running {
-                return;
-            }
-            self.started.notified().await;
-        }
+        wait_for_state(&self.started, || {
+            self.health().status == WorkerStatus::Running
+        })
+        .await;
     }
 
     /// Run both claim loops until cancellation; all leases remain reclaimable.
@@ -626,6 +643,7 @@ impl WorkerSupervisor {
             let repository_for_task = repository.clone();
             let worker_id_for_task = worker_id.to_owned();
             self.health.in_flight.fetch_add(1, Ordering::AcqRel);
+            let health_for_task = self.health.clone();
             tasks.spawn(async move {
                 let is_backup = job.job_type.starts_with("backup.");
                 let maintenance_operation = if is_backup {
@@ -686,8 +704,25 @@ impl WorkerSupervisor {
                         }
                     })
                 };
-                let mut outcome = handler(job.clone(), cancellation).await;
-                monitor.abort();
+                // Dropping or panicking the handler must not detach a lease
+                // renewer that keeps a dead job running forever.
+                let monitor_guard = AbortOnDrop(monitor.abort_handle());
+                let mut outcome = match std::panic::AssertUnwindSafe(async {
+                    handler(job.clone(), cancellation).await
+                })
+                .catch_unwind()
+                .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(_) => {
+                        health_for_task.error("job_handler_panicked");
+                        JobOutcome::Failed {
+                            code: "job_handler_panicked",
+                        }
+                    }
+                };
+                drop(monitor_guard);
+                let _ = monitor.await;
                 if !is_backup
                     && matches!(
                         repository_for_task
@@ -1102,7 +1137,7 @@ pub fn outbox_to_job_handler(state: StateStore, _memory: MemoryService) -> Outbo
                 let is_memory_source_reconcile_event = is_file_event
                     && is_memory_source_reconcile_event_type(&event.event_type)
                     && !reserved_path;
-                if event.aggregate_type == "file" {
+                if event.aggregate_type == "file" && !reserved_path {
                     state
                         .jobs()
                         .enqueue(
@@ -1389,6 +1424,19 @@ pub fn index_rebuild_job_handler(
                     };
                 }
             };
+            // Internal canonical artifacts are maintained by their owning
+            // service. Also drain jobs admitted by older binaries without a
+            // full ordinary-note rebuild or note-vector rescheduling.
+            if job.payload.get("aggregate_type").and_then(Value::as_str) == Some("file")
+                && job
+                    .payload
+                    .get("payload")
+                    .and_then(|payload| payload.get("path"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|path| path_in_reserved_namespace(&vault.reserved_root, path))
+            {
+                return JobOutcome::Complete;
+            }
             match state
                 .jobs()
                 .has_newer_active_job(&context, "index.rebuild", job.created_at, job.id)
@@ -1525,7 +1573,7 @@ pub fn vault_initialize_job_handler(
                     "managed Vault initialization could not schedule optional note embeddings"
                 );
             }
-            let _ = memory.ensure_retrieval_calibration(&context).await;
+            let _ = memory.ensure_memory_jobs_scheduled(&context).await;
             JobOutcome::Complete
         })
     })
@@ -1585,150 +1633,6 @@ pub fn vault_reconcile_job_handler(
     })
 }
 
-/// Execute bounded calibration through the actual application/Provider engine.
-/// Two global slots; the database permits one active calibration job per Vault.
-pub fn retrieval_calibration_job_handler(state: StateStore, memory: MemoryService) -> JobHandler {
-    let slots = Arc::new(tokio::sync::Semaphore::new(2));
-    Arc::new(move |job, shutdown| {
-        let state = state.clone();
-        let memory = memory.clone();
-        let slots = slots.clone();
-        Box::pin(async move {
-            if job
-                .payload
-                .get("explicit_diagnostic")
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-            {
-                return JobOutcome::Cancelled;
-            }
-
-            let permit = tokio::select! {
-                _=shutdown.cancelled()=>return JobOutcome::Cancelled,
-                permit=slots.acquire()=>permit,
-            };
-            let Ok(_permit) = permit else {
-                return JobOutcome::Failed {
-                    code: "calibration_worker_closed",
-                };
-            };
-            let Some(vault_id) = job.vault_id else {
-                return JobOutcome::Failed {
-                    code: "calibration_vault_missing",
-                };
-            };
-            let context = match state.vaults().find_by_id(vault_id).await {
-                Ok(Some(vault)) => match vault.context() {
-                    Ok(context) => context,
-                    Err(_) => {
-                        return JobOutcome::Failed {
-                            code: "calibration_context_invalid",
-                        };
-                    }
-                },
-                _ => {
-                    return JobOutcome::Failed {
-                        code: "calibration_vault_missing",
-                    };
-                }
-            };
-            let mut quality_failed = false;
-            let mut terminal_error = None;
-            for channel in ["memory", "note"] {
-                let profile = match memory.calibration_profile(&context, channel).await {
-                    Ok(profile) => profile,
-                    Err(error) => return JobOutcome::Failed { code: error.code() },
-                };
-                // A configuration change can make a retry skip every channel.
-                // Retire only signatures owned by this job, preserving cached
-                // vectors, spent budget, completed reports and newer jobs.
-                if let Some(signatures) = job.payload["signatures"].as_array() {
-                    for signature in signatures.iter().filter_map(Value::as_str) {
-                        if profile
-                            .as_ref()
-                            .is_none_or(|current| current.signature != signature)
-                            && state
-                                .calibrations()
-                                .finish(
-                                    &context,
-                                    channel,
-                                    signature,
-                                    "cancelled",
-                                    &json!({"error_code":"calibration_profile_changed"}),
-                                )
-                                .await
-                                .is_err()
-                        {
-                            return JobOutcome::Retry {
-                                delay: Duration::from_secs(30),
-                                code: "calibration_retirement_failed",
-                            };
-                        }
-                    }
-                }
-                let Some(profile) = profile else {
-                    continue;
-                };
-                if !job.payload["signatures"]
-                    .as_array()
-                    .is_some_and(|signatures| {
-                        signatures
-                            .iter()
-                            .any(|value| value.as_str() == Some(&profile.signature))
-                    })
-                {
-                    continue;
-                }
-                let result = tokio::select! {
-                    _=shutdown.cancelled()=> {
-                        // Graceful process shutdown retains a resumable checkpoint;
-                        // explicit durable Admin cancellation stops this signature.
-                        if state.jobs().get(&context, job.id).await.ok().flatten().is_some_and(|job| job.cancel_requested) {
-                            let _ = state.calibrations().finish(&context, channel, &profile.signature, "cancelled", &json!({"error_code":"calibration_cancelled"})).await;
-                        }
-                        return JobOutcome::Cancelled;
-                    },
-                    result=memory.execute_retrieval_calibration(&context,&profile)=>result,
-                };
-                match result {
-                    Ok(report) => {
-                        quality_failed |= !report.passed;
-                    }
-                    Err(error) if error.retryable() && job.attempts < job.max_attempts => {
-                        return JobOutcome::Retry {
-                            delay: Duration::from_secs(30),
-                            code: error.code(),
-                        };
-                    }
-                    Err(error) => {
-                        let _ = state
-                            .calibrations()
-                            .finish(
-                                &context,
-                                channel,
-                                &profile.signature,
-                                "failed",
-                                &json!({"error_code":error.code()}),
-                            )
-                            .await;
-                        terminal_error = Some(error.code());
-                    }
-                }
-            }
-            if let Some(code) = terminal_error {
-                JobOutcome::Failed { code }
-            } else if quality_failed {
-                JobOutcome::Failed {
-                    code: "calibration_quality_not_passed",
-                }
-            } else {
-                JobOutcome::Complete
-            }
-        })
-    })
-}
-
-/// Handle extraction work admitted from a current Markdown file event.
 pub fn memory_extract_job_handler(
     state: StateStore,
     history_root: std::path::PathBuf,
@@ -2041,6 +1945,12 @@ pub fn memory_extract_job_handler(
                     let mut stop_after_checkpoint = None;
                     match result {
                         Ok(extraction) => {
+                            if extraction.pending_batches > 0 {
+                                return JobOutcome::Deferred {
+                                    delay: Duration::from_secs(1),
+                                    code: "memory_selection_next_batch",
+                                };
+                            }
                             consecutive_output_failures = 0;
                             if extraction.already_evaluated {
                                 already_evaluated_skipped =
@@ -2363,6 +2273,14 @@ pub fn memory_extract_job_handler(
                 let note_elapsed_ms = now_millis().saturating_sub(note_started_at);
                 match result {
                     Ok(extraction) => {
+                        if extraction.pending_batches > 0 {
+                            if state.jobs().update_progress(job.id,worker_id,&json!({"phase":"selecting_units","completed":0,"total":1,"current_path":path.as_str(),"completed_batches":extraction.completed_batches,"pending_batches":extraction.pending_batches,"skipped_units":extraction.skipped_units})).await.is_err() {return JobOutcome::Retry {delay:Duration::from_secs(5),code:"memory_selection_checkpoint_failed"};}
+                            return JobOutcome::Deferred {
+                                delay: Duration::from_secs(1),
+                                code: "memory_selection_next_batch",
+                            };
+                        }
+
                         let notes_evaluated = u64::from(extraction.source_admitted);
                         let already_evaluated_skipped = u64::from(extraction.already_evaluated);
                         let source_policy_skipped =
@@ -2589,51 +2507,12 @@ const fn memory_output_failure_limit_reached(consecutive_failures: u32) -> bool 
     consecutive_failures >= MAX_CONSECUTIVE_MEMORY_OUTPUT_FAILURES
 }
 
-pub(crate) async fn retire_legacy_memory_jobs(
-    state: &StateStore,
-    context: &VaultContext,
-) -> Result<(), mcp_vault_state::StateError> {
-    for job_type in [
-        "memory.consolidate",
-        "memory.enrich_retrieval",
-        "memory.reset_pipeline",
-        "memory.revalidate",
-        "memory.audit_sources",
-        "memory.rebuild",
-        "memory.repair_sources",
-    ] {
-        state.jobs().request_cancel_type(context, job_type).await?;
-    }
-    Ok(())
-}
-
 /// Recover one explicitly authorized source resume across canonical/DB commit.
 pub fn memory_source_resume_job_handler(
     state: StateStore,
     history_root: std::path::PathBuf,
     core_runtime: mcp_vault_core::VaultCoreRuntime,
     memory: MemoryService,
-) -> JobHandler {
-    memory_source_operation_job_handler(state, history_root, core_runtime, memory, false)
-}
-
-/// Local source-set deduplication uses the same Vault admission and cancellation
-/// boundary as source resume, but preserves the existing extraction pause.
-pub fn memory_source_dedup_job_handler(
-    state: StateStore,
-    history_root: std::path::PathBuf,
-    core_runtime: mcp_vault_core::VaultCoreRuntime,
-    memory: MemoryService,
-) -> JobHandler {
-    memory_source_operation_job_handler(state, history_root, core_runtime, memory, true)
-}
-
-fn memory_source_operation_job_handler(
-    state: StateStore,
-    history_root: std::path::PathBuf,
-    core_runtime: mcp_vault_core::VaultCoreRuntime,
-    memory: MemoryService,
-    deduplicate: bool,
 ) -> JobHandler {
     Arc::new(move |job, shutdown| {
         let state = state.clone();
@@ -2672,23 +2551,10 @@ fn memory_source_operation_job_handler(
                 }
             };
             let operation = async {
-                if deduplicate {
-                    let file_id = job
-                        .payload
-                        .get("file_id")
-                        .and_then(serde_json::Value::as_str)
-                        .and_then(|value| mcp_vault_domain::FileId::parse(value).ok())
-                        .ok_or(MemoryError::InvalidInput("memory_dedup_source_missing"))?;
-                    memory
-                        .deduplicate_source_exact(&context, &core, file_id)
-                        .await
-                        .map(|_| ())
-                } else {
-                    memory
-                        .complete_note_extraction_resume(&context, &core, &job.payload)
-                        .await
-                        .map(|_| ())
-                }
+                memory
+                    .complete_note_extraction_resume(&context, &core, &job.payload)
+                    .await
+                    .map(|_| ())
             };
             let result = tokio::select! { _=shutdown.cancelled()=>return JobOutcome::Cancelled, result=operation=>result };
             match result {
@@ -2703,175 +2569,195 @@ fn memory_source_operation_job_handler(
     })
 }
 
-/// Automatic formal adoption and bounded semantic maintenance; never requires an
-/// Admin action, extraction rerun, or a dedicated model binding.
-pub fn memory_dedup_job_handler(
-    state: StateStore,
-    history_root: std::path::PathBuf,
-    core_runtime: mcp_vault_core::VaultCoreRuntime,
-    memory: MemoryService,
-) -> JobHandler {
+/// Generate one bounded navigation page and persist a continuation without
+/// consuming retry attempts. Source revisions fence the completed generation.
+pub fn memory_overview_job_handler(state: StateStore, memory: MemoryService) -> JobHandler {
     Arc::new(move |job, shutdown| {
-        let state = state.clone();
-        let history_root = history_root.clone();
-        let core_runtime = core_runtime.clone();
-        let memory = memory.clone();
+        let (state, memory) = (state.clone(), memory.clone());
         Box::pin(async move {
-            let Some(id) = job.vault_id else {
+            let Some(vault_id) = job.vault_id else {
                 return JobOutcome::Failed {
-                    code: "memory_dedup_vault_missing",
+                    code: "memory_overview_vault_missing",
                 };
             };
-            let vault = match state.vaults().find_by_id(id).await {
-                Ok(Some(v)) => v,
+            let context = match state.vaults().find_by_id(vault_id).await {
+                Ok(Some(vault)) => match vault.context() {
+                    Ok(context) => context,
+                    Err(_) => {
+                        return JobOutcome::Failed {
+                            code: "memory_overview_context_invalid",
+                        };
+                    }
+                },
                 _ => {
-                    return JobOutcome::Retry {
-                        delay: Duration::from_secs(60),
-                        code: "memory_dedup_vault_unavailable",
+                    return JobOutcome::Failed {
+                        code: "memory_overview_vault_missing",
                     };
                 }
             };
-            let context = match vault.context() {
-                Ok(c) => c,
+            if state
+                .jobs()
+                .find_active_by_type(&context, "memory.extract")
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                return JobOutcome::Deferred {
+                    delay: Duration::from_secs(5),
+                    code: "memory_overview_waiting_for_sources",
+                };
+            }
+            let runtime = match state.memory_units().runtime(&context).await {
+                Ok(runtime) => runtime,
+                Err(_) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "memory_overview_state_unavailable",
+                    };
+                }
+            };
+            if runtime.paused {
+                return JobOutcome::Deferred {
+                    delay: Duration::from_secs(30),
+                    code: "memory_generation_paused",
+                };
+            }
+            let signature = match memory.overview_work_signature(&context).await {
+                Ok(Some(signature)) => signature,
+                Ok(None) => return JobOutcome::Complete,
+                Err(error) => return memory_extract_error_outcome(error),
+            };
+            let previous = job.progress.as_ref();
+            let same_generation = previous
+                .and_then(|p| p.get("generation"))
+                .and_then(Value::as_i64)
+                == Some(runtime.generation)
+                && previous.and_then(|p| p["model_signature"].as_str()) == Some(signature.as_str());
+            let scope = if same_generation {
+                previous
+                    .and_then(|progress| progress.get("scope"))
+                    .filter(|value| !value.is_null())
+                    .cloned()
+                    .map(serde_json::from_value::<mcp_vault_state::UnitOverviewScope>)
+                    .transpose()
+            } else {
+                Ok(None)
+            };
+            let scope = match scope {
+                Ok(scope) => scope,
                 Err(_) => {
                     return JobOutcome::Failed {
-                        code: "memory_dedup_context_invalid",
+                        code: "memory_overview_scope_invalid",
                     };
                 }
             };
-            let core = match super::core_for_vault(&state, &history_root, &vault, &core_runtime) {
-                Ok(c) => c,
+            let completed_pages = if same_generation {
+                previous
+                    .and_then(|p| p["completed_pages"].as_u64())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            let completed_scopes = if same_generation {
+                previous
+                    .and_then(|p| p["completed_scopes"].as_u64())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            let after_id = if same_generation {
+                previous
+                    .and_then(|p| p.get("after_id"))
+                    .and_then(Value::as_str)
+                    .and_then(|id| mcp_vault_domain::MemoryId::parse(id).ok())
+            } else {
+                None
+            };
+            let page = match state
+                .memory_units()
+                .list(
+                    &context,
+                    &mcp_vault_state::UnitFilter {
+                        after_id,
+                        path_prefix: scope.as_ref().and_then(|scope| scope.path_prefix.clone()),
+                        topic_ids: scope
+                            .as_ref()
+                            .map(|scope| scope.topic_ids.clone())
+                            .unwrap_or_default(),
+                        ..Default::default()
+                    },
+                    41,
+                    0,
+                )
+                .await
+            {
+                Ok(page) => page,
                 Err(_) => {
                     return JobOutcome::Retry {
-                        delay: Duration::from_secs(60),
-                        code: "memory_dedup_core_unavailable",
+                        delay: Duration::from_secs(5),
+                        code: "memory_overview_sources_unavailable",
                     };
                 }
             };
-            let mut slices = job
-                .progress
-                .as_ref()
-                .and_then(|p| p.get("slices_completed"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            loop {
-                // Poll reporting and maintenance concurrently. Awaiting report
-                // I/O inside a selected timer branch can deadlock a one-connection
-                // pool while maintenance holds its transaction between polls.
-                let result = tokio::select! {
-                    _=shutdown.cancelled()=>return JobOutcome::Cancelled,
-                    result=memory.maintain_memory_dedup(&context,&core)=>result,
-                    _=track_memory_dedup_progress(&state,&context,&job,slices)=>return JobOutcome::Retry{delay:Duration::from_secs(5),code:"memory_dedup_progress_failed"},
-                };
-                let continue_in_place = matches!(&result, Ok(true))
-                    || result
-                        .as_ref()
-                        .is_err_and(|error| error.code() == "memory_equivalence_slice_exhausted");
-                let outcome = match result {
-                    Ok(true) => JobOutcome::Deferred {
-                        delay: Duration::from_secs(1),
-                        code: "memory_dedup_checkpoint",
-                    },
-                    Ok(false) => JobOutcome::Complete,
-                    Err(e) => {
-                        let delay = if e.code() == "memory_equivalence_slice_exhausted" {
-                            1
-                        } else if e.retryable() {
-                            5
-                        } else {
-                            60
+            let request = mcp_vault_memory::OverviewRequest {
+                access: mcp_vault_memory::MemoryReadAccess::All,
+                after_id,
+                path_prefix: scope.as_ref().and_then(|scope| scope.path_prefix.clone()),
+                topic_ids: scope
+                    .as_ref()
+                    .map(|scope| scope.topic_ids.clone())
+                    .unwrap_or_default(),
+                limit: 40,
+                ..Default::default()
+            };
+            let result = tokio::select! {_=shutdown.cancelled()=>return JobOutcome::Cancelled,result=memory.generate_memory_overview(&context,request)=>result};
+            if let Err(error) = result {
+                return memory_extract_error_outcome(error);
+            }
+            let more = page.len() > 40;
+            let cursor = page.iter().take(40).next_back().map(|unit| unit.id);
+            let next_scope = if more {
+                scope.clone()
+            } else {
+                match state
+                    .memory_units()
+                    .next_overview_scope(&context, scope.as_ref().map(|scope| scope.key.as_str()))
+                    .await
+                {
+                    Ok(scope) => scope,
+                    Err(_) => {
+                        return JobOutcome::Retry {
+                            delay: Duration::from_secs(5),
+                            code: "memory_overview_scope_unavailable",
                         };
-                        let _ = state
-                            .current_memory()
-                            .set_formal_status(
-                                &context,
-                                e.code(),
-                                if continue_in_place {
-                                    0
-                                } else {
-                                    now_millis() + delay * 1000
-                                },
-                            )
-                            .await;
-                        if delay <= 5 {
-                            JobOutcome::Deferred {
-                                delay: Duration::from_secs(delay as u64),
-                                code: e.code(),
-                            }
-                        } else {
-                            JobOutcome::Complete
-                        } // periodic admission resumes durable pairs after retry_at
                     }
+                }
+            };
+            let continue_work = more || next_scope.is_some();
+            if let Some(worker)=job.lease_owner.as_deref()
+                && state.jobs().update_progress(job.id,worker,&json!({"phase":if continue_work {"overview_page_completed"}else{"completed"},"generation":runtime.generation,"model_signature":signature,"after_id":if more {cursor}else{None},"scope":next_scope,"completed_pages":completed_pages+1,"completed_scopes":completed_scopes+u64::from(!more)})).await.is_err() {return JobOutcome::Retry {delay:Duration::from_secs(5),code:"memory_overview_checkpoint_failed"};}
+            if continue_work {
+                return JobOutcome::Deferred {
+                    delay: Duration::from_millis(100),
+                    code: "memory_overview_next_page",
                 };
-                // Releasing a slice restores its attempt count. Persist content-free
-                // diagnostics before releasing the lease so queued work is not
-                // indistinguishable from a job which never ran.
-                if let Some(worker_id) = job.lease_owner.as_deref() {
-                    let status = match state.current_memory().formal_status(&context).await {
-                        Ok(status) => status,
-                        Err(_) => {
-                            return JobOutcome::Retry {
-                                delay: Duration::from_secs(5),
-                                code: "memory_dedup_progress_failed",
-                            };
-                        }
-                    };
-                    let (reason, resume_at) = if continue_in_place {
-                        (None, 0)
-                    } else {
-                        match outcome {
-                            JobOutcome::Deferred { delay, code } => (
-                                Some(code),
-                                now_millis().saturating_add(duration_millis(delay)),
-                            ),
-                            _ => (None, status.retry_at),
-                        }
-                    };
-                    if state.jobs().update_progress(job.id, worker_id, &json!({
-                    "phase": "memory_dedup", "slices_completed": slices.saturating_add(1),
-                    "stage": status.phase, "sentence_checked": status.sentence_checked,
-                    "maintenance_status": status.status, "adopted": status.adopted,
-                    "checked_pairs": status.checked_pairs, "pending_pairs": status.pending_pairs,
-                    "wait_reason": reason, "resume_at": resume_at,
-                })).await.is_err() {
-                    return JobOutcome::Retry { delay: Duration::from_secs(5), code: "memory_dedup_progress_failed" };
-                }
-                }
-                slices = slices.saturating_add(1);
-                if continue_in_place {
-                    // Keep this worker lease across bounded slices. Yield only to
-                    // Tokio/cancellation, not back to lower-priority durable jobs.
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-                return outcome;
+            }
+            match state
+                .memory_units()
+                .complete_overview_generation(&context, runtime.generation)
+                .await
+            {
+                Ok(()) => JobOutcome::Complete,
+                Err(_) => JobOutcome::Deferred {
+                    delay: Duration::from_secs(1),
+                    code: "memory_overview_sources_changed",
+                },
             }
         })
     })
 }
 
-async fn track_memory_dedup_progress(
-    state: &StateStore,
-    context: &VaultContext,
-    job: &JobRecord,
-    slices: u64,
-) -> Result<(), mcp_vault_state::StateError> {
-    let mut tick = tokio::time::interval(Duration::from_secs(2));
-    loop {
-        tick.tick().await;
-        if let Some(worker_id) = job.lease_owner.as_deref() {
-            let status = state.current_memory().formal_status(context).await?;
-            state.jobs().update_progress(job.id,worker_id,&json!({
-                "phase":"memory_dedup","stage":status.phase,"sentence_checked":status.sentence_checked,
-                "slices_completed":slices,"maintenance_status":status.status,"adopted":status.adopted,
-                "checked_pairs":status.checked_pairs,"pending_pairs":status.pending_pairs,
-                "wait_reason":null,"resume_at":0,
-            })).await?;
-        }
-    }
-}
-
-/// Reconcile one source identity/hash change before optional extraction.
 pub fn memory_source_reconcile_job_handler(
     state: StateStore,
     history_root: std::path::PathBuf,
@@ -2963,14 +2849,10 @@ pub fn memory_source_reconcile_job_handler(
                 }
             };
 
-            if memory
-                .ensure_memory_dedup_scheduled(&context)
-                .await
-                .is_err()
-            {
+            if memory.ensure_memory_jobs_scheduled(&context).await.is_err() {
                 return JobOutcome::Retry {
                     delay: Duration::from_secs(5),
-                    code: "memory_dedup_admission_failed",
+                    code: "memory_overview_admission_failed",
                 };
             }
             let path = job
@@ -3121,17 +3003,17 @@ pub fn embedding_job_handler(
                         result = index.reembed_note_sources(&context, model_id, &sources) => result,
                     };
                     if result.is_ok() {
-                        let _ = memory.ensure_retrieval_calibration(&context).await;
+                        let _ = memory.ensure_memory_jobs_scheduled(&context).await;
                     }
                     note_embedding_error_outcome(result)
                 }
-                Some("memory") => {
+                Some("memory_unit") => {
                     let result = tokio::select! {
                         _ = shutdown.cancelled() => return JobOutcome::Cancelled,
                         result = memory.reembed_sources(&context, model_id, &sources) => result,
                     };
                     if result.is_ok() {
-                        let _ = memory.ensure_retrieval_calibration(&context).await;
+                        let _ = memory.ensure_memory_jobs_scheduled(&context).await;
                     }
                     memory_embedding_error_outcome(result)
                 }
@@ -3202,15 +3084,6 @@ fn path_in_reserved_namespace(root: &VaultPath, raw_path: &str) -> bool {
         .is_ok_and(|policy| policy.is_reserved(&path))
 }
 
-#[cfg(test)]
-fn path_is_memory_record(root: &VaultPath, raw_path: &str) -> bool {
-    let Ok(path) = VaultPath::parse(raw_path) else {
-        return false;
-    };
-    let prefix = format!("{}/memory/records/", root.as_str());
-    path.as_str().starts_with(&prefix) && path.as_str().ends_with(".md")
-}
-
 fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3253,7 +3126,7 @@ mod tests {
         memory_extract_error_outcome, memory_extract_job_handler,
         memory_output_failure_limit_reached, memory_source_reconcile_job_handler,
         note_embedding_error_outcome, now_millis, outbox_event_job_handler, outbox_to_job_handler,
-        path_is_memory_record, redacted_path_hash, vault_initialize_job_handler,
+        redacted_path_hash, vault_initialize_job_handler, wait_for_state,
     };
     use axum::{Json, Router, extract::State as AxumState, routing::post};
     use mcp_vault_auth::{AuthService, MasterKeyRing};
@@ -3283,6 +3156,128 @@ mod tests {
             MasterKeyRing::from_bytes(1, &[8_u8; 32]).unwrap(),
         );
         MemoryService::new(state.clone(), auth)
+    }
+
+    #[tokio::test]
+    async fn state_notification_during_observation_is_not_lost() {
+        let notify = Notify::new();
+        let observations = AtomicUsize::new(0);
+        // Deterministically signal in the interval where the first observation
+        // is false, but the state changes before the waiter awaits notification.
+        timeout(
+            Duration::from_millis(200),
+            wait_for_state(&notify, || {
+                if observations.fetch_add(1, Ordering::SeqCst) == 0 {
+                    notify.notify_waiters();
+                    false
+                } else {
+                    true
+                }
+            }),
+        )
+        .await
+        .expect("a ready state cannot be stranded by a lost notification");
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        timeout(Duration::from_millis(200), cancelled.cancelled())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn panicking_handlers_fail_the_job_and_release_the_lease_without_stalling_other_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("panic-worker").unwrap(),
+            directory.path().join("content"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Panic worker", VaultStatus::Active)
+            .await
+            .unwrap();
+        let supervisor = WorkerSupervisor::new(
+            state.clone(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            WorkerConfig {
+                poll_interval: Duration::from_millis(5),
+                lease_duration: Duration::from_millis(100),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        supervisor
+            .register_job_handler(
+                "test.sync_panic",
+                Arc::new(|_, _| panic!("synthetic synchronous failure")),
+            )
+            .unwrap();
+        supervisor
+            .register_job_handler(
+                "test.async_panic",
+                Arc::new(|_, _| Box::pin(async { panic!("synthetic asynchronous failure") })),
+            )
+            .unwrap();
+        supervisor
+            .register_job_handler(
+                "test.success",
+                Arc::new(|_, _| Box::pin(async { JobOutcome::Complete })),
+            )
+            .unwrap();
+        let mut ids = Vec::new();
+        for kind in ["test.sync_panic", "test.async_panic", "test.success"] {
+            ids.push(
+                state
+                    .jobs()
+                    .enqueue(&context, kind, kind, &json!({}), 0, 5, 0)
+                    .await
+                    .unwrap()
+                    .id,
+            );
+        }
+        let shutdown = Cancellation::default();
+        let running = tokio::spawn({
+            let supervisor = supervisor.clone();
+            let shutdown = shutdown.clone();
+            async move { supervisor.run(shutdown).await }
+        });
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let mut done = true;
+                for (index, id) in ids.iter().enumerate() {
+                    let job = state.jobs().get(&context, *id).await.unwrap().unwrap();
+                    done &= job.status
+                        == if index < 2 {
+                            mcp_vault_state::JobStatus::Failed
+                        } else {
+                            mcp_vault_state::JobStatus::Completed
+                        };
+                }
+                if done {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a panicking job must not remain running under a detached renewer");
+        for id in &ids[..2] {
+            let job = state.jobs().get(&context, *id).await.unwrap().unwrap();
+            assert_eq!(job.attempts, 1);
+            assert_eq!(job.last_error.as_deref(), Some("job_handler_panicked"));
+            assert!(job.lease_owner.is_none() && job.lease_until.is_none());
+        }
+        shutdown.cancel();
+        timeout(Duration::from_secs(2), running)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     fn test_outbox_handler(state: &StateStore) -> OutboxHandler {
@@ -3421,15 +3416,15 @@ mod tests {
         Json(request): Json<Value>,
     ) -> Json<Value> {
         let call = calls.fetch_add(1, Ordering::SeqCst);
+        let user: Value =
+            serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
+        let selection = json!({"unit_id":user["units"][0]["unit_id"],"kind":"decision","retrieval_hint":"fixture decision"});
         let content = if call == 0 {
-            r#"{"memories":[{"content":"The first note records a durable decision.","kind":"decision"}],"unexpected":"reject"}"#
-        } else if call == 1 {
-            r#"{"memories":[{"content":"The second note records a durable decision.","kind":"decision","tags":["test"]}]}"#
-        } else if call == 2 || call == 3 {
-            r#"{"memories":[{"content":"The first note records a durable decision.","kind":"decision"}]}"#
+            json!({"selections":[selection],"unexpected":"reject"})
         } else {
-            r#"{"memories":[{"content":"The second note records a durable decision.","kind":"decision"}]}"#
-        };
+            json!({"selections":[selection]})
+        }
+        .to_string();
         assert_eq!(request["model"], "fake-extraction");
         Json(json!({
             "choices": [{
@@ -3504,21 +3499,6 @@ mod tests {
         assert!(hash.starts_with("sha256:"));
         assert_eq!(hash, redacted_path_hash(&path));
         assert!(!hash.contains(path.as_str()));
-    }
-
-    #[test]
-    fn only_canonical_memory_records_admit_projection_rebuilds() {
-        let root = VaultPath::parse("_mcp-vault").unwrap();
-        assert!(path_is_memory_record(
-            &root,
-            "_mcp-vault/memory/records/2026/08/memory.md"
-        ));
-        assert!(!path_is_memory_record(&root, "_mcp-vault/memory/MEMORY.md"));
-        assert!(!path_is_memory_record(
-            &root,
-            "_mcp-vault/memory/source_summaries/source.md"
-        ));
-        assert!(!path_is_memory_record(&root, "../memory.md"));
     }
 
     #[tokio::test]
@@ -3597,7 +3577,7 @@ mod tests {
             .settings()
             .set_vault(
                 &context,
-                "memory.extraction.policy",
+                "memory.units.policy",
                 &json!({"enabled": true, "max_candidates_per_note": 11}),
                 WritePrecondition::ExactRevision(Revision::new(1)),
                 None,
@@ -3641,6 +3621,124 @@ mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_memory_events_do_not_fan_out_full_vault_index_rebuilds() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("managed-events").unwrap(),
+            directory.path().join("content"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "managed events", VaultStatus::Active)
+            .await
+            .unwrap();
+        let vault = state
+            .vaults()
+            .find_by_id(context.id())
+            .await
+            .unwrap()
+            .unwrap();
+        let root = vault.reserved_root.as_str();
+        let paths = [
+            format!("{root}/memory/current/facts/a.md"),
+            format!("{root}/memory/current/sources/b.md"),
+            format!("{root}/memory/current/explicit/c.md"),
+            format!("{root}-notes/user.md"),
+        ];
+        for path in &paths {
+            outbox_to_job_handler(state.clone(), test_memory_service(&state))(OutboxEventRecord {
+                id: EventId::new(),
+                vault_id: Some(context.id()),
+                event_type: "FileUpdated".into(),
+                aggregate_type: "file".into(),
+                aggregate_id: FileId::new().to_string(),
+                payload: json!({"path":path,"operation":"replace"}),
+                created_at: 1,
+                available_at: 1,
+                claimed_by: None,
+                claimed_until: None,
+                delivered_at: None,
+                attempts: 0,
+                last_error: None,
+                dead_lettered: false,
+                dead_letter_reason: None,
+            })
+            .await
+            .unwrap();
+        }
+        let index = state
+            .jobs()
+            .list(&context, None, Some("index.rebuild"), 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            index.len(),
+            1,
+            "managed writes must not rebuild all ordinary notes"
+        );
+        assert_eq!(index[0].payload["payload"]["path"], paths[3]);
+        assert_eq!(
+            state
+                .jobs()
+                .list(&context, None, Some("outbox.event"), 100, 0)
+                .await
+                .unwrap()
+                .len(),
+            4,
+            "durable event acknowledgement remains intact"
+        );
+        assert_eq!(
+            state
+                .jobs()
+                .list(&context, None, Some("memory.source_reconcile"), 100, 0)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // A job admitted by the previous binary must drain without touching a
+        // Vault root that is intentionally absent in this fixture.
+        let obsolete = state
+            .jobs()
+            .enqueue(
+                &context,
+                "index.rebuild",
+                "old-managed-index",
+                &json!({"aggregate_type":"file","payload":{"path":paths[0].to_uppercase()}}),
+                0,
+                5,
+                1,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !state
+                .jobs()
+                .has_newer_active_job(&context, "index.rebuild", index[0].created_at, index[0].id)
+                .await
+                .unwrap(),
+            "obsolete managed work must not suppress the real note rebuild"
+        );
+        let handler = index_rebuild_job_handler(
+            state.clone(),
+            directory.path().join("history"),
+            Default::default(),
+            mcp_vault_indexer::IndexService::new(state),
+        );
+        assert_eq!(
+            handler(obsolete, Cancellation::default()).await,
+            JobOutcome::Complete
         );
     }
 
@@ -4396,10 +4494,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(current.len(), 1);
-        assert_eq!(
-            current[0].content,
-            "The second note records a durable decision."
-        );
+        assert_eq!(current[0].content, "Second note.");
         assert_eq!(current[0].sources[0].file_id, Some(source_files[1].id));
         state.jobs().complete(job.id, "mixed-worker").await.unwrap();
         for obsolete_job_type in ["memory.consolidate", "memory.enrich_retrieval"] {
@@ -4436,7 +4531,7 @@ mod tests {
             .claim_batch("incremental-worker", now, now.saturating_add(60_000), 100)
             .await
             .unwrap();
-        assert_eq!(claimed[0].job_type, "memory.deduplicate");
+        assert!(claimed.iter().all(|job| job.job_type != "memory.organize"));
         let claimed = claimed
             .into_iter()
             .find(|job| job.id == incremental.id)
@@ -4621,13 +4716,8 @@ mod tests {
             .unwrap();
         supervisor
             .register_job_handler(
-                "memory.deduplicate",
-                super::memory_dedup_job_handler(
-                    state.clone(),
-                    history_root.clone(),
-                    core_runtime.clone(),
-                    memory.clone(),
-                ),
+                "memory.overview",
+                super::memory_overview_job_handler(state.clone(), memory.clone()),
             )
             .unwrap();
         supervisor
@@ -4662,7 +4752,7 @@ mod tests {
             .unwrap();
         assert_eq!(jobs.len(), 4);
         // Extraction failed before publishing any memories: no semantic job is needed.
-        assert!(!jobs.iter().any(|job| job.job_type == "memory.deduplicate"));
+        assert!(!jobs.iter().any(|job| job.job_type == "memory.overview"));
         assert!(
             jobs.iter()
                 .all(|job| matches!(job.status, JobStatus::Completed | JobStatus::Failed))

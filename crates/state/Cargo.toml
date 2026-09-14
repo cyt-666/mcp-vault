@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+fs2 = { workspace = true }
 mcp-vault-domain = { path = "../domain" }
 serde = { workspace = true }
 serde_json = { workspace = true }

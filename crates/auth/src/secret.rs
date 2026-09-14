@@ -190,11 +190,28 @@ impl MasterKeyRing {
     /// other than one conventional trailing newline.
     pub fn from_file_bytes(bytes: &[u8]) -> Result<Self, AuthError> {
         let mut normalized = Zeroizing::new(bytes.to_vec());
-        if normalized.last() == Some(&b'\n') {
-            normalized.pop();
-            if normalized.last() == Some(&b'\r') {
-                normalized.pop();
+        let accepted = match normalized.len() {
+            len if len == MASTER_KEY_BYTES || len == MASTER_KEY_BYTES * 2 => true,
+            33 if normalized.ends_with(b"\n") => {
+                normalized.truncate(MASTER_KEY_BYTES);
+                true
             }
+            34 if normalized.ends_with(b"\r\n") => {
+                normalized.truncate(MASTER_KEY_BYTES);
+                true
+            }
+            65 if normalized.ends_with(b"\n") => {
+                normalized.truncate(MASTER_KEY_BYTES * 2);
+                true
+            }
+            66 if normalized.ends_with(b"\r\n") => {
+                normalized.truncate(MASTER_KEY_BYTES * 2);
+                true
+            }
+            _ => false,
+        };
+        if !accepted {
+            return Err(AuthError::MasterKeyUnavailable);
         }
 
         if normalized.len() == MASTER_KEY_BYTES {
@@ -520,6 +537,44 @@ mod tests {
             .collect::<String>();
         assert!(MasterKeyRing::from_file_bytes(hex.as_bytes()).is_ok());
         assert!(MasterKeyRing::from_file_bytes(b"too-short").is_err());
+    }
+
+    #[test]
+    fn master_key_file_parser_preserves_raw_bytes_and_single_delimiters() {
+        fn assert_same_key(encoded: &[u8], expected: &[u8; 32]) {
+            let parsed = MasterKeyRing::from_file_bytes(encoded).unwrap();
+            let expected = MasterKeyRing::from_bytes(1, expected).unwrap();
+            assert_eq!(
+                parsed.installation_key_check(),
+                expected.installation_key_check()
+            );
+        }
+
+        let suffixes: &[&[u8]] = &[b"", b"\n", b"\r\n"];
+        for (seed, tail) in [(7_u8, b"\n".as_slice()), (8_u8, b"\r"), (9_u8, b"\r\n")] {
+            let mut raw = [seed; 32];
+            raw[32 - tail.len()..].copy_from_slice(tail);
+            for suffix in suffixes {
+                let mut encoded = raw.to_vec();
+                encoded.extend_from_slice(suffix);
+                assert_same_key(&encoded, &raw);
+            }
+        }
+
+        let raw = [10_u8; 32];
+        let hex = raw
+            .iter()
+            .map(|value| format!("{value:02x}"))
+            .collect::<String>();
+        assert_same_key(hex.as_bytes(), &raw);
+        assert_same_key(format!("{hex}\n").as_bytes(), &raw);
+        assert_same_key(format!("{hex}\r\n").as_bytes(), &raw);
+
+        assert!(MasterKeyRing::from_file_bytes(&[0_u8; 31]).is_err());
+        assert!(MasterKeyRing::from_file_bytes(&[0_u8; 33]).is_err());
+        let mut double_newline = raw.to_vec();
+        double_newline.extend_from_slice(b"\n\n");
+        assert!(MasterKeyRing::from_file_bytes(&double_newline).is_err());
     }
 
     #[cfg(unix)]

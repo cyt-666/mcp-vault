@@ -1,390 +1,73 @@
-# Long-Term Memory System
+# Source-preserving memory units
 
-This document is the normative memory design for MCP Vault v2.2. ADR 0030 extends source ownership with automatically maintained formal memories; ADR 0026
-supersedes the prerelease lifecycle, candidate, two-phase consolidation, and
-source-health designs. Their tables may remain as non-destructive migration
-input, but no MCP, Admin, resource, embedding, or recall path treats them as
-current memory.
+This is the normative v3 memory contract. [ADR-0033](adr/0033-source-preserving-memory-units.md) supersedes the generated-body, consolidation and conversion contracts in ADRs 0026–0032 where they conflict. Historical SQL migrations remain unchanged; the runtime does not read predecessor memory formats or tables.
 
-## 1. Contract
+## Ownership and canonical content
 
-The model-visible memory domain has one state: **current**. A successful delete
-physically removes the current memory projection and its canonical current
-Markdown. Revision history and backups remain governed by Vault retention, but
-they are not addressable through memory IDs and are never searched by a model
-route.
+An explicit `MemoryUnit` stores the authorized submitted body without trimming, case folding, translation or model rewriting. Optional type, importance, confidence, tags, entities, validity and sources remain optional. Updating it requires its expected revision. Idempotency compares the exact input, including whitespace and letter case.
 
-There are exactly two ownership modes:
+An automatic unit belongs to one current source set, identified by Vault and stable source File ID. Its body is a complete span from the original Markdown plus necessary ancestor headings and introductory context. The server creates candidate identities, byte and line coordinates, full-source hashes and provenance. A model can choose candidate IDs, one of `preference`, `constraint`, `decision`, `experience`, `procedure`, `state`, and an auxiliary retrieval hint. It cannot generate or edit the memory body, fabricate IDs, or supply canonical paths or source identity.
 
-- `explicit`: a user, Agent, Admin, or importer owns one independent memory;
-- `note_derived`: one formal proposition supported by exact current contributions
-  from one or more source File IDs.
+Automatic selection targets actual preferences, constraints, adopted decisions, task state and practical experiences or procedures. Generic tutorials, third-party architecture descriptions, reference material and reading directories remain ordinary knowledge retrieval inputs. A one-off delivery detail (including presentation layout, slide copy, asset lists, file naming, or a purely presentation-specific step) remains in its source note even when it really happened or is phrased as “decided”. A mixed source is judged unit by unit: a durable decision or experience with an explicit adoption relationship, reason, and scope may be selected beside rejected delivery specifications. Important safety prerequisites, blockers, and committed next steps for a real task remain eligible even when they only need to be executed once. The file type and path are signals only; they are never a blacklist or a per-source quota. Facts from a reference architecture are not current project conventions without explicit current adoption evidence. Preserve time, version, and scope that the source actually states; a document's continued existence or a “current” title does not establish present validity, and missing dates must not be guessed. Historical author experience may still be selected within its stated scope. A complete selected unit retains the premise, scope, order, exception, and verification steps needed to interpret it. Selection quality is not guaranteed by schema validation: real-model evaluation and human review remain required.
 
-There is no archive, restore, supersede, candidate approval, raw-memory inbox,
-global consolidation generation, or query-time memory model.
+The first pass keeps the `memory-source-unit-selection-v3` admission contract and its concrete boundaries. The active extraction profile is `memory-source-unit-selection-v3-minimal-review-v1`: minimal source units are selected first, then the independent completeness-review contract may keep, add displayed siblings, omit incomplete candidates, or explicitly replace them with a complete parent. Dates, versions, scope, safety prerequisites, exceptions, order, and verification steps remain part of a selected unit when the source provides them; a title or “current” wording does not prove present validity. Retrieval hints are short search aids and cannot add facts. The profile identity deliberately differs from previously active v4 and earlier selection-only checkpoints, so stale batches and published sets are not reused.
 
-## 2. Canonical and operational data
-
-Current knowledge is materialized in the Vault reserved namespace:
+Canonical files are below the configured reserved root:
 
 ```text
-.mcp-vault/memory/current/explicit/{memory_id}.md
-.mcp-vault/memory/current/sources/{source_file_id}.md
-.mcp-vault/memory/current/facts/{memory_id}.md
+memory-v3/explicit/{memory_id}.md    schema mcp-vault-memory-unit/v3
+memory-v3/sources/{source_file_id}.md  schema mcp-vault-memory-units/v3
 ```
 
-The exact reserved root is configuration-owned. Explicit files contain the
-caller-supplied proposition and optional metadata. A source-set file contains
-the source File ID, source path, full source content hash, set revision, pause
-flag, extraction profile, and every current item in deterministic order.
-
-SQLite owns operational coordination:
-
-- `memory_current_items` stores explicit memories and internal source contributions;
-- `memory_formal_items` and `memory_formal_supports` project formal facts;
-- `memory_public_items` is the shared get/list/recall/FTS/embedding read authority;
-- `memory_current_sources` stores exact contribution provenance;
-- `memory_note_sets` stores one row per source File ID;
-- `memory_note_set_snapshots` stores validated, prepared whole-set writes;
-- `memory_current_idempotency` and
-  `memory_current_explicit_reservations` make explicit commands retryable;
-- `memory_current_fts` and vectors are rebuildable retrieval projections;
-- legacy memory tables are migration input only.
-
-Every row, query, reservation, snapshot, FTS row, vector, job, and audit entry
-is Vault-scoped. The repository makes a row readable only when its canonical
-file is current. A note-derived row additionally requires a live source entry
-with the exact stored full-content hash.
-
-## 3. Source-owned extraction
-
-Automatic extraction operates on one Markdown source note at a time:
-
-```text
-Vault Core read
-  -> stable File ID + exact revision + full content hash
-  -> one structured generation call
-  -> validate {"memories":[...]}
-  -> prepare complete replacement snapshot
-  -> atomically write canonical set Markdown
-  -> atomically replace the source's projection
-  -> schedule rebuildable embeddings
-```
-
-The model may propose only:
-
-```json
-{
-  "memories": [
-    {
-      "content": "The Alpha team uses Rust 1.95 for backend builds.",
-      "kind": "decision",
-      "tags": ["backend"]
-    }
-  ]
-}
-```
-
-`kind` and `tags` are optional. The service owns IDs, source identity,
-provenance, revisions, actions, history, canonical paths, confidence,
-importance, and database state. Invalid/unknown kinds and invalid, duplicate,
-or excess tags are dropped with a bounded content-free warning; they never
-discard otherwise valid content. Missing/invalid required content, a missing
-or oversized `memories` array, and ambiguous root structure fail the complete
-replacement. Exactly identical content/kind/tag proposals are collapsed and secret-like
-text is redacted before publication.
-
-The extraction prompt requires complete useful coverage while preserving the
-exact subject, scope, condition, exception, date, uncertainty, negation, and
-non-adoption status. Durable technical or reference knowledge is allowed; the
-content need not be autobiographical. Note text is untrusted evidence and
-cannot instruct the extractor.
-
-An empty array is a valid current empty set. A replacement is all-or-nothing;
-there is no `supersedes` edge and no partial merge. Exact items may
-retain their stable item ID while their revision advances. Removed items cease
-to exist in the current projection.
-
-### Source identity rules
-
-- Same File ID and same content hash: a move updates navigation metadata and
-  canonical set Markdown without calling a model.
-- Same File ID and changed hash: the old set becomes unreadable immediately,
-  before extraction is queued or completed.
-- Deleted source: the old set is unreadable immediately.
-- A new File ID is a new owner even if its path or bytes resemble an old note.
-- If Vault Core explicitly recreates a deleted path by restoring its tombstone
-  and retains the File ID for note-history continuity, the deleted memory set
-  still does not return: the next extraction allocates a fresh set and item
-  identities.
-- No heuristic path/content scan may rebind ownership.
-
-### Crash recovery
-
-A validated full-set snapshot is committed before its canonical write. A retry
-adopts only byte-identical canonical output, then atomically publishes the
-projection and marks the snapshot applied. If source revision/hash or expected
-set revision changed, the proposal conflicts and must be regenerated. This
-prevents both half-published sets and stale model output from becoming current.
-
-## 4. Explicit remember and update
-
-`remember` directly creates an `explicit` current memory. It does not invoke an
-extraction or consolidation model. Omitted `kind`, `importance`, and
-`confidence` stay absent; the server never invents default semantic scores.
-Tags, entities, validity, provenance coordinates, and caller metadata are
-preserved after validation and secret redaction.
-
-An idempotency key is bound to a request hash. The service reserves the stable
-memory ID and creation time before writing the canonical file. A retry may
-adopt only the exact canonical bytes left by the same reservation; using the
-key for different input fails closed.
-
-Updates are explicit-memory-only and require the expected item revision.
-Canonical bytes are written through Vault Core before the current projection
-advances. A retry after an interrupted projection commit adopts only exact
-already-written bytes. Note-derived content is updated by editing/re-extracting
-its owning note, not by an item patch.
-
-## 5. Delete and pause
-
-`forget_memory` means delete, not archive:
-
-- explicit: delete its canonical current Markdown and current projection;
-- note-derived: prepare and publish the owning set without that item, then set
-  `extraction_paused=true` for the source.
-
-The response contains only deletion metadata, never the deleted body. The
-deleted ID is immediately unavailable to get, list, recall, MCP resources, and
-embedding-source resolution. Manual deletion cannot be undone by a background
-re-extraction. An authenticated Admin must explicitly resume the source; the
-resume is set-revision-aware and queues a forced one-call replacement.
-
-## 6. Recall
-
-Recall is current-only and performs no live generation or reranking LLM call.
-It combines:
-
-- FTS candidates with deterministic lexical-overlap gating;
-- exact context entity/tag matches;
-- optional current vectors whose model, projection version, profile hash,
-  source content hash, chunk identity, and input hash all match;
-- optional ordinary-note results from the index service.
-
-Lexical admission requires query evidence; semantic ranking uses current valid vectors
-without a benchmark-derived floor. Similarity alone does not prove answerability.
-Recency alone cannot cause a memory to
-be returned. Semantic raw cosine is retained as `semantic_cosine` for
-diagnostics; the public `score` is a fusion ranking score and must not be
-described as cosine similarity. Missing/unavailable vectors degrade to local
-retrieval instead of widening relevance.
-
-The output budget accounts for the whole returned object, including body,
-metadata, and optional provenance. An oversized candidate is skipped even when
-it ranks first, allowing later fitting candidates to be returned. The first
-item is not exempt. `available_*`, `truncated`, and degradation codes describe
-the bounded result without exposing hidden history.
-
-Ordinary-note semantic indexing preserves heading, paragraph, list, code-block,
-and table-row adjacency in its plain-text projection. It packs overlapping
-UTF-8 byte-bounded windows, prefers a nearby block/line/sentence boundary,
-attaches the nearest local heading as context, and covers the document
-sequentially through the tail. An explicit coverage diagnostic is required if
-a configured safety limit is ever reached. Vector hits are aggregated per
-note/current-memory object before ranking so a long object cannot occupy
-multiple result slots.
-
-## 7. Embedding freshness
-
-Every vector stores:
-
-- provider/model identity and embedding dimension;
-- projection version;
-- source object type, ID, chunk key, and content hash;
-- `profile_hash`, derived from non-secret provider/model/settings/capability
-  inputs and projection version;
-- `input_hash`, derived from the exact prepared text plus the source identity.
-
-Scheduling, status, source resolution, and recall all apply the same freshness
-predicate. Changing a source, preprocessing rule, model binding, endpoint, or
-relevant settings makes the old vector ineligible. Vectors are never the only
-copy of knowledge and can always be rebuilt.
-
-Admin edit revision and embedding identity revision are distinct. Renaming a
-Provider or saving identical model configuration must not invalidate vectors.
-Provider disabled/mode checks still block unauthorized operations even when the
-stored vector fingerprint remains valid. Migration 0018 preserves pre-upgrade
-fingerprints by initializing the new identity revisions from their former values.
-
-## 8. Migration from prerelease memory
-
-Migration is never automatic or destructive. Authenticated Admin flow is:
-
-1. take a backup and run `POST /memory/migration/preflight`;
-2. inspect content-free counts and IDs for safe explicit, note-derived, mixed,
-   unsupported, and historical rows; the returned confirmation hash also binds
-   every legacy field that apply would consume;
-3. run `POST /memory/migration/execute` with confirmation
-   `MIGRATE_MEMORY_V2_1`;
-4. regenerate note-derived memory from current source notes when extraction is
-   configured;
-5. retain legacy tables/history until the operator separately retires them.
-
-Unambiguous active explicit/import rows preserve their original Memory ID and
-validated optional metadata. Note-derived rows are regenerated under File-ID
-ownership. Mixed or unsupported provenance is reported and never guessed.
-Non-active legacy lifecycle rows are historical and remain outside all current
-model paths. Migration does not delete legacy rows.
-Execute recomputes the classified-state digest while holding the per-Vault
-memory write lock and fails before its first canonical write if the reviewed
-preflight changed, including changes that leave all classification counts
-unchanged.
-
-## 9. Jobs and control plane
-
-Production registers only the memory jobs needed by v2.1:
-
-- `memory.extract`: one-call source-set extraction/backfill;
-- `memory.source_reconcile`: event-driven File-ID/hash/path reconciliation;
-- `embedding.rebuild`: rebuild note or memory vectors.
-
-Startup retires obsolete prerelease memory jobs without deleting user data.
-The Admin API exposes current CRUD, extraction status/run, source resume,
-migration preflight/execute, and embedding status/rebuild. It exposes no
-archive/restore/merge, candidate inbox, source-health audit, multilingual
-backfill, consolidation, or pipeline-reset route.
-
-## 10. Acceptance
-
-The deterministic regression corpus contains at least 40 retrieval queries,
-including 10 no-answer/hard-negative cases, and at least 15 labeled generation
-cases. Reports include corpus fingerprint, pipeline version, Recall@5, MRR@5,
-no-answer false-return rate, support precision, fact coverage, subject errors,
-condition/negation errors, type errors, duplicates, and per-case details.
-
-Deterministic fake outputs validate wiring and accounting, not real model
-quality. Real-provider evaluation is opt-in only and requires explicit data and
-cost authorization. Required integration coverage includes Vault isolation,
-hash invalidation, move-without-model, whole-set replacement, delete/pause,
-explicit resume, exact-vector freshness, output budgets, and crash adoption.
-
-
-## Current-set calibration and source-language preservation
-
-ADR-0028 supersedes ADR-0027 automatic synthetic calibration: evaluations are optional diagnostics and do not gate production recall. The amended ADR-0028 requires deterministic rule chunks; legacy model grouping plans and bindings are ignored. It does not restore lifecycle history or global consolidation. The extraction prompt preserves source language, progress, environment, conditional results and future plans; unchanged source sets are not re-extracted merely because the prompt version changes.
-
-The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
-specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).
-
-## MCP source navigation and compact presentation
-
-MCP recall defaults include_sources to true and exposes original note paths as
-memories[].sources[].path; use read_note directly for evidence. Related-note cues
-are separate from memory provenance. Compact recall/list omit internal ranking and
-managed-memory-file metadata; include_details returns the extended record, while
-get_memory is always a full single-record read. Internal service/Admin contracts and
-complete-object token-budget accounting remain unchanged. No evaluation pass is required.
-
-## Automatic exact source-set maintenance (ADR-0030)
-
-The automatic `memory.deduplicate` worker compacts existing current sets, including
-paused sets. The legacy `memory.deduplicate_source` handler remains registered for
-previously queued exact-compaction jobs. The local operation removes only
-byte-identical content with identical semantic metadata. It retains the earliest
-source ordinal, rewrites the complete canonical set through the existing
-prepared snapshot protocol, preserves source pause state and surviving item IDs,
-and invalidates only removed objects' vectors. Remaining ordinals are contiguous
-so deleting an interior item remains compatible with Markdown rebuild.
-
-Extraction exact deduplication likewise must not use case-folded/NFKC lexical
-identity as evidence of equality. Different kinds or tags remain distinct.
-
-The application uses the existing authorized extraction model for structured
-semantic proposals, backed by Vault-isolated decisions and rolling transport
-accounting. Formal publication and background admission are described below.
-
-## Automatic formal-memory maintenance (v2.2, ADR 0030)
-
-Normal startup upgrades schema and admits at most one `memory.deduplicate` job per ready
-Vault. It recovers local operations, reconciles source identities, compacts exact
-same-source duplicates, and adopts old v2.1 contributions as singleton facts
-without generation. The public view switches atomically after eligible inputs are
-covered. No migration endpoint, regeneration, rebind or Admin visit is required.
-
-Same-source inclusion removes only the covered contribution; it does not promote
-another document's shorter evidence into support for a longer body. Sentence
-simplification uses a bounded proposal followed by independent complete-equivalence
-verification and numeric/inline-code conservation. Cross-source merging requires
-full equivalence of every incoming member against the stable complete body;
-relatedness, inclusion, uncertainty, conflicting scopes and transitive paths are
-insufficient. Explicit memories are excluded. Confidence is never increased by
-source count. Necessary bounded source context is read through Vault Core.
-
-Candidates union same-source siblings, lexical matches and valid existing-vector
-Top-32 matches. Small corpora (at most 64 contributions) enumerate bounded pairs.
-Larger corpora report candidate coverage, never a proof of global semantic uniqueness.
-Source and contribution scans use stable keyset cursors. Candidate fingerprints,
-completed judgments and dispatch reservations survive restart. Installation-wide
-semantic concurrency is 2; each Vault has one active job; a slice permits 16
-actual transports and continues immediately at the slice boundary. There is no
-daily request-count or input-byte cap. Actual transports (including retries) are
-accounted per Vault for 24 hours. Provider unavailability or rate limits defer
-semantic work while local cleanup remains automatic. Normal recall performs no generation.
-
-Facts live in `memory/current/facts/{id}.md`. Supports identify exact contribution
-ID, source File ID/hash and semantic metadata hash. Pending multi-file publications
-have a persisted operation; byte-identical canonical writes are adopted on retry,
-the public projection changes transactionally, and obsolete files are removed
-before the operation is retired. Rebuild restores source sets before facts without
-LLM calls. A stale source immediately ceases to qualify as support; remaining
-qualified sources keep the formal object alive.
-
-Deleting a formal ID removes every known exact contribution and pauses all known
-source sets. A concurrently regenerated different contribution is preserved.
-Absorbed IDs do not redirect reads or writes. Revision/history retention still
-applies through Vault Core; no history becomes readable as current memory.
-
-
-Candidate checking must not wait for an unbounded memory-body cleanup pass.
-Each slice first persists candidates and processes up to two pairs, then visits
-at most two formal memory bodies, including bodies which need no changes.
-Migration 0022 stores the singleton scan cursor before external I/O; interrupted
-items remain eligible on the next sweep while later items can advance. The
-successful body-check counter is cumulative (including cached/no-change checks),
-not a count of unique memories or rewrites. Original source-note bytes are never
-rewritten by this cleanup.
-
-The Admin stage is persisted before recovery, source checking, adoption,
-candidate discovery, pair comparison and singleton-body checking. Workers publish
-these content-free metrics every two seconds. Whole-slice timeout reports
-`memory_equivalence_slice_timeout` and backs off; request-count exhaustion remains
-`memory_equivalence_slice_exhausted` and can continue in the same worker.
-Pair counts measure candidate combinations, not memory objects or successful
-merges; one memory may participate in many comparisons.
-
-Newly published source contributions enter a durable incremental discovery queue
-in the same transaction as publication. They bypass the historical scan cursor;
-their unattempted comparison candidates precede unattempted historical candidates.
-Comparison turns are persisted before external I/O, so cancellation rotates an
-unfinished pair instead of counting it as complete or blocking the queue head.
-Extraction remains asynchronous with respect to semantic merging: a duplicate can
-be briefly visible until its candidate is checked. This is not a synchronous
-all-memory comparison or a guarantee of finding every semantic equivalent.
-
-Automatic admission is driven by unfinished or changed inputs. Empty/explicit-only
-Vaults and unchanged covered inputs do not create new semantic jobs. A bounded
-metadata-only database scan fingerprints source revisions/hashes, contributions,
-formal facts, memory vector versions and the extraction profile/rule. Pending
-pairs, newly published contributions and recovery operations prevent idle
-suppression. A successful pass checkpoints its starting fingerprint, so changes
-during processing cannot be mistaken for covered inputs. Provider retry deadlines
-also suppress premature admission. No admission check invokes a model.
-
-Equivalence and memory-body proposals accept extra top-level response properties
-locally and ignore them; the requested wire schema remains strict for provider
-compatibility. Required fields, types, relation enum and local pair references
-remain validated. Invalid pair proposals are cached as uncertain and preserve
-both memories while subsequent pairs continue. Invalid body proposals preserve
-the original and allow subsequent work; transport/provider failures still back off.
-Uncertain and different outcomes count as examined, not successful merges; they
-are not repeatedly questioned when their inputs remain unchanged.
+Explicit files preserve the submitted body exactly after the canonical separator. Source collections carry structured provenance and readable complete bodies. Parser validation checks hashes, rendered-body consistency and source coordinates against current original bytes. The source Markdown remains canonical user knowledge; FTS, vectors, caches and overviews are rebuildable. Canonical writes, deletions and recovery use Vault Core, revision history and durable outbox events.
+
+## Selection and publication
+
+Markdown parsing respects headings and complete nested sections, lists, tables, quotes and code blocks. Necessary ancestor introductions accompany child sections. A parent already selected with its complete descendant range subsumes that child's presentation within the same source publication; this does not authorize cross-source merging.
+
+The first pass uses leaf or parent-introduction minimal units, then builds deterministic bounded completeness-review scopes from the source-owned full units. Both passes use at most 32 units and 60 KiB of final serialized input. Review can keep or omit first-pass units, add displayed minimal siblings, or explicitly replace them with a complete parent; byte containment never implies replacement. Sensitive and unreviewable oversized content is omitted with a stable diagnostic, never shortened or regenerated. Each first-pass ID is classified exactly once as review-owned, deterministic omission, or unrelated passthrough. Review checkpoints use the same Vault/source-hash repository with a distinct stage/schema/profile/input hash, and publication waits for every review scope.
+
+Each source-processing invocation makes at most one uncached selection request; a backfill worker yields between unfinished batches. Validated results are checkpointed by Vault, source identity, full source hash, model/provider configuration, prompt/schema/batching profile and input hash. The v3 selection prompt/profile identity includes the complete selection instruction and its version, so changing the selection boundary cannot reuse an old published set or batch checkpoint. All batches must complete before one atomic source-set replacement. A crash or retry reuses matching validated batches. A changed profile causes a fresh evaluation; an explicit re-evaluation also changes the expected set generation used by the cache. Empty successful selections publish an empty evaluated set; skipped content is reported separately from a successful empty selection.
+
+Prepared publication checks source identity/hash/revision, expected current set revision, canonical revision, source pause and global generation pause. Source changes immediately disqualify old automatic units through repository eligibility, before asynchronous rebuilding. Same-ID/same-hash moves update navigation without model generation. A delete/recreate is a new identity. Partial extraction is never exposed as a finished set.
+
+Deleting an automatic unit removes it through a whole-set canonical rewrite and pauses that source. Other current units in the source remain readable. Only an explicit authenticated resume with the expected set revision clears the pause and requests evaluation. Deletion does not create a model-visible archive or supersession graph. History and backups remain operational recovery data.
+
+## Retrieval and authorization
+
+Normal `recall` does not call a generative model or scan the Vault. It uses eligible current projections with lexical, entity, tag and optional current-vector evidence. Original unit bodies receive more lexical weight than repeated ancestor context; auxiliary retrieval hints have a smaller separate ranking contribution. A soft source-diversity penalty favors distinct sources when relevance is similar. Explicit source filters are applied to the note lexical pool before its bound. Embedding and reranking are optional; provider failure degrades to lexical retrieval. A score orders candidates and does not establish factual correctness or semantic entailment. Exact body/context equality may fold presentation; semantic similarity never permits canonical deletion or rewriting.
+
+The default budget is 4096 estimated Tokens, 12 complete units and 4 related-note cues; the maximum Token budget is 32000. The estimate uses serialized UTF-8 size divided by four, rounded up; it is an engineering output bound rather than a model-specific tokenizer count. Complete bodies, provenance, scope, diagnostic metadata and navigation are budgeted together. Bodies are never clipped. A unit too large for the remaining budget may contribute a `pointers` entry with a `get_memory`/resource read target; later smaller units are still considered.
+
+Task `context.paths`, `context.entities` and `context.recent_topics` affect ranking without excluding other contexts. An explicit `source_path` is an exact filter. There is no manually maintained project registry. Related notes are separately typed current revision-bound navigation cues, not durable memory evidence.
+
+Explicit memory reads require `memory:read`. Automatic bodies, their pointers and related-note cues additionally require `vault:read`. Filtering occurs before candidate counting/ranking, and the same eligibility applies to recall, get, list, resources and overview. A legacy, deleted, cross-Vault or stale source ID is not readable. Runtime state and all operational data are Vault-scoped.
+
+## Overview
+
+`get_memory_overview` and `vault://memory/context` return bounded navigation over current units. Inputs include exact `source_path`, directory `path_prefix`, `topic_ids`, `after_id`, `limit` (default 40), and a Token budget. Directory prefixes respect path boundaries. Topic filters resolve through the current knowledge map.
+
+Generated sections contain a label, a navigation description and referenced current unit IDs. They are clearly marked `generated_navigation`, independent of original memory bodies. The generation service validates allowed IDs and stores dependencies on revisions, hashes and current source eligibility. Any dependency change invalidates the cache. Reads use current deterministic entries when the generated cache is missing or stale; they never wait for a model. Scoped queries can always use deterministic navigation. The background job builds bounded pages for the global overview and each current folder/topic in the existing knowledge map, using `memory_overview` with fallback to `memory_extraction`. One model request is allowed per overview invocation. Checkpoints record the current scope and page; source/index or model configuration changes restart the affected dependency generation. Stable job keys prevent repeated failed calls on unchanged inputs; an explicit run/resume can retry a failed overview.
+
+Overview descriptions and retrieval hints are not sources for later automatic extraction and do not replace body evidence. No generated global description is a truth-maintenance system.
+
+## Jobs and administration
+
+- `memory.extract`: durable source selection, one uncached batch per invocation, complete-set publication.
+- `memory.source_reconcile`: source movement, invalidation and deletion.
+- `memory.overview`: bounded current-unit navigation generation with dependency checks.
+- `embedding.rebuild`: independent note or `memory_unit` vector generation.
+
+Admin exposes current units, explicit editing, automatic-unit copying, source pause/resume, extraction readiness and progress, skipped units, generation pause/resume/run, overview navigation and vector coverage. `/memory/generation` controls only the new work. No merge, candidate review, semantic calibration, legacy conversion or organization route is registered.
+
+Fresh installations keep automatic extraction disabled until configured. Offline cutover enables the new policy but installs a new maintenance pause for protocol checks. Resuming generation admits a full ordinary-note backfill; it does not inherit old exclusions or source pauses.
+
+## Cutover
+
+Migration 0028 creates independent new tables and marks pre-existing Vaults as requiring offline initialization. It copies no legacy memories. Migration 0029 adds current knowledge-map dependency invalidation for directory/topic navigation. `mcp-vault initialize-memory --discard-legacy-memory` requires a process lock and exclusive SQLite ownership. It records a durable content-free manifest, terminalizes only incomplete Core intents proven to remain wholly inside the predecessor `memory/` namespace as `discarded` without replaying them, retires manifest files through Vault Core with exact hash guards, removes allow-listed Vault-scoped old memory rows/jobs/vectors/settings, and marks initialization ready. Cross-boundary or unclassifiable journals fail closed. Ordinary notes, attachments, unrelated managed files, accounts, credentials, Provider/model bindings and file history are preserved.
+
+Interrupted initialization resumes the same manifest with exact hash guards. A completed initialization is a no-op on repeat and cannot clear newly created v3 units. Disabled Vaults retain their status. Existing historical migration files and their checksums are preserved. Pair the database, Vault content and history backup before cutover; see the operational cutover runbook for deployment-specific verification.
+
+## Acceptance evidence
+
+Engineering tests establish exact-byte preservation, validation, permissions, source invalidation, budget bounds, atomicity and recovery. Fake providers test this calling contract; they do not simulate language understanding. Real configured generation and embeddings must be tested against frozen original sources, with baseline note retrieval, difficult negatives and manual review of actual outputs. Report engineering, real-model and production acceptance separately, retaining failures and limitations.

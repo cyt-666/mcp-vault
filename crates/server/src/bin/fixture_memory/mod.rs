@@ -2,9 +2,7 @@
 use axum::{Json, Router, routing::post};
 use mcp_vault_auth::{AuthService, SecretString};
 use mcp_vault_core::{VaultCore, VaultCoreRuntime};
-use mcp_vault_domain::{
-    Actor, MemoryId, MemorySourceId, Revision, SourcePlane, VaultContext, VaultPath,
-};
+use mcp_vault_domain::{Actor, SourcePlane, VaultContext, VaultPath};
 use mcp_vault_memory::{ExtractionPolicy, MemoryService, RememberInput};
 use mcp_vault_providers::{
     ModelCapabilities, ModelInput, ModelSettings, ProviderInput, ProviderKind, ProviderMode,
@@ -12,9 +10,9 @@ use mcp_vault_providers::{
 };
 use mcp_vault_server::workers::{
     Cancellation, WorkerConfig, WorkerSupervisor, memory_extract_job_handler,
-    retrieval_calibration_job_handler,
+    memory_overview_job_handler,
 };
-use mcp_vault_state::{MemoryBundle, MemoryRecord, MemorySourceRecord, StateStore};
+use mcp_vault_state::StateStore;
 use serde_json::{Value, json};
 use std::{error::Error, path::Path, sync::Arc};
 
@@ -124,72 +122,17 @@ pub async fn prepare(
     )
     .await?;
     memory.extract_note(context, &core, &path).await?;
-    let id = MemoryId::new();
-    state
-        .memory()
-        .replace_bundle(
-            context,
-            &MemoryBundle {
-                memory: MemoryRecord {
-                    id,
-                    vault_id: context.id(),
-                    memory_type: "fact".into(),
-                    status: "active".into(),
-                    status_reason: None,
-                    status_changed_at: None,
-                    content: "Legacy browser assertion".into(),
-                    normalized_content: "legacy browser assertion".into(),
-                    content_hash: "sha256:synthetic-legacy".into(),
-                    importance: 0.7,
-                    confidence: 0.8,
-                    origin: "explicit_admin".into(),
-                    revision: Revision::new(1),
-                    canonical_file_id: None,
-                    canonical_path: None,
-                    canonical_revision: None,
-                    valid_from: None,
-                    valid_to: None,
-                    extraction: json!({}),
-                    created_at: 1,
-                    updated_at: 1,
-                    last_recalled_at: None,
-                    recall_count: 0,
-                },
-                sources: vec![MemorySourceRecord {
-                    id: MemorySourceId::new(),
-                    vault_id: context.id(),
-                    memory_id: id,
-                    source_type: "explicit_admin".into(),
-                    note_file_id: None,
-                    note_path: None,
-                    note_revision: None,
-                    heading_path: vec![],
-                    start_line: None,
-                    end_line: None,
-                    excerpt_hash: None,
-                    actor_id: None,
-                    created_at: 1,
-                }],
-                entities: vec![],
-                tags: vec![],
-                relations: vec![],
-            },
-            None,
-        )
-        .await?;
     providers
         .bind_model(Some(context), "embedding_memory", model.id, json!({}), None)
         .await?;
-    // Seed complete valid vectors directly after creating the current records,
-    // without pending embedding jobs. This isolates the missing-calibration UI
-    // state while the fixture retains all real production handlers.
+    // Seed synthetic vectors only for browser contract checks.
     let sources = state
-        .current_memory()
+        .memory_units()
         .list(context, &Default::default(), 100, 0)
         .await?
         .into_iter()
         .map(|memory| mcp_vault_providers::EmbeddingSourceRef {
-            object_type: "memory".into(),
+            object_type: "memory_unit".into(),
             object_id: memory.id.to_string(),
             chunk_key: "body-v3:0000".into(),
             content_hash: memory.content_hash,
@@ -204,8 +147,8 @@ pub async fn prepare(
     .map_err(|_| "fixture worker invalid")?;
     supervisor
         .register_job_handler(
-            "retrieval.calibrate",
-            retrieval_calibration_job_handler(state.clone(), memory.clone()),
+            "memory.overview",
+            memory_overview_job_handler(state.clone(), memory.clone()),
         )
         .map_err(|_| "fixture registration invalid")?;
     supervisor
@@ -246,28 +189,25 @@ pub async fn prepare(
     tokio::spawn(async move {
         supervisor.run(Cancellation::default()).await;
     });
-    // This fixture intentionally leaves calibration absent so browser tests can
-    // inspect the waiting state and explicitly exercise the real run endpoint.
+    // Generation and overview controls use the real worker handlers.
     Ok(())
 }
-async fn extract() -> Json<Value> {
-    Json(
-        json!({"choices":[{"message":{"content":json!({"memories":[{"content":"Synthetic team completed the local exercise.","kind":"fact","tags":[]}]}).to_string()}}]}),
-    )
+async fn extract(Json(request): Json<Value>) -> Json<Value> {
+    let input: Value =
+        serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
+    let value = if request["response_format"]["json_schema"]["name"] == "memory_overview" {
+        json!({"sections":[{"label":"Local practices","description":"Read these source units for local conditions and procedures.","unit_ids":input["units"].as_array().unwrap().iter().map(|unit|unit["id"].clone()).collect::<Vec<_>>()}]})
+    } else {
+        json!({"selections":input["units"].as_array().unwrap().iter().map(|unit|json!({"unit_id":unit["unit_id"],"kind":"experience","retrieval_hint":"local exercise"})).collect::<Vec<_>>()})
+    };
+    Json(json!({"choices":[{"message":{"content":value.to_string()}}]}))
 }
 async fn embeddings(Json(body): Json<Value>) -> Json<Value> {
-    let corpus: Value = serde_json::from_str(include_str!(
-        "../../../../../tests/fixtures/memory-quality/calibration.json"
-    ))
-    .unwrap();
-    let documents = corpus["documents"].as_array().unwrap();
-    let queries = corpus["queries"].as_array().unwrap();
     Json(
         json!({"data":body["input"].as_array().unwrap().iter().enumerate().map(|(index,input)|{
-        let text=input.as_str().unwrap();let doc=documents.iter().position(|doc|text.to_lowercase().contains(&doc["content"].as_str().unwrap().to_lowercase()));
-        let query=queries.iter().find(|query|query["query"].as_str()==Some(text));
-        let coordinate=doc.or_else(||query.and_then(|query|query["relevant"][0].as_str()).and_then(|id|documents.iter().position(|doc|doc["id"].as_str()==Some(id)))).unwrap_or(if query.is_some(){63}else{60});
-        let mut vector=vec![0.0_f32;64];vector[coordinate]=1.0;json!({"index":index,"embedding":vector})
+        let mut vector=vec![0.0_f32;64];
+        for byte in input.as_str().unwrap().bytes() { vector[byte as usize % 64]+=1.0; }
+        json!({"index":index,"embedding":vector})
     }).collect::<Vec<_>>()}),
     )
 }

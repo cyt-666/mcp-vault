@@ -281,8 +281,36 @@ impl BackupService {
             self.config.readiness.store(true, Ordering::Release);
             return Ok(());
         }
+        let Some(mut maintenance_lease) = self.config.maintenance.try_begin_offline() else {
+            return Err(BackupError::Maintenance);
+        };
+        self.wait_for_active_operations().await?;
+        for vault in self.state.vaults().list().await? {
+            let context = vault.context().map_err(|_| BackupError::Maintenance)?;
+            let initialization = self.state.memory_units().initialization(&context).await?;
+            if initialization
+                .as_ref()
+                .is_some_and(|row| row.phase == "clearing")
+            {
+                return Err(BackupError::Maintenance);
+            }
+            if initialization
+                .as_ref()
+                .is_some_and(|row| row.phase == "ready")
+            {
+                let completed_files = initialization
+                    .as_ref()
+                    .and_then(|row| row.manifest.get("files"))
+                    .and_then(serde_json::Value::as_array)
+                    .map_or(0, Vec::len) as u64;
+                self.state
+                    .memory_units()
+                    .reconcile_ready_initialization_task(&context, completed_files)
+                    .await?;
+            }
+        }
         self.verify_live_state().await?;
-        self.config.maintenance.set(MaintenanceMode::Normal);
+        maintenance_lease.restore_to(MaintenanceMode::Normal);
         self.config.readiness.store(true, Ordering::Release);
         Ok(())
     }
@@ -294,7 +322,7 @@ impl BackupService {
     ) -> Result<BackupOperation, BackupError> {
         if self.config.maintenance.mode() == MaintenanceMode::Offline {
             return Err(BackupError::Maintenance);
-        }
+        };
         let id = BackupId::new();
         let location = self.artifact_path(id)?;
         let backup = self
@@ -398,17 +426,16 @@ impl BackupService {
             self.state.backups().mark_running(id).await?;
         }
         let previous = self.config.maintenance.mode();
-        if previous == MaintenanceMode::Offline {
+        let Some(mut maintenance_lease) = self.config.maintenance.try_begin_read_only() else {
             let _ = self
                 .state
                 .backups()
                 .mark_failed(id, "maintenance_offline")
                 .await;
             return Err(BackupError::Maintenance);
-        }
-        self.config.maintenance.set(MaintenanceMode::ReadOnly);
+        };
         if let Err(error) = self.wait_for_active_writes().await {
-            self.config.maintenance.set(previous);
+            maintenance_lease.restore();
             let _ = self
                 .state
                 .backups()
@@ -417,7 +444,7 @@ impl BackupService {
             return Err(error);
         }
         let result = self.create_artifact(id).await;
-        self.config.maintenance.set(previous);
+        maintenance_lease.restore_to(previous);
         match result {
             Ok(manifest) => {
                 self.state
@@ -483,12 +510,19 @@ impl BackupService {
         preview.target_matches = true;
 
         let previous = self.config.maintenance.mode();
-        if previous == MaintenanceMode::Offline {
+        let Some(mut maintenance_lease) = self.config.maintenance.try_begin_offline() else {
             return Err(BackupError::Maintenance);
+        };
+        if let Err(error) = self.wait_for_active_operations().await {
+            maintenance_lease.restore();
+            return Err(error);
         }
         let pre_restore_id = BackupId::new();
         let pre_location = self.artifact_path(pre_restore_id)?;
-        self.state.backups().mark_restoring(id).await?;
+        if let Err(error) = self.state.backups().mark_restoring(id).await {
+            maintenance_lease.restore();
+            return Err(error.into());
+        }
 
         // Always capture a safety backup before touching configured roots.
         if let Err(error) = self
@@ -498,6 +532,7 @@ impl BackupService {
             .await
         {
             let error: BackupError = error.into();
+            maintenance_lease.restore();
             let _ = self
                 .state
                 .backups()
@@ -519,25 +554,10 @@ impl BackupService {
                 .await;
             return Err(error);
         }
-        self.config.maintenance.set(MaintenanceMode::ReadOnly);
-        if let Err(error) = self.wait_for_active_writes().await {
-            self.config.maintenance.set(previous);
-            let _ = self
-                .state
-                .backups()
-                .mark_failed(pre_restore_id, error_code(&error))
-                .await;
-            let _ = self
-                .state
-                .backups()
-                .mark_failed(id, error_code(&error))
-                .await;
-            return Err(error);
-        }
         let pre_manifest = match self.create_artifact(pre_restore_id).await {
             Ok(manifest) => manifest,
             Err(error) => {
-                self.config.maintenance.set(previous);
+                maintenance_lease.restore();
                 let _ = self
                     .state
                     .backups()
@@ -562,7 +582,7 @@ impl BackupService {
             .await
         {
             let error: BackupError = error.into();
-            self.config.maintenance.set(previous);
+            maintenance_lease.restore();
             let _ = self
                 .state
                 .backups()
@@ -576,12 +596,8 @@ impl BackupService {
             return Err(error);
         }
 
-        self.config.maintenance.set(MaintenanceMode::Offline);
         self.config.readiness.store(false, Ordering::Release);
-        let result = match self.wait_for_active_operations().await {
-            Ok(()) => self.apply_restore(&preview.manifest, archive_path).await,
-            Err(error) => Err(error),
-        };
+        let result = self.apply_restore(&preview.manifest, archive_path).await;
         if result.is_ok() {
             if let Some(restored) = self.state.backups().get(id).await?
                 && restored.status == BackupStatus::Running
@@ -610,7 +626,6 @@ impl BackupService {
                     pre_manifest.completed_at,
                 )
                 .await?;
-            self.config.maintenance.set(MaintenanceMode::Normal);
             self.config.readiness.store(true, Ordering::Release);
         }
         let mut reopened_after_failure = false;
@@ -635,11 +650,9 @@ impl BackupService {
             }
         }
         let can_reopen = result.is_ok() || reopened_after_failure;
-        self.config.maintenance.set(if can_reopen {
-            previous
-        } else {
-            MaintenanceMode::Offline
-        });
+        if can_reopen {
+            maintenance_lease.restore_to(previous);
+        }
         self.config.readiness.store(can_reopen, Ordering::Release);
         result.map(|_| preview)
     }

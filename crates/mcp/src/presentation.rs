@@ -47,11 +47,21 @@ fn memory(value: &mut Value) {
     );
     if let Some(sources) = value.get_mut("sources").and_then(Value::as_array_mut) {
         for source in sources.iter_mut() {
-            retain(source, &["path"]);
+            retain(
+                source,
+                &[
+                    "source_type",
+                    "file_id",
+                    "path",
+                    "revision",
+                    "heading",
+                    "start_line",
+                    "end_line",
+                ],
+            );
         }
         sources.retain(|source| source.get("path").is_some());
         sources.dedup();
-        sources.truncate(8);
     }
 }
 fn revision(value: &mut Value) {
@@ -94,10 +104,29 @@ pub(super) fn tool_data(tool: &str, mut data: Value, details: bool) -> Value {
         return data;
     }
     match tool {
+        "get_memory_overview" => {
+            retain(
+                &mut data,
+                &[
+                    "navigation_kind",
+                    "generated_sections",
+                    "entries",
+                    "next_after_id",
+                    "truncated",
+                    "degraded",
+                ],
+            );
+        }
         "recall" => {
             retain(
                 &mut data,
-                &["memories", "related_notes", "truncated", "degraded"],
+                &[
+                    "memories",
+                    "pointers",
+                    "related_notes",
+                    "truncated",
+                    "degraded",
+                ],
             );
             if let Some(items) = data.get_mut("memories") {
                 each(items, memory);
@@ -191,4 +220,26 @@ pub(super) fn tool_data(tool: &str, mut data: Value, details: bool) -> Value {
         _ => {}
     }
     data
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn compact_recall_keeps_complete_source_coordinates_and_oversize_pointers() {
+        let source = json!({"path":"notes/完整.md","file_id":"source-1","revision":4,"heading":["条件","步骤"],"start_line":8,"end_line":14});
+        let pointer = json!({"id":"large","revision":2,"resource_uri":"vault://memory/large","sources":[source.clone()],"reason":"complete_unit_exceeds_remaining_budget"});
+        let body = "  ## 步骤\r\n1. 前置条件满足后执行。\r\n2. 不得交换次序。\r\n";
+        let result = tool_data(
+            "recall",
+            json!({"memories":[{"id":"current","content":body,"sources":[source.clone()],"fact_count":2}],"pointers":[pointer.clone()]}),
+            false,
+        );
+        assert_eq!(result["memories"][0]["content"], body);
+        assert_eq!(result["memories"][0]["sources"], json!([source]));
+        assert_eq!(result["pointers"], json!([pointer]));
+        assert!(result["memories"][0].get("fact_count").is_none());
+    }
 }

@@ -84,7 +84,7 @@ async function loadPage(page: Page, vaultSlug: string): Promise<JsonObject> {
   }
 
   if (page === 'memory') {
-    const paths = { memories: '/memories?limit=50', extraction: '/memory/extraction', embedding: '/memory/embeddings', jobs: '/jobs/overview?limit=50', calibration: '/memory/semantic-calibration', sources: '/memory/extraction/sources?paused=true&limit=50&offset=0' };
+    const paths = { memories: '/memories?limit=50', extraction: '/memory/extraction', embedding: '/memory/embeddings', jobs: '/jobs/overview?limit=50', overview: '/memory/overview', sources: '/memory/extraction/sources?paused=true&limit=50&offset=0', initialization: '/memory/initialization' };
     const results = await Promise.allSettled(Object.values(paths).map((path) => adminApi.request<JsonObject>(scopedPath(vaultSlug, path))));
     const values: Record<string, JsonObject> = {};
     const loadErrors: JsonObject = {};
@@ -93,23 +93,26 @@ async function loadPage(page: Page, vaultSlug: string): Promise<JsonObject> {
       if (result.status === 'fulfilled') values[key] = result.value;
       else { values[key] = {}; loadErrors[key] = formatRequestError(result.reason); }
     });
-    const { memories: memoryData, extraction: extractionData, embedding: embeddingData, jobs: jobsOverview } = values;
+    const { memories: memoryData, extraction: extractionData, embedding: embeddingData, jobs: jobsOverview, initialization: initializationData } = values;
+    const initializationResult = results[Object.keys(paths).indexOf('initialization')];
     const memoryJobs = ['running', 'queued', 'retry_wait', 'history']
       .flatMap((group) => Array.isArray(jobsOverview[group]) ? jobsOverview[group] : [])
       .filter((job) => (
         typeof job === 'object'
         && job !== null
         && 'job_type' in job
-        && (String(job.job_type).startsWith('memory.') || job.job_type === 'retrieval.calibrate')
+        && String(job.job_type).startsWith('memory.')
       ));
     return {
       ...memoryData,
       vault_slug: vaultSlug,
-      calibration: values.calibration,
+      overview: values.overview,
       sources: values.sources,
       load_errors: loadErrors,
       extraction: extractionData,
       embedding: embeddingData,
+      initialization: initializationData,
+      initialization_loaded: initializationResult?.status === 'fulfilled',
       memory_jobs: memoryJobs,
     };
   }

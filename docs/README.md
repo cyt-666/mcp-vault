@@ -67,3 +67,5 @@ When documents conflict:
 These documents specify the intended complete service. `implementation-plan.md` breaks that target into work packages, but completion of an early package does not redefine the product as an MVP.
 
 - [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md): startup preparation, Admin workflows, quality interpretation, upgrade and rollback.
+
+Current memory implementation and operations: [Source-preserving memory units](memory-system.md), [ADR-0033](adr/0033-source-preserving-memory-units.md), and [v3 cutover guide](memory-v3-cutover.md).

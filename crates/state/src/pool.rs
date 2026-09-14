@@ -18,11 +18,9 @@ use crate::{
     auth::AuthStateRepository,
     background::{JobRepository, OutboxRepository, ScanCheckpointRepository},
     backups::BackupRepository,
-    current_memory::CurrentMemoryRepository,
     error::{IntegrityReport, StateError},
     files::FileStateRepository,
     index::IndexRepository,
-    memory::MemoryRepository,
     providers::ProviderRepository,
     settings::SettingsRepository,
     vaults::VaultRepository,
@@ -37,9 +35,89 @@ const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub struct StateStore {
     pool: SqlitePool,
     write_gate: Arc<Semaphore>,
+    offline_exclusive: bool,
+}
+
+/// Process-scoped deployment lock. The descriptor stays owned until shutdown.
+pub struct DatabaseProcessLock {
+    _file: Option<std::fs::File>,
 }
 
 impl StateStore {
+    /// Both server and offline commands lock the canonical database location.
+    /// SQLite exclusive locking additionally excludes predecessors that do not
+    /// know this process lock.
+    pub fn acquire_process_lock(database_url: &str) -> Result<DatabaseProcessLock, StateError> {
+        if is_memory_database(database_url) {
+            return Ok(DatabaseProcessLock { _file: None });
+        }
+        let options = SqliteConnectOptions::from_str(database_url)
+            .map_err(|error| StateError::Connection(error.to_string()))?;
+        let path = options.get_filename();
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)
+            .map_err(|error| StateError::Filesystem(error.to_string()))?;
+        let canonical = if path.exists() {
+            std::fs::canonicalize(path)
+        } else {
+            std::fs::canonicalize(parent)
+                .map(|parent| parent.join(path.file_name().unwrap_or_default()))
+        }
+        .map_err(|error| StateError::Filesystem(error.to_string()))?;
+        let mut lock_path = canonical.into_os_string();
+        lock_path.push(".process-lock");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(PathBuf::from(lock_path))
+            .map_err(|error| StateError::Filesystem(error.to_string()))?;
+        fs2::FileExt::try_lock_exclusive(&file).map_err(|_| {
+            StateError::InvalidInput("database is owned by another server or maintenance process")
+        })?;
+        Ok(DatabaseProcessLock { _file: Some(file) })
+    }
+
+    /// Open an existing database with one non-expiring EXCLUSIVE connection.
+    /// The lock is acquired before any migration or canonical-file mutation and
+    /// remains held between transactions; no second process may read or write.
+    pub async fn connect_offline_exclusive(database_url: &str) -> Result<Self, StateError> {
+        if is_memory_database(database_url) {
+            return Err(StateError::InvalidInput(
+                "offline maintenance requires an existing database",
+            ));
+        }
+        let options = SqliteConnectOptions::from_str(database_url)
+            .map_err(|error| StateError::Connection(error.to_string()))?
+            .create_if_missing(false)
+            .foreign_keys(true)
+            .pragma("locking_mode", "EXCLUSIVE")
+            .synchronous(SqliteSynchronous::Full)
+            .busy_timeout(Duration::from_secs(1));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .min_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .connect_with(options)
+            .await?;
+        let mut connection = pool.acquire().await?;
+        sqlx::query("BEGIN EXCLUSIVE")
+            .execute(&mut *connection)
+            .await?;
+        sqlx::query("COMMIT").execute(&mut *connection).await?;
+        drop(connection);
+        Ok(Self {
+            pool,
+            write_gate: Arc::new(Semaphore::new(1)),
+            offline_exclusive: true,
+        })
+    }
+
     /// Open an existing database for offline diagnostics. Never create a path,
     /// change journal mode, apply migrations or allow SQL writes.
     pub async fn connect_read_only(database_url: &str) -> Result<Self, StateError> {
@@ -62,6 +140,7 @@ impl StateStore {
         Ok(Self {
             pool,
             write_gate: Arc::new(Semaphore::new(1)),
+            offline_exclusive: false,
         })
     }
 
@@ -95,6 +174,7 @@ impl StateStore {
         Ok(Self {
             pool,
             write_gate: Arc::new(Semaphore::new(1)),
+            offline_exclusive: false,
         })
     }
 
@@ -118,6 +198,13 @@ impl StateStore {
         })
     }
 
+    pub fn is_offline_exclusive(&self) -> bool {
+        self.offline_exclusive
+    }
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
+
     /// Return a Vault registry repository bound to this state store.
     pub fn vaults(&self) -> VaultRepository {
         VaultRepository::new(self.pool.clone())
@@ -138,14 +225,19 @@ impl StateStore {
         IndexRepository::new(self.pool.clone())
     }
 
-    /// Return prerelease memory operations for v2.1 migration/backup only.
-    pub fn memory(&self) -> MemoryRepository {
-        MemoryRepository::new(self.pool.clone())
+    /// Independent source-preserving memory storage; never reads legacy rows.
+    pub fn memory_units(&self) -> crate::UnitRepository {
+        crate::UnitRepository::new(self.pool.clone(), self.offline_exclusive)
     }
 
-    /// Return current-only, source-owned durable-memory operations.
-    pub fn current_memory(&self) -> CurrentMemoryRepository {
-        CurrentMemoryRepository::new(self.pool.clone())
+    /// Return the narrowly scoped initialization repository authorized by an
+    /// already acquired process maintenance lease. This does not change the
+    /// store's ordinary mode or grant general offline access.
+    pub fn memory_units_for_initialization(
+        &self,
+        _lease: &mcp_vault_domain::MaintenanceLease,
+    ) -> crate::UnitRepository {
+        crate::UnitRepository::new_for_initialization(self.pool.clone(), _lease.permit_token())
     }
 
     /// Return provider/model/binding/embedding repository operations.
@@ -171,11 +263,6 @@ impl StateStore {
     /// Return the durable transactional outbox repository.
     pub fn outbox(&self) -> OutboxRepository {
         OutboxRepository::new(self.pool.clone())
-    }
-
-    /// Return derived calibration state and durable request accounting.
-    pub fn calibrations(&self) -> crate::CalibrationRepository {
-        crate::CalibrationRepository::new(self.pool.clone())
     }
 
     /// Return the persistent job queue repository.
@@ -558,6 +645,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn offline_exclusive_access_refuses_an_open_database_and_blocks_other_clients() {
+        use sqlx::{Connection, sqlite::SqliteConnectOptions};
+        use std::{str::FromStr, time::Duration};
+        let directory = tempfile::tempdir().unwrap();
+        let url = database_url(directory.path());
+        let active = StateStore::connect_and_migrate(&url).await.unwrap();
+        assert!(StateStore::connect_offline_exclusive(&url).await.is_err());
+        active.pool.close().await;
+        let exclusive = StateStore::connect_offline_exclusive(&url).await.unwrap();
+        assert!(exclusive.integrity_check().await.unwrap().integrity_ok);
+        let options = SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .busy_timeout(Duration::from_millis(100));
+        if let Ok(mut other) = sqlx::SqliteConnection::connect_with(&options).await {
+            assert!(
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM vaults")
+                    .fetch_one(&mut other)
+                    .await
+                    .is_err()
+            );
+            other.close().await.unwrap();
+        }
+        exclusive.pool.close().await;
+        let mut restored = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM vaults")
+                .fetch_one(&mut restored)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn process_lock_uses_the_database_location_and_releases_on_drop() {
+        let directory = tempfile::tempdir().unwrap();
+        let url = database_url(directory.path());
+        let first = StateStore::acquire_process_lock(&url).unwrap();
+        assert!(StateStore::acquire_process_lock(&url).is_err());
+        drop(first);
+        assert!(StateStore::acquire_process_lock(&url).is_ok());
+    }
+
+    #[tokio::test]
     async fn migration_creates_operational_tables_and_integrity_is_green() {
         let store = StateStore::connect_and_migrate("sqlite::memory:")
             .await
@@ -634,7 +767,7 @@ mod tests {
         let report = store.integrity_check().await.unwrap();
         assert!(report.integrity_ok);
         assert_eq!(report.foreign_key_violations, 0);
-        assert_eq!(report.migration_version, 23);
+        assert_eq!(report.migration_version, 33);
         assert!(store.foreign_keys_enabled().await.unwrap());
     }
 
@@ -756,7 +889,7 @@ mod tests {
         }
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 23);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 33);
     }
 
     #[tokio::test]
@@ -798,7 +931,7 @@ mod tests {
         assert!(jwks.is_none());
         assert_eq!(enabled, 0);
         assert!(store.has_table("installation_key_checks").await.unwrap());
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 23);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 33);
     }
 
     #[tokio::test]
@@ -849,7 +982,7 @@ mod tests {
         assert_eq!(store.integrity_check().await.unwrap().migration_version, 10);
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 23);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 33);
     }
 
     #[tokio::test]
@@ -1005,7 +1138,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(pipeline_column, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 23);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 33);
     }
 
     #[tokio::test]
@@ -1067,7 +1200,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(retained, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 23);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 33);
     }
 
     #[tokio::test]
@@ -1152,7 +1285,7 @@ mod tests {
         .unwrap();
         assert_eq!(reason.as_deref(), Some("source_unavailable"));
         assert_eq!(changed_at, Some(20));
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 23);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 33);
     }
 
     #[tokio::test]
@@ -1290,7 +1423,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(fts_row, (String::new(), "keep canonical memory".to_owned()));
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 23);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 33);
     }
 
     #[tokio::test]
@@ -1416,225 +1549,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migration_0023_preserves_pairs_and_rotates_interrupted_work_per_vault() {
-        let store = StateStore::connect("sqlite::memory:").await.unwrap();
-        let mut prior = sqlx::migrate::Migrator::DEFAULT;
-        prior.migrations = std::borrow::Cow::Owned(
-            crate::migrations::MIGRATOR
-                .iter()
-                .filter(|migration| migration.version <= 22)
-                .cloned()
-                .collect(),
-        );
-        prior.run(&store.pool).await.unwrap();
-        let vault = VaultId::new();
-        let other = VaultId::new();
-        for id in [vault, other] {
-            insert_vault(&store, id, &id.to_string()).await;
-            for (key, done) in [("a", 0), ("b", 0), ("c", 1)] {
-                sqlx::query("INSERT INTO memory_formal_pairs(vault_id,pair_key,left_id,right_id,done) VALUES(?,?,?,?,?)")
-                    .bind(id.to_string()).bind(key)
-                    .bind(mcp_vault_domain::MemoryId::new().to_string())
-                    .bind(mcp_vault_domain::MemoryId::new().to_string()).bind(done)
-                    .execute(&store.pool).await.unwrap();
-            }
-        }
-        for (id, code) in [
-            (vault, "memory_equivalence_budget_exhausted"),
-            (other, "provider_unavailable"),
-        ] {
-            sqlx::query("INSERT INTO memory_formal_maintenance(vault_id,status,retry_at) VALUES(?,?,9999999999999)")
-                .bind(id.to_string()).bind(code).execute(&store.pool).await.unwrap();
-        }
-        store.migrate().await.unwrap();
-        let context = store
-            .vaults()
-            .find_by_id(vault)
-            .await
-            .unwrap()
-            .unwrap()
-            .context()
-            .unwrap();
-        let other = store
-            .vaults()
-            .find_by_id(other)
-            .await
-            .unwrap()
-            .unwrap()
-            .context()
-            .unwrap();
-        assert!(
-            store
-                .current_memory()
-                .start_formal_pair(&context, "a")
-                .await
-                .unwrap()
-        );
-        assert!(
-            !store
-                .current_memory()
-                .start_formal_pair(&context, "c")
-                .await
-                .unwrap()
-        );
-        assert!(
-            !store
-                .current_memory()
-                .start_formal_pair(&context, "missing")
-                .await
-                .unwrap()
-        );
-        // Recreate repository: scheduling progress lives in SQLite, not an in-memory cursor.
-        let pending = store
-            .current_memory()
-            .pending_formal_pairs(&context, 10)
-            .await
-            .unwrap();
-        assert_eq!(
-            pending.iter().map(|p| p.0.as_str()).collect::<Vec<_>>(),
-            ["b", "a"]
-        );
-        let pending_other = store
-            .current_memory()
-            .pending_formal_pairs(&other, 10)
-            .await
-            .unwrap();
-        assert_eq!(
-            pending_other
-                .iter()
-                .map(|p| p.0.as_str())
-                .collect::<Vec<_>>(),
-            ["a", "b"]
-        );
-        let status = store
-            .current_memory()
-            .formal_status(&context)
-            .await
-            .unwrap();
-        assert_eq!(status.status, "pending");
-        assert_eq!(status.retry_at, 0);
-        let other_status = store.current_memory().formal_status(&other).await.unwrap();
-        assert_eq!(other_status.status, "provider_unavailable");
-        assert_eq!(other_status.retry_at, 9999999999999);
-        assert_eq!(status.pending_pairs, 2);
-        assert_eq!(status.checked_pairs, 1);
-        store
-            .current_memory()
-            .finish_formal_pair(&context, "b")
-            .await
-            .unwrap();
-        let pending = store
-            .current_memory()
-            .pending_formal_pairs(&context, 10)
-            .await
-            .unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].0, "a");
-    }
-
-    #[tokio::test]
-    async fn migration_0022_preserves_active_dedup_state_and_isolates_sentence_checkpoints() {
-        let store = StateStore::connect("sqlite::memory:").await.unwrap();
-        let mut prior = sqlx::migrate::Migrator::DEFAULT;
-        prior.migrations = std::borrow::Cow::Owned(
-            crate::migrations::MIGRATOR
-                .iter()
-                .filter(|migration| migration.version <= 21)
-                .cloned()
-                .collect(),
-        );
-        prior.run(&store.pool).await.unwrap();
-        let vault = VaultId::new();
-        let other = VaultId::new();
-        insert_vault(&store, vault, "progress-upgrade").await;
-        insert_vault(&store, other, "progress-other").await;
-        sqlx::query("INSERT INTO memory_formal_maintenance(vault_id,cursor,status,retry_at) VALUES(?,'existing-pair-cursor','provider_unavailable',123456)")
-            .bind(vault.to_string()).execute(&store.pool).await.unwrap();
-        store.migrate().await.unwrap();
-        let existing: (String, String, i64) = sqlx::query_as(
-            "SELECT cursor,status,retry_at FROM memory_formal_maintenance WHERE vault_id=?",
-        )
-        .bind(vault.to_string())
-        .fetch_one(&store.pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            existing,
-            (
-                "existing-pair-cursor".into(),
-                "provider_unavailable".into(),
-                123456
-            )
-        );
-        let context = store
-            .vaults()
-            .find_by_id(vault)
-            .await
-            .unwrap()
-            .unwrap()
-            .context()
-            .unwrap();
-        let other = store
-            .vaults()
-            .find_by_id(other)
-            .await
-            .unwrap()
-            .unwrap()
-            .context()
-            .unwrap();
-        let cursor = mcp_vault_domain::MemoryId::new();
-        store
-            .current_memory()
-            .checkpoint_sentence_scan(&context, Some(cursor))
-            .await
-            .unwrap();
-        store
-            .current_memory()
-            .set_dedup_phase(&context, "checking_sentences")
-            .await
-            .unwrap();
-        store
-            .current_memory()
-            .record_sentence_checked(&context)
-            .await
-            .unwrap();
-        assert_eq!(
-            store
-                .current_memory()
-                .sentence_scan_cursor(&context)
-                .await
-                .unwrap(),
-            Some(cursor)
-        );
-        assert_eq!(
-            store
-                .current_memory()
-                .sentence_scan_cursor(&other)
-                .await
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            store
-                .current_memory()
-                .formal_status(&context)
-                .await
-                .unwrap()
-                .sentence_checked,
-            1
-        );
-        assert_eq!(
-            store
-                .current_memory()
-                .formal_status(&other)
-                .await
-                .unwrap()
-                .sentence_checked,
-            0
-        );
-    }
-
-    #[tokio::test]
     async fn migration_0016_preserves_prepared_snapshot_and_accepts_local_model_less_delete() {
         let store = StateStore::connect("sqlite::memory:").await.unwrap();
         let mut prior = sqlx::migrate::Migrator::DEFAULT;
@@ -1670,279 +1584,6 @@ mod tests {
                 .foreign_key_violations
                 == 0
         );
-    }
-
-    #[tokio::test]
-    async fn migration_0018_preserves_embedding_identity_vectors_and_calibration() {
-        let store = StateStore::connect("sqlite::memory:").await.unwrap();
-        let mut prior = sqlx::migrate::Migrator::DEFAULT;
-        prior.migrations = std::borrow::Cow::Owned(
-            crate::migrations::MIGRATOR
-                .iter()
-                .filter(|migration| migration.version <= 17)
-                .cloned()
-                .collect(),
-        );
-        prior.run(&store.pool).await.unwrap();
-        let vault = VaultId::new();
-        insert_vault(&store, vault, "identity-upgrade").await;
-        sqlx::query("INSERT INTO providers (id,name,provider_type,base_url,settings_json,enabled,revision,created_at,updated_at) VALUES ('provider','before','embedding_http','https://example.invalid/','{}',1,7,1,2)").execute(&store.pool).await.unwrap();
-        sqlx::query("INSERT INTO models (id,provider_id,external_model_id,capability_json,settings_json,enabled,revision,created_at,updated_at) VALUES ('model','provider','test','{}','{}',1,11,1,3)").execute(&store.pool).await.unwrap();
-        sqlx::query("INSERT INTO embedding_records (id,vault_id,object_type,object_id,chunk_key,provider_id,model_id,dimension,content_hash,vector_backend_key,created_at,updated_at) VALUES ('embedding',?,'note','source','text-v3:0000','provider','model',2,'source-hash','embedding',1,2)").bind(vault.to_string()).execute(&store.pool).await.unwrap();
-        sqlx::query("INSERT INTO embedding_vectors (vault_id,embedding_id,dimension,vector_blob,norm,created_at) VALUES (?,'embedding',2,?,1.0,2)").bind(vault.to_string()).bind([1.0_f32.to_le_bytes(),0.0_f32.to_le_bytes()].concat()).execute(&store.pool).await.unwrap();
-        let context = store
-            .vaults()
-            .find_by_id(vault)
-            .await
-            .unwrap()
-            .unwrap()
-            .context()
-            .unwrap();
-        store
-            .calibrations()
-            .ensure(&context, "note", "same-signature")
-            .await
-            .unwrap();
-        store
-            .calibrations()
-            .checkpoint(
-                &context,
-                "note",
-                "same-signature",
-                &serde_json::json!({"cache":[1.0,0.0]}),
-            )
-            .await
-            .unwrap();
-        store
-            .calibrations()
-            .finish(
-                &context,
-                "note",
-                "same-signature",
-                "passed",
-                &serde_json::json!({"saved":true}),
-            )
-            .await
-            .unwrap();
-        let before = serde_json::to_value(
-            store
-                .calibrations()
-                .get(&context, "note", "same-signature")
-                .await
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        let vector_before: (Vec<u8>, i64) =
-            sqlx::query_as("SELECT vector_blob,created_at FROM embedding_vectors WHERE vault_id=?")
-                .bind(vault.to_string())
-                .fetch_one(&store.pool)
-                .await
-                .unwrap();
-        for signature in ["stranded", "active"] {
-            store
-                .calibrations()
-                .ensure(&context, "memory", signature)
-                .await
-                .unwrap();
-            store
-                .calibrations()
-                .reserve_request(&context, "memory", signature, 123, 900_000)
-                .await
-                .unwrap();
-            store
-                .calibrations()
-                .checkpoint(
-                    &context,
-                    "memory",
-                    signature,
-                    &serde_json::json!({"saved":[1.0,0.0]}),
-                )
-                .await
-                .unwrap();
-            sqlx::query("INSERT INTO jobs(id,vault_id,job_type,dedup_key,payload_json,status,max_attempts,available_at,created_at,updated_at) VALUES (?,?,'retrieval.calibrate',?,?,'completed',3,1,1,1)")
-                .bind(format!("finished-{signature}")).bind(vault.to_string()).bind(format!("finished-{signature}"))
-                .bind(serde_json::json!({"signatures":[signature]}).to_string()).execute(&store.pool).await.unwrap();
-        }
-        store
-            .jobs()
-            .enqueue(
-                &context,
-                "retrieval.calibrate",
-                "active-job",
-                &serde_json::json!({"signatures":["active"],"explicit_diagnostic":true}),
-                0,
-                3,
-                0,
-            )
-            .await
-            .unwrap();
-        let other_id = VaultId::new();
-        insert_vault(&store, other_id, "other-identity").await;
-        let other = store
-            .vaults()
-            .find_by_id(other_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .context()
-            .unwrap();
-        store
-            .calibrations()
-            .ensure(&other, "memory", "stranded")
-            .await
-            .unwrap();
-        store.migrate().await.unwrap();
-        let revisions:(i64,i64,i64,i64)=sqlx::query_as("SELECT p.revision,p.embedding_revision,m.revision,m.embedding_revision FROM providers p JOIN models m ON m.provider_id=p.id").fetch_one(&store.pool).await.unwrap();
-        assert_eq!(
-            revisions,
-            (7, 7, 11, 11),
-            "legacy fingerprint revision components must remain byte-identical"
-        );
-        assert_eq!(
-            vector_before,
-            sqlx::query_as::<_, (Vec<u8>, i64)>(
-                "SELECT vector_blob,created_at FROM embedding_vectors WHERE vault_id=?"
-            )
-            .bind(vault.to_string())
-            .fetch_one(&store.pool)
-            .await
-            .unwrap()
-        );
-        let after = store
-            .calibrations()
-            .get(&context, "note", "same-signature")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(before, serde_json::to_value(&after).unwrap());
-        assert_eq!(
-            after.checkpoint_json,
-            serde_json::json!({"cache":[1.0,0.0]}).to_string()
-        );
-        let stranded = store
-            .calibrations()
-            .get(&context, "memory", "stranded")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(stranded.status, "cancelled");
-        assert_eq!(stranded.requests, 1);
-        assert_eq!(stranded.request_bytes, 123);
-        assert_eq!(
-            stranded.checkpoint_json,
-            serde_json::json!({"saved":[1.0,0.0]}).to_string()
-        );
-        assert_eq!(
-            store
-                .calibrations()
-                .get(&context, "memory", "active")
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            "running"
-        );
-        assert_eq!(
-            store
-                .calibrations()
-                .get(&other, "memory", "stranded")
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            "pending"
-        );
-        assert!(store.integrity_check().await.unwrap().integrity_ok);
-    }
-
-    #[tokio::test]
-    async fn migration_0019_retires_only_automatic_jobs_and_keeps_reports_and_budgets() {
-        let store = StateStore::connect("sqlite::memory:").await.unwrap();
-        let mut prior = sqlx::migrate::Migrator::DEFAULT;
-        prior.migrations = std::borrow::Cow::Owned(
-            crate::migrations::MIGRATOR
-                .iter()
-                .filter(|m| m.version <= 18)
-                .cloned()
-                .collect(),
-        );
-        prior.run(&store.pool).await.unwrap();
-        let vault = VaultId::new();
-        insert_vault(&store, vault, "retire-auto").await;
-        let context = store
-            .vaults()
-            .find_by_id(vault)
-            .await
-            .unwrap()
-            .unwrap()
-            .context()
-            .unwrap();
-        let other_id = VaultId::new();
-        insert_vault(&store, other_id, "manual-diagnostic").await;
-        let other = store
-            .vaults()
-            .find_by_id(other_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .context()
-            .unwrap();
-        for (signature, explicit) in [("auto", false), ("manual", true)] {
-            let context = if explicit { &other } else { &context };
-            store
-                .calibrations()
-                .ensure(context, "note", signature)
-                .await
-                .unwrap();
-            store
-                .calibrations()
-                .reserve_request(context, "note", signature, 42, i64::MAX)
-                .await
-                .unwrap();
-            store
-                .jobs()
-                .enqueue(
-                    context,
-                    "retrieval.calibrate",
-                    signature,
-                    &serde_json::json!({"signatures":[signature],"explicit_diagnostic":explicit}),
-                    0,
-                    3,
-                    0,
-                )
-                .await
-                .unwrap();
-        }
-        store.migrate().await.unwrap();
-        for (signature, status) in [("auto", "cancelled"), ("manual", "running")] {
-            let context = if signature == "manual" {
-                &other
-            } else {
-                &context
-            };
-            let row = store
-                .calibrations()
-                .get(context, "note", signature)
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(row.status, status);
-            assert_eq!(row.requests, 1);
-            assert_eq!(row.request_bytes, 42);
-        }
-        let jobs = store
-            .jobs()
-            .list(&context, None, Some("retrieval.calibrate"), 10, 0)
-            .await
-            .unwrap();
-        assert_eq!(
-            jobs.iter()
-                .filter(|j| j.status == crate::JobStatus::Cancelled)
-                .count(),
-            1
-        );
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 23);
     }
 
     async fn insert_vault(store: &StateStore, id: VaultId, slug: &str) {

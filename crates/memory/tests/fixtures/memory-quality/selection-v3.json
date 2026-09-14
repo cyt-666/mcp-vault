@@ -1,0 +1,139 @@
+{
+  "fixture": "memory-selection-v3",
+  "version": 1,
+  "purpose": "受控自动选择边界；供后续真实模型逐项人工验收，不是语义质量分数。",
+  "documents": [
+    {
+      "id": "mixed-ppt-and-decision",
+      "path": "work/briefing.md",
+      "markdown": "# 本次汇报\n\n## 页面风格\n本次汇报采用 16:9；标题 32–40pt；页脚 11–13pt。\n\n## 项目约定\n项目已采纳：所有写入先经过 Vault Core，再由索引任务异步更新；适用于当前 MCP Vault 服务。理由是协议层不能绕过原子写入和修订边界。\n\n## 问答\n\n### 为什么选择 Markdown\n我们已决定把 Markdown 文件作为当前项目的知识正本，因为用户可以直接携带和编辑；该决定适用于本 Vault 的长期存储。\n"
+    },
+    {
+      "id": "one-off-release",
+      "path": "release/checklist.md",
+      "markdown": "# 本次发布\n\n## 交付清单\n这次发布已决定把演示文件命名为 vault-demo-final.pptx，并在周五前逐页校对。\n"
+    },
+    {
+      "id": "old-reference",
+      "path": "reference/architecture.md",
+      "markdown": "# 旧架构说明\n\n## 模块关系\n0.1.17 的 TUI、app-server 和 core 通过消息通道连接，客户端可以从 TUI 进入 app-server。\n"
+    },
+    {
+      "id": "preference",
+      "path": "preferences/working-style.md",
+      "markdown": "# 长期工作偏好\n\n以后处理迁移或批量写入时，我偏好先做可回滚备份，再执行变更；如果无法回滚就先停下来说明原因。\n"
+    },
+    {
+      "id": "recovery-procedure",
+      "path": "work/recovery.md",
+      "markdown": "# 恢复操作\n\n## 已采纳的恢复步骤\n这是我们在上次恢复演练后采纳的操作：只有确认数据库与 Vault 备份属于同一时间点时才恢复。先停止写入，再校验两份备份的哈希，校验失败就不要恢复；校验通过后恢复并检查修订号。\n"
+    },
+    {
+      "id": "current-state",
+      "path": "work/current-status.md",
+      "markdown": "# 当前阻塞\n\n## 迁移进度\n当前迁移被权限错误阻塞，已完成备份；修复权限后仍从第 3 阶段继续，并先复核备份哈希。\n"
+    },
+    {
+      "id": "migration-safety",
+      "path": "work/migration.md",
+      "markdown": "# 当前数据库迁移\n\n## 安全前提\n本次数据库迁移仍阻塞，执行前必须验证备份可恢复；这是恢复演练后保留的安全前提。\n"
+    },
+    {
+      "id": "hypothetical",
+      "path": "ideas/future.md",
+      "markdown": "# 可能的未来方案\n\n以后也许可以用双写索引，若时间允许再做一次实验。当前没有安排实施。\n"
+    }
+  ],
+  "cases": [
+    {
+      "id": "mixed-delivery-ppt-layout",
+      "group": "mixed_source",
+      "document_id": "mixed-ppt-and-decision",
+      "heading": ["本次汇报", "页面风格"],
+      "expected": "reject",
+      "kind": null,
+      "reason": "一次交付的排版规格，即使确实执行过也不跨会话适用。"
+    },
+    {
+      "id": "mixed-adopted-project-decision",
+      "group": "mixed_source",
+      "document_id": "mixed-ppt-and-decision",
+      "heading": ["本次汇报", "项目约定"],
+      "expected": "select",
+      "kind": "decision",
+      "reason": "有明确采纳关系、理由和当前项目适用范围。"
+    },
+    {
+      "id": "mixed-markdown-adopted-reason",
+      "group": "mixed_source",
+      "document_id": "mixed-ppt-and-decision",
+      "heading": ["本次汇报", "问答", "为什么选择 Markdown"],
+      "expected": "select",
+      "kind": "decision",
+      "reason": "问答或演示章节仍可能承载真正的项目决策，不能按文件类型整体排除。"
+    },
+    {
+      "id": "one-off-release-artifacts",
+      "group": "one_time_delivery",
+      "document_id": "one-off-release",
+      "heading": ["本次发布", "交付清单"],
+      "expected": "reject",
+      "kind": null,
+      "reason": "“已决定”和真实发生不能把一次性交付的命名、逐页校对变成长记忆。"
+    },
+    {
+      "id": "old-reference-architecture",
+      "group": "old_reference",
+      "document_id": "old-reference",
+      "heading": ["旧架构说明", "模块关系"],
+      "expected": "reject",
+      "kind": null,
+      "reason": "参考架构事实不自动成为当前项目约定。"
+    },
+    {
+      "id": "persistent-preference",
+      "group": "preference",
+      "document_id": "preference",
+      "heading": ["长期工作偏好"],
+      "expected": "select",
+      "kind": "preference",
+      "reason": "明确表达持续适用的用户偏好及例外。"
+    },
+    {
+      "id": "procedure-with-premise-exception",
+      "group": "procedure",
+      "document_id": "recovery-procedure",
+      "heading": ["恢复操作", "已采纳的恢复步骤"],
+      "expected": "select",
+      "kind": "procedure",
+      "reason": "最小完整单元必须保留前提、顺序、失败例外和验证步骤。"
+    },
+    {
+      "id": "current-blocked-state",
+      "group": "state",
+      "document_id": "current-state",
+      "heading": ["当前阻塞", "迁移进度"],
+      "expected": "select",
+      "kind": "state",
+      "reason": "跨会话接续工作需要阻塞原因、已完成状态和明确下一步。"
+    },
+    {
+      "id": "one-time-migration-safety",
+      "group": "state",
+      "document_id": "migration-safety",
+      "heading": ["当前数据库迁移", "安全前提"],
+      "expected": "select",
+      "kind": "constraint",
+      "reason": "一次任务中的重要安全前提应保留到任务继续。"
+    },
+    {
+      "id": "hypothetical-method",
+      "group": "hypothetical",
+      "document_id": "hypothetical",
+      "heading": ["可能的未来方案"],
+      "expected": "reject",
+      "kind": null,
+      "reason": "没有实际采纳、亲历结果或任务承诺的假设方案不进入自动记忆。"
+    }
+  ]
+}

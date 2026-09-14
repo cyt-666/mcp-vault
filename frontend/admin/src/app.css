@@ -267,6 +267,7 @@ textarea { min-height: 7rem; resize: vertical; }
 .record-main { min-width: 0; }
 .record-title { align-items: center; display: flex; flex-wrap: wrap; gap: 0.6rem; justify-content: flex-start; }
 .record-title strong { line-height: 1.45; overflow-wrap: anywhere; }
+.memory-content { white-space: pre-wrap; }
 .record-item p { color: #a9bac9; font-size: 0.82rem; margin: 0.3rem 0; overflow-wrap: anywhere; }
 .record-item small { color: var(--subtle); display: block; font-size: 0.74rem; line-height: 1.5; overflow-wrap: anywhere; }
 .record-item code { color: #a9cfc7; }

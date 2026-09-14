@@ -8,6 +8,8 @@ publish = false
 default-run = "mcp-vault"
 
 [dependencies]
+async-trait = { workspace = true }
+futures-util = { workspace = true, features = ["std"] }
 mcp-vault-admin-api = { path = "../admin-api" }
 mcp-vault-backup = { path = "../backup" }
 mcp-vault-domain = { path = "../domain" }
@@ -37,6 +39,9 @@ url = { workspace = true }
 tempfile = { workspace = true }
 
 [dev-dependencies]
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+unicode-normalization = { workspace = true }
 sqlx = { workspace = true }
 http-body-util = { workspace = true }
 tower = { workspace = true }

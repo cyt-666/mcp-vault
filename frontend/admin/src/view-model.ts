@@ -122,6 +122,10 @@ const errorMessages: Record<string, string> = {
   provider_unavailable: 'AI 服务暂时不可用。',
   capability_unavailable: '所选模型不支持这项用途。',
   model_exists: '这个模型 ID 已经登记过了。',
+  memory_initialization_required: '需要先在“记忆”页面确认一次旧记忆清理。',
+  memory_selection_next_batch: '已保存批次，等待继续选择原文',
+  memory_generation_paused: '记忆生成已暂停',
+  memory_overview_next_page: '正在构建下一页概览',
   memory_extraction_not_ready: '记忆提取尚未就绪，请先启用策略、允许 AI 调用并绑定记忆提取模型。',
   memory_extraction_model_unbound: '尚未给记忆提取绑定模型。',
   memory_extraction_model_missing: '记忆提取绑定的模型不存在，请重新选择。',
@@ -191,6 +195,24 @@ const jobErrorMessages: Record<string, string> = {
   provider_output_repetition_truncated: 'AI 输出因重复内容被模型平台截断；任务不会自动重试',
   provider_response_invalid: 'AI 服务返回了无法识别的响应',
   provider_schema_invalid: 'AI 返回了 JSON，但当前记忆集合结构不符合要求',
+  state_database_busy: '数据库写入锁繁忙，将从检查点重试',
+  state_pool_timeout: '等待数据库连接超时，将自动重试',
+  job_handler_panicked: '任务遇到内部异常并已停止；已保存进度保留，请先修复对应问题再重试',
+  state_pool_closed: '数据库连接池已关闭',
+  state_database_unique_violation: '数据库唯一约束冲突，需要检查当前状态',
+  state_database_foreign_key_violation: '数据库来源引用约束冲突，需要检查当前状态',
+  state_database_check_violation: '数据库字段约束校验失败',
+  state_database_full: '数据库所在磁盘空间不足',
+  state_database_read_only: '数据库处于只读状态',
+  state_database_error: '数据库操作失败，请查看对应阶段的服务日志',
+  state_revision_conflict: '状态版本已变化，将从检查点重试',
+  state_json_invalid: '已保存的状态 JSON 无法解析',
+  state_value_decode_error: '已保存的状态字段无法解析',
+  state_row_missing: '待处理的状态记录不存在',
+  memory_core_external_mismatch: '规范文件与数据库状态不一致',
+  memory_core_revision_conflict: '规范文件版本已变化，将重新检查',
+  memory_core_needs_review: '文件恢复无法确认完整状态，需要检查恢复日志',
+  memory_core_storage_error: '规范文件读写失败，请检查存储状态',
 };
 
 const statusLabels: Record<string, string> = {
@@ -218,16 +240,7 @@ const statusLabels: Record<string, string> = {
 };
 
 const memoryTypeLabels: Record<string, string> = {
-  identity: '身份',
-  preference: '偏好',
-  decision: '决策',
-  constraint: '约束',
-  fact: '事实',
-  project: '项目',
-  progress: '进展',
-  event: '事件',
-  relationship: '关系',
-  procedure: '流程',
+  preference: '偏好', constraint: '约束', decision: '决策', experience: '实践经验', state: '当前状态', procedure: '操作流程',
 };
 
 export function formatRequestError(error: unknown): string {

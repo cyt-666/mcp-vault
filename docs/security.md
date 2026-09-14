@@ -545,22 +545,25 @@ changes may therefore reach the configured extraction Provider. Legacy
 every other path/content privacy rule continues to apply.
 
 Extraction model output is untrusted. The only accepted root is one
-`memories[]` array whose items contain required non-empty `content` and optional
-`kind`/`tags`. Local code applies bounds and secret filtering, drops invalid
-optional metadata, allocates all durable IDs, and binds the proposal to the
-current Vault/File ID/revision/normalized whole-note hash. The model cannot
-provide source identity, evidence coordinates, lifecycle actions, confidence,
-importance, database references, or write paths. A missing/ambiguous/truncated
-root or invalid required content fails the whole source operation; it is never
-interpreted as an empty set.
+`selections[]` array whose items contain a server-issued `unit_id`, an optional
+allowed `kind`, and a bounded `retrieval_hint`; the model never supplies a
+memory body. Local code validates every ID against the current batch, allocates
+all durable IDs, extracts the complete original unit, and binds the proposal to
+the current Vault/File ID/revision/source hash and selection profile. The model
+cannot provide source identity, evidence coordinates, lifecycle actions,
+confidence, importance, database references, or write paths. A
+missing/ambiguous/truncated root, unknown/duplicate ID, or invalid metadata
+fails the whole source operation; it is never interpreted as an empty set.
 
 The complete validated source-set snapshot is persisted before canonical
 mutation. Publication rechecks the exact File ID/hash, source pause state, and
 expected set revision. Recovery may adopt only byte-identical managed output
 from that snapshot, so an interruption cannot justify replaying the paid call,
-publishing stale output, or overwriting a concurrent set change. Generated
-content and metadata receive best-effort secret redaction before persistence;
-no response content is emitted into logs or progress.
+publishing stale output, or overwriting a concurrent set change. Sensitive
+candidates are identified and skipped before they reach the Provider; the
+persisted body is extracted from the original source without rewriting, while
+generated retrieval hints and other metadata receive best-effort secret
+redaction. No response content is emitted into logs or progress.
 
 Normal memory recall joins note-derived ownership to current file metadata and
 requires the full source hash to match. A same-File-ID move may update path

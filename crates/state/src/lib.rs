@@ -7,16 +7,24 @@ mod audit;
 mod auth;
 mod background;
 mod backups;
-mod current_memory;
 mod error;
 mod files;
 mod index;
-mod memory;
+mod search;
+pub use search::memory_search_terms;
 mod migrations;
 mod pool;
 mod providers;
 mod settings;
+mod units;
 mod vaults;
+
+pub use units::{
+    MemoryInitializationState, MemoryInitializationTask, UnitBundle, UnitCounts,
+    UnitExplicitReservation, UnitFilter, UnitOverviewRecord, UnitOverviewScope, UnitOwnership,
+    UnitRecord, UnitRepository, UnitRuntimeState, UnitSearchHit, UnitSourceRecord,
+    UnitSourceSetRecord, UnitSourceSetSnapshotRecord, UnitSourceSetView,
+};
 
 pub use audit::{AuditRecord, AuditRepository};
 pub use auth::{
@@ -31,35 +39,18 @@ pub use background::{
     ScanCheckpointRecord, ScanCheckpointRepository, ScanStatus,
 };
 pub use backups::{BackupRecord, BackupRepository, BackupStatus};
-pub use current_memory::{
-    CurrentExplicitReservation, CurrentMemoryBundle, CurrentMemoryCounts, CurrentMemoryFilter,
-    CurrentMemoryOwnership, CurrentMemoryRecord, CurrentMemoryRepository, CurrentMemorySearchHit,
-    CurrentMemorySourceRecord, CurrentMemorySourceSetView, FormalMaintenanceStatus,
-    FormalMemoryDocument, FormalMemoryOperation, FormalMemorySupport, FormalSourceRewrite,
-    MemoryNoteSetRecord, MemoryNoteSetSnapshotRecord, MemoryV2MigrationPreflight,
-    contribution_semantic_hash,
-};
 pub use error::{IntegrityReport, StateError};
 pub use files::{
     CommitHook, CommitHookPhase, CommitMutationInput, EntryType, FileOperation, FileRecord,
-    FileRevisionRecord, FileStateRepository, IdempotencyLookup, JournalRecord, JournalState,
-    MutationCommitResult, NoopCommitHook, OutboxEventInput, PrepareOperationInput,
+    FileRevisionRecord, FileStateRepository, IdempotencyLookup, IncompleteJournalSummary,
+    JournalRecord, JournalState, MutationCommitResult, NoopCommitHook, OutboxEventInput,
+    PrepareOperationInput, SupersedeCreateResult, SupersedeCreateWitness,
 };
 pub use index::{
     HeadingProjectionInput, IndexMembershipProjectionInput, IndexNodeProjectionInput,
     IndexNodeRecord, IndexRepository, IndexStatusRecord, LinkProjectionInput,
     NoteEmbeddingSourceRecord, NoteLinkRecord, NoteProjectionInput, NoteSearchRecord,
     TagProjectionInput,
-};
-pub use memory::{
-    MemoryBundle, MemoryCandidateRecord, MemoryConsolidationProposalRecord,
-    MemoryConsolidationStateRecord, MemoryCounts, MemoryDiagnosticRecord, MemoryFilter,
-    MemoryIdempotencyRecord, MemoryPipelinePurgeReport, MemoryRecord, MemoryRelationRecord,
-    MemoryRepository, MemoryRetrievalCoverage, MemoryRetrievalMetadataRecord,
-    MemoryRetrievalProposalRecord, MemorySearchHit, MemorySourceAuditStateRecord,
-    MemorySourceHealthCounts, MemorySourceHealthDetailRecord, MemorySourceHealthRecord,
-    MemorySourceHealthState, MemorySourceRecord, MemoryStage1Counts, MemoryStage1OutputRecord,
-    memory_search_terms,
 };
 pub use pool::{StateStore, StateTransaction};
 pub use providers::{
@@ -80,9 +71,3 @@ pub(crate) fn now_millis() -> Result<i64, StateError> {
     i64::try_from(elapsed.as_millis())
         .map_err(|_| StateError::InvalidInput("system clock exceeds SQLite timestamp range"))
 }
-
-mod calibration;
-pub use calibration::{
-    CalibrationBudget, CalibrationDocument, CalibrationLexicalIndex, CalibrationRepository,
-    CalibrationRun,
-};

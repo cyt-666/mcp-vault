@@ -169,6 +169,8 @@ pub enum NoteRetrievalMode {
 /// Vault-scoped note retrieval filters.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NoteRetrievalScope {
+    /// Optional exact current source path, used by source-scoped memory cues.
+    pub source_path: Option<String>,
     /// Validated Vault-relative prefix.
     pub path_prefix: Option<String>,
     /// Normalized tags that must all match.
@@ -1077,6 +1079,7 @@ impl IndexService {
                 context,
                 &fts_query,
                 path_prefix,
+                None,
                 &tags,
                 topic_keys,
                 modified_after,
@@ -1113,8 +1116,8 @@ impl IndexService {
         .await
     }
 
-    /// Recall-specific candidate collection. Missing calibration allows only
-    /// strong lexical evidence; this internal service API is not an MCP option.
+    /// Recall-specific candidate collection with a conservative optional
+    /// semantic floor; query-time generation is never used.
     pub async fn retrieve_notes_for_recall(
         &self,
         context: &VaultContext,
@@ -1122,11 +1125,29 @@ impl IndexService {
         min_cosine: Option<f64>,
         limit: u32,
     ) -> Result<NoteRetrievalResult, IndexError> {
+        self.retrieve_notes_for_recall_scoped(
+            context,
+            query,
+            min_cosine,
+            limit,
+            &NoteRetrievalScope::default(),
+        )
+        .await
+    }
+
+    pub async fn retrieve_notes_for_recall_scoped(
+        &self,
+        context: &VaultContext,
+        query: &str,
+        min_cosine: Option<f64>,
+        limit: u32,
+        scope: &NoteRetrievalScope,
+    ) -> Result<NoteRetrievalResult, IndexError> {
         self.retrieve_notes_with_admission(
             context,
             query,
             NoteRetrievalMode::Hybrid,
-            &NoteRetrievalScope::default(),
+            scope,
             limit,
             0,
             true,
@@ -1167,23 +1188,15 @@ impl IndexService {
         let mut candidates = HashSet::new();
         let mut eligible = HashSet::new();
         if !matches!(mode, NoteRetrievalMode::Semantic) {
-            let lexical = if matches!(mode, NoteRetrievalMode::Lexical) {
-                self.search_notes_scoped(
+            let lexical = self
+                .search_notes_query(
                     context,
                     query,
-                    scope.path_prefix.as_deref(),
-                    &scope.tags,
-                    &scope.topic_ids,
-                    scope.modified_after,
-                    scope.modified_before,
+                    scope,
                     pool_limit,
-                    0,
+                    !matches!(mode, NoteRetrievalMode::Lexical),
                 )
-                .await?
-            } else {
-                self.search_notes_relaxed(context, query, scope, pool_limit)
-                    .await?
-            };
+                .await?;
             for (rank, note) in lexical.into_iter().enumerate() {
                 candidates.insert(note.file_id);
                 eligible.insert(note.file_id);
@@ -1290,12 +1303,13 @@ impl IndexService {
         })
     }
 
-    async fn search_notes_relaxed(
+    async fn search_notes_query(
         &self,
         context: &VaultContext,
         query: &str,
         scope: &NoteRetrievalScope,
         limit: u32,
+        relaxed: bool,
     ) -> Result<Vec<NoteSearchRecord>, IndexError> {
         let tags = scope
             .tags
@@ -1306,8 +1320,13 @@ impl IndexService {
         self.repository()
             .search_notes(
                 context,
-                &quote_fts_query_any(query)?,
+                &if relaxed {
+                    quote_fts_query_any(query)?
+                } else {
+                    quote_fts_query(query)?
+                },
                 scope.path_prefix.as_deref(),
+                scope.source_path.as_deref(),
                 &tags,
                 &scope.topic_ids,
                 scope.modified_after,
@@ -2080,6 +2099,13 @@ fn semantic_note_rank_score(similarity: f32, rank: usize) -> Option<f64> {
 }
 
 fn note_matches_scope(note: &NoteSearchRecord, scope: &NoteRetrievalScope) -> bool {
+    if scope
+        .source_path
+        .as_deref()
+        .is_some_and(|path| note.path.as_str() != path)
+    {
+        return false;
+    }
     if scope
         .path_prefix
         .as_deref()

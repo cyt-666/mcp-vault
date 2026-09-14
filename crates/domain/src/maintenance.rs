@@ -5,8 +5,8 @@
 //! authorization and storage operations still require their normal context.
 
 use std::sync::{
-    Arc,
-    atomic::{AtomicU8, AtomicUsize, Ordering},
+    Arc, Mutex, Weak,
+    atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
 
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,8 @@ pub struct MaintenanceGate {
 #[derive(Debug)]
 struct MaintenanceState {
     mode: AtomicU8,
+    maintenance_active: AtomicBool,
+    transition: Mutex<()>,
     active_operations: AtomicUsize,
     active_writes: AtomicUsize,
 }
@@ -76,6 +78,42 @@ pub struct MaintenanceOperationGuard {
     write: bool,
 }
 
+/// Exclusive transition into Offline mode. The lease stops new admissions;
+/// callers must drain the counters before touching canonical state. A caller
+/// must explicitly restore the prior mode after a safe completion; dropping
+/// an unreleased lease keeps Offline for explicit recovery.
+#[derive(Debug)]
+#[must_use = "explicitly restore or retain Offline maintenance ownership"]
+pub struct MaintenanceLease {
+    state: Arc<MaintenanceState>,
+    previous: MaintenanceMode,
+    released: bool,
+    token: MaintenancePermitToken,
+}
+
+/// Opaque, read-only capability checked by the State initialization boundary.
+/// Callers cannot reactivate or forge a released lease.
+#[derive(Clone, Debug)]
+pub struct MaintenancePermitToken {
+    active: Arc<AtomicBool>,
+    state: Weak<MaintenanceState>,
+}
+
+impl MaintenancePermitToken {
+    pub fn belongs_to(&self, gate: &MaintenanceGate) -> bool {
+        self.state.ptr_eq(&Arc::downgrade(&gate.state))
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+            && self.state.upgrade().is_some_and(|state| {
+                state.mode.load(Ordering::Acquire) == MaintenanceMode::Offline as u8
+                    && state.active_operations.load(Ordering::Acquire) == 0
+                    && state.active_writes.load(Ordering::Acquire) == 0
+            })
+    }
+}
+
 impl Default for MaintenanceGate {
     fn default() -> Self {
         Self::new()
@@ -88,6 +126,8 @@ impl MaintenanceGate {
         Self {
             state: Arc::new(MaintenanceState {
                 mode: AtomicU8::new(MaintenanceMode::Normal as u8),
+                maintenance_active: AtomicBool::new(false),
+                transition: Mutex::new(()),
                 active_operations: AtomicUsize::new(0),
                 active_writes: AtomicUsize::new(0),
             }),
@@ -105,7 +145,21 @@ impl MaintenanceGate {
 
     /// Set the process mode.
     pub fn set(&self, mode: MaintenanceMode) {
+        let _transition = self
+            .state
+            .transition
+            .lock()
+            .expect("maintenance transition lock poisoned");
+        if self.state.maintenance_active.load(Ordering::Acquire) && mode != MaintenanceMode::Offline
+        {
+            return;
+        }
         self.state.mode.store(mode as u8, Ordering::Release);
+        if mode != MaintenanceMode::Offline {
+            self.state
+                .maintenance_active
+                .store(false, Ordering::Release);
+        }
     }
 
     /// Return whether a data-plane request may start in the current mode.
@@ -126,6 +180,64 @@ impl MaintenanceGate {
     /// Admit one mutating operation only while the process is normal.
     pub fn try_start_write(&self) -> Option<MaintenanceOperationGuard> {
         self.try_start(true)
+    }
+
+    /// Atomically stop new admissions and return an exclusive Offline lease.
+    /// Existing operations are still counted and must be drained by the
+    /// caller with a bounded timeout.
+    pub fn try_begin_offline(&self) -> Option<MaintenanceLease> {
+        self.try_begin_mode(MaintenanceMode::Offline)
+    }
+
+    /// Atomically own ReadOnly mode for backup creation while allowing
+    /// admitted reads to continue; canonical writes remain blocked.
+    pub fn try_begin_read_only(&self) -> Option<MaintenanceLease> {
+        self.try_begin_mode(MaintenanceMode::ReadOnly)
+    }
+
+    fn try_begin_mode(&self, target: MaintenanceMode) -> Option<MaintenanceLease> {
+        let _transition = self.state.transition.lock().ok()?;
+        if self
+            .state
+            .maintenance_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return None;
+        }
+        let previous = self.mode();
+        if previous == MaintenanceMode::Offline && target != MaintenanceMode::Offline {
+            self.state
+                .maintenance_active
+                .store(false, Ordering::Release);
+            return None;
+        }
+        if previous != target
+            && self
+                .state
+                .mode
+                .compare_exchange(
+                    previous as u8,
+                    target as u8,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+        {
+            self.state
+                .maintenance_active
+                .store(false, Ordering::Release);
+            return None;
+        }
+        Some(MaintenanceLease {
+            state: self.state.clone(),
+            previous,
+            released: false,
+            token: MaintenancePermitToken {
+                active: Arc::new(AtomicBool::new(true)),
+                state: Arc::downgrade(&self.state),
+            },
+        })
     }
 
     /// Return the number of admitted operations that have not completed.
@@ -172,6 +284,64 @@ impl MaintenanceGate {
     }
 }
 
+impl MaintenanceLease {
+    /// Mode that was active before this lease.
+    pub const fn previous_mode(&self) -> MaintenanceMode {
+        self.previous
+    }
+
+    /// Return whether all pre-existing operations have drained.
+    pub fn is_drained(&self) -> bool {
+        self.state.active_operations.load(Ordering::Acquire) == 0
+            && self.state.active_writes.load(Ordering::Acquire) == 0
+    }
+
+    /// Restore the prior mode and release maintenance ownership.
+    pub fn restore(mut self) {
+        self.restore_to(self.previous);
+    }
+
+    /// Restore an explicit mode and release maintenance ownership. This is
+    /// used when an explicitly resumed task completes after an earlier
+    /// failed attempt left the process Offline.
+    pub fn restore_to(&mut self, mode: MaintenanceMode) {
+        let _transition = self
+            .state
+            .transition
+            .lock()
+            .expect("maintenance transition lock poisoned");
+        self.state.mode.store(mode as u8, Ordering::Release);
+        self.state
+            .maintenance_active
+            .store(false, Ordering::Release);
+        self.token.active.store(false, Ordering::Release);
+        self.released = true;
+    }
+
+    /// Internal capability token checked by the State initialization boundary.
+    pub fn permit_token(&self) -> MaintenancePermitToken {
+        self.token.clone()
+    }
+}
+
+impl Drop for MaintenanceLease {
+    fn drop(&mut self) {
+        if !self.released {
+            // A mutation failure remains Offline for explicit recovery. A
+            // drain/setup failure must call restore() before dropping.
+            let _transition = self
+                .state
+                .transition
+                .lock()
+                .expect("maintenance transition lock poisoned");
+            self.state
+                .maintenance_active
+                .store(false, Ordering::Release);
+            self.token.active.store(false, Ordering::Release);
+        }
+    }
+}
+
 impl Drop for MaintenanceOperationGuard {
     fn drop(&mut self) {
         if self.write {
@@ -215,5 +385,31 @@ mod tests {
         drop(write);
         assert_eq!(gate.active_writes(), 0);
         drop(request);
+    }
+
+    #[test]
+    fn offline_lease_owns_gate_and_invalidates_initialization_token() {
+        let gate = MaintenanceGate::new();
+        let lease = gate.try_begin_offline().unwrap();
+        assert_eq!(gate.mode(), MaintenanceMode::Offline);
+        assert!(gate.try_begin_offline().is_none());
+        assert!(lease.is_drained());
+        let token = lease.permit_token();
+        assert!(token.is_valid());
+        let foreign = MaintenanceGate::new();
+        let foreign_lease = foreign.try_begin_offline().unwrap();
+        assert!(!foreign_lease.permit_token().belongs_to(&gate));
+        foreign_lease.restore();
+        let busy_gate = MaintenanceGate::new();
+        let active = busy_gate.try_start_operation().unwrap();
+        let busy_lease = busy_gate.try_begin_offline().unwrap();
+        assert!(!busy_lease.permit_token().is_valid());
+        drop(active);
+        busy_lease.restore();
+        gate.set(MaintenanceMode::Normal);
+        assert_eq!(gate.mode(), MaintenanceMode::Offline);
+        lease.restore();
+        assert_eq!(gate.mode(), MaintenanceMode::Normal);
+        assert!(!token.is_valid());
     }
 }

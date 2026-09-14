@@ -963,7 +963,8 @@ function ProviderPage({ data, notify, onRefresh }: { data: JsonObject | null; no
 }
 
 const modelRoles = [
-  { value: 'memory_extraction', label: '自动生成长期记忆', detail: '从普通 Markdown 原文中识别并保存真正耐久的信息' },
+  { value: 'memory_extraction', label: '选择长期记忆原文', detail: '选择完整原文单元，不生成记忆正文' },
+  { value: 'memory_overview', label: '记忆概览（可选）', detail: '生成有来源的导航；未绑定时使用记忆选择模型' },
   { value: 'note_summary', label: '笔记摘要', detail: '生成可重建的笔记摘要' },
   { value: 'topic_enrichment', label: '主题增强', detail: '辅助主题和知识结构分析' },
   { value: 'embedding_note', label: '笔记向量', detail: '让搜索和 recall 能按语义想起普通笔记' },
@@ -1406,15 +1407,187 @@ function noteSemanticBlockerLabel(code: string): string {
   return labels[code] ?? code;
 }
 
+function MemoryGenerationPanel({ data, notify, onRefresh }: { data: JsonObject; notify: Notify; onRefresh: () => void }) {
+  const [status, setStatus] = useState(data);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => setStatus(data), [data]);
+  const runtime = asRecord(status.runtime);
+  const paused = booleanValue(runtime.paused);
+  const required = booleanValue(status.initialization_required);
+  async function control(action: 'run' | 'pause' | 'resume') {
+    setBusy(true);
+    try {
+      setStatus(asRecord(await adminApi.request('/memory/generation', { method: 'POST', body: { action } })));
+      notify(action === 'pause' ? '已暂停来源生成和概览；已完成的批次进度会保留。' : '已提交生成操作，将从已保存的批次继续。');
+      onRefresh();
+    } catch (error: unknown) { notify(formatRequestError(error), 'danger'); }
+    finally { setBusy(false); }
+  }
+  return <Panel title="记忆生成与概览" description="自动记忆选择完整原文单元；概览单独生成导航说明。">
+    {required ? <Notice tone="warning">请先在本页确认一次旧记忆清理，之后才能使用自动记忆。</Notice> : null}
+    <p>生成状态：{paused ? '已暂停' : status.extraction_job ? '正在处理来源' : '等待来源变化'}</p>
+    <p>概览状态：{status.overview_job ? '正在更新' : numberValue(asRecord(status.counts).total) === 0 ? '暂无记忆，无需生成概览' : runtime.generation === runtime.overview_generation ? '当前概览已更新' : '使用当前来源目录，等待生成概览'}</p>
+    {status.overview_job ? <p>概览已保存 {numberValue(asRecord(asRecord(status.overview_job).progress).completed_pages)} 页 · 已处理 {numberValue(asRecord(asRecord(status.overview_job).progress).completed_scopes)} 个范围 · 当前：{stringValue(asRecord(asRecord(asRecord(status.overview_job).progress).scope).label, '全部记忆')}</p> : null}
+    {arrayRecords(status.source_progress).filter((source) => arrayRecords(source.skipped).length > 0).map((source) => <Notice tone="warning" key={stringValue(source.file_id)}>{stringValue(source.path)}：{arrayRecords(source.skipped).map((unit) => unit.reason === 'indivisible_unit_too_large' ? '完整单元超过处理上限，可通过笔记检索读取' : '含敏感内容的单元未发送给模型').join('；')}。</Notice>)}
+    <div className="button-row">
+      <button className="primary-button" disabled={busy || required} onClick={() => void control(paused ? 'resume' : 'run')}>{busy ? '正在提交…' : paused ? '继续生成' : '处理来源与概览'}</button>
+      <button className="secondary-button" disabled={busy || paused || required} onClick={() => void control('pause')}>暂停生成</button>
+    </div>
+  </Panel>;
+}
+
+export function MemoryInitializationPanel({ vaultKey, initialStatus, initialStatusLoaded = false, notify, onRefresh }: { vaultKey: string; initialStatus?: JsonObject; initialStatusLoaded?: boolean; notify: Notify; onRefresh: () => void }) {
+  const [status, setStatus] = useState<JsonObject | null>(initialStatus ?? null);
+  const [busy, setBusy] = useState(false);
+  const requestSeq = useRef(0);
+  const vaultGeneration = useRef(0);
+  const previousPhase = useRef<string | null>(null);
+
+  async function refresh() {
+    const sequence = ++requestSeq.current;
+    try {
+      const next = asRecord(await adminApi.request('/memory/initialization'));
+      if (sequence !== requestSeq.current) return;
+      const nextPhase = stringValue(asRecord(next.initialization).phase, stringValue(asRecord(next.preview).phase, 'ready'));
+      setStatus(next);
+      if (previousPhase.current !== 'ready' && nextPhase === 'ready') onRefresh();
+      previousPhase.current = nextPhase;
+    }
+    catch (error: unknown) { if (sequence === requestSeq.current) notify(formatRequestError(error), 'danger'); }
+  }
+  useEffect(() => {
+    vaultGeneration.current += 1;
+    requestSeq.current += 1;
+    setStatus(initialStatus ?? null);
+    setBusy(false);
+    previousPhase.current = null;
+    if (!initialStatusLoaded && !initialStatus) void refresh();
+    return () => {
+      vaultGeneration.current += 1;
+      requestSeq.current += 1;
+    };
+  }, [vaultKey, initialStatus]);
+  const task = asRecord(status?.task);
+  const initialization = asRecord(status?.initialization);
+  const preview = asRecord(status?.preview);
+  const taskState = stringValue(task.state, '');
+  const vaultStatus = stringValue(status?.vault_status, 'active');
+  const vaultStillError = vaultStatus === 'error';
+  const phase = taskState === 'ready'
+    ? 'ready'
+    : stringValue(initialization.phase, stringValue(preview.phase, 'ready'));
+  useEffect(() => {
+    if (taskState !== 'queued' && taskState !== 'running' && phase !== 'clearing') return;
+    const timer = window.setInterval(() => { void refresh(); }, 1500);
+    return () => window.clearInterval(timer);
+  }, [taskState, phase, vaultKey]);
+  const counts = asRecord(preview.record_counts);
+  const previewAvailable = preview.available !== false;
+  const legacyTotal = Object.values(counts).reduce<number>((sum, value) => sum + (typeof value === 'number' ? value : 0), 0);
+  const manifest = asRecord(initialization.manifest);
+  const manifestFiles = arrayRecords(manifest.files);
+  const fileCount = previewAvailable ? arrayRecords(preview.files).length : manifestFiles.length;
+  const persistedFileCount = fileCount || numberValue(manifest.file_count);
+  const taskErrorCode = textValue(task.error_code);
+  const taskErrorStage = textValue(task.error_stage);
+  const taskErrorPath = textValue(task.error_path);
+  const taskSourceCode = textValue(task.error_source_code);
+  const progress = taskState === 'running' || phase === 'clearing'
+    ? `${numberValue(manifest.completed_files, numberValue(task.completed_files))} / ${numberValue(manifest.file_count, persistedFileCount || numberValue(task.total_files))} 个受管文件`
+    : '';
+  async function start(resume: boolean) {
+    if (!window.confirm(resume
+      ? '确认继续清理旧记忆吗？普通 Vault 内容和新记忆会保留。'
+      : '确认清理旧记忆吗？此操作会删除旧记忆记录和受管旧文件，普通 Vault 内容与新记忆会保留。')) return;
+    const generation = vaultGeneration.current;
+    setBusy(true);
+    try {
+      const result = asRecord(await adminApi.request(`/memory/initialization/${resume ? 'resume' : 'start'}`, { method: 'POST', body: { confirm_discard_legacy_memory: true } }));
+      if (generation !== vaultGeneration.current) return;
+      setStatus((current) => ({ ...current, ...result }));
+      notify(resume ? '已提交初始化续跑任务。' : '已提交初始化任务，服务会在后台排空写入后执行。');
+      onRefresh();
+    } catch (error: unknown) { if (generation === vaultGeneration.current) notify(formatRequestError(error), 'danger'); }
+    finally { if (generation === vaultGeneration.current) setBusy(false); }
+  }
+  if (!status || (phase === 'ready' && !vaultStillError)) return null;
+  return <Panel title={vaultStillError && phase === 'ready' ? '旧记忆初始化已完成' : '旧记忆一次性初始化'} eyebrow={vaultStillError && phase === 'ready' ? 'Vault 仍需处理' : '需要明确确认'} description={vaultStillError && phase === 'ready' ? '记忆初始化已完成，但 Vault 仍处于错误状态。' : '清理旧记忆数据和受管旧文件，普通 Vault 内容与新记忆保留。服务重启不会自动执行。'}>
+    {vaultStillError && phase === 'ready' ? <Notice tone="warning">记忆初始化已完成，但 Vault 仍处于错误状态；请到“Vault 设置”中启用或重试初始化。页面不会自动修改 Vault 状态。</Notice> : null}
+    <div className="summary-list">
+      <SummaryRow label="当前阶段" value={<StatusBadge tone={taskState === 'failed' ? 'danger' : 'warning'}>{initializationTaskStateLabel(taskState || phase)}</StatusBadge>} />
+      <SummaryRow label="旧记录数量" value={previewAvailable ? legacyTotal : '暂不可读'} />
+      <SummaryRow label="受管旧文件" value={previewAvailable ? fileCount : (persistedFileCount > 0 ? `已记录 ${persistedFileCount}` : '暂不可读')} />
+      {progress ? <SummaryRow label="清理进度" value={progress} /> : null}
+      {taskErrorCode ? <SummaryRow label="最近错误" value={<code>{taskErrorCode}</code>} /> : null}
+      {taskErrorStage ? <SummaryRow label="错误阶段" value={<code>{taskErrorStage}</code>} /> : null}
+      {taskErrorPath ? <SummaryRow label="错误路径" value={<code>{taskErrorPath}</code>} /> : null}
+      {taskSourceCode && taskSourceCode !== taskErrorCode ? <SummaryRow label="来源错误码" value={<code>{taskSourceCode}</code>} /> : null}
+      {taskErrorCode && !taskErrorStage && !taskErrorPath && !taskSourceCode ? <p className="muted compact-text">旧任务没有保存更细的错误阶段、路径或来源错误码。</p> : null}
+      {arrayRecords(task.journal_summary).length > 0 ? <SummaryRow label="清理日志汇总" value={<span>{arrayRecords(task.journal_summary).map((entry) => `${stringValue(entry.operation, '未知操作')}：${stringValue(entry.state, '未知状态')}（${numberValue(entry.count)}）`).join('；')}</span>} /> : null}
+      {stringValue(preview.error_code) ? <SummaryRow label="预览状态" value={<code>{stringValue(preview.error_code)}</code>} /> : null}
+    </div>
+    {!previewAvailable && taskState === 'failed' ? <Notice tone="info">清理任务失败；预览因当前维护状态暂不可读。上面的任务错误来自持久化清理结果，两者是独立诊断。</Notice> : null}
+    <p className="muted">会保留普通 Markdown、附件、历史和新记忆；清理完成后自动生成仍会保持暂停，完成登录与协议检查后再继续。</p>
+    <div className="button-row">
+      {taskState === 'failed' && booleanValue(task.resumable) ? <button className="primary-button" disabled={busy} type="button" onClick={() => void start(true)}>{busy ? '正在提交…' : '确认继续初始化'}</button> : null}
+      {!taskState ? <button className="danger-button" disabled={busy} type="button" onClick={() => void start(false)}>{busy ? '正在提交…' : '确认清理旧记忆'}</button> : null}
+      <button className="secondary-button" disabled={busy} type="button" onClick={() => void refresh()}>刷新状态</button>
+    </div>
+  </Panel>;
+}
+
+function initializationTaskStateLabel(value: string): string {
+  return ({ queued: '等待执行', running: '正在清理', failed: '失败', ready: '已完成', clearing: '正在清理', required: '待确认' } as Record<string, string>)[value] ?? value;
+}
+
+function textValue(value: unknown): string {
+  return typeof value === 'string' && value.trim() ? value : '';
+}
+
+function MemoryOverviewPanel({ data, notify }: { data: JsonObject; notify: Notify }) {
+  const [directory, setDirectory] = useState('');
+  const [expanded, setExpanded] = useState(false);
+  const [overview, setOverview] = useState(data);
+  const [selected, setSelected] = useState<JsonObject | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { if (!directory.trim()) setOverview(data); }, [data, directory]);
+  const sections = arrayRecords(overview.generated_sections);
+  const entries = arrayRecords(overview.entries);
+  async function readUnit(id: string) {
+    setBusy(true);
+    try { setSelected(asRecord(await adminApi.request(`/memories/${encodeURIComponent(id)}`))); }
+    catch (error: unknown) { notify(formatRequestError(error), 'danger'); }
+    finally { setBusy(false); }
+  }
+  return <Panel title="记忆概览" description="目录用于定位完整记忆。生成的导航说明不作为原文证据。">
+    <form className="compact-form" onSubmit={(event) => {
+      event.preventDefault(); setBusy(true); setSelected(null);
+      void adminApi.request(`/memory/overview?path_prefix=${encodeURIComponent(directory.trim())}`).then((value) => setOverview(asRecord(value))).catch((error: unknown) => notify(formatRequestError(error), 'danger')).finally(() => setBusy(false));
+    }}><label>目录路径（可选）<input value={directory} onChange={(event) => setDirectory(event.target.value)} placeholder="例如：项目/研究" /></label><button className="secondary-button" disabled={busy}>查看目录</button></form>
+    {sections.length > 0 ? <div><StatusBadge tone="neutral">生成的导航说明</StatusBadge>{sections.map((section, index) => <p key={index}><strong>{stringValue(section.label)}</strong>：{stringValue(section.description)}</p>)}</div> : <p>当前显示来源目录；无需等待生成模型。</p>}
+    {entries.slice(0, expanded ? entries.length : 8).map((entry) => <div className="summary-row" key={stringValue(entry.id)}><span>{stringValue(entry.label)}<small>{arrayRecords(entry.sources).map(memorySourceLocation).join('；')}</small></span><button className="secondary-button" disabled={busy} onClick={() => void readUnit(stringValue(entry.id))}>读取完整记忆</button></div>)}
+    {entries.length > 8 ? <button type="button" className="secondary-button" onClick={() => setExpanded(!expanded)}>{expanded ? '收起本页目录' : `展开本页其余 ${entries.length - 8} 条`}</button> : null}
+    {typeof overview.next_after_id === 'string' ? <button className="secondary-button" disabled={busy} onClick={() => {
+      setBusy(true);
+      void adminApi.request(`/memory/overview?path_prefix=${encodeURIComponent(directory.trim())}&after_id=${encodeURIComponent(stringValue(overview.next_after_id))}`).then((value) => setOverview(asRecord(value))).catch((error: unknown) => notify(formatRequestError(error), 'danger')).finally(() => setBusy(false));
+    }}>下一页目录</button> : null}
+    {selected ? <div className="record-item record-item--stack"><strong>完整记忆</strong><pre className="memory-content">{stringValue(selected.content)}</pre><small>{arrayRecords(selected.sources).map(memorySourceLocation).join('；')}</small><button className="secondary-button" onClick={() => setSelected(null)}>收起</button></div> : null}
+  </Panel>;
+}
+
 function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; notify: Notify; onRefresh: () => void }) {
+  const localVaultKey = `mcp-vault:obsidian-name:${stringValue(data?.vault_slug, 'default')}`;
+  const [obsidianVault, setObsidianVault] = useState(() => { try { return localStorage.getItem(localVaultKey) ?? ''; } catch { return ''; } });
+  useEffect(() => { try { setObsidianVault(localStorage.getItem(localVaultKey) ?? ''); } catch { setObsidianVault(''); } }, [localVaultKey]);
   const [memories, setMemories] = useState(() => arrayRecords(data?.memories));
   const extraction = asRecord(data?.extraction);
-  const dedup = asRecord(extraction?.dedup);
+  const generation = asRecord(extraction?.generation);
   const embedding = asRecord(data?.embedding);
   const memoryJobs = arrayRecords(data?.memory_jobs);
   const [memoryActionId, setMemoryActionId] = useState('');
   const [newContent, setNewContent] = useState('');
   const [newKind, setNewKind] = useState('');
+  const [copySource, setCopySource] = useState<JsonObject | null>(null);
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<JsonObject | null>(null);
   const [nextOffset, setNextOffset] = useState<unknown>(data?.next_cursor ?? data?.next_offset);
@@ -1422,6 +1595,7 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
 
   const loadedPages = useRef(1);
   const vaultSlug = stringValue(data?.vault_slug, '');
+  const initializationLoaded = typeof data?.initialization_loaded === 'boolean';
   useEffect(() => {
     let cancelled = false;
     const first = arrayRecords(data?.memories);
@@ -1453,7 +1627,7 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
     const content = stringValue(memory.content, '这条记忆').slice(0, 120);
     const derived = stringValue(memory.ownership) === 'note_derived';
     const consequence = derived
-      ? '这会从所有已知支持来源中删除该记忆，并暂停这些来源的自动提取，直到管理员明确恢复。'
+      ? '这会删除该来源单元，并暂停其来源笔记的自动提取，直到明确恢复。其他有效单元保留。'
       : '当前规范 Markdown 和记忆投影都会删除。';
     if (!window.confirm(`确定删除这条当前记忆吗？\n\n${content}\n\n${consequence}\n修订历史或备份仍按保留策略存在，但模型接口无法读取。`)) return;
     setMemoryActionId(id);
@@ -1479,7 +1653,8 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
       const result = asRecord(await adminApi.request('/memories', {
         method: 'POST',
         body: {
-          content: newContent.trim(),
+          content: newContent,
+          ...(copySource ? { source_memory: copySource } : {}),
           kind: newKind || null,
           idempotency_key: crypto.randomUUID(),
         },
@@ -1488,6 +1663,7 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
       if (Object.keys(memory).length > 0) setMemories((current) => [memory, ...current]);
       setNewContent('');
       setNewKind('');
+      setCopySource(null);
       notify('显式记忆已直接保存，不需要模型整理。');
       onRefresh();
     } catch (error: unknown) {
@@ -1499,28 +1675,34 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
 
   return (
     <div className="page-stack">
-      <Notice tone="info">来源笔记的当前贡献会自动整理为正式记忆；等价内容共享一个 ID，并保留全部支持来源。来源内容变化会立即使旧贡献失效。显式记忆直接保存。</Notice>
-      <Panel title="自动记忆整理" description="升级启动后自动接管已有记忆，不设每日调用总量上限；模型暂不可用或限流时保留当前内容，稍后自动继续。">
-        <p>状态：{({ pending: '等待后台接管', processing: '整理中', covered_candidates: '本轮候选已处理', waiting_for_extraction_model: '等待提取模型', memory_equivalence_budget_exhausted: '旧版本本地限额暂停，升级后自动继续' } as Record<string, string>)[stringValue(dedup?.status, '')] ?? (dedup?.status ? `等待重试：${jobErrorLabel(dedup.status)}（${stringValue(dedup.status)}）` : '等待后台接管')}</p>
-        {numberValue(dedup?.retry_at) > 0 ? <p>下次可执行：{formatTime(dedup?.retry_at)}</p> : null}
-        <p>已有记忆：{dedup?.adopted === true ? '已接管' : '等待接管'} · 待比较组合：{String(dedup?.pending_pairs ?? 0)} · 已检查组合：{String(dedup?.checked_pairs ?? 0)}</p>
-        <p>当前阶段：{dedupStageLabel(dedup?.phase)} · 累计条目检查：{numberValue(dedup?.sentence_checked)}</p>
-      </Panel>
+      <Notice tone="info">自动记忆保留完整原文、必要上下文及来源；来源变化后旧单元立即失效。明确记忆按提交正文保存，概览只提供导航。</Notice>
+      {initializationLoaded ? <MemoryInitializationPanel
+        vaultKey={vaultSlug}
+        initialStatus={Object.keys(asRecord(data?.initialization)).length > 0 ? asRecord(data?.initialization) : undefined}
+        initialStatusLoaded={booleanValue(data?.initialization_loaded)}
+        notify={notify}
+        onRefresh={onRefresh}
+      /> : null}
+      <MemoryGenerationPanel data={generation} notify={notify} onRefresh={onRefresh} />
+      <MemoryOverviewPanel data={asRecord(data?.overview)} notify={notify} />
       <MemoryExtractionPanel data={extraction} jobs={memoryJobs} notify={notify} onRefresh={onRefresh} />
       <MemoryEmbeddingPanel data={embedding} notify={notify} onRefresh={onRefresh} />
       <MemoryManagement data={data} notify={notify} onRefresh={onRefresh} />
+      <details className="disclosure"><summary>在本机 Obsidian 打开来源</summary><label>本机 Vault 名称<input value={obsidianVault} onChange={(event) => { const value=event.target.value; setObsidianVault(value); try { localStorage.setItem(localVaultKey,value); } catch { /* Browser storage is optional. */ } }} /></label><p className="muted">填写本机已同步 Vault 的名称后，来源旁会显示打开链接。此设置仅保存在当前浏览器。</p></details>
       {editing ? <Panel title="编辑当前显式记忆"><MemoryEditor memory={editing} data={data} notify={notify} onRefresh={onRefresh} onClose={() => setEditing(null)} /></Panel> : null}
       <Panel title="添加显式记忆" eyebrow="直接写入" description="可选类型只是元数据；服务不会补造重要性、置信度或来源。">
         <form className="compact-form" onSubmit={(event) => void createMemory(event)}>
           <label>内容<textarea required rows={4} value={newContent} onChange={(event) => setNewContent(event.target.value)} /></label>
+          <div>{copySource ? <p>保存时保留所选当前记忆的来源定位。<button type="button" className="secondary-button" onClick={() => setCopySource(null)}>取消来源关联</button></p> : null}</div>
           <label>类型（可选）
             <select value={newKind} onChange={(event) => setNewKind(event.target.value)}>
               <option value="">不指定</option>
-              <option value="fact">事实</option>
+              <option value="experience">实践经验</option>
               <option value="decision">决定</option>
               <option value="preference">偏好</option>
               <option value="constraint">约束</option>
-              <option value="project">项目</option>
+              <option value="state">当前状态</option>
+              <option value="procedure">操作流程</option>
             </select>
           </label>
           <div className="button-row"><button className="primary-button" disabled={creating || !newContent.trim()} type="submit">{creating ? '正在保存…' : '保存当前记忆'}</button></div>
@@ -1536,9 +1718,9 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
               const derived = stringValue(memory.ownership) === 'note_derived';
               return (
                 <article className="record-item record-item--stack" key={stringValue(memory.id)}>
-                  <div className="record-title"><strong>{stringValue(memory.content, '无内容')}</strong><StatusBadge tone={derived ? 'neutral' : 'success'}>{derived ? '笔记派生' : '显式'}</StatusBadge></div>
+                  <div className="record-title"><strong className="memory-content">{stringValue(memory.content, '无内容')}</strong><StatusBadge tone={derived ? 'neutral' : 'success'}>{derived ? '笔记派生' : '显式'}</StatusBadge></div>
                   <p>{memory.memory_type ? memoryTypeLabel(memory.memory_type) : '未指定类型'} · 规范文件 <code>{stringValue(memory.canonical_path)}</code></p>
-                  <small>最近更新 {formatTime(memory.updated_at)}</small>
+                  <small>当前修订 {numberValue(memory.revision)}</small>
                   {sources.length > 0 ? (
                     <details className="disclosure memory-source-details">
                       <summary>查看来源笔记与证据定位（{sources.length}）</summary>
@@ -1552,10 +1734,12 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
                           />
                         ))}
                       </div>
-                      <small>这里显示的是证据定位元数据；原文仍保留在对应笔记及其修订历史中，不会被复制成记忆正文。</small>
+                      <small>这里显示的是证据定位元数据；自动记忆正文来自原始笔记的完整单元；这里的标题与行号用于回到当前来源。</small>
+                      {obsidianVault.trim() ? <div className="button-row">{sources.filter((source) => typeof source.path === 'string').map((source, index) => <a className="secondary-button" key={index} href={`obsidian://open?vault=${encodeURIComponent(obsidianVault.trim())}&file=${encodeURIComponent(stringValue(source.path) + (Array.isArray(source.heading) && source.heading.length ? '#' + String(source.heading.at(-1)) : ''))}`}>打开来源：{stringValue(source.path)}</a>)}</div> : null}
                     </details>
                   ) : <small>来源：已认证的显式记忆输入。</small>}
                   <div className="button-row">
+                    {derived ? <button type="button" className="secondary-button" onClick={() => { setNewContent(stringValue(memory.content)); setCopySource({ id: memory.id, expected_revision: memory.revision }); setNewKind(stringValue(memory.memory_type, '')); notify('已将完整正文放入添加表单，可编辑后保存为明确记忆。'); }}>另存为明确记忆</button> : null}
                     {!derived ? <button type="button" className="secondary-button" aria-label={`编辑显式记忆 ${stringValue(memory.id)}`} onClick={() => setEditing(memory)}>编辑</button> : null}
                     <button aria-label={`删除当前记忆 ${stringValue(memory.id)}`} className="danger-button" disabled={memoryActionId === stringValue(memory.id)} type="button" onClick={() => void deleteMemory(memory)}>删除</button>
                   </div>
@@ -1688,7 +1872,6 @@ function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonOb
         method: 'PUT',
         body: {
           enabled,
-          source_mode: 'automatic',
           request_timeout_seconds: requestTimeoutSeconds,
           expected_revision: typeof data.revision === 'number' ? data.revision : null,
         },
@@ -1704,7 +1887,7 @@ function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonOb
 
   async function processExistingNotes(includeEvaluated: boolean) {
     const prompt = includeEvaluated
-      ? '确定重新提取全部现有笔记吗？未修改且已成功提取的笔记也会再次调用一次提取模型，并整体替换各自的当前集合；这会增加 Token 消耗。'
+      ? '确定重新提取全部现有笔记吗？未修改且已成功提取的笔记也会重新按批次调用选择模型，并整体替换各自的当前集合；这会增加 Token 消耗。'
       : '确定处理新增、内容有变化、配置有变化或上次失败的笔记吗？未变化且已经成功提取的笔记不会再次调用模型。';
     if (!window.confirm(prompt)) return;
     setBusy(true);
@@ -1735,8 +1918,8 @@ function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonOb
   return (
     <Panel
       title="笔记当前记忆集合"
-      eyebrow="一次提取 · 整体替换"
-      description="每篇笔记一次模型调用，返回该来源的完整当前集合；服务校验后以 File ID 和内容哈希原子发布。"
+      eyebrow="原文选择 · 分批续跑"
+      description="长笔记按完整原文单元分批选择，全部批次完成后整体发布。超限单元保留为资料入口并报告。"
       actions={<StatusBadge tone={configurationReady ? 'success' : 'warning'}>{configurationReady ? '可以运行' : '尚未就绪'}</StatusBadge>}
     >
       <div className="compact-form">
@@ -1747,18 +1930,18 @@ function MemoryExtractionPanel({ data, jobs, notify, onRefresh }: { data: JsonOb
           <button className="secondary-button" disabled={busy || !dirty} type="button" onClick={() => void save()}>{busy ? '正在保存…' : '保存设置'}</button>
         </div>
       </div>
-      <Notice tone="info">模型只返回 content、可选 kind 和 tags。ID、来源、规范 Markdown、历史和原子发布均由服务负责；来源内容一变，旧集合立即不可读。</Notice>
+      <Notice tone="info">模型只返回候选编号、分类和检索说明；正文、标题上下文和来源坐标均由服务从原文构造。来源一变，旧单元立即不可读。</Notice>
       {operationMessage ? <Notice tone={operationMessage.tone}>{operationMessage.text}</Notice> : null}
       <div className="summary-list">
         <SummaryRow label="提取模型" value={stringValue(readiness.external_model_id, '未绑定')} mono />
-        <SummaryRow label="每篇模型调用" value="1 次" />
+        <SummaryRow label="模型调用" value="每批最多 1 次，保存断点后继续" />
         <SummaryRow label="发布方式" value="按来源完整集合原子替换" />
       </div>
       {blockers.length > 0 ? <Notice tone="warning">{blockers.map(extractionBlockerLabel).join('；')}。</Notice> : null}
       <details className="disclosure">
         <summary>高级设置</summary>
         <div className="form-grid">
-          <label>单篇提取超时（秒，30–1800）<input max="1800" min="30" step="1" type="number" value={requestTimeoutSeconds} onChange={(event) => { setRequestTimeoutSeconds(Number(event.target.value)); setDirty(true); }} /></label>
+          <label>单批选择超时（秒，30–1800）<input max="1800" min="30" step="1" type="number" value={requestTimeoutSeconds} onChange={(event) => { setRequestTimeoutSeconds(Number(event.target.value)); setDirty(true); }} /></label>
         </div>
       </details>
       <div className="button-row">
@@ -1929,21 +2112,10 @@ function jobProgressDetail(job: JsonObject): string {
   const lastNoteElapsedMs = numberValue(progress.last_note_elapsed_ms);
 
   let detail: string;
-  if (phase === 'memory_dedup') {
-    const reason = stringValue(progress.wait_reason, '');
-    const maintenance = stringValue(progress.maintenance_status, '');
-    const labels: Record<string, string> = {
-      processing: '正在自动整理', covered_candidates: '本轮候选处理完成',
-      waiting_for_extraction_model: '等待已有提取模型可用',
-      memory_dedup_checkpoint: '分批处理，自动续跑',
-      memory_equivalence_slice_exhausted: '本轮请求数达到上限，继续处理',
-      memory_equivalence_slice_timeout: '本轮处理超时，将从检查点重试',
-      memory_equivalence_budget_exhausted: '旧版本本地限额暂停，升级后自动继续',
-    };
-    detail = `${dedupStageLabel(progress.stage)} · 累计条目检查 ${numberValue(progress.sentence_checked)} 次 · 已检查 ${numberValue(progress.checked_pairs)} 组，待比较 ${numberValue(progress.pending_pairs)} 组`;
-    if (reason) detail += ` · ${labels[reason] ?? jobErrorLabel(reason)}`;
-    else if (maintenance && !['processing', 'covered_candidates'].includes(maintenance)) detail += ` · ${labels[maintenance] ?? jobErrorLabel(maintenance)}`;
-    if (numberValue(progress.resume_at) > 0) detail += ` · 下次可执行 ${formatTime(progress.resume_at)}`;
+  if (phase === 'selecting_units') {
+    detail = `正在选择完整原文单元：已完成 ${numberValue(progress.completed_batches)} 批 · 剩余 ${numberValue(progress.pending_batches)} 批`;
+  } else if (phase === 'overview_page_completed' || stringValue(job.job_type) === 'memory.overview') {
+    detail = phase === 'completed' ? '概览已更新' : '正在更新概览目录';
   } else if (phase === 'extracting_note') {
     detail = `正在处理第 ${currentIndex || completed + 1} / ${total || 1} 篇${currentPath ? `：${currentPath}` : ''}`;
   } else if (phase === 'waiting_retry' || phase === 'failed') {
@@ -1957,7 +2129,7 @@ function jobProgressDetail(job: JsonObject): string {
   } else if (phase === 'note_completed' || phase === 'completed' || phase === 'completed_with_errors') {
     detail = `已处理 ${completed} / ${total} 篇`;
   } else if (stringValue(job.job_type) === 'embedding.rebuild' && stringValue(details.source_type, '')) {
-    const sourceLabel = stringValue(details.source_type) === 'memory' ? '记忆' : '笔记分块';
+    const sourceLabel = stringValue(details.source_type) === 'memory_unit' ? '记忆' : '笔记分块';
     const model = stringValue(details.model_id, '');
     const version = numberValue(details.projection_version);
     detail = `生成 ${numberValue(details.source_count)} 个${sourceLabel}向量${model ? ` · 模型 ${truncateId(model)}` : ''}${version > 0 ? ` · 投影 v${version}` : ''}`;
@@ -2003,11 +2175,6 @@ function jobProgressDetail(job: JsonObject): string {
   }
   return outcomes.length > 0 ? `${detail} · ${outcomes.join(' · ')}` : detail;
 }
-function dedupStageLabel(value: unknown): string {
-  const phase = stringValue(value, 'pending');
-  return ({ pending: '等待接管', recovering: '恢复中断操作', checking_sources: '检查来源状态', adopting: '接管已有记忆', finding_candidates: '查找相似记忆', checking_pairs: '比较记忆是否等价', checking_sentences: '检查记忆条目的重复表述', checkpoint: '本轮检查结束' } as Record<string,string>)[phase] ?? phase;
-}
-
 function schemaViolationLabel(issue: string, path: string): string {
   const location = path || '返回对象';
   const labels: Record<string, string> = {
@@ -2294,7 +2461,7 @@ function jobTypeLabel(value: unknown): string {
     'index.rebuild': '重建知识索引',
     'outbox.event': '文件事件处理',
     'memory.extract': '生成来源当前记忆集合',
-    'memory.deduplicate': '自动记忆去重与合并',
+    'memory.organize': '增量记忆整理',
     'memory.consolidate': '旧版记忆任务（已退役）',
     'memory.enrich_retrieval': '旧版记忆任务（已退役）',
     'memory.reset_pipeline': '旧版记忆任务（已退役）',

@@ -1,5 +1,7 @@
 # ExecPlan：修复记忆检索、自动补校准和 Admin 操作闭环
 
+> 当前执行已由 [v3 记忆系统计划](memory-system-v3.md) 替代。下文保留前序问题与验证记录，不再执行旧校准、合并或转换方案。
+
 ## 1. Title and status｜标题与状态
 
 - 仓库：`cyt-666/mcp-vault`。

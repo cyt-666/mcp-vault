@@ -1,6 +1,6 @@
 services:
   mcp-vault:
-    image: "${MCP_VAULT_IMAGE:-mcp-vault:0.2.3}"
+    image: "${MCP_VAULT_IMAGE:-mcp-vault:0.2.4}"
     platform: linux/amd64
     pull_policy: never
     restart: unless-stopped

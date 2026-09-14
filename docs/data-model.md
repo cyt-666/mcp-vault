@@ -492,7 +492,21 @@ file_committed
 metadata_committed
 rolled_back
 needs_review
+superseded
+discarded
 ```
+
+`superseded` is reserved for the State witness verifier. It records that a
+later create's active File ID, revision, metadata journal and physical hash
+prove the same canonical result. It does not create a revision for the old
+File ID or modify the later file and its history.
+
+`discarded` is reserved for an explicitly confirmed predecessor-memory
+initialization. It records a terminal old Core intent only after Vault Core
+proves every operation path stayed inside the managed legacy-memory namespace;
+its canonical files are still removed separately through normal Core
+retirement and manifest hash checks. It is never used for ordinary Vault or
+new v3 memory operations.
 
 ### 9.2 Transactional outbox
 
@@ -762,52 +776,25 @@ unindexed filter columns; it is always replaceable from the canonical notes.
 
 ## 13. Memory schema
 
-The normative current schema is defined in `memory-system.md` and migrations 0015–0022.
-It contains:
+The normative v3 schema is migration `0028_source_preserving_memory_units.sql` and [Source-preserving memory units](memory-system.md):
 
-- `memory_current_items`: explicit and note-derived current projections, with
-  no lifecycle column;
-- `memory_current_sources`: Vault-scoped provenance for current items;
-- `memory_note_sets`: exactly one complete current set per source File ID,
-  including exact source hash/revision, set revision, pause flag, canonical
-  file identity, and extraction profile;
-- `memory_note_set_snapshots`: one prepared whole-set proposal per source for
-  filesystem/SQLite crash recovery;
-- `memory_current_idempotency` and
-  `memory_current_explicit_reservations`: completed and pre-write explicit
-  command identities;
-- `memory_current_fts`: a rebuildable current-only FTS5 projection;
-- existing embedding rows, accepted only with current content/profile/input
-  hashes.
+| Table | Responsibility |
+| --- | --- |
+| `memory_units` | Explicit or source-owned current complete body, optional metadata, exact hash and canonical revision |
+| `memory_unit_sources` | Vault-scoped current source identity, hash and coordinates |
+| `memory_unit_sets` | One source-owned collection, expected source/set/canonical revisions, current hash and source pause |
+| `memory_unit_snapshots` | Prepared complete-set handoff for Vault Core/SQLite crash recovery |
+| `memory_unit_idempotency`, `memory_unit_reservations` | Exact completed/prepared explicit request identities |
+| `memory_units_fts` | Rebuildable current-unit lexical index |
+| `memory_unit_selection_batches` | Validated batch output keyed by exact source/input identity |
+| `memory_unit_selection_progress` | Current-source batch counters and skipped-unit diagnostics |
+| `memory_unit_overviews`, `memory_unit_overview_dependencies` | Derived navigation and exact current-unit dependencies |
+| `memory_unit_runtime` | Pause and source/overview dependency generations |
+| `memory_unit_initialization` | Offline required/clearing/ready phase and resumable cleanup manifest |
 
-An explicit item has its own canonical file metadata and no set ID. A
-note-derived item has a set ID/ordinal and uses its set's canonical Markdown.
-Repository eligibility joins exact live canonical revisions; note-derived rows
-also join a live source File ID with the stored full-content hash. Every child
-key and query includes `vault_id`.
+All keys, queries and child relationships enforce the Vault boundary. Automatic eligibility joins live source File ID/hash and canonical file/revision. Canonical bodies live under `memory-v3/explicit` and `memory-v3/sources` in the reserved root. Embedding rows use `object_type=memory_unit` with exact content/profile/prepared-input hashes.
 
-The v2.1 canonical namespace is:
-
-```text
-memory/current/explicit/{memory_id}.md
-memory/current/sources/{source_file_id}.md
-```
-
-Legacy `memories`, source-health, raw/stage, consolidation, relation,
-candidate, diagnostic, and retrieval-alias tables remain only as
-non-destructive migration input. They are not joined by current get/list/
-recall/resource/embedding resolution. Migration classification is recorded in
-`memory_v2_migration_state`; it never contains memory bodies in its report.
-
-### 13.1 Superseded prerelease schema (non-normative)
-
-Older migrations created lifecycle, raw/stage, consolidation, relation,
-source-health, diagnostic, and retrieval-alias tables. They remain intact as
-non-destructive migration/backup input, but no current repository query joins
-them. Migration 0015 classifies legacy rows per Vault and records only a
-content-free report; it never turns ambiguous multi-source output into a
-current owner by guesswork. These tables can be retired only by a separately
-authorized future retention procedure.
+Predecessor tables remain in historical DDL so applied migration checksums remain stable. Only the exclusive offline initializer reads their content-free counts and deletes allow-listed Vault-scoped rows. No runtime memory reader or format parser converts or adopts them. Migration 0028 copies no predecessor memory rows and marks every pre-existing Vault as requiring initialization. The initializer preserves non-memory operational records, ordinary files and revision history; repeat execution after ready cannot clear new units.
 
 ## 14. Provider and model configuration
 
@@ -1132,3 +1119,115 @@ at the start of a completed pass. Admission compares it with current metadata
 and requires covered status plus no pending pairs, new contributions or recovery
 operations before skipping a job. Fingerprinting pages metadata in batches of
 128; no note bodies, secrets or model calls are involved.
+
+
+## Migration 0024: incremental memory organization
+
+ADR-0031 retires the scheduling and proposal records introduced in migrations
+0020–0023. Migration deletes old automatic dedup jobs in every status, old pairs,
+examined fingerprints, maintenance/sentence progress, new-contribution markers,
+judgment/rewrite caches and dispatch accounting. It preserves canonical source
+and formal projections, identity reservations and pending formal operations.
+Vault Core must recover those operations before the one-time formal reset.
+
+New Vault-scoped tables:
+
+| Table | Authority |
+|---|---|
+| `memory_organization_state` | One-time initialization, pause, phase, backoff and counters |
+| `memory_organization_sources` | Dirty source ID, generation and incremental priority |
+| `memory_organization_items` | One checkpoint per contribution, exact input hash, generation, completion/outcome, attempt order and vector stamp |
+| `memory_organization_vectors` | Coalesced per-formal-object vector arrival and generation |
+| `memory_organization_decisions` | Rebuildable validated batch decisions keyed by exact input |
+| `memory_organization_dispatches` | Content-free actual dispatch/input-byte accounting |
+
+Source-set and source-file triggers persist dirty identities in the same
+transaction as source changes. Embedding arrival triggers coalesce vector work.
+Generation comparisons prevent acknowledgement from deleting newer work. Completed
+unchanged contribution inputs survive source reconciliation; an explicit recheck
+or relevant vector arrival increments their generation. The unique active-job
+index permits at most one queued/running/retry-wait `memory.organize` per Vault.
+The initialization marker is never reset on ordinary process startup. Historical
+empty pair tables are not consulted or populated by the production organizer.
+
+
+## Migration 0025: bounded initialization checkpoints
+
+Adds `reset_cursor`, `reset_complete`, `adoption_cursor`, `reset_checked` and
+`adoption_checked` to `memory_organization_state`. It preserves the existing
+initialized flag, paused state, jobs and prepared formal operations. No previous
+migration is rewritten. Reset and adoption each visit at most eight entries per
+worker slice; checkpoints advance only after a canonical publication or verified
+no-op. Interrupted publication recovers before cursor advancement. Already
+initialized Vaults do not repeat cutover. Counters describe initialization visits,
+not model calls or candidate pairs.
+
+Organization diagnostics need no schema migration. The existing item `outcome`
+text distinguishes retained-result reasons for new completions. Newly written
+decision JSON contains an application-owned `validation` field alongside
+`relations`; older readers ignore it and newer readers tolerate its absence.
+Missing classifications remain unknown and are never backfilled by guessing.
+On-demand Admin aggregation uses fixed category names and one read transaction,
+with every query constrained by the authenticated Vault identity.
+
+## Migration 0026: repair organization dimension discovery
+
+No columns or canonical data change. Completed independent organization items
+are requeued once when they have matching-content, positive-norm stored memory
+vectors under the currently selected embedding model and that model omits an
+expected dimension. A Vault-specific binding takes precedence over the global
+binding. Each join between work, support, formal memory and vector records carries
+the Vault predicate. Grouped contributions, unrelated models, missing vectors
+and explicit-dimension overrides remain completed. Generation advances to fence
+older completion attempts; pause state and decision caches remain intact.
+
+
+## Migration 0027: per-fact support and lossless consolidation
+
+Adds `memory_formal_facts` (Vault, formal ID, one-based ordinal, content) and
+`memory_formal_fact_supports` (Vault, formal ID, ordinal, contribution ID).
+Composite foreign keys enforce both the fact owner and contribution membership;
+a fact cannot reference another group's or another Vault's membership. Stored
+membership now means belonging to the group, not independently supporting its
+entire body. Legacy documents without per-fact rows keep their whole-support
+read semantics until the one-time local reset.
+
+Formal Markdown schema v2.3 stores `facts` together with exact original memberships.
+The numbered body is derived deterministically from those facts. Both tables are
+rebuildable from canonical files; v2.2 remains readable. Every public current-read
+predicate rejects a consolidated body if any fact lacks a current exact support.
+On lost evidence, local reconciliation unfolds complete surviving original
+contributions and atomically requeues them, instead of generating replacement text
+or allowing a partial source to justify a missing detail.
+
+The migration preserves current/canonical records, cached decisions, credentials,
+pause state and prepared file operations. It resets the bounded initialization
+checkpoint only in Vaults with existing formal objects and marks current source
+sets dirty, so old judgments are revisited from original contributions exactly
+once. Ordinary restarts never repeat the reset. Prepared operations recover before
+initialization changes canonical objects. Rollback requires matching pre-upgrade
+Vault and SQLite backups.
+
+The pending-order index admits successful `continuing` stages before ordinary
+work. Selecting one clears the preference before I/O; generation and input checks
+prevent a stale request from changing newer work. Stage caches record bounded
+proposal/check JSON plus application validation; physical request accounting
+remains content-free and separate from successful publication counts.
+
+## Migration 0028: source-preserving memory units
+
+Creates independent v3 tables, FTS, batch checkpoints, source progress, overview dependencies, runtime pause/generation state and offline initialization manifests. Unit mutations and source-file changes invalidate overview generations. No prior migration file is rewritten and no predecessor memory is converted. Legacy rows are discarded only by the explicit offline maintenance command after paired backup and exclusive locking.
+
+## Migration 0029: directory and topic navigation dependencies
+
+Adds Vault-scoped invalidation triggers for current source index memberships and node labels. It requests a scoped overview pass while keeping matching global caches reusable. No user content, Provider settings or prior migration checksum changes.
+
+## Migration 0033: terminal discarded legacy-memory journals
+
+Extends `operation_journal.state` with `discarded`. Explicit legacy-memory
+initialization uses this terminal state only after Vault Core proves every
+canonical path in the selected intent is wholly inside the managed predecessor
+memory namespace. The row and its content-free discard reason remain available
+as operational history; the row is excluded from recovery and review queues.
+Migration 0033 preserves all existing journal rows, indexes, operation payloads
+and checksums of earlier migrations.

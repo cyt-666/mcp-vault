@@ -20,10 +20,7 @@ The application container includes:
 - background workers;
 - optional local embedding runtime support.
 
-The Rust builder also needs `tests/fixtures/memory-quality/calibration.json`:
-the production calibration engine embeds this bundled benchmark with `include_str!`.
-The Dockerfile copies that file explicitly before compiling. It is included in the
-server binary; the runtime container does not need a fixture directory or mount.
+The v3 server embeds the compiled Admin UI. The retired synthetic calibration benchmark is not included in the production image. Existing installations require the exclusive offline memory initialization in [the v3 cutover guide](memory-v3-cutover.md) before using new memory APIs.
 
 Do not require a separate database, message broker, vector service, or reverse
 proxy for application initialization.

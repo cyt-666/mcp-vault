@@ -1,5 +1,10 @@
 # ExecPlan：记忆自动去冗余、跨文档同义合并与现有版本无操作升级
 
+> 当前执行已由 [v3 记忆系统计划](memory-system-v3.md) 替代。下文保留前序问题与验证记录，不再执行旧校准、合并或转换方案。
+
+> 2026-09-07：本计划的配对调度、默认句子改写、包含删除和模型变化拆组方案已由 [ADR-0031](../../adr/0031-incremental-memory-organization.md) 及 [增量归并执行计划](../completed/incremental-memory-organization.md) 取代。以下内容保留为原实现的工程记录，不再作为当前运行方案。
+
+
 ## 1. 状态、基线与执行方式
 
 - 仓库：`cyt-666/mcp-vault`。

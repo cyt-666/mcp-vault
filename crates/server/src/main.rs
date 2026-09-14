@@ -8,24 +8,29 @@ async fn main() -> Result<ExitCode, mcp_vault_server::ServerError> {
     let command = std::env::args().nth(1);
 
     match command.as_deref() {
-        Some("diagnose-calibration") => {
+        Some("initialize-memory") if std::env::args().nth(2).as_deref() == Some("--inspect") => {
             let arguments = std::env::args().skip(2).collect::<Vec<_>>();
-            return match mcp_vault_server::diagnostics::calibration(
-                &config.database_url,
-                &arguments,
-            )
-            .await
-            {
-                Ok(report) => {
-                    println!("{report}");
-                    Ok(ExitCode::SUCCESS)
-                }
-                Err(error) => {
-                    eprintln!("calibration diagnosis failed: {error}");
-                    Ok(ExitCode::FAILURE)
-                }
-            };
+            if arguments != ["--inspect"] {
+                eprintln!("usage: mcp-vault initialize-memory --inspect");
+                return Ok(ExitCode::FAILURE);
+            }
+            let report = mcp_vault_server::inspect_memory_initialization(&config).await?;
+            println!("{report}");
+            return Ok(ExitCode::SUCCESS);
         }
+        Some("initialize-memory") => {
+            let arguments = std::env::args().skip(2).collect::<Vec<_>>();
+            if arguments != ["--discard-legacy-memory"] {
+                eprintln!(
+                    "usage: mcp-vault initialize-memory --discard-legacy-memory (stop the service and back up SQLite, Vaults and history first)"
+                );
+                return Ok(ExitCode::FAILURE);
+            }
+            let report = mcp_vault_server::initialize_memory(&config).await?;
+            println!("{report}");
+            return Ok(ExitCode::SUCCESS);
+        }
+
         Some("--check-config") => {
             println!("mcp-vault configuration is valid");
             return Ok(ExitCode::SUCCESS);

@@ -13,8 +13,6 @@ WORKDIR /workspace
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
 COPY crates ./crates
 COPY migrations ./migrations
-# The production calibration engine embeds this benchmark at compile time.
-COPY tests/fixtures/memory-quality/calibration.json ./tests/fixtures/memory-quality/calibration.json
 COPY --from=frontend /workspace/frontend/admin/dist ./frontend/admin/dist
 RUN cargo build --release --locked -p mcp-vault-server
 

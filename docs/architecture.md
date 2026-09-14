@@ -521,61 +521,25 @@ The index never moves user notes automatically.
 
 ## 11. Memory architecture
 
-### 11.1 Current contribution/formal architecture (normative v2.2)
+### 11.1 Complete source units (normative v3)
 
-Memory has two ownership forms and no model-visible lifecycle. An explicit
-memory owns one canonical Markdown file. A source contribution belongs to the complete current set owned by its source File ID.
-A formal note-derived object has its own canonical fact file and one or more
-exact contribution supports; ADR 0030 defines automatic maintenance.
+Explicit memories own a canonical v3 Markdown file and preserve the authorized body exactly. Automatic units belong to a current source-owned collection. The application parses complete source spans and ancestor context, assigns identities and coordinates, validates model-selected IDs and supplies every published body directly from the original Markdown. No model rewrites or merges bodies.
 
 ```text
-explicit remember/update
-    -> validate caller content and optional metadata
-    -> reserve idempotent identity when supplied
-    -> Vault Core canonical current Markdown
-    -> current projection + FTS + vector scheduling
-
-source note event
-    -> File ID + exact full-content hash
-    -> immediate repository-level invalidation on mismatch/delete
-    -> one structured {memories:[...]} generation call
-    -> validated prepared whole-set snapshot
-    -> Vault Core canonical set replacement
-    -> atomic projection replacement + vector scheduling
-
-recall
-    -> current-eligibility SQL joins
-    -> gated FTS/entity/tag/current-vector candidates
-    -> per-object fusion, deduplication, complete output budgeting
-    -> current memories and separately typed ordinary-note cues
+explicit remember/update -> exact input validation -> Vault Core revisioned file -> current projection
+source event -> current identity/hash -> bounded candidate batches -> validated checkpoints
+             -> complete prepared source set -> Vault Core -> atomic current projection
+recall -> permission/current-source eligibility -> lexical/vector candidates -> ranking
+       -> complete budgeted units + oversized-unit pointers + separate note cues
+overview worker -> bounded current units -> generated navigation + dependency checks
+read overview -> valid generated cache or deterministic current-unit navigation
 ```
 
-Same-ID/same-hash moves update navigation and set Markdown without generation.
-There is no cross-File-ID source repair. A note-derived item deletion rewrites
-the whole set and pauses that source until an authenticated, revision-aware
-Admin resume. Explicit deletion removes its canonical current file. All get,
-list, recall, MCP resource/context, and embedding-source paths use the same
-current repository; retained revisions and legacy rows are unreachable from
-model routes.
+Source changes disqualify old units immediately. Same-ID/same-hash moves update navigation without generation. Automatic deletion pauses only its owning source; explicit resume is revision-aware. Canonical mutations and crash recovery use Vault Core; SQL remains in Vault-scoped repositories. Normal recall and overview reads never require a generative model.
 
-The filesystem/SQLite handoff uses a persisted prepared set snapshot or an
-explicit idempotency reservation. A retry adopts only byte-identical canonical
-output and still compares the source hash and expected set/item revision.
-Vectors carry separate content, profile, and prepared-input hashes and are
-always rebuildable. Recall makes no query-time generation call.
+Fresh tables use the `memory_unit` namespace and canonical files use `memory-v3/` under the reserved root. The old runtime, format readers and public conversion/organization/calibration paths are removed. Historical migration DDL is preserved only for safe database opening and offline deletion. An exclusive offline initializer with a durable manifest discards predecessor memory data without converting it or deleting ordinary knowledge, configuration, credentials or history.
 
-See [Long-Term Memory System](memory-system.md) and ADR 0026 for the full
-contract.
-
-### 11.2 Superseded prerelease architecture (non-normative)
-
-Releases before v2.1 used lifecycle rows, Stage 1 raw outputs, global Phase 2
-consolidation, source-health projections, and multilingual alias backfill.
-ADR 0026 supersedes that architecture. The old SQLite tables remain readable
-only by the bounded migration classifier and backup tooling; startup cancels
-their queued job types, and no protocol, resource, worker, recall, or embedding
-source can execute the former engine. Historical rationale remains in the
-superseded ADRs and migrations rather than in this normative runtime design.
+See [Source-preserving memory units](memory-system.md) and [ADR-0033](adr/0033-source-preserving-memory-units.md).
 
 ## 12. Provider architecture
 
@@ -773,9 +737,6 @@ The architecture is preserved when:
 - an Agent connection cannot change Vault by tool argument.
 
 
-## Bounded calibration application service
+## Memory generation boundaries
 
-The memory application service owns synthetic evaluation and publication; state repositories own checkpoints and atomic request accounting. The server registers the bounded retrieval.calibrate worker for explicitly requested diagnostics only (ADR-0028); startup/periodic reconciliation does not admit synthetic evaluations. The indexer uses bounded deterministic rule chunks for ingestion and retrieval; legacy model grouping plans and bindings are ignored. The Provider transport enforces accounting at actual dispatch. Neither protocol handlers nor UI compute quality metrics.
-
-The complete behavior, API mapping, quality gates and upgrade/rollback procedure are
-specified in [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md).
+The memory application service owns source selection, validation, publication, current retrieval and derived overview generation. Repositories own Vault-scoped checkpoints, atomic source qualification and dependency validation. Server workers schedule bounded invocations; protocol handlers translate authenticated requests. Selection and overview jobs each make at most one uncached model request per invocation. Query-time retrieval has no generative request. Historical synthetic calibration and memory organization workers are not registered.

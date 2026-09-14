@@ -129,6 +129,156 @@ impl EmbeddingSourceResolver for TestResolver {
     }
 }
 
+#[tokio::test]
+async fn identical_prepared_inputs_reuse_values_without_reusing_object_identity() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let captured = calls.clone();
+    let app = Router::new().route(
+        "/v1/embeddings",
+        post(move |body: Json<Value>| {
+            let calls = captured.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                fake_embeddings(body).await
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let directory = tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let work = context(&state, "same-input", directory.path().join("work")).await;
+    let auth = AuthService::new(
+        state.auth(),
+        MasterKeyRing::from_bytes(1, &[71; 32]).unwrap(),
+    );
+    let service = ProviderService::new(state.clone(), auth);
+    service
+        .set_provider_mode(&work, ProviderMode::LocalOnly, None)
+        .await
+        .unwrap();
+    let provider = service
+        .create_provider(ProviderInput {
+            name: "counted embeddings".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: Url::parse(&format!("http://{address}/v1")).unwrap(),
+            settings: ProviderSettings::default(),
+            enabled: true,
+            secret: None,
+        })
+        .await
+        .unwrap();
+    let model = service
+        .register_model(ModelInput {
+            provider_id: provider.id,
+            external_model_id: "fake-embed".into(),
+            capabilities: ModelCapabilities {
+                embeddings: true,
+                dimension: Some(3),
+                ..Default::default()
+            },
+            settings: Default::default(),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    let a = EmbeddingSourceRef {
+        object_type: "memory".into(),
+        object_id: "memory-a".into(),
+        chunk_key: "body-v3:0000".into(),
+        content_hash: "same-content".into(),
+    };
+    let b = EmbeddingSourceRef {
+        object_id: "memory-b".into(),
+        ..a.clone()
+    };
+    let embeddings = service.embeddings();
+    let first = embeddings
+        .reembed_with_resolver(&work, model.id, std::slice::from_ref(&a), &TestResolver)
+        .await
+        .unwrap();
+    let second = embeddings
+        .reembed_with_resolver(&work, model.id, std::slice::from_ref(&b), &TestResolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        second[0].object_id, b.object_id,
+        "cached values cannot substitute another memory's record"
+    );
+    assert_ne!(first[0].id, second[0].id);
+    assert_eq!(first[0].input_hash, second[0].input_hash);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "identical values need no additional model call"
+    );
+    assert_eq!(
+        embeddings.coverage(&work, model.id).await.unwrap().objects,
+        2
+    );
+    let again = embeddings
+        .reembed_with_resolver(&work, model.id, std::slice::from_ref(&b), &TestResolver)
+        .await
+        .unwrap();
+    assert_eq!(again[0].id, second[0].id);
+    struct VanishingResolver(AtomicUsize);
+    #[async_trait]
+    impl EmbeddingSourceResolver for VanishingResolver {
+        async fn resolve_source(
+            &self,
+            _: &VaultContext,
+            _: &EmbeddingSourceRef,
+        ) -> Result<Option<String>, ProviderError> {
+            Ok((self.0.fetch_add(1, Ordering::SeqCst) == 0).then(|| "reembedded source".into()))
+        }
+    }
+    let vanishing = EmbeddingSourceRef {
+        object_id: "vanishing".into(),
+        ..b.clone()
+    };
+    assert!(
+        embeddings
+            .reembed_with_resolver(
+                &work,
+                model.id,
+                &[vanishing],
+                &VanishingResolver(AtomicUsize::new(0))
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        embeddings.coverage(&work, model.id).await.unwrap().objects,
+        2
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "a stale cache target must not publish or call the provider"
+    );
+    let other = context(&state, "same-input-other", directory.path().join("other")).await;
+    service
+        .set_provider_mode(&other, ProviderMode::LocalOnly, None)
+        .await
+        .unwrap();
+    embeddings
+        .reembed_with_resolver(&other, model.id, &[a], &TestResolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "cached vectors cannot cross Vaults"
+    );
+    server.abort();
+}
+
 async fn transient_response(State(attempts): State<Arc<AtomicUsize>>) -> impl IntoResponse {
     if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
         (

@@ -452,7 +452,8 @@ impl ProviderService {
             || runtime.transport.clone(),
             |budget| runtime.transport.clone().with_budget(budget.clone()),
         );
-        runtime
+        let started = std::time::Instant::now();
+        let result = runtime
             .adapter
             .generate_structured(
                 &transport,
@@ -465,7 +466,21 @@ impl ProviderService {
                 ),
                 request,
             )
-            .await
+            .await;
+        if let Ok(output) = &result {
+            let usage = output.usage.as_ref();
+            let purpose = match request.schema_name.as_str() {
+                "memory_unit_selection" => "memory_unit_selection",
+                "memory_overview" => "memory_overview",
+                _ => "structured_generation",
+            };
+            tracing::info!(target:"mcp_vault::providers",event="provider_generation_completed",vault_id=%context.id(),model_id=%model_id,purpose,
+                input_tokens=?usage.and_then(|usage|usage.get("prompt_tokens").or_else(||usage.get("input_tokens"))).and_then(serde_json::Value::as_u64),
+                output_tokens=?usage.and_then(|usage|usage.get("completion_tokens").or_else(||usage.get("output_tokens"))).and_then(serde_json::Value::as_u64),
+                cached_tokens=?usage.and_then(|usage|usage.pointer("/prompt_tokens_details/cached_tokens")).and_then(serde_json::Value::as_u64),
+                elapsed_ms=started.elapsed().as_millis() as u64,"structured generation completed");
+        }
+        result
     }
 
     /// Generate structured JSON using the effective role binding.
@@ -506,6 +521,8 @@ impl ProviderService {
             )
             .await?;
         validate_model_dimensions(&runtime.model, &result)?;
+        tracing::info!(target:"mcp_vault::providers",event="provider_embedding_completed",vault_id=%context.id(),model_id=%model_id,inputs=request.inputs.len(),
+            input_tokens=?result.usage.as_ref().and_then(|usage|usage.get("prompt_tokens").or_else(||usage.get("total_tokens"))).and_then(serde_json::Value::as_u64),"embedding completed");
         Ok(result)
     }
 
@@ -920,10 +937,49 @@ impl EmbeddingService {
                     .provider
                     .state
                     .providers()
-                    .find_valid_embedding_by_input(context, model_id, &profile_hash, &input_hash)
+                    .find_valid_embedding_for_object(
+                        context,
+                        model_id,
+                        &profile_hash,
+                        &input_hash,
+                        &source.object_id,
+                    )
                     .await?
                 {
                     records.push(existing);
+                    continue;
+                }
+                if let Some(cached) = self
+                    .provider
+                    .state
+                    .providers()
+                    .find_valid_vector_by_input(context, model_id, &profile_hash, &input_hash)
+                    .await?
+                    && cached.embedding.object_type == source.object_type
+                    && cached.embedding.chunk_key == source.chunk_key
+                    && cached.embedding.content_hash == source.content_hash
+                {
+                    let still_current = resolver
+                        .resolve_source(context, source)
+                        .await?
+                        .is_some_and(|current| current == text);
+                    if !still_current {
+                        continue;
+                    }
+                    let mut record = cached.embedding;
+                    record.id = new_embedding_id();
+                    record.object_id = source.object_id.clone();
+                    record.vector_backend_key = format!(
+                        "{}:{}:{}:{}",
+                        context.id(),
+                        source.object_type,
+                        source.object_id,
+                        source.chunk_key
+                    );
+                    record.created_at = now_millis();
+                    record.updated_at = record.created_at;
+                    self.vector.upsert(context, &record, &cached.vector).await?;
+                    records.push(record);
                     continue;
                 }
                 inputs.push(EmbeddingInput {
@@ -1012,6 +1068,9 @@ impl EmbeddingService {
         }
         let payload = json!({
             "projection_version": EMBEDDING_PROJECTION_VERSION,
+            // Repair previously completed cache hits that returned another
+            // object's metadata. Vector inputs/profile stay compatible.
+            "reference_version": 2,
             "model_id": model_id,
             "sources": sources,
         });
@@ -1062,8 +1121,9 @@ impl EmbeddingService {
     }
 }
 
-/// Hash the exact input and its stable source/preparation identity under one
-/// embedding profile. Callers can recompute this without invoking a model.
+/// Hash the exact input and preparation fields under one embedding profile.
+/// Object IDs are deliberately omitted so values can be reused; callers must
+/// separately bind the stored record to the actual object identity.
 pub fn embedding_input_hash(profile_hash: &str, source: &EmbeddingSourceRef, text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"mcp-vault-embedding-input-v1\0");

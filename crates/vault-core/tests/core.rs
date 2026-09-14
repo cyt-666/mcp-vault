@@ -10,7 +10,10 @@ use mcp_vault_domain::{
     Actor, ActorType, Revision, SourcePlane, VaultContext, VaultId, VaultPath, VaultPathPolicy,
     VaultSlug,
 };
-use mcp_vault_state::{StateStore, VaultStatus};
+use mcp_vault_state::{
+    CommitMutationInput, EntryType, FileOperation, NoopCommitHook, PrepareOperationInput,
+    StateStore, VaultStatus,
+};
 use mcp_vault_storage_fs::{DestinationPolicy, DurabilityPolicy, StorageOptions, VaultStorage};
 use tempfile::TempDir;
 use tokio::io::AsyncReadExt;
@@ -418,26 +421,24 @@ async fn dropped_staged_put_rolls_back_its_journal_and_temp_payload() {
     staged.write_chunk(b"partial upload").await.unwrap();
     drop(staged);
 
-    for _ in 0..20 {
-        if state
-            .files()
-            .list_incomplete(&context)
-            .await
-            .unwrap()
-            .is_empty()
-        {
-            break;
+    // Drop schedules asynchronous I/O; a fixed number of CPU yields does not
+    // wait for that I/O when the full workspace suite is contending for workers.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if state
+                .files()
+                .list_incomplete(&context)
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        state
-            .files()
-            .list_incomplete(&context)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    })
+    .await
+    .expect("dropped staged upload must release its journal and temporary payload");
     assert!(matches!(
         core.metadata(&context, &note).await,
         Err(VaultError::NotFound)
@@ -1228,6 +1229,147 @@ async fn recovery_removes_a_linked_temporary_name_after_canonical_install() {
         read_bytes(&recovery_core, &context, &note).await,
         b"complete linked payload"
     );
+}
+
+#[tokio::test]
+async fn recovery_supersedes_real_staged_create_after_later_metadata_claim() {
+    let (_directory, state, context, core) = setup().await;
+    let note = path("notes/replayed.md");
+    let failing = core
+        .clone()
+        .with_failure_injector(Arc::new(FailAt::new(CommitPhase::OutboxInserted)));
+    let mut staged = failing
+        .begin_put(
+            &context,
+            &note,
+            true,
+            true,
+            system_actor(),
+            SourcePlane::WebDav,
+        )
+        .await
+        .unwrap();
+    staged.write_chunk(b"replayed").await.unwrap();
+    let error = staged.commit().await.unwrap_err();
+    assert!(matches!(
+        error,
+        VaultError::InjectedFailure(_) | VaultError::State(_)
+    ));
+
+    let old = state.files().list_incomplete(&context).await.unwrap();
+    assert_eq!(old.len(), 1);
+    assert_eq!(old[0].source_path.as_ref(), Some(&note));
+    assert_eq!(old[0].destination_path.as_ref(), Some(&note));
+    assert!(old[0].temp_path.is_some());
+    let old_file_id = old[0].prior_file_id.unwrap();
+    let old_operation = old[0].id;
+    let hash = old[0].proposed_hash.clone().unwrap();
+    let replacement_file_id = mcp_vault_domain::FileId::new();
+    let replacement_operation = mcp_vault_domain::OperationId::new();
+    let payload = serde_json::json!({
+        "operation_id": replacement_operation,
+        "file_id": replacement_file_id,
+        "entry_type": "file",
+        "operation": "create",
+        "path": note,
+        "path_before": serde_json::Value::Null,
+        "path_after": note,
+        "expected_revision": serde_json::Value::Null,
+        "require_absent": true,
+        "content_hash": hash,
+        "history_blob_hash": hash,
+        "size": 8,
+        "modified_at": 1,
+        "filesystem_identity": serde_json::Value::Null,
+        "deleted_at": serde_json::Value::Null,
+    });
+    state
+        .files()
+        .prepare_operation(
+            &context,
+            PrepareOperationInput {
+                id: replacement_operation,
+                operation: FileOperation::Create,
+                source_path: Some(note.clone()),
+                destination_path: Some(note.clone()),
+                prior_file_id: Some(replacement_file_id),
+                expected_revision: None,
+                prior_hash: None,
+                proposed_hash: Some(hash.clone()),
+                temp_path: Some(path(".replayed.tmp")),
+                payload,
+                idempotency_key: None,
+            },
+        )
+        .await
+        .unwrap();
+    state
+        .files()
+        .mark_file_committed(&context, replacement_operation, Some(&hash))
+        .await
+        .unwrap();
+    state
+        .files()
+        .commit_mutation(
+            &context,
+            CommitMutationInput {
+                operation_id: replacement_operation,
+                file_id: replacement_file_id,
+                entry_type: EntryType::File,
+                path: note.clone(),
+                path_before: None,
+                path_after: Some(note.clone()),
+                expected_revision: None,
+                require_absent: true,
+                tombstone_archive_path: None,
+                content_hash: Some(hash.clone()),
+                history_blob_hash: Some(hash.clone()),
+                size: 8,
+                modified_at: 1,
+                filesystem_identity: None,
+                deleted_at: None,
+                operation: FileOperation::Create,
+                actor: system_actor(),
+                source_plane: SourcePlane::System,
+                idempotency_key: None,
+                audit_action: "test.replayed_create".to_owned(),
+                audit_metadata: serde_json::json!({}),
+                request_id: None,
+                outbox_events: Vec::new(),
+            },
+            &NoopCommitHook,
+        )
+        .await
+        .unwrap();
+
+    let report = core.recover(&context).await.unwrap();
+    assert_eq!(report.superseded, 1);
+    assert_eq!(report.needs_review, 0);
+    assert!(
+        state
+            .files()
+            .list_incomplete(&context)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let replacement = state
+        .files()
+        .get_active(&context, &note)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(replacement.id, replacement_file_id);
+    assert_eq!(replacement.current_revision, Revision::new(1));
+    assert_eq!(
+        state
+            .files()
+            .get_by_id(&context, old_file_id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(old_operation, old[0].id);
 }
 
 #[tokio::test]

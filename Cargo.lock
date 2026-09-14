@@ -2302,7 +2302,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-admin-api"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2329,7 +2329,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-auth"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -2354,7 +2354,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-backup"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "fs2",
  "mcp-vault-core",
@@ -2374,7 +2374,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "mcp-vault-domain",
  "mcp-vault-state",
@@ -2388,7 +2388,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-domain"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "percent-encoding",
  "serde",
@@ -2399,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-indexer"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "axum",
@@ -2423,7 +2423,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-mcp"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2452,10 +2452,11 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-memory"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "axum",
+ "comrak",
  "mcp-vault-auth",
  "mcp-vault-core",
  "mcp-vault-domain",
@@ -2468,6 +2469,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sqlx",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2479,7 +2481,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-providers"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "axum",
@@ -2502,9 +2504,11 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-server"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
+ "async-trait",
  "axum",
+ "futures-util",
  "http-body-util",
  "mcp-vault-admin-api",
  "mcp-vault-auth",
@@ -2522,9 +2526,11 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "reqwest",
  "rust-embed",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "tempfile",
  "thiserror",
@@ -2533,13 +2539,15 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "unicode-normalization",
  "url",
 ]
 
 [[package]]
 name = "mcp-vault-state"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
+ "fs2",
  "mcp-vault-domain",
  "serde",
  "serde_json",
@@ -2553,7 +2561,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-storage-fs"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "fs2",
  "mcp-vault-domain",
@@ -2567,7 +2575,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-vault-webdav"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "axum",
  "base64 0.22.1",

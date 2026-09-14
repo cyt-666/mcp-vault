@@ -18,13 +18,15 @@ use std::{
 };
 
 use mcp_vault_domain::{
-    Actor, DomainError, FileId, FilesystemEntryKind, MaintenanceGate, MaintenanceOperationGuard,
-    Revision, SourcePlane, VaultContext, VaultId, VaultPath, VaultPathPolicy, VaultSlug,
+    Actor, DomainError, FileId, FilesystemEntryKind, MaintenanceGate, MaintenanceLease,
+    MaintenanceOperationGuard, MaintenancePermitToken, Revision, SourcePlane, VaultContext,
+    VaultId, VaultPath, VaultPathPolicy, VaultSlug,
 };
 use mcp_vault_state::{
     CommitHook, CommitHookPhase, CommitMutationInput, EntryType, FileOperation, FileRecord,
     FileRevisionRecord, FileStateRepository, IdempotencyLookup, JobRecord, JournalRecord,
-    JournalState, OutboxEventInput, PrepareOperationInput, StateError, StateStore, VaultRecord,
+    JournalState, OutboxEventInput, PrepareOperationInput, StateError, StateStore,
+    SupersedeCreateResult, SupersedeCreateWitness, VaultRecord,
 };
 use mcp_vault_storage_fs::{
     AtomicWrite, ContentHash, DestinationPolicy, FileMetadata, HistoryStore, ReadFile,
@@ -312,8 +314,23 @@ pub struct RecoveryReport {
     pub rolled_back: usize,
     /// Journal rows whose metadata was finalized.
     pub finalized: usize,
+    /// Journal rows safely adjudicated as superseded by a later create.
+    pub superseded: usize,
     /// Journal rows requiring maintenance review.
     pub needs_review: usize,
+}
+
+/// Recovery failure with the journal identity and Vault-relative path that
+/// was being reconciled. The existing `recover` API maps this back to its
+/// original `VaultError`; maintenance callers may retain the safe context.
+#[derive(Debug)]
+pub struct RecoveryFailure {
+    /// Underlying redacted Core failure.
+    pub source: VaultError,
+    /// Journal operation being reconciled, when known.
+    pub operation_id: Option<mcp_vault_domain::OperationId>,
+    /// Source or destination path from that journal, when known.
+    pub path: Option<VaultPath>,
 }
 
 /// Result of one bounded initial/reconciliation pass.
@@ -354,6 +371,7 @@ pub struct VaultCoreRuntime {
 #[derive(Clone, Debug)]
 pub struct MaintenanceRecoveryPermit {
     maintenance: MaintenanceGate,
+    token: Option<MaintenancePermitToken>,
 }
 
 impl std::fmt::Debug for VaultCoreRuntime {
@@ -384,6 +402,19 @@ impl VaultCoreRuntime {
     pub fn maintenance_recovery_permit(&self) -> MaintenanceRecoveryPermit {
         MaintenanceRecoveryPermit {
             maintenance: self.maintenance.clone(),
+            token: None,
+        }
+    }
+
+    /// Mint a permit bound to a live, drained Offline lease for maintenance
+    /// inventory reads. The token becomes invalid when the lease is released.
+    pub fn maintenance_recovery_permit_with_lease(
+        &self,
+        lease: &MaintenanceLease,
+    ) -> MaintenanceRecoveryPermit {
+        MaintenanceRecoveryPermit {
+            maintenance: self.maintenance.clone(),
+            token: Some(lease.permit_token()),
         }
     }
 }
@@ -974,6 +1005,113 @@ impl VaultCore {
         }
         scan.await.map_err(|_| VaultError::Maintenance)??;
         Ok(entries)
+    }
+
+    /// List managed files while an owned, drained Offline lease is active.
+    /// Ordinary protocol reads continue through `list_managed_files`.
+    pub async fn list_managed_files_during_maintenance(
+        &self,
+        context: &VaultContext,
+        permit: &MaintenanceRecoveryPermit,
+    ) -> Result<Vec<FileMetadata>, VaultError> {
+        self.validate_maintenance_permit(permit)?;
+        self.validate_registered_context(context, false).await?;
+        let storage = self.storage(context);
+        let (sender, mut receiver) = mpsc::channel(64);
+        let scan = tokio::spawn(async move { storage.walk_managed_entries(sender).await });
+        let mut entries = Vec::new();
+        while let Some(entry) = receiver.recv().await {
+            entries.push(entry);
+        }
+        scan.await.map_err(|_| VaultError::Maintenance)??;
+        Ok(entries)
+    }
+
+    /// Inspect only the hash of a managed file for an offline cleanup manifest.
+    /// Absence is explicit; neither ordinary paths nor unsafe traversal is allowed.
+    pub async fn managed_file_hash(
+        &self,
+        context: &VaultContext,
+        path: &VaultPath,
+    ) -> Result<Option<String>, VaultError> {
+        let _operation = self.validate_context(context, false).await?;
+        self.path_policy
+            .validate_managed_path(path)
+            .map_err(VaultError::Domain)?;
+        let storage = self.storage(context);
+        if storage_absent_with_policy(&storage, path, true).await? {
+            return Ok(None);
+        }
+        let (_, hash) = storage.hash_file_managed(path).await.map_err(map_storage)?;
+        Ok(Some(hash.to_string()))
+    }
+
+    /// Hash one managed file while an owned, drained Offline lease is active.
+    pub async fn managed_file_hash_during_maintenance(
+        &self,
+        context: &VaultContext,
+        path: &VaultPath,
+        permit: &MaintenanceRecoveryPermit,
+    ) -> Result<Option<String>, VaultError> {
+        self.validate_maintenance_permit(permit)?;
+        self.validate_registered_context(context, false).await?;
+        self.path_policy
+            .validate_managed_path(path)
+            .map_err(VaultError::Domain)?;
+        let storage = self.storage(context);
+        if storage_absent_with_policy(&storage, path, true).await? {
+            return Ok(None);
+        }
+        let (_, hash) = storage.hash_file_managed(path).await.map_err(map_storage)?;
+        Ok(Some(hash.to_string()))
+    }
+
+    /// Retire an explicitly selected managed file through normal history, journal
+    /// and outbox boundaries, including an orphan or externally missing file.
+    /// The caller owns namespace admission and must supply its inspected hash.
+    pub async fn retire_managed_file(
+        &self,
+        context: &VaultContext,
+        path: &VaultPath,
+        expected_hash: Option<&str>,
+        actor: Actor,
+        permit: &MaintenanceRecoveryPermit,
+    ) -> Result<bool, VaultError> {
+        if !self.runtime.maintenance.is_same_gate(&permit.maintenance) {
+            return Err(VaultError::Maintenance);
+        }
+        self.validate_registered_context(context, false).await?;
+        self.path_policy
+            .validate_managed_path(path)
+            .map_err(VaultError::Domain)?;
+        let storage = self.storage(context);
+        if storage_absent_with_policy(&storage, path, true).await? {
+            return self
+                .import_external_delete(context, path, actor, true)
+                .await;
+        }
+        let (_, hash) = storage.hash_file_managed(path).await.map_err(map_storage)?;
+        let metadata = storage.stat_managed(path).await.map_err(map_storage)?;
+        if expected_hash.is_none_or(|expected| {
+            expected.strip_prefix("sha256:").unwrap_or(expected) != hash.to_string()
+        }) {
+            return Err(VaultError::Domain(DomainError::PreconditionFailed {
+                reason: "managed file changed after cleanup inspection",
+            }));
+        }
+        self.import_external_file(context, path, &metadata, hash, actor.clone(), true)
+            .await?;
+        let file = self.require_active_file(context, path).await?;
+        self.delete_managed_inner(
+            context,
+            path,
+            file.current_revision,
+            actor,
+            SourcePlane::System,
+            None,
+        )
+        .await?;
+        Ok(true)
     }
 
     /// Return whether a path is inside this Core's managed namespace.
@@ -1631,6 +1769,27 @@ impl VaultCore {
         idempotency_key: Option<&str>,
     ) -> Result<MutationResult, VaultError> {
         let _operation = self.validate_context(context, true).await?;
+        self.delete_managed_inner(
+            context,
+            path,
+            expected_revision,
+            actor,
+            source_plane,
+            idempotency_key,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn delete_managed_inner(
+        &self,
+        context: &VaultContext,
+        path: &VaultPath,
+        expected_revision: Revision,
+        actor: Actor,
+        source_plane: SourcePlane,
+        idempotency_key: Option<&str>,
+    ) -> Result<MutationResult, VaultError> {
         self.path_policy
             .validate_managed_path(path)
             .map_err(VaultError::Domain)?;
@@ -1870,8 +2029,15 @@ impl VaultCore {
                 report.unchanged = report.unchanged.saturating_add(1);
                 continue;
             }
-            self.import_external_file(context, &path, &metadata, content_hash, actor.clone())
-                .await?;
+            self.import_external_file(
+                context,
+                &path,
+                &metadata,
+                content_hash,
+                actor.clone(),
+                false,
+            )
+            .await?;
             report.imported = report.imported.saturating_add(1);
         }
         let scan_summary = scan_task
@@ -1891,7 +2057,7 @@ impl VaultCore {
                     .to_owned();
                 if !seen_keys.contains(&key)
                     && self
-                        .import_external_delete(context, &file.path, actor.clone())
+                        .import_external_delete(context, &file.path, actor.clone(), false)
                         .await?
                 {
                     report.deleted = report.deleted.saturating_add(1);
@@ -1910,6 +2076,7 @@ impl VaultCore {
         metadata: &FileMetadata,
         content_hash: ContentHash,
         actor: Actor,
+        managed: bool,
     ) -> Result<(), VaultError> {
         let _guards = self.acquire_locks(context, &[path]).await;
         let files = self.state.files();
@@ -1955,7 +2122,11 @@ impl VaultCore {
             actor,
             SourcePlane::Reconciliation,
             None,
-            "file.external_change",
+            if managed {
+                "managed.file.external_change"
+            } else {
+                "file.external_change"
+            },
             self.event_for(event_type, file_id, path, FileOperation::ExternalChange),
         );
         files
@@ -1976,8 +2147,14 @@ impl VaultCore {
             .await
             .map_err(VaultError::State)?;
         let history = self.history_store(context)?;
-        self.ensure_history_blob(&self.storage(context), &history, path, Some(&hash))
-            .await?;
+        self.ensure_history_blob_with_policy(
+            &self.storage(context),
+            &history,
+            path,
+            Some(&hash),
+            managed,
+        )
+        .await?;
         self.commit_payload(context, payload).await.map(|_| ())
     }
 
@@ -2051,10 +2228,11 @@ impl VaultCore {
         context: &VaultContext,
         path: &VaultPath,
         actor: Actor,
+        managed: bool,
     ) -> Result<bool, VaultError> {
         let _guards = self.acquire_locks(context, &[path]).await;
         let storage = self.storage(context);
-        if !storage_absent(&storage, path).await? {
+        if !storage_absent_with_policy(&storage, path, managed).await? {
             return Ok(false);
         }
         let files = self.state.files();
@@ -2087,7 +2265,11 @@ impl VaultCore {
             actor,
             SourcePlane::Reconciliation,
             None,
-            "file.external_delete",
+            if managed {
+                "managed.file.external_delete"
+            } else {
+                "file.external_delete"
+            },
             self.event_for("FileDeleted", file_id, path, FileOperation::ExternalChange),
         );
         files
@@ -2134,22 +2316,481 @@ impl VaultCore {
         self.recover_inner(context).await
     }
 
-    async fn recover_inner(&self, context: &VaultContext) -> Result<RecoveryReport, VaultError> {
+    /// Maintenance recovery variant that preserves safe journal context for
+    /// durable diagnostics. It never returns payloads or absolute paths.
+    pub async fn recover_during_maintenance_detailed(
+        &self,
+        context: &VaultContext,
+        permit: &MaintenanceRecoveryPermit,
+    ) -> Result<RecoveryReport, RecoveryFailure> {
+        if !self.runtime.maintenance.is_same_gate(&permit.maintenance) {
+            return Err(RecoveryFailure {
+                source: VaultError::Maintenance,
+                operation_id: None,
+                path: None,
+            });
+        }
+        self.validate_registered_context(context, false)
+            .await
+            .map_err(|source| RecoveryFailure {
+                source,
+                operation_id: None,
+                path: None,
+            })?;
+        self.recover_inner_detailed(context).await
+    }
+
+    /// Recover only incomplete journals that touch a Vault-relative path
+    /// prefix. A journal is in scope when either endpoint or its typed Core
+    /// payload path is under the prefix. Unclassifiable journals fail closed
+    /// and remain in scope. This is intended for maintenance operations that
+    /// own one canonical namespace while leaving unrelated files untouched.
+    pub async fn recover_during_maintenance_detailed_for_path_prefix(
+        &self,
+        context: &VaultContext,
+        permit: &MaintenanceRecoveryPermit,
+        path_prefix: &VaultPath,
+    ) -> Result<RecoveryReport, RecoveryFailure> {
+        if !self.runtime.maintenance.is_same_gate(&permit.maintenance) {
+            return Err(RecoveryFailure {
+                source: VaultError::Maintenance,
+                operation_id: None,
+                path: None,
+            });
+        }
+        self.validate_registered_context(context, false)
+            .await
+            .map_err(|source| RecoveryFailure {
+                source,
+                operation_id: None,
+                path: None,
+            })?;
+        self.recover_inner_detailed_for_path_prefix(context, Some(path_prefix))
+            .await
+    }
+
+    /// Discard incomplete Core intents owned entirely by the predecessor
+    /// memory namespace after an explicit initialization confirmation. This
+    /// does not replay file operations: initialization's persisted manifest
+    /// remains responsible for retiring canonical files through Core with
+    /// their inspected hashes. A journal that crosses or cannot be proven to
+    /// stay inside the namespace fails closed before any journal is changed.
+    pub async fn discard_legacy_memory_journals_during_maintenance(
+        &self,
+        context: &VaultContext,
+        permit: &MaintenanceRecoveryPermit,
+        manifest_paths: &[VaultPath],
+    ) -> Result<usize, RecoveryFailure> {
+        if self.state.is_offline_exclusive() {
+            if !self.runtime.maintenance.is_same_gate(&permit.maintenance) {
+                return Err(RecoveryFailure {
+                    source: VaultError::Maintenance,
+                    operation_id: None,
+                    path: None,
+                });
+            }
+        } else {
+            self.validate_maintenance_permit(permit)
+                .map_err(|source| RecoveryFailure {
+                    source,
+                    operation_id: None,
+                    path: None,
+                })?;
+        }
+        self.validate_registered_context(context, false)
+            .await
+            .map_err(|source| RecoveryFailure {
+                source,
+                operation_id: None,
+                path: None,
+            })?;
+        let prefix = VaultPath::parse(&format!("{}/memory", self.managed_root().as_str()))
+            .map_err(|_| RecoveryFailure {
+                source: VaultError::InvalidPatch("legacy memory namespace is invalid"),
+                operation_id: None,
+                path: None,
+            })?;
+        let files = self.state.files();
+        let mut journals =
+            files
+                .list_incomplete(context)
+                .await
+                .map_err(|source| RecoveryFailure {
+                    source: VaultError::State(source),
+                    operation_id: None,
+                    path: None,
+                })?;
+        journals.extend(files.list_needs_review(context).await.map_err(|source| {
+            RecoveryFailure {
+                source: VaultError::State(source),
+                operation_id: None,
+                path: None,
+            }
+        })?);
+        journals.sort_by_key(|journal| journal.created_at);
+        let mut seen = HashSet::new();
+        journals.retain(|journal| seen.insert(journal.id));
+
+        let storage = self.storage(context);
+        let mut discardable = Vec::new();
+        let mut temporary_paths = Vec::new();
+        for journal in journals {
+            if !Self::journal_touches_path_prefix(&journal, &prefix) {
+                continue;
+            }
+            let recovery_path = Self::journal_path_in_prefix(&journal, &prefix);
+            let fail = || RecoveryFailure {
+                source: VaultError::NeedsReview,
+                operation_id: Some(journal.id),
+                path: recovery_path.clone(),
+            };
+            let Ok(payload) = serde_json::from_value::<CorePayload>(journal.payload.clone()) else {
+                return Err(fail());
+            };
+            if journal.operation.as_str() != payload.operation
+                || !Self::journal_is_entirely_within_path_prefix(&journal, &payload, &prefix)
+                || !matches!(payload.entry_type.as_str(), "file" | "directory")
+            {
+                return Err(fail());
+            }
+            let canonical_paths = Self::journal_canonical_paths(&journal, &payload);
+            if payload.entry_type == EntryType::File.as_str() {
+                for path in &canonical_paths {
+                    let physically_present = !storage_absent_with_policy(&storage, path, true)
+                        .await
+                        .map_err(|source| RecoveryFailure {
+                            source,
+                            operation_id: Some(journal.id),
+                            path: Some(path.clone()),
+                        })?;
+                    let active = files.get_active(context, path).await.map_err(|source| {
+                        RecoveryFailure {
+                            source: VaultError::State(source),
+                            operation_id: Some(journal.id),
+                            path: Some(path.clone()),
+                        }
+                    })?;
+                    if (physically_present || active.is_some()) && !manifest_paths.contains(path) {
+                        return Err(RecoveryFailure {
+                            source: VaultError::NeedsReview,
+                            operation_id: Some(journal.id),
+                            path: Some(path.clone()),
+                        });
+                    }
+                }
+            }
+            if let Some(temp_path) = journal.temp_path.as_ref() {
+                let temporary =
+                    TemporaryPath::parse(temp_path.clone()).map_err(|source| RecoveryFailure {
+                        source: VaultError::Storage(source),
+                        operation_id: Some(journal.id),
+                        path: recovery_path.clone(),
+                    })?;
+                if temporary.as_path().parent() != payload.path.parent() {
+                    return Err(fail());
+                }
+                temporary_paths.push((journal.id, recovery_path.clone(), temporary));
+            }
+            discardable.push(journal);
+        }
+
+        // Remove only journal-owned temporary files before the State CAS. If
+        // the process stops here, retry sees the same active rows and removal
+        // is idempotent because missing temporary files are already clean.
+        for (operation_id, path, temporary) in temporary_paths {
+            storage
+                .remove_temporary(&temporary)
+                .await
+                .map_err(|source| RecoveryFailure {
+                    source: map_storage(source),
+                    operation_id: Some(operation_id),
+                    path,
+                })?;
+        }
+        files
+            .discard_legacy_memory_journals(context, &discardable)
+            .await
+            .map_err(|source| RecoveryFailure {
+                source: VaultError::State(source),
+                operation_id: discardable.first().map(|journal| journal.id),
+                path: discardable
+                    .first()
+                    .and_then(|journal| Self::journal_path_in_prefix(journal, &prefix)),
+            })?;
+        Ok(discardable.len())
+    }
+
+    /// Explicitly repair only reviewed replayed-create conflicts that can be
+    /// proved against the current physical file and later metadata commit.
+    /// Other `needs_review` rows are left untouched for operator review.
+    pub async fn repair_reviewed_replayed_creates_during_maintenance(
+        &self,
+        context: &VaultContext,
+        permit: &MaintenanceRecoveryPermit,
+    ) -> Result<usize, VaultError> {
+        self.repair_reviewed_replayed_creates_during_maintenance_scoped(context, permit, None)
+            .await
+    }
+
+    /// Explicitly repair reviewed replayed-create conflicts only when their
+    /// paths touch the supplied Vault-relative prefix.
+    pub async fn repair_reviewed_replayed_creates_during_maintenance_for_path_prefix(
+        &self,
+        context: &VaultContext,
+        permit: &MaintenanceRecoveryPermit,
+        path_prefix: &VaultPath,
+    ) -> Result<usize, VaultError> {
+        self.repair_reviewed_replayed_creates_during_maintenance_scoped(
+            context,
+            permit,
+            Some(path_prefix),
+        )
+        .await
+    }
+
+    async fn repair_reviewed_replayed_creates_during_maintenance_scoped(
+        &self,
+        context: &VaultContext,
+        permit: &MaintenanceRecoveryPermit,
+        path_prefix: Option<&VaultPath>,
+    ) -> Result<usize, VaultError> {
+        if self.state.is_offline_exclusive() {
+            if !self.runtime.maintenance.is_same_gate(&permit.maintenance) {
+                return Err(VaultError::Maintenance);
+            }
+        } else {
+            self.validate_maintenance_permit(permit)?;
+        }
+        self.validate_registered_context(context, false).await?;
         let storage = self.storage(context);
         let files = self.state.files();
-        let history = self.history_store(context)?;
+        let mut repaired = 0;
+        for journal in files.list_needs_review(context).await? {
+            if path_prefix
+                .is_some_and(|prefix| !Self::journal_touches_path_prefix(&journal, prefix))
+            {
+                continue;
+            }
+            if journal.operation != FileOperation::Create
+                || journal.error.as_deref() != Some("recovery metadata destination already exists")
+            {
+                continue;
+            }
+            let Ok(payload) = serde_json::from_value::<CorePayload>(journal.payload.clone()) else {
+                continue;
+            };
+            let Some(prior_file_id) = journal.prior_file_id else {
+                continue;
+            };
+            let Some(replacement) = files.get_active(context, &payload.path).await? else {
+                continue;
+            };
+            let managed = self.path_policy.is_reserved(&payload.path);
+            if let Some(temp) = journal.temp_path.as_ref() {
+                let Ok(temp) = TemporaryPath::parse(temp.clone()) else {
+                    continue;
+                };
+                if !storage_absent_with_policy(&storage, temp.as_path(), managed).await? {
+                    continue;
+                }
+            }
+            if storage_absent_with_policy(&storage, &payload.path, managed).await? {
+                continue;
+            }
+            let physical_hash = match if managed {
+                storage.hash_file_managed(&payload.path).await
+            } else {
+                storage.hash_file(&payload.path).await
+            } {
+                Ok((_, hash)) => hash.to_string(),
+                Err(_) => continue,
+            };
+            let witness = SupersedeCreateWitness {
+                operation_id: journal.id,
+                path: payload.path,
+                prior_file_id,
+                replacement_file_id: replacement.id,
+                replacement_revision: replacement.current_revision,
+                physical_hash,
+            };
+            match files
+                .supersede_reviewed_replayed_create(context, &witness)
+                .await?
+            {
+                SupersedeCreateResult::Applied | SupersedeCreateResult::AlreadyApplied => {
+                    repaired += 1;
+                }
+                SupersedeCreateResult::NotProven => {}
+            }
+        }
+        Ok(repaired)
+    }
+
+    /// Whether a journal can be shown to touch `path_prefix`. Known paths are
+    /// checked in both journal endpoints and the canonical Core payload. If no
+    /// usable path is recorded, return true so callers fail closed.
+    pub fn journal_touches_path_prefix(journal: &JournalRecord, path_prefix: &VaultPath) -> bool {
+        let in_scope = |path: &VaultPath| {
+            path.as_str() == path_prefix.as_str()
+                || path
+                    .as_str()
+                    .strip_prefix(path_prefix.as_str())
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        };
+        if journal.source_path.as_ref().is_some_and(in_scope)
+            || journal.destination_path.as_ref().is_some_and(in_scope)
+        {
+            return true;
+        }
+        if let Ok(payload) = serde_json::from_value::<CorePayload>(journal.payload.clone()) {
+            if in_scope(&payload.path)
+                || payload.path_before.as_ref().is_some_and(in_scope)
+                || payload.path_after.as_ref().is_some_and(in_scope)
+                || payload
+                    .tombstone_archive_path
+                    .as_ref()
+                    .is_some_and(in_scope)
+            {
+                return true;
+            }
+            if payload.operation == FileOperation::Move.as_str()
+                && (payload.path_before.is_none() || payload.path_after.is_none())
+            {
+                return true;
+            }
+            // A well-formed Core payload with recorded paths proves that this
+            // journal is unrelated when every path is outside the prefix.
+            return false;
+        }
+        // A malformed payload is unrelated only when its journal endpoints
+        // provide enough evidence to classify it. Missing endpoints cannot
+        // prove that an operation did not touch the protected namespace.
+        journal.source_path.is_none() || journal.destination_path.is_none()
+    }
+
+    fn journal_is_entirely_within_path_prefix(
+        journal: &JournalRecord,
+        payload: &CorePayload,
+        path_prefix: &VaultPath,
+    ) -> bool {
+        let is_within = |path: &VaultPath| {
+            path.as_str() == path_prefix.as_str()
+                || path
+                    .as_str()
+                    .strip_prefix(path_prefix.as_str())
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        };
+        let paths = Self::journal_canonical_paths(journal, payload);
+        !paths.is_empty() && paths.iter().all(is_within)
+    }
+
+    fn journal_canonical_paths(journal: &JournalRecord, payload: &CorePayload) -> Vec<VaultPath> {
+        let mut paths = vec![payload.path.clone()];
+        paths.extend(journal.source_path.iter().cloned());
+        paths.extend(journal.destination_path.iter().cloned());
+        paths.extend(payload.path_before.iter().cloned());
+        paths.extend(payload.path_after.iter().cloned());
+        paths.extend(payload.tombstone_archive_path.iter().cloned());
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    fn journal_path_in_prefix(
+        journal: &JournalRecord,
+        path_prefix: &VaultPath,
+    ) -> Option<VaultPath> {
+        journal
+            .source_path
+            .iter()
+            .chain(journal.destination_path.iter())
+            .find(|path| {
+                path.as_str() == path_prefix.as_str()
+                    || path
+                        .as_str()
+                        .strip_prefix(path_prefix.as_str())
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            })
+            .cloned()
+            .or_else(|| {
+                serde_json::from_value::<CorePayload>(journal.payload.clone())
+                    .ok()
+                    .and_then(|payload| {
+                        if path_prefix.as_str() == payload.path.as_str()
+                            || payload
+                                .path
+                                .as_str()
+                                .strip_prefix(path_prefix.as_str())
+                                .is_some_and(|suffix| suffix.starts_with('/'))
+                        {
+                            Some(payload.path)
+                        } else {
+                            payload.tombstone_archive_path
+                        }
+                    })
+            })
+    }
+
+    async fn recover_inner(&self, context: &VaultContext) -> Result<RecoveryReport, VaultError> {
+        self.recover_inner_detailed(context)
+            .await
+            .map_err(|failure| failure.source)
+    }
+
+    async fn recover_inner_detailed(
+        &self,
+        context: &VaultContext,
+    ) -> Result<RecoveryReport, RecoveryFailure> {
+        self.recover_inner_detailed_for_path_prefix(context, None)
+            .await
+    }
+
+    async fn recover_inner_detailed_for_path_prefix(
+        &self,
+        context: &VaultContext,
+        path_prefix: Option<&VaultPath>,
+    ) -> Result<RecoveryReport, RecoveryFailure> {
+        let storage = self.storage(context);
+        let files = self.state.files();
+        let history = self
+            .history_store(context)
+            .map_err(|source| RecoveryFailure {
+                source,
+                operation_id: None,
+                path: None,
+            })?;
         let journals = files
             .list_incomplete(context)
             .await
-            .map_err(VaultError::State)?;
+            .map_err(|source| RecoveryFailure {
+                source: VaultError::State(source),
+                operation_id: None,
+                path: None,
+            })?;
         let mut report = RecoveryReport::default();
         for journal in journals {
-            match self
-                .recover_one(context, &storage, &history, &files, journal)
-                .await?
+            if path_prefix
+                .is_some_and(|prefix| !Self::journal_touches_path_prefix(&journal, prefix))
             {
+                continue;
+            }
+            let operation_id = journal.id;
+            let path = journal
+                .destination_path
+                .clone()
+                .or_else(|| journal.source_path.clone());
+            let outcome = self
+                .recover_one(context, &storage, &history, &files, journal)
+                .await
+                .map_err(|source| RecoveryFailure {
+                    source,
+                    operation_id: Some(operation_id),
+                    path,
+                })?;
+            match outcome {
                 RecoveryOutcome::RolledBack => report.rolled_back += 1,
                 RecoveryOutcome::Finalized => report.finalized += 1,
+                RecoveryOutcome::Superseded => report.superseded += 1,
                 RecoveryOutcome::NeedsReview => report.needs_review += 1,
             }
         }
@@ -2215,6 +2856,7 @@ impl VaultCore {
                 )
                 .await?;
             }
+            let recovery_path = payload.path.clone();
             let result = self.commit_payload(context, payload).await;
             return match result {
                 Ok(_) => Ok(RecoveryOutcome::Finalized),
@@ -2228,6 +2870,84 @@ impl VaultCore {
                         .await
                         .map_err(VaultError::State)?;
                     Ok(RecoveryOutcome::NeedsReview)
+                }
+                Err(VaultError::AlreadyExists) => {
+                    // A replayed create may be adjudicated only when the
+                    // physical result and a later metadata commit form a
+                    // complete witness. State rereads metadata in one
+                    // transaction; this hash is observed through Storage.
+                    let Some(prior_file_id) = journal.prior_file_id else {
+                        files
+                            .mark_needs_review(
+                                context,
+                                journal.id,
+                                "recovery metadata destination already exists",
+                            )
+                            .await
+                            .map_err(VaultError::State)?;
+                        return Err(VaultError::AlreadyExists);
+                    };
+                    let Some(replacement) = files
+                        .get_active(context, &recovery_path)
+                        .await
+                        .map_err(VaultError::State)?
+                    else {
+                        files
+                            .mark_needs_review(
+                                context,
+                                journal.id,
+                                "recovery metadata destination already exists",
+                            )
+                            .await
+                            .map_err(VaultError::State)?;
+                        return Err(VaultError::AlreadyExists);
+                    };
+                    let physical_hash = match if self.path_policy.is_reserved(&recovery_path) {
+                        storage.hash_file_managed(&recovery_path).await
+                    } else {
+                        storage.hash_file(&recovery_path).await
+                    } {
+                        Ok((_, hash)) => hash.to_string(),
+                        Err(error) => {
+                            files
+                                .mark_needs_review(
+                                    context,
+                                    journal.id,
+                                    "recovery metadata destination already exists",
+                                )
+                                .await
+                                .map_err(VaultError::State)?;
+                            return Err(map_storage(error));
+                        }
+                    };
+                    let witness = SupersedeCreateWitness {
+                        operation_id: journal.id,
+                        path: recovery_path,
+                        prior_file_id,
+                        replacement_file_id: replacement.id,
+                        replacement_revision: replacement.current_revision,
+                        physical_hash,
+                    };
+                    match files
+                        .supersede_replayed_create(context, &witness)
+                        .await
+                        .map_err(VaultError::State)?
+                    {
+                        SupersedeCreateResult::Applied | SupersedeCreateResult::AlreadyApplied => {
+                            Ok(RecoveryOutcome::Superseded)
+                        }
+                        SupersedeCreateResult::NotProven => {
+                            files
+                                .mark_needs_review(
+                                    context,
+                                    journal.id,
+                                    "recovery metadata destination already exists",
+                                )
+                                .await
+                                .map_err(VaultError::State)?;
+                            Err(VaultError::AlreadyExists)
+                        }
+                    }
                 }
                 Err(error) => Err(error),
             };
@@ -2915,6 +3635,28 @@ impl VaultCore {
         Ok(operation)
     }
 
+    fn validate_maintenance_read_permit(
+        &self,
+        permit: &MaintenanceRecoveryPermit,
+    ) -> Result<(), VaultError> {
+        if !self.runtime.maintenance.is_same_gate(&permit.maintenance)
+            || !permit.token.as_ref().is_some_and(|token| {
+                token.belongs_to(&self.runtime.maintenance) && token.is_valid()
+            })
+        {
+            return Err(VaultError::Maintenance);
+        }
+        Ok(())
+    }
+
+    /// Validate a live maintenance capability before recovery or inventory.
+    pub fn validate_maintenance_permit(
+        &self,
+        permit: &MaintenanceRecoveryPermit,
+    ) -> Result<(), VaultError> {
+        self.validate_maintenance_read_permit(permit)
+    }
+
     async fn validate_registered_context(
         &self,
         context: &VaultContext,
@@ -2993,6 +3735,7 @@ impl VaultCore {
 enum RecoveryOutcome {
     RolledBack,
     Finalized,
+    Superseded,
     NeedsReview,
 }
 
