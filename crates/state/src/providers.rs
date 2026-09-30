@@ -43,6 +43,17 @@ pub struct ProviderRecord {
     pub updated_at: i64,
 }
 
+/// Installation-scoped pointer from a stable Provider identity to its
+/// encrypted secret record. This intentionally omits Provider configuration
+/// and works against the original `providers(id, secret_id)` schema.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderSecretReference {
+    /// Explicit installation-level Provider identity.
+    pub provider_id: ProviderId,
+    /// Encrypted secret metadata identity; ciphertext remains in Auth state.
+    pub secret_id: SecretId,
+}
+
 /// Redacted counts from one atomic Provider lifecycle deletion.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ProviderDeletionSummary {
@@ -273,6 +284,50 @@ pub struct ProviderRepository {
 impl ProviderRepository {
     pub(crate) fn new(pool: SqlitePool, write_gate: Arc<Semaphore>) -> Self {
         Self { pool, write_gate }
+    }
+
+    /// Read only the installation-scoped secret reference for one explicit
+    /// Provider ID. This narrow compatibility API deliberately queries only
+    /// the stable legacy `id` and `secret_id` columns; it does not imply that
+    /// Providers or their credentials belong to a Vault.
+    pub async fn get_provider_secret_reference(
+        &self,
+        provider_id: ProviderId,
+    ) -> Result<Option<ProviderSecretReference>, StateError> {
+        #[derive(FromRow)]
+        struct ProviderColumnRow {
+            name: String,
+        }
+        let columns = sqlx::query_as::<_, ProviderColumnRow>("PRAGMA table_info(providers)")
+            .fetch_all(&self.pool)
+            .await?;
+        if !columns.iter().any(|column| column.name == "id")
+            || !columns.iter().any(|column| column.name == "secret_id")
+        {
+            return Err(StateError::SchemaIncompatible);
+        }
+
+        #[derive(FromRow)]
+        struct SecretReferenceRow {
+            id: String,
+            secret_id: String,
+        }
+
+        let row = sqlx::query_as::<_, SecretReferenceRow>(
+            "SELECT id, secret_id FROM providers
+             WHERE id = ? AND secret_id IS NOT NULL",
+        )
+        .bind(provider_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| {
+            Ok(ProviderSecretReference {
+                provider_id: ProviderId::parse(&row.id)?,
+                secret_id: SecretId::parse(&row.secret_id)?,
+            })
+        })
+        .transpose()
     }
 
     /// Insert a global provider configuration.
@@ -1320,4 +1375,150 @@ fn decode_vector(blob: &[u8], dimension: u32) -> Result<Vec<f32>, StateError> {
         .chunks_exact(std::mem::size_of::<f32>())
         .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("f32 chunk has four bytes")))
         .collect())
+}
+
+#[cfg(test)]
+mod provider_secret_reference_tests {
+    use std::{borrow::Cow, sync::Arc};
+
+    use sqlx::{SqlitePool, migrate::Migrator, sqlite::SqlitePoolOptions};
+    use tokio::sync::Semaphore;
+
+    use super::*;
+
+    async fn insert_provider_fixture(
+        pool: &SqlitePool,
+        provider_id: ProviderId,
+        secret_id: SecretId,
+        current_schema: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO encrypted_secrets
+             (id, purpose, owner_type, owner_id, key_version, nonce, ciphertext,
+              hint, created_at, updated_at)
+             VALUES (?, 'provider-api-key', 'provider', ?, 1, X'', X'', NULL, 1, 1)",
+        )
+        .bind(secret_id.to_string())
+        .bind(provider_id.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let provider_id_text = provider_id.to_string();
+        let secret_id_text = secret_id.to_string();
+        if current_schema {
+            sqlx::query(
+                "INSERT INTO providers
+                 (id, name, provider_type, base_url, secret_id, settings_json,
+                  enabled, revision, embedding_revision, created_at, updated_at)
+                 VALUES (?, 'fixture', 'openai_compatible', 'http://localhost', ?, '{}', 1, 1, 1, 1, 1)",
+            )
+            .bind(provider_id_text)
+            .bind(secret_id_text)
+            .execute(pool)
+            .await
+            .unwrap();
+        } else {
+            sqlx::query(
+                "INSERT INTO providers
+                 (id, name, provider_type, base_url, secret_id, settings_json,
+                  enabled, revision, created_at, updated_at)
+                 VALUES (?, 'fixture', 'openai_compatible', 'http://localhost', ?, '{}', 1, 1, 1, 1)",
+            )
+            .bind(provider_id_text)
+            .bind(secret_id_text)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn narrow_reference_query_supports_current_and_migration_11_schemas() {
+        let current_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::migrations::MIGRATOR
+            .run(&current_pool)
+            .await
+            .unwrap();
+        let current_provider = ProviderId::new();
+        let current_secret = SecretId::new();
+        insert_provider_fixture(&current_pool, current_provider, current_secret, true).await;
+        let current_repository =
+            ProviderRepository::new(current_pool.clone(), Arc::new(Semaphore::new(1)));
+        assert_eq!(
+            current_repository
+                .get_provider_secret_reference(current_provider)
+                .await
+                .unwrap(),
+            Some(ProviderSecretReference {
+                provider_id: current_provider,
+                secret_id: current_secret,
+            })
+        );
+
+        let legacy_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let mut legacy_migrator = Migrator::DEFAULT;
+        legacy_migrator.migrations = Cow::Owned(
+            crate::migrations::MIGRATOR
+                .iter()
+                .filter(|migration| migration.version <= 11)
+                .cloned()
+                .collect(),
+        );
+        legacy_migrator.run(&legacy_pool).await.unwrap();
+        let legacy_provider = ProviderId::new();
+        let legacy_secret = SecretId::new();
+        insert_provider_fixture(&legacy_pool, legacy_provider, legacy_secret, false).await;
+        let legacy_repository =
+            ProviderRepository::new(legacy_pool.clone(), Arc::new(Semaphore::new(1)));
+
+        assert_eq!(
+            legacy_repository
+                .get_provider_secret_reference(legacy_provider)
+                .await
+                .unwrap(),
+            Some(ProviderSecretReference {
+                provider_id: legacy_provider,
+                secret_id: legacy_secret,
+            })
+        );
+        assert!(
+            legacy_repository
+                .get_provider(legacy_provider)
+                .await
+                .is_err()
+        );
+
+        current_pool.close().await;
+        legacy_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn narrow_reference_query_reports_schema_incompatibility_safely() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE providers (id TEXT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let repository = ProviderRepository::new(pool.clone(), Arc::new(Semaphore::new(1)));
+        assert!(matches!(
+            repository
+                .get_provider_secret_reference(ProviderId::new())
+                .await,
+            Err(StateError::SchemaIncompatible)
+        ));
+        pool.close().await;
+    }
 }

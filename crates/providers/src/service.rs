@@ -16,6 +16,7 @@ use mcp_vault_state::{
     EmbeddingCoverage, EmbeddingRecord, ModelRecord, ProviderDeletionSummary, ProviderHealthRecord,
     ProviderRecord, StateError, StateStore,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex as AsyncMutex;
@@ -37,8 +38,10 @@ use crate::{
 /// projection.
 pub const EMBEDDING_PROJECTION_VERSION: u32 = 3;
 
-const PROVIDER_SECRET_PURPOSE: &str = "provider-api-key";
-const PROVIDER_SECRET_OWNER: &str = "provider";
+/// Purpose used for installation-encrypted Provider credentials.
+pub const PROVIDER_SECRET_PURPOSE: &str = "provider-api-key";
+/// Owner category used for installation-encrypted Provider credentials.
+pub const PROVIDER_SECRET_OWNER: &str = "provider";
 const PROVIDER_MODE_SETTING: &str = "provider.mode";
 
 /// Source-resolution boundary owned by the indexer or memory application
@@ -101,6 +104,68 @@ pub struct ProviderModeState {
     pub mode: ProviderMode,
     /// Persisted optimistic revision, or `None` for the implicit default.
     pub revision: Option<Revision>,
+}
+
+/// Secret-free Provider runtime identity captured by bounded live operations.
+/// Header values and encrypted credential material are never included.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderRuntimeSnapshot {
+    /// SHA-256 over every safe identity/configuration field below.
+    pub fingerprint: String,
+    pub provider_id: String,
+    pub provider_type: String,
+    pub endpoint: String,
+    pub provider_revision: u64,
+    pub provider_enabled: bool,
+    pub settings: SafeProviderSettings,
+    pub model_id: String,
+    pub external_model_id: String,
+    pub model_revision: u64,
+    pub model_enabled: bool,
+    pub capabilities: ModelCapabilities,
+    pub model_settings: ModelSettings,
+    pub mode: ProviderMode,
+    pub mode_revision: Option<u64>,
+}
+
+/// Non-secret transport settings suitable for a live-run artifact.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SafeProviderSettings {
+    pub timeout_ms: u64,
+    pub stream_first_event_timeout_ms: u64,
+    pub stream_idle_timeout_ms: u64,
+    pub stream_total_timeout_ms: u64,
+    pub connect_timeout_ms: u64,
+    pub max_retries: u32,
+    pub max_concurrency: u32,
+    pub max_request_bytes: usize,
+    pub max_response_bytes: usize,
+    pub allow_private_networks: bool,
+    pub header_names: Vec<String>,
+    pub organization: Option<String>,
+    pub model_cache_configured: bool,
+}
+
+impl From<&ProviderSettings> for SafeProviderSettings {
+    fn from(settings: &ProviderSettings) -> Self {
+        Self {
+            timeout_ms: settings.timeout_ms,
+            stream_first_event_timeout_ms: settings.stream_first_event_timeout_ms,
+            stream_idle_timeout_ms: settings.stream_idle_timeout_ms,
+            stream_total_timeout_ms: settings.stream_total_timeout_ms,
+            connect_timeout_ms: settings.connect_timeout_ms,
+            max_retries: settings.max_retries,
+            max_concurrency: settings.max_concurrency,
+            max_request_bytes: settings.max_request_bytes,
+            max_response_bytes: settings.max_response_bytes,
+            allow_private_networks: settings.allow_private_networks,
+            header_names: settings.headers.keys().cloned().collect(),
+            organization: settings.organization.clone(),
+            model_cache_configured: settings.model_cache_dir.is_some(),
+        }
+    }
 }
 
 /// Provider/model application service independent of Admin HTTP.
@@ -366,6 +431,43 @@ impl ProviderService {
         settings: Value,
         expected_revision: Option<Revision>,
     ) -> Result<mcp_vault_state::ModelBindingRecord, ProviderError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        let model = self
+            .state
+            .providers()
+            .get_model(model_id)
+            .await?
+            .ok_or(ProviderError::ModelNotFound)?;
+        if !model.enabled {
+            return Err(ProviderError::ModelDisabled);
+        }
+        let provider = self
+            .state
+            .providers()
+            .get_provider(model.provider_id)
+            .await?
+            .ok_or(ProviderError::NotFound)?;
+        if !provider.enabled {
+            return Err(ProviderError::Disabled);
+        }
+        if let Some(required) = required_role_capability(role) {
+            let capabilities = ModelCapabilities::from_json(&model.capabilities)?;
+            let supported = match required {
+                "structured_output" => capabilities.structured_output,
+                "embeddings" => capabilities.embeddings,
+                "reranking" => capabilities.reranking,
+                _ => false,
+            };
+            if !supported {
+                return Err(ProviderError::ModelCapabilityMismatch {
+                    capability: required,
+                });
+            }
+        }
+        if is_generation_role(role) && !provider_kind_supports_generation(&provider.provider_type)?
+        {
+            return Err(ProviderError::CapabilityUnavailable);
+        }
         self.state
             .providers()
             .upsert_binding(context, role, model_id, &settings, expected_revision)
@@ -436,7 +538,44 @@ impl ProviderService {
         model_id: ModelId,
         request: &StructuredGenerationRequest,
     ) -> Result<StructuredGenerationResult, ProviderError> {
-        let runtime = self.runtime(context, model_id).await?;
+        let runtime = self.runtime(context, model_id, false).await?;
+        self.generate_structured_from_runtime(context, model_id, runtime, request)
+            .await
+    }
+
+    /// Generate only when the runtime loaded for this call still matches a
+    /// previously captured live-evaluation fingerprint.
+    pub async fn generate_structured_pinned(
+        &self,
+        context: &VaultContext,
+        model_id: ModelId,
+        expected: &ProviderRuntimeSnapshot,
+        request: &StructuredGenerationRequest,
+    ) -> Result<StructuredGenerationResult, ProviderError> {
+        let runtime = self.runtime(context, model_id, false).await?;
+        if runtime.snapshot()?.fingerprint != expected.fingerprint {
+            return Err(ProviderError::RuntimeConfigurationDrift);
+        }
+        self.generate_structured_from_runtime(context, model_id, runtime, request)
+            .await
+    }
+
+    /// Capture a secret-free effective Provider/model/mode identity.
+    pub async fn runtime_snapshot(
+        &self,
+        context: &VaultContext,
+        model_id: ModelId,
+    ) -> Result<ProviderRuntimeSnapshot, ProviderError> {
+        self.runtime(context, model_id, false).await?.snapshot()
+    }
+
+    async fn generate_structured_from_runtime(
+        &self,
+        context: &VaultContext,
+        model_id: ModelId,
+        runtime: Runtime,
+        request: &StructuredGenerationRequest,
+    ) -> Result<StructuredGenerationResult, ProviderError> {
         if request.model != runtime.model.external_model_id {
             return Err(ProviderError::InvalidConfiguration(
                 "request model does not match registered model",
@@ -507,7 +646,7 @@ impl ProviderService {
         model_id: ModelId,
         request: &EmbeddingRequest,
     ) -> Result<EmbeddingResult, ProviderError> {
-        let runtime = self.runtime(context, model_id).await?;
+        let runtime = self.runtime(context, model_id, true).await?;
         validate_embedding_inputs(&runtime.model, request)?;
         let result = runtime
             .adapter
@@ -535,7 +674,7 @@ impl ProviderService {
         request: &EmbeddingRequest,
         budget: Arc<dyn crate::RequestBudget>,
     ) -> Result<EmbeddingResult, ProviderError> {
-        let runtime = self.runtime(context, model_id).await?;
+        let runtime = self.runtime(context, model_id, true).await?;
         validate_embedding_inputs(&runtime.model, request)?;
         let transport = runtime.transport.with_budget(budget);
         let result = runtime
@@ -653,6 +792,7 @@ impl ProviderService {
         &self,
         context: &VaultContext,
         model_id: ModelId,
+        require_embeddings: bool,
     ) -> Result<Runtime, ProviderError> {
         let model = self
             .state
@@ -663,17 +803,23 @@ impl ProviderService {
         if !model.enabled {
             return Err(ProviderError::Disabled);
         }
+        let mode_state = self.provider_mode_state(context).await?;
+        if mode_state.mode == ProviderMode::Disabled {
+            return Err(ProviderError::PrivacyDenied);
+        }
+        let capabilities = ModelCapabilities::from_json(&model.capabilities)?;
+        if require_embeddings {
+            require_embedding_capability(&capabilities)?;
+        }
         let provider = self.get_provider(model.provider_id).await?;
         if !provider.enabled {
             return Err(ProviderError::Disabled);
         }
         let kind = ProviderKind::try_from(provider.provider_type.as_str())?;
         let settings = ProviderSettings::from_json(&provider.settings)?;
-        let capabilities = ModelCapabilities::from_json(&model.capabilities)?;
         let model_settings = ModelSettings::from_json(&model.settings)?;
         let base_url = Url::parse(&provider.base_url)?;
         model_settings.validate_for_model(kind, base_url.host_str(), &model.external_model_id)?;
-        let mode = self.provider_mode(context).await?;
         let secret = self.read_secret(&provider).await?;
         let transport = self.transport_for(&provider, &settings)?;
         Ok(Runtime {
@@ -683,7 +829,12 @@ impl ProviderService {
             settings,
             model_settings,
             provider_kind: kind,
-            mode,
+            mode: mode_state.mode,
+            mode_revision: mode_state.revision.map(|revision| revision.value()),
+            provider_id: provider.id.to_string(),
+            provider_type: provider.provider_type,
+            provider_revision: provider.revision.value(),
+            provider_enabled: provider.enabled,
             secret,
             transport,
             adapter: adapter_for(kind),
@@ -771,9 +922,43 @@ struct Runtime {
     model_settings: ModelSettings,
     provider_kind: ProviderKind,
     mode: ProviderMode,
+    mode_revision: Option<u64>,
+    provider_id: String,
+    provider_type: String,
+    provider_revision: u64,
+    provider_enabled: bool,
     secret: Option<SecretString>,
     transport: ProviderTransport,
     adapter: Box<dyn ProviderAdapter>,
+}
+
+impl Runtime {
+    fn snapshot(&self) -> Result<ProviderRuntimeSnapshot, ProviderError> {
+        let mut snapshot = ProviderRuntimeSnapshot {
+            fingerprint: String::new(),
+            provider_id: self.provider_id.clone(),
+            provider_type: self.provider_type.clone(),
+            endpoint: self.base_url.to_string(),
+            provider_revision: self.provider_revision,
+            provider_enabled: self.provider_enabled,
+            settings: SafeProviderSettings::from(&self.settings),
+            model_id: self.model.id.to_string(),
+            external_model_id: self.model.external_model_id.clone(),
+            model_revision: self.model.revision.value(),
+            model_enabled: self.model.enabled,
+            capabilities: self.capabilities.clone(),
+            model_settings: self.model_settings.clone(),
+            mode: self.mode,
+            mode_revision: self.mode_revision,
+        };
+        let mut fingerprint_material = snapshot.clone();
+        fingerprint_material.fingerprint.clear();
+        let bytes = serde_json::to_vec(&fingerprint_material).map_err(|_| {
+            ProviderError::InvalidConfiguration("runtime fingerprint serialization failed")
+        })?;
+        snapshot.fingerprint = format!("{:x}", Sha256::digest(bytes));
+        Ok(snapshot)
+    }
 }
 
 /// Application service for embedding persistence, vector search, and
@@ -795,6 +980,8 @@ impl EmbeddingService {
             .get_model(model_id)
             .await?
             .ok_or(ProviderError::NotFound)?;
+        let capabilities = ModelCapabilities::from_json(&model.capabilities)?;
+        require_embedding_capability(&capabilities)?;
         let provider = self
             .provider
             .state
@@ -844,6 +1031,8 @@ impl EmbeddingService {
             .get_model(model_id)
             .await?
             .ok_or(ProviderError::NotFound)?;
+        let capabilities = ModelCapabilities::from_json(&model.capabilities)?;
+        require_embedding_capability(&capabilities)?;
         let provider = self
             .provider
             .state
@@ -1023,7 +1212,9 @@ impl EmbeddingService {
             .get_model(model_id)
             .await?
             .ok_or(ProviderError::NotFound)?;
-        if let Some(expected) = ModelCapabilities::from_json(&model.capabilities)?.dimension
+        let capabilities = ModelCapabilities::from_json(&model.capabilities)?;
+        require_embedding_capability(&capabilities)?;
+        if let Some(expected) = capabilities.dimension
             && query.len() as u32 != expected
         {
             return Err(ProviderError::DimensionMismatch);
@@ -1066,6 +1257,15 @@ impl EmbeddingService {
                 "re-embedding source batch is invalid",
             ));
         }
+        let model = self
+            .provider
+            .state
+            .providers()
+            .get_model(model_id)
+            .await?
+            .ok_or(ProviderError::NotFound)?;
+        let capabilities = ModelCapabilities::from_json(&model.capabilities)?;
+        require_embedding_capability(&capabilities)?;
         let payload = json!({
             "projection_version": EMBEDDING_PROJECTION_VERSION,
             // Repair previously completed cache hits that returned another
@@ -1207,6 +1407,7 @@ fn validate_embedding_inputs(
     request: &EmbeddingRequest,
 ) -> Result<(), ProviderError> {
     let cap = ModelCapabilities::from_json(&model.capabilities)?;
+    require_embedding_capability(&cap)?;
     // Conservative bytes-as-token bound when a tokenizer is unavailable.
     let limit = cap
         .context_window
@@ -1218,6 +1419,16 @@ fn validate_embedding_inputs(
         ));
     }
     Ok(())
+}
+
+fn require_embedding_capability(capabilities: &ModelCapabilities) -> Result<(), ProviderError> {
+    if capabilities.embeddings {
+        Ok(())
+    } else {
+        Err(ProviderError::ModelCapabilityMismatch {
+            capability: "embeddings",
+        })
+    }
 }
 
 fn validate_model_dimensions(
@@ -1250,6 +1461,29 @@ fn now_millis() -> i64 {
         .ok()
         .and_then(|duration| i64::try_from(duration.as_millis()).ok())
         .unwrap_or(0)
+}
+
+fn required_role_capability(role: &str) -> Option<&'static str> {
+    match role {
+        "embedding_note" | "embedding_memory" => Some("embeddings"),
+        "rerank" => Some("reranking"),
+        _ => None,
+    }
+}
+
+fn is_generation_role(role: &str) -> bool {
+    matches!(
+        role,
+        "memory_extraction" | "memory_overview" | "note_summary" | "topic_enrichment"
+    )
+}
+
+fn provider_kind_supports_generation(provider_type: &str) -> Result<bool, ProviderError> {
+    let kind = ProviderKind::try_from(provider_type)?;
+    Ok(!matches!(
+        kind,
+        ProviderKind::EmbeddingHttp | ProviderKind::FastEmbedLocal
+    ))
 }
 
 #[cfg(test)]

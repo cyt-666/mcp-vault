@@ -1,0 +1,25 @@
+{
+  "schema_version": "m6-agent-blind-review-v1",
+  "record_status": "template_only",
+  "candidate_sha256": "bdc5f4d0ce3c06a8531b97a1ec5d781eb59095df7195c1e92b962a55fc5ff2c2",
+  "review_package_sha256": "8750f57608e393fc393faea73f21f36fd595b6b7d0150be522f68553e2c1119a",
+  "human_review": false,
+  "quality_claim": "not_evaluated",
+  "producer": {
+    "role": "candidate_producer",
+    "identity": "GPT-6-Luna"
+  },
+  "reviewer": {
+    "role": "independent_agent_reviewer",
+    "identity": "PENDING",
+    "model_version": "PENDING",
+    "independent_from_producer": true
+  },
+  "gold_reviews": [],
+  "artifact_scores": [],
+  "blind_scores": [],
+  "adjudications": [],
+  "gold_locked_at": null,
+  "score_locked_at": null,
+  "arm_mapping_revealed_at": null
+}

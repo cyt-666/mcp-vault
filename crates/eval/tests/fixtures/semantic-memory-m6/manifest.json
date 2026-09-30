@@ -1,0 +1,4304 @@
+{
+  "schema_version": "semantic-memory-manifest-v1",
+  "fixture_id": "semantic-memory-synthetic-m6-v1",
+  "dataset_class": "synthetic",
+  "synthetic": true,
+  "contains_real_user_data": false,
+  "execution_policy": {
+    "default_mode": "mock",
+    "allowed_modes": [
+      "mock",
+      "replay"
+    ],
+    "allow_live": false,
+    "external_request_budget": 0
+  },
+  "comparison_protocol": {
+    "arms": [
+      "A",
+      "B",
+      "C"
+    ],
+    "context_budget_tokens": 4096,
+    "freeze_source_set": true,
+    "freeze_task_set": true,
+    "freeze_answer_model_per_run": true,
+    "freeze_retrieval_model_per_run": true,
+    "freeze_index_profile_per_run": true,
+    "real_run_status": "pending_authorization"
+  },
+  "sources": [
+    {
+      "id": "S01",
+      "path": "sources/p01-primary.md",
+      "sha256": "b227dbb4074ab1431d9e5881093ac5b35d84d170ad05c53250463db2f6990724",
+      "source_kind": "vault_note",
+      "assertion_role": "adopted",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s01",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s01-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S02",
+      "path": "sources/p01-procedure.md",
+      "sha256": "093ef5313c265d7eb2c76a6b8513da821e4661b43cd55e12de80fa9d21ae8933",
+      "source_kind": "vault_note",
+      "assertion_role": "observed",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s02",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s02-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S03",
+      "path": "sources/p01-status.md",
+      "sha256": "bdf7c8ca4af7d0b6584e4b1e3b4841f1d70a07aaf38d24faf8b3d76af2acdd4e",
+      "source_kind": "vault_note",
+      "assertion_role": "task_state",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s03",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s03-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S04",
+      "path": "sources/p02-primary.md",
+      "sha256": "660c453c0040e192fa62936f51e42ba83f776a7329372e8c07f537e5399f4a8d",
+      "source_kind": "vault_note",
+      "assertion_role": "adopted",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s04",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s04-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S05",
+      "path": "sources/p02-procedure.md",
+      "sha256": "4ca1e8826708ef182546b769f0ddcb1b150b6baa9f571162dfea32912c24103e",
+      "source_kind": "vault_note",
+      "assertion_role": "observed",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s05",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s05-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S06",
+      "path": "sources/p02-status.md",
+      "sha256": "b3e04a71e10b9c96079b09d84666cfdb5050bc8fbf3f57b1ef3b1169349ebac8",
+      "source_kind": "vault_note",
+      "assertion_role": "task_state",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s06",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s06-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S07",
+      "path": "sources/p03-primary.md",
+      "sha256": "787241f33faf2077b780e186795854a0311caabd57c2bc067b29d05f18c877ed",
+      "source_kind": "vault_note",
+      "assertion_role": "adopted",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s07",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s07-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S08",
+      "path": "sources/p03-procedure.md",
+      "sha256": "fd699f8f5460c286ff71df031abbf4339cfb5fedcc27c37cead79f1b52e51aef",
+      "source_kind": "vault_note",
+      "assertion_role": "observed",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s08",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s08-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S09",
+      "path": "sources/p03-status.md",
+      "sha256": "104395cfa6327ff7a24d8081a919373c46d5c6699d4d3b31fb6eff94b66ca7e2",
+      "source_kind": "vault_note",
+      "assertion_role": "task_state",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s09",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s09-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S10",
+      "path": "sources/p04-primary.md",
+      "sha256": "fd336a8157d09ee1b4d1a62b06e14c596705494f316baecad6218ebbf3053824",
+      "source_kind": "vault_note",
+      "assertion_role": "adopted",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s10",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s10-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S11",
+      "path": "sources/p04-procedure.md",
+      "sha256": "5e08c015aecd498dc3d976acb342f8c9545b5a6ab7ae4defc33f0c55193ba289",
+      "source_kind": "vault_note",
+      "assertion_role": "observed",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s11",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s11-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S12",
+      "path": "sources/p04-status.md",
+      "sha256": "e4db6a14897ac540d45e6c9bac5c37416a56be684ad5f4c07b8c70e4681da13e",
+      "source_kind": "vault_note",
+      "assertion_role": "task_state",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s12",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s12-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S13",
+      "path": "sources/p05-primary.md",
+      "sha256": "3f8edeb37a0ecb4a0bd55af5a23734932f941bf4dcb0b2a7684eac62361c33ec",
+      "source_kind": "vault_note",
+      "assertion_role": "adopted",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s13",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s13-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S14",
+      "path": "sources/p05-procedure.md",
+      "sha256": "b33e2753d886e09fe6b1da4fd88200a297148a0793be8fe88b43141ce97d10b1",
+      "source_kind": "vault_note",
+      "assertion_role": "observed",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s14",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s14-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S15",
+      "path": "sources/p05-status.md",
+      "sha256": "1887f0157a07d15d4ef992be271a3de028f51789b896c3c519c187a227bb349c",
+      "source_kind": "vault_note",
+      "assertion_role": "task_state",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s15",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s15-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S16",
+      "path": "sources/p06-primary.md",
+      "sha256": "7f465939f5d977582931db2116593307da90a1da239fedd6be3d1ed3e602470e",
+      "source_kind": "vault_note",
+      "assertion_role": "adopted",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s16",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s16-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S17",
+      "path": "sources/p06-procedure.md",
+      "sha256": "a2c093cf037da5d420d7d54532d02d332b40819eb3634feee62c3b7116d2310a",
+      "source_kind": "vault_note",
+      "assertion_role": "observed",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s17",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s17-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S18",
+      "path": "sources/p06-status.md",
+      "sha256": "4d9321df104b791fd3a5127c0c69d397fe6a757d730dd34989d752e7ce4a78db",
+      "source_kind": "vault_note",
+      "assertion_role": "task_state",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s18",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s18-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S19",
+      "path": "sources/p07-primary.md",
+      "sha256": "8f36fde505e2ecf866355cb186d7badbe300bb5294712c15a8843583386e9a9c",
+      "source_kind": "vault_note",
+      "assertion_role": "adopted",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s19",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s19-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S20",
+      "path": "sources/p07-procedure.md",
+      "sha256": "c6317e016944ef2c33e8865bd6f2533b1e22ed5719a0ed07348b642f594e1290",
+      "source_kind": "vault_note",
+      "assertion_role": "observed",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s20",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s20-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S21",
+      "path": "sources/p07-status.md",
+      "sha256": "941c5a3771bb5ee28fcbeeef672becb88563d16330c7c5ff515e5274a50389ad",
+      "source_kind": "vault_note",
+      "assertion_role": "task_state",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s21",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s21-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S22",
+      "path": "sources/p08-primary.md",
+      "sha256": "bb52ec541a284d080e85c71a672146b3cb060b18810feecdbb2a816b797c3bfd",
+      "source_kind": "vault_note",
+      "assertion_role": "adopted",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s22",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s22-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S23",
+      "path": "sources/p08-procedure.md",
+      "sha256": "3ed1a5f8c2fe0aef0c04dbdbf944f0601fa7e7bcfb9a04d6d60a17650950cf91",
+      "source_kind": "vault_note",
+      "assertion_role": "observed",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s23",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s23-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S24",
+      "path": "sources/p08-status.md",
+      "sha256": "a11d0fa86a0afc733e4e5b43a91659707d608ff87109bd4802b19b31c7c4a9b1",
+      "source_kind": "vault_note",
+      "assertion_role": "task_state",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s24",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s24-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S25",
+      "path": "sources/p09-primary.md",
+      "sha256": "3a76c3f1d285fa51918cae35823f7bd483eac57d96ce5d8fc97d1ba50fdee083",
+      "source_kind": "vault_note",
+      "assertion_role": "adopted",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s25",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s25-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S26",
+      "path": "sources/p09-procedure.md",
+      "sha256": "e3a78beedfcd61524430755979c0b46fbffb0e6143bc16257786078ccf0451c0",
+      "source_kind": "vault_note",
+      "assertion_role": "observed",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s26",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s26-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S27",
+      "path": "sources/p09-status.md",
+      "sha256": "b9ec8e5cdf89b83a0a0d68fc1dc14d3e50b9a7d51c7bc4c974fed728da5cb1f6",
+      "source_kind": "vault_note",
+      "assertion_role": "task_state",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s27",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s27-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S28",
+      "path": "sources/p10-primary.md",
+      "sha256": "234ea911a5ecb243f36e6fd008005ad546d05e1ee0075241bf24748d5f28e57a",
+      "source_kind": "vault_note",
+      "assertion_role": "adopted",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s28",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s28-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S29",
+      "path": "sources/p10-procedure.md",
+      "sha256": "5dbf82ea0ba028afdfca10fbe1761d1b09ad1163572017f550f970d2efab0885",
+      "source_kind": "vault_note",
+      "assertion_role": "observed",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s29",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s29-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    },
+    {
+      "id": "S30",
+      "path": "sources/p10-status.md",
+      "sha256": "1d64e308a2fd379f8fde4b217a1058e92abf69868fa5127c40f7a592755471c7",
+      "source_kind": "vault_note",
+      "assertion_role": "task_state",
+      "vault_id": "vault-m6-synthetic",
+      "file_id": "m6-file-s30",
+      "file_revision": 3,
+      "source_revision_id": "m6-revision-s30-r3",
+      "authorization_revision": 7,
+      "profile_id": "semantic-profile-m6-v1",
+      "rules_revision": 11,
+      "source_generation": 2,
+      "extraction_commit_sequence": 4,
+      "authorization_scope": {
+        "required_permissions": [
+          "memory:read",
+          "vault:read"
+        ],
+        "state": "active"
+      },
+      "source_state": "current"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "M6-p01-support",
+      "q_refs": [
+        "Q-p01-support"
+      ],
+      "coverage_tags": [
+        "scope",
+        "condition",
+        "supported"
+      ],
+      "question": "What durable Orion release guidance is supported for production rollout?",
+      "split": "development",
+      "source_ids": [
+        "S01",
+        "S02",
+        "S03"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S01",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s01-r3",
+          "content_hash": "b227dbb4074ab1431d9e5881093ac5b35d84d170ad05c53250463db2f6990724"
+        },
+        {
+          "source_id": "S02",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s02-r3",
+          "content_hash": "093ef5313c265d7eb2c76a6b8513da821e4661b43cd55e12de80fa9d21ae8933"
+        },
+        {
+          "source_id": "S03",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s03-r3",
+          "content_hash": "bdf7c8ca4af7d0b6584e4b1e3b4841f1d70a07aaf38d24faf8b3d76af2acdd4e"
+        }
+      ],
+      "expected_usable_information": [
+        "Start at 5 percent and expand only after error rate stays below 2 percent for 30 minutes.",
+        "The answer must remain scoped to the named project."
+      ],
+      "must_preserve_conditions": [
+        "Scope is production rollout.",
+        "Conditions and exceptions remain attached to the decision."
+      ],
+      "must_not_infer": [
+        "Do not broaden the guidance to another project or environment.",
+        "Do not turn an observation into an adopted decision."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S01",
+            "S02"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p01-conditions",
+      "q_refs": [
+        "Q-p01-conditions"
+      ],
+      "coverage_tags": [
+        "condition",
+        "exception"
+      ],
+      "question": "What condition or exception limits the Orion release guidance?",
+      "split": "development",
+      "source_ids": [
+        "S01",
+        "S02",
+        "S03"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S01",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s01-r3",
+          "content_hash": "b227dbb4074ab1431d9e5881093ac5b35d84d170ad05c53250463db2f6990724"
+        },
+        {
+          "source_id": "S02",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s02-r3",
+          "content_hash": "093ef5313c265d7eb2c76a6b8513da821e4661b43cd55e12de80fa9d21ae8933"
+        },
+        {
+          "source_id": "S03",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s03-r3",
+          "content_hash": "bdf7c8ca4af7d0b6584e4b1e3b4841f1d70a07aaf38d24faf8b3d76af2acdd4e"
+        }
+      ],
+      "expected_usable_information": [
+        "Rollback order: stop traffic increase, set weight to 0 percent, confirm stable version, then record the incident ID."
+      ],
+      "must_preserve_conditions": [
+        "Scope is production rollout.",
+        "The limiting condition must stay attached."
+      ],
+      "must_not_infer": [
+        "Do not turn a conditional rule into an unconditional one."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S01",
+            "S02"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p01-negative",
+      "q_refs": [
+        "Q-p01-negative"
+      ],
+      "coverage_tags": [
+        "no_answer",
+        "hard_negative"
+      ],
+      "question": "Does the synthetic record prove an unconditional rule outside production rollout?",
+      "split": "development",
+      "source_ids": [
+        "S01",
+        "S02",
+        "S03"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S01",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s01-r3",
+          "content_hash": "b227dbb4074ab1431d9e5881093ac5b35d84d170ad05c53250463db2f6990724"
+        },
+        {
+          "source_id": "S02",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s02-r3",
+          "content_hash": "093ef5313c265d7eb2c76a6b8513da821e4661b43cd55e12de80fa9d21ae8933"
+        },
+        {
+          "source_id": "S03",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s03-r3",
+          "content_hash": "bdf7c8ca4af7d0b6584e4b1e3b4841f1d70a07aaf38d24faf8b3d76af2acdd4e"
+        }
+      ],
+      "expected_usable_information": [],
+      "must_preserve_conditions": [
+        "There is no supported unconditional rule outside production rollout."
+      ],
+      "must_not_infer": [
+        "Do not invent an answer from similar wording.",
+        "Do not convert one observation or exception into a global policy."
+      ],
+      "expected_no_answer": true,
+      "expected_status": "unanswered",
+      "expected_source_relations": [
+        {
+          "kind": "unknown_scope_or_time",
+          "source_ids": [
+            "S01",
+            "S02",
+            "S03"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p01-ordering",
+      "q_refs": [
+        "Q-p01-ordering"
+      ],
+      "coverage_tags": [
+        "ordered_steps"
+      ],
+      "question": "What order is recorded for the Orion release procedure?",
+      "split": "development",
+      "source_ids": [
+        "S01",
+        "S02",
+        "S03"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S01",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s01-r3",
+          "content_hash": "b227dbb4074ab1431d9e5881093ac5b35d84d170ad05c53250463db2f6990724"
+        },
+        {
+          "source_id": "S02",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s02-r3",
+          "content_hash": "093ef5313c265d7eb2c76a6b8513da821e4661b43cd55e12de80fa9d21ae8933"
+        },
+        {
+          "source_id": "S03",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s03-r3",
+          "content_hash": "bdf7c8ca4af7d0b6584e4b1e3b4841f1d70a07aaf38d24faf8b3d76af2acdd4e"
+        }
+      ],
+      "expected_usable_information": [
+        "Rollback order: stop traffic increase, set weight to 0 percent, confirm stable version, then record the incident ID."
+      ],
+      "must_preserve_conditions": [
+        "Preserve the recorded step order.",
+        "Keep the steps within production rollout."
+      ],
+      "must_not_infer": [
+        "Do not reorder steps or add an automatic reopening step."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S02",
+            "S03"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p01-status",
+      "q_refs": [
+        "Q-p01-status"
+      ],
+      "coverage_tags": [
+        "state",
+        "status"
+      ],
+      "question": "What is the current state of the Orion release record?",
+      "split": "development",
+      "source_ids": [
+        "S01",
+        "S02",
+        "S03"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S01",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s01-r3",
+          "content_hash": "b227dbb4074ab1431d9e5881093ac5b35d84d170ad05c53250463db2f6990724"
+        },
+        {
+          "source_id": "S02",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s02-r3",
+          "content_hash": "093ef5313c265d7eb2c76a6b8513da821e4661b43cd55e12de80fa9d21ae8933"
+        },
+        {
+          "source_id": "S03",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s03-r3",
+          "content_hash": "bdf7c8ca4af7d0b6584e4b1e3b4841f1d70a07aaf38d24faf8b3d76af2acdd4e"
+        }
+      ],
+      "expected_usable_information": [
+        "The synthetic record is current for Orion release."
+      ],
+      "must_preserve_conditions": [
+        "Status is scoped to production rollout."
+      ],
+      "must_not_infer": [
+        "Do not claim completion, adoption, or general availability unless the source states it."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "same_source",
+          "source_ids": [
+            "S03"
+          ]
+        }
+      ],
+      "severity": "medium"
+    },
+    {
+      "id": "M6-p01-duplicate",
+      "q_refs": [
+        "Q-p01-duplicate"
+      ],
+      "coverage_tags": [
+        "duplicate_sources",
+        "controlled_synthesis"
+      ],
+      "question": "How should repeated Orion release wording be represented?",
+      "split": "development",
+      "source_ids": [
+        "S01",
+        "S02",
+        "S03"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S01",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s01-r3",
+          "content_hash": "b227dbb4074ab1431d9e5881093ac5b35d84d170ad05c53250463db2f6990724"
+        },
+        {
+          "source_id": "S02",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s02-r3",
+          "content_hash": "093ef5313c265d7eb2c76a6b8513da821e4661b43cd55e12de80fa9d21ae8933"
+        },
+        {
+          "source_id": "S03",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s03-r3",
+          "content_hash": "bdf7c8ca4af7d0b6584e4b1e3b4841f1d70a07aaf38d24faf8b3d76af2acdd4e"
+        }
+      ],
+      "expected_usable_information": [
+        "Start at 5 percent and expand only after error rate stays below 2 percent for 30 minutes.",
+        "Represent repeated support once and retain the source links."
+      ],
+      "must_preserve_conditions": [
+        "Scope is production rollout.",
+        "Keep the limiting condition and provenance."
+      ],
+      "must_not_infer": [
+        "Do not count repeated wording as independent decisions.",
+        "Do not merge a different scope into this project."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "duplicate",
+          "source_ids": [
+            "S01",
+            "S03"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p02-support",
+      "q_refs": [
+        "Q-p02-support"
+      ],
+      "coverage_tags": [
+        "scope",
+        "condition",
+        "supported"
+      ],
+      "question": "What durable Atlas migration guidance is supported for production database migration?",
+      "split": "development",
+      "source_ids": [
+        "S04",
+        "S05",
+        "S06"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S04",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s04-r3",
+          "content_hash": "660c453c0040e192fa62936f51e42ba83f776a7329372e8c07f537e5399f4a8d"
+        },
+        {
+          "source_id": "S05",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s05-r3",
+          "content_hash": "4ca1e8826708ef182546b769f0ddcb1b150b6baa9f571162dfea32912c24103e"
+        },
+        {
+          "source_id": "S06",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s06-r3",
+          "content_hash": "b3e04a71e10b9c96079b09d84666cfdb5050bc8fbf3f57b1ef3b1169349ebac8"
+        }
+      ],
+      "expected_usable_information": [
+        "A readable backup is required before every migration; a full restore drill is only required for the March high-risk migration.",
+        "The answer must remain scoped to the named project."
+      ],
+      "must_preserve_conditions": [
+        "Scope is production database migration.",
+        "Conditions and exceptions remain attached to the decision."
+      ],
+      "must_not_infer": [
+        "Do not broaden the guidance to another project or environment.",
+        "Do not turn an observation into an adopted decision."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S04",
+            "S05"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p02-conditions",
+      "q_refs": [
+        "Q-p02-conditions"
+      ],
+      "coverage_tags": [
+        "condition",
+        "exception"
+      ],
+      "question": "What condition or exception limits the Atlas migration guidance?",
+      "split": "development",
+      "source_ids": [
+        "S04",
+        "S05",
+        "S06"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S04",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s04-r3",
+          "content_hash": "660c453c0040e192fa62936f51e42ba83f776a7329372e8c07f537e5399f4a8d"
+        },
+        {
+          "source_id": "S05",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s05-r3",
+          "content_hash": "4ca1e8826708ef182546b769f0ddcb1b150b6baa9f571162dfea32912c24103e"
+        },
+        {
+          "source_id": "S06",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s06-r3",
+          "content_hash": "b3e04a71e10b9c96079b09d84666cfdb5050bc8fbf3f57b1ef3b1169349ebac8"
+        }
+      ],
+      "expected_usable_information": [
+        "If the backup is unreadable, stop the migration. Do not infer that every migration needs a restore drill."
+      ],
+      "must_preserve_conditions": [
+        "Scope is production database migration.",
+        "The limiting condition must stay attached."
+      ],
+      "must_not_infer": [
+        "Do not turn a conditional rule into an unconditional one."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S04",
+            "S05"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p02-negative",
+      "q_refs": [
+        "Q-p02-negative"
+      ],
+      "coverage_tags": [
+        "no_answer",
+        "hard_negative"
+      ],
+      "question": "Does the synthetic record prove an unconditional rule outside production database migration?",
+      "split": "development",
+      "source_ids": [
+        "S04",
+        "S05",
+        "S06"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S04",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s04-r3",
+          "content_hash": "660c453c0040e192fa62936f51e42ba83f776a7329372e8c07f537e5399f4a8d"
+        },
+        {
+          "source_id": "S05",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s05-r3",
+          "content_hash": "4ca1e8826708ef182546b769f0ddcb1b150b6baa9f571162dfea32912c24103e"
+        },
+        {
+          "source_id": "S06",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s06-r3",
+          "content_hash": "b3e04a71e10b9c96079b09d84666cfdb5050bc8fbf3f57b1ef3b1169349ebac8"
+        }
+      ],
+      "expected_usable_information": [],
+      "must_preserve_conditions": [
+        "There is no supported unconditional rule outside production database migration."
+      ],
+      "must_not_infer": [
+        "Do not invent an answer from similar wording.",
+        "Do not convert one observation or exception into a global policy."
+      ],
+      "expected_no_answer": true,
+      "expected_status": "unanswered",
+      "expected_source_relations": [
+        {
+          "kind": "unknown_scope_or_time",
+          "source_ids": [
+            "S04",
+            "S05",
+            "S06"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p02-ordering",
+      "q_refs": [
+        "Q-p02-ordering"
+      ],
+      "coverage_tags": [
+        "ordered_steps"
+      ],
+      "question": "What order is recorded for the Atlas migration procedure?",
+      "split": "development",
+      "source_ids": [
+        "S04",
+        "S05",
+        "S06"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S04",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s04-r3",
+          "content_hash": "660c453c0040e192fa62936f51e42ba83f776a7329372e8c07f537e5399f4a8d"
+        },
+        {
+          "source_id": "S05",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s05-r3",
+          "content_hash": "4ca1e8826708ef182546b769f0ddcb1b150b6baa9f571162dfea32912c24103e"
+        },
+        {
+          "source_id": "S06",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s06-r3",
+          "content_hash": "b3e04a71e10b9c96079b09d84666cfdb5050bc8fbf3f57b1ef3b1169349ebac8"
+        }
+      ],
+      "expected_usable_information": [
+        "If the backup is unreadable, stop the migration. Do not infer that every migration needs a restore drill."
+      ],
+      "must_preserve_conditions": [
+        "Preserve the recorded step order.",
+        "Keep the steps within production database migration."
+      ],
+      "must_not_infer": [
+        "Do not reorder steps or add an automatic reopening step."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S05",
+            "S06"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p02-status",
+      "q_refs": [
+        "Q-p02-status"
+      ],
+      "coverage_tags": [
+        "state",
+        "status"
+      ],
+      "question": "What is the current state of the Atlas migration record?",
+      "split": "development",
+      "source_ids": [
+        "S04",
+        "S05",
+        "S06"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S04",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s04-r3",
+          "content_hash": "660c453c0040e192fa62936f51e42ba83f776a7329372e8c07f537e5399f4a8d"
+        },
+        {
+          "source_id": "S05",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s05-r3",
+          "content_hash": "4ca1e8826708ef182546b769f0ddcb1b150b6baa9f571162dfea32912c24103e"
+        },
+        {
+          "source_id": "S06",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s06-r3",
+          "content_hash": "b3e04a71e10b9c96079b09d84666cfdb5050bc8fbf3f57b1ef3b1169349ebac8"
+        }
+      ],
+      "expected_usable_information": [
+        "The synthetic record is current for Atlas migration."
+      ],
+      "must_preserve_conditions": [
+        "Status is scoped to production database migration."
+      ],
+      "must_not_infer": [
+        "Do not claim completion, adoption, or general availability unless the source states it."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "same_source",
+          "source_ids": [
+            "S06"
+          ]
+        }
+      ],
+      "severity": "medium"
+    },
+    {
+      "id": "M6-p02-duplicate",
+      "q_refs": [
+        "Q-p02-duplicate"
+      ],
+      "coverage_tags": [
+        "duplicate_sources",
+        "controlled_synthesis"
+      ],
+      "question": "How should repeated Atlas migration wording be represented?",
+      "split": "development",
+      "source_ids": [
+        "S04",
+        "S05",
+        "S06"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S04",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s04-r3",
+          "content_hash": "660c453c0040e192fa62936f51e42ba83f776a7329372e8c07f537e5399f4a8d"
+        },
+        {
+          "source_id": "S05",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s05-r3",
+          "content_hash": "4ca1e8826708ef182546b769f0ddcb1b150b6baa9f571162dfea32912c24103e"
+        },
+        {
+          "source_id": "S06",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s06-r3",
+          "content_hash": "b3e04a71e10b9c96079b09d84666cfdb5050bc8fbf3f57b1ef3b1169349ebac8"
+        }
+      ],
+      "expected_usable_information": [
+        "A readable backup is required before every migration; a full restore drill is only required for the March high-risk migration.",
+        "Represent repeated support once and retain the source links."
+      ],
+      "must_preserve_conditions": [
+        "Scope is production database migration.",
+        "Keep the limiting condition and provenance."
+      ],
+      "must_not_infer": [
+        "Do not count repeated wording as independent decisions.",
+        "Do not merge a different scope into this project."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "duplicate",
+          "source_ids": [
+            "S04",
+            "S06"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p03-support",
+      "q_refs": [
+        "Q-p03-support"
+      ],
+      "coverage_tags": [
+        "scope",
+        "condition",
+        "supported"
+      ],
+      "question": "What durable Borealis tenancy guidance is supported for Aster organization?",
+      "split": "development",
+      "source_ids": [
+        "S07",
+        "S08",
+        "S09"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S07",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s07-r3",
+          "content_hash": "787241f33faf2077b780e186795854a0311caabd57c2bc067b29d05f18c877ed"
+        },
+        {
+          "source_id": "S08",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s08-r3",
+          "content_hash": "fd699f8f5460c286ff71df031abbf4339cfb5fedcc27c37cead79f1b52e51aef"
+        },
+        {
+          "source_id": "S09",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s09-r3",
+          "content_hash": "104395cfa6327ff7a24d8081a919373c46d5c6699d4d3b31fb6eff94b66ca7e2"
+        }
+      ],
+      "expected_usable_information": [
+        "Aster and Birch use the same project codename for different organizations; their decisions must stay separate.",
+        "The answer must remain scoped to the named project."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Aster organization.",
+        "Conditions and exceptions remain attached to the decision."
+      ],
+      "must_not_infer": [
+        "Do not broaden the guidance to another project or environment.",
+        "Do not turn an observation into an adopted decision."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S07",
+            "S08"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p03-conditions",
+      "q_refs": [
+        "Q-p03-conditions"
+      ],
+      "coverage_tags": [
+        "condition",
+        "exception"
+      ],
+      "question": "What condition or exception limits the Borealis tenancy guidance?",
+      "split": "development",
+      "source_ids": [
+        "S07",
+        "S08",
+        "S09"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S07",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s07-r3",
+          "content_hash": "787241f33faf2077b780e186795854a0311caabd57c2bc067b29d05f18c877ed"
+        },
+        {
+          "source_id": "S08",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s08-r3",
+          "content_hash": "fd699f8f5460c286ff71df031abbf4339cfb5fedcc27c37cead79f1b52e51aef"
+        },
+        {
+          "source_id": "S09",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s09-r3",
+          "content_hash": "104395cfa6327ff7a24d8081a919373c46d5c6699d4d3b31fb6eff94b66ca7e2"
+        }
+      ],
+      "expected_usable_information": [
+        "The adopted Aster decision applies only to Aster. Birch material is reference-only until separately adopted."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Aster organization.",
+        "The limiting condition must stay attached."
+      ],
+      "must_not_infer": [
+        "Do not turn a conditional rule into an unconditional one."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S07",
+            "S08"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p03-negative",
+      "q_refs": [
+        "Q-p03-negative"
+      ],
+      "coverage_tags": [
+        "no_answer",
+        "hard_negative"
+      ],
+      "question": "Does the synthetic record prove an unconditional rule outside Aster organization?",
+      "split": "development",
+      "source_ids": [
+        "S07",
+        "S08",
+        "S09"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S07",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s07-r3",
+          "content_hash": "787241f33faf2077b780e186795854a0311caabd57c2bc067b29d05f18c877ed"
+        },
+        {
+          "source_id": "S08",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s08-r3",
+          "content_hash": "fd699f8f5460c286ff71df031abbf4339cfb5fedcc27c37cead79f1b52e51aef"
+        },
+        {
+          "source_id": "S09",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s09-r3",
+          "content_hash": "104395cfa6327ff7a24d8081a919373c46d5c6699d4d3b31fb6eff94b66ca7e2"
+        }
+      ],
+      "expected_usable_information": [],
+      "must_preserve_conditions": [
+        "There is no supported unconditional rule outside Aster organization."
+      ],
+      "must_not_infer": [
+        "Do not invent an answer from similar wording.",
+        "Do not convert one observation or exception into a global policy."
+      ],
+      "expected_no_answer": true,
+      "expected_status": "unanswered",
+      "expected_source_relations": [
+        {
+          "kind": "unknown_scope_or_time",
+          "source_ids": [
+            "S07",
+            "S08",
+            "S09"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p03-ordering",
+      "q_refs": [
+        "Q-p03-ordering"
+      ],
+      "coverage_tags": [
+        "ordered_steps"
+      ],
+      "question": "What order is recorded for the Borealis tenancy procedure?",
+      "split": "development",
+      "source_ids": [
+        "S07",
+        "S08",
+        "S09"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S07",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s07-r3",
+          "content_hash": "787241f33faf2077b780e186795854a0311caabd57c2bc067b29d05f18c877ed"
+        },
+        {
+          "source_id": "S08",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s08-r3",
+          "content_hash": "fd699f8f5460c286ff71df031abbf4339cfb5fedcc27c37cead79f1b52e51aef"
+        },
+        {
+          "source_id": "S09",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s09-r3",
+          "content_hash": "104395cfa6327ff7a24d8081a919373c46d5c6699d4d3b31fb6eff94b66ca7e2"
+        }
+      ],
+      "expected_usable_information": [
+        "The adopted Aster decision applies only to Aster. Birch material is reference-only until separately adopted."
+      ],
+      "must_preserve_conditions": [
+        "Preserve the recorded step order.",
+        "Keep the steps within Aster organization."
+      ],
+      "must_not_infer": [
+        "Do not reorder steps or add an automatic reopening step."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S08",
+            "S09"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p03-status",
+      "q_refs": [
+        "Q-p03-status"
+      ],
+      "coverage_tags": [
+        "state",
+        "status"
+      ],
+      "question": "What is the current state of the Borealis tenancy record?",
+      "split": "development",
+      "source_ids": [
+        "S07",
+        "S08",
+        "S09"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S07",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s07-r3",
+          "content_hash": "787241f33faf2077b780e186795854a0311caabd57c2bc067b29d05f18c877ed"
+        },
+        {
+          "source_id": "S08",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s08-r3",
+          "content_hash": "fd699f8f5460c286ff71df031abbf4339cfb5fedcc27c37cead79f1b52e51aef"
+        },
+        {
+          "source_id": "S09",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s09-r3",
+          "content_hash": "104395cfa6327ff7a24d8081a919373c46d5c6699d4d3b31fb6eff94b66ca7e2"
+        }
+      ],
+      "expected_usable_information": [
+        "The synthetic record is current for Borealis tenancy."
+      ],
+      "must_preserve_conditions": [
+        "Status is scoped to Aster organization."
+      ],
+      "must_not_infer": [
+        "Do not claim completion, adoption, or general availability unless the source states it."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "same_source",
+          "source_ids": [
+            "S09"
+          ]
+        }
+      ],
+      "severity": "medium"
+    },
+    {
+      "id": "M6-p03-duplicate",
+      "q_refs": [
+        "Q-p03-duplicate"
+      ],
+      "coverage_tags": [
+        "duplicate_sources",
+        "controlled_synthesis"
+      ],
+      "question": "How should repeated Borealis tenancy wording be represented?",
+      "split": "development",
+      "source_ids": [
+        "S07",
+        "S08",
+        "S09"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S07",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s07-r3",
+          "content_hash": "787241f33faf2077b780e186795854a0311caabd57c2bc067b29d05f18c877ed"
+        },
+        {
+          "source_id": "S08",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s08-r3",
+          "content_hash": "fd699f8f5460c286ff71df031abbf4339cfb5fedcc27c37cead79f1b52e51aef"
+        },
+        {
+          "source_id": "S09",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s09-r3",
+          "content_hash": "104395cfa6327ff7a24d8081a919373c46d5c6699d4d3b31fb6eff94b66ca7e2"
+        }
+      ],
+      "expected_usable_information": [
+        "Aster and Birch use the same project codename for different organizations; their decisions must stay separate.",
+        "Represent repeated support once and retain the source links."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Aster organization.",
+        "Keep the limiting condition and provenance."
+      ],
+      "must_not_infer": [
+        "Do not count repeated wording as independent decisions.",
+        "Do not merge a different scope into this project."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "duplicate",
+          "source_ids": [
+            "S07",
+            "S09"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p04-support",
+      "q_refs": [
+        "Q-p04-support"
+      ],
+      "coverage_tags": [
+        "scope",
+        "condition",
+        "supported"
+      ],
+      "question": "What durable Cedar incident guidance is supported for Cedar incident response?",
+      "split": "development",
+      "source_ids": [
+        "S10",
+        "S11",
+        "S12"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S10",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s10-r3",
+          "content_hash": "fd336a8157d09ee1b4d1a62b06e14c596705494f316baecad6218ebbf3053824"
+        },
+        {
+          "source_id": "S11",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s11-r3",
+          "content_hash": "5e08c015aecd498dc3d976acb342f8c9545b5a6ab7ae4defc33f0c55193ba289"
+        },
+        {
+          "source_id": "S12",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s12-r3",
+          "content_hash": "e4db6a14897ac540d45e6c9bac5c37416a56be684ad5f4c07b8c70e4681da13e"
+        }
+      ],
+      "expected_usable_information": [
+        "The incident is observed, not resolved: the queue remains blocked while the owner investigates the timeout.",
+        "The answer must remain scoped to the named project."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Cedar incident response.",
+        "Conditions and exceptions remain attached to the decision."
+      ],
+      "must_not_infer": [
+        "Do not broaden the guidance to another project or environment.",
+        "Do not turn an observation into an adopted decision."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S10",
+            "S11"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p04-conditions",
+      "q_refs": [
+        "Q-p04-conditions"
+      ],
+      "coverage_tags": [
+        "condition",
+        "exception"
+      ],
+      "question": "What condition or exception limits the Cedar incident guidance?",
+      "split": "development",
+      "source_ids": [
+        "S10",
+        "S11",
+        "S12"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S10",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s10-r3",
+          "content_hash": "fd336a8157d09ee1b4d1a62b06e14c596705494f316baecad6218ebbf3053824"
+        },
+        {
+          "source_id": "S11",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s11-r3",
+          "content_hash": "5e08c015aecd498dc3d976acb342f8c9545b5a6ab7ae4defc33f0c55193ba289"
+        },
+        {
+          "source_id": "S12",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s12-r3",
+          "content_hash": "e4db6a14897ac540d45e6c9bac5c37416a56be684ad5f4c07b8c70e4681da13e"
+        }
+      ],
+      "expected_usable_information": [
+        "The timeout was reproduced once; it is not evidence that every request fails."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Cedar incident response.",
+        "The limiting condition must stay attached."
+      ],
+      "must_not_infer": [
+        "Do not turn a conditional rule into an unconditional one."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S10",
+            "S11"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p04-negative",
+      "q_refs": [
+        "Q-p04-negative"
+      ],
+      "coverage_tags": [
+        "no_answer",
+        "hard_negative"
+      ],
+      "question": "Does the synthetic record prove an unconditional rule outside Cedar incident response?",
+      "split": "development",
+      "source_ids": [
+        "S10",
+        "S11",
+        "S12"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S10",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s10-r3",
+          "content_hash": "fd336a8157d09ee1b4d1a62b06e14c596705494f316baecad6218ebbf3053824"
+        },
+        {
+          "source_id": "S11",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s11-r3",
+          "content_hash": "5e08c015aecd498dc3d976acb342f8c9545b5a6ab7ae4defc33f0c55193ba289"
+        },
+        {
+          "source_id": "S12",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s12-r3",
+          "content_hash": "e4db6a14897ac540d45e6c9bac5c37416a56be684ad5f4c07b8c70e4681da13e"
+        }
+      ],
+      "expected_usable_information": [],
+      "must_preserve_conditions": [
+        "There is no supported unconditional rule outside Cedar incident response."
+      ],
+      "must_not_infer": [
+        "Do not invent an answer from similar wording.",
+        "Do not convert one observation or exception into a global policy."
+      ],
+      "expected_no_answer": true,
+      "expected_status": "unanswered",
+      "expected_source_relations": [
+        {
+          "kind": "unknown_scope_or_time",
+          "source_ids": [
+            "S10",
+            "S11",
+            "S12"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p04-ordering",
+      "q_refs": [
+        "Q-p04-ordering"
+      ],
+      "coverage_tags": [
+        "ordered_steps"
+      ],
+      "question": "What order is recorded for the Cedar incident procedure?",
+      "split": "development",
+      "source_ids": [
+        "S10",
+        "S11",
+        "S12"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S10",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s10-r3",
+          "content_hash": "fd336a8157d09ee1b4d1a62b06e14c596705494f316baecad6218ebbf3053824"
+        },
+        {
+          "source_id": "S11",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s11-r3",
+          "content_hash": "5e08c015aecd498dc3d976acb342f8c9545b5a6ab7ae4defc33f0c55193ba289"
+        },
+        {
+          "source_id": "S12",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s12-r3",
+          "content_hash": "e4db6a14897ac540d45e6c9bac5c37416a56be684ad5f4c07b8c70e4681da13e"
+        }
+      ],
+      "expected_usable_information": [
+        "The timeout was reproduced once; it is not evidence that every request fails."
+      ],
+      "must_preserve_conditions": [
+        "Preserve the recorded step order.",
+        "Keep the steps within Cedar incident response."
+      ],
+      "must_not_infer": [
+        "Do not reorder steps or add an automatic reopening step."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S11",
+            "S12"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p04-status",
+      "q_refs": [
+        "Q-p04-status"
+      ],
+      "coverage_tags": [
+        "state",
+        "status"
+      ],
+      "question": "What is the current state of the Cedar incident record?",
+      "split": "development",
+      "source_ids": [
+        "S10",
+        "S11",
+        "S12"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S10",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s10-r3",
+          "content_hash": "fd336a8157d09ee1b4d1a62b06e14c596705494f316baecad6218ebbf3053824"
+        },
+        {
+          "source_id": "S11",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s11-r3",
+          "content_hash": "5e08c015aecd498dc3d976acb342f8c9545b5a6ab7ae4defc33f0c55193ba289"
+        },
+        {
+          "source_id": "S12",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s12-r3",
+          "content_hash": "e4db6a14897ac540d45e6c9bac5c37416a56be684ad5f4c07b8c70e4681da13e"
+        }
+      ],
+      "expected_usable_information": [
+        "The synthetic record is current for Cedar incident."
+      ],
+      "must_preserve_conditions": [
+        "Status is scoped to Cedar incident response."
+      ],
+      "must_not_infer": [
+        "Do not claim completion, adoption, or general availability unless the source states it."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "same_source",
+          "source_ids": [
+            "S12"
+          ]
+        }
+      ],
+      "severity": "medium"
+    },
+    {
+      "id": "M6-p04-duplicate",
+      "q_refs": [
+        "Q-p04-duplicate"
+      ],
+      "coverage_tags": [
+        "duplicate_sources",
+        "controlled_synthesis"
+      ],
+      "question": "How should repeated Cedar incident wording be represented?",
+      "split": "development",
+      "source_ids": [
+        "S10",
+        "S11",
+        "S12"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S10",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s10-r3",
+          "content_hash": "fd336a8157d09ee1b4d1a62b06e14c596705494f316baecad6218ebbf3053824"
+        },
+        {
+          "source_id": "S11",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s11-r3",
+          "content_hash": "5e08c015aecd498dc3d976acb342f8c9545b5a6ab7ae4defc33f0c55193ba289"
+        },
+        {
+          "source_id": "S12",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s12-r3",
+          "content_hash": "e4db6a14897ac540d45e6c9bac5c37416a56be684ad5f4c07b8c70e4681da13e"
+        }
+      ],
+      "expected_usable_information": [
+        "The incident is observed, not resolved: the queue remains blocked while the owner investigates the timeout.",
+        "Represent repeated support once and retain the source links."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Cedar incident response.",
+        "Keep the limiting condition and provenance."
+      ],
+      "must_not_infer": [
+        "Do not count repeated wording as independent decisions.",
+        "Do not merge a different scope into this project."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "duplicate",
+          "source_ids": [
+            "S10",
+            "S12"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p05-support",
+      "q_refs": [
+        "Q-p05-support"
+      ],
+      "coverage_tags": [
+        "scope",
+        "condition",
+        "supported"
+      ],
+      "question": "What durable Delta security guidance is supported for Delta production access?",
+      "split": "development",
+      "source_ids": [
+        "S13",
+        "S14",
+        "S15"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S13",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s13-r3",
+          "content_hash": "3f8edeb37a0ecb4a0bd55af5a23734932f941bf4dcb0b2a7684eac62361c33ec"
+        },
+        {
+          "source_id": "S14",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s14-r3",
+          "content_hash": "b33e2753d886e09fe6b1da4fd88200a297148a0793be8fe88b43141ce97d10b1"
+        },
+        {
+          "source_id": "S15",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s15-r3",
+          "content_hash": "1887f0157a07d15d4ef992be271a3de028f51789b896c3c519c187a227bb349c"
+        }
+      ],
+      "expected_usable_information": [
+        "Use a short-lived access grant, then revoke it after the change window.",
+        "The answer must remain scoped to the named project."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Delta production access.",
+        "Conditions and exceptions remain attached to the decision."
+      ],
+      "must_not_infer": [
+        "Do not broaden the guidance to another project or environment.",
+        "Do not turn an observation into an adopted decision."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S13",
+            "S14"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p05-conditions",
+      "q_refs": [
+        "Q-p05-conditions"
+      ],
+      "coverage_tags": [
+        "condition",
+        "exception"
+      ],
+      "question": "What condition or exception limits the Delta security guidance?",
+      "split": "development",
+      "source_ids": [
+        "S13",
+        "S14",
+        "S15"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S13",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s13-r3",
+          "content_hash": "3f8edeb37a0ecb4a0bd55af5a23734932f941bf4dcb0b2a7684eac62361c33ec"
+        },
+        {
+          "source_id": "S14",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s14-r3",
+          "content_hash": "b33e2753d886e09fe6b1da4fd88200a297148a0793be8fe88b43141ce97d10b1"
+        },
+        {
+          "source_id": "S15",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s15-r3",
+          "content_hash": "1887f0157a07d15d4ef992be271a3de028f51789b896c3c519c187a227bb349c"
+        }
+      ],
+      "expected_usable_information": [
+        "The emergency exception applies only to the named maintenance window and does not authorize standing access."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Delta production access.",
+        "The limiting condition must stay attached."
+      ],
+      "must_not_infer": [
+        "Do not turn a conditional rule into an unconditional one."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S13",
+            "S14"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p05-negative",
+      "q_refs": [
+        "Q-p05-negative"
+      ],
+      "coverage_tags": [
+        "no_answer",
+        "hard_negative"
+      ],
+      "question": "Does the synthetic record prove an unconditional rule outside Delta production access?",
+      "split": "development",
+      "source_ids": [
+        "S13",
+        "S14",
+        "S15"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S13",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s13-r3",
+          "content_hash": "3f8edeb37a0ecb4a0bd55af5a23734932f941bf4dcb0b2a7684eac62361c33ec"
+        },
+        {
+          "source_id": "S14",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s14-r3",
+          "content_hash": "b33e2753d886e09fe6b1da4fd88200a297148a0793be8fe88b43141ce97d10b1"
+        },
+        {
+          "source_id": "S15",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s15-r3",
+          "content_hash": "1887f0157a07d15d4ef992be271a3de028f51789b896c3c519c187a227bb349c"
+        }
+      ],
+      "expected_usable_information": [],
+      "must_preserve_conditions": [
+        "There is no supported unconditional rule outside Delta production access."
+      ],
+      "must_not_infer": [
+        "Do not invent an answer from similar wording.",
+        "Do not convert one observation or exception into a global policy."
+      ],
+      "expected_no_answer": true,
+      "expected_status": "unanswered",
+      "expected_source_relations": [
+        {
+          "kind": "unknown_scope_or_time",
+          "source_ids": [
+            "S13",
+            "S14",
+            "S15"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p05-ordering",
+      "q_refs": [
+        "Q-p05-ordering"
+      ],
+      "coverage_tags": [
+        "ordered_steps"
+      ],
+      "question": "What order is recorded for the Delta security procedure?",
+      "split": "development",
+      "source_ids": [
+        "S13",
+        "S14",
+        "S15"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S13",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s13-r3",
+          "content_hash": "3f8edeb37a0ecb4a0bd55af5a23734932f941bf4dcb0b2a7684eac62361c33ec"
+        },
+        {
+          "source_id": "S14",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s14-r3",
+          "content_hash": "b33e2753d886e09fe6b1da4fd88200a297148a0793be8fe88b43141ce97d10b1"
+        },
+        {
+          "source_id": "S15",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s15-r3",
+          "content_hash": "1887f0157a07d15d4ef992be271a3de028f51789b896c3c519c187a227bb349c"
+        }
+      ],
+      "expected_usable_information": [
+        "The emergency exception applies only to the named maintenance window and does not authorize standing access."
+      ],
+      "must_preserve_conditions": [
+        "Preserve the recorded step order.",
+        "Keep the steps within Delta production access."
+      ],
+      "must_not_infer": [
+        "Do not reorder steps or add an automatic reopening step."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S14",
+            "S15"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p05-status",
+      "q_refs": [
+        "Q-p05-status"
+      ],
+      "coverage_tags": [
+        "state",
+        "status"
+      ],
+      "question": "What is the current state of the Delta security record?",
+      "split": "development",
+      "source_ids": [
+        "S13",
+        "S14",
+        "S15"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S13",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s13-r3",
+          "content_hash": "3f8edeb37a0ecb4a0bd55af5a23734932f941bf4dcb0b2a7684eac62361c33ec"
+        },
+        {
+          "source_id": "S14",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s14-r3",
+          "content_hash": "b33e2753d886e09fe6b1da4fd88200a297148a0793be8fe88b43141ce97d10b1"
+        },
+        {
+          "source_id": "S15",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s15-r3",
+          "content_hash": "1887f0157a07d15d4ef992be271a3de028f51789b896c3c519c187a227bb349c"
+        }
+      ],
+      "expected_usable_information": [
+        "The synthetic record is current for Delta security."
+      ],
+      "must_preserve_conditions": [
+        "Status is scoped to Delta production access."
+      ],
+      "must_not_infer": [
+        "Do not claim completion, adoption, or general availability unless the source states it."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "same_source",
+          "source_ids": [
+            "S15"
+          ]
+        }
+      ],
+      "severity": "medium"
+    },
+    {
+      "id": "M6-p05-duplicate",
+      "q_refs": [
+        "Q-p05-duplicate"
+      ],
+      "coverage_tags": [
+        "duplicate_sources",
+        "controlled_synthesis"
+      ],
+      "question": "How should repeated Delta security wording be represented?",
+      "split": "development",
+      "source_ids": [
+        "S13",
+        "S14",
+        "S15"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S13",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s13-r3",
+          "content_hash": "3f8edeb37a0ecb4a0bd55af5a23734932f941bf4dcb0b2a7684eac62361c33ec"
+        },
+        {
+          "source_id": "S14",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s14-r3",
+          "content_hash": "b33e2753d886e09fe6b1da4fd88200a297148a0793be8fe88b43141ce97d10b1"
+        },
+        {
+          "source_id": "S15",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s15-r3",
+          "content_hash": "1887f0157a07d15d4ef992be271a3de028f51789b896c3c519c187a227bb349c"
+        }
+      ],
+      "expected_usable_information": [
+        "Use a short-lived access grant, then revoke it after the change window.",
+        "Represent repeated support once and retain the source links."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Delta production access.",
+        "Keep the limiting condition and provenance."
+      ],
+      "must_not_infer": [
+        "Do not count repeated wording as independent decisions.",
+        "Do not merge a different scope into this project."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "duplicate",
+          "source_ids": [
+            "S13",
+            "S15"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p06-support",
+      "q_refs": [
+        "Q-p06-support"
+      ],
+      "coverage_tags": [
+        "scope",
+        "condition",
+        "supported"
+      ],
+      "question": "What durable Ember retention guidance is supported for Ember project artifacts?",
+      "split": "development",
+      "source_ids": [
+        "S16",
+        "S17",
+        "S18"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S16",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s16-r3",
+          "content_hash": "7f465939f5d977582931db2116593307da90a1da239fedd6be3d1ed3e602470e"
+        },
+        {
+          "source_id": "S17",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s17-r3",
+          "content_hash": "a2c093cf037da5d420d7d54532d02d332b40819eb3634feee62c3b7116d2310a"
+        },
+        {
+          "source_id": "S18",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s18-r3",
+          "content_hash": "4d9321df104b791fd3a5127c0c69d397fe6a757d730dd34989d752e7ce4a78db"
+        }
+      ],
+      "expected_usable_information": [
+        "Retain deployment manifests for 90 days; this is the adopted project decision.",
+        "The answer must remain scoped to the named project."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Ember project artifacts.",
+        "Conditions and exceptions remain attached to the decision."
+      ],
+      "must_not_infer": [
+        "Do not broaden the guidance to another project or environment.",
+        "Do not turn an observation into an adopted decision."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S16",
+            "S17"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p06-conditions",
+      "q_refs": [
+        "Q-p06-conditions"
+      ],
+      "coverage_tags": [
+        "condition",
+        "exception"
+      ],
+      "question": "What condition or exception limits the Ember retention guidance?",
+      "split": "development",
+      "source_ids": [
+        "S16",
+        "S17",
+        "S18"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S16",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s16-r3",
+          "content_hash": "7f465939f5d977582931db2116593307da90a1da239fedd6be3d1ed3e602470e"
+        },
+        {
+          "source_id": "S17",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s17-r3",
+          "content_hash": "a2c093cf037da5d420d7d54532d02d332b40819eb3634feee62c3b7116d2310a"
+        },
+        {
+          "source_id": "S18",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s18-r3",
+          "content_hash": "4d9321df104b791fd3a5127c0c69d397fe6a757d730dd34989d752e7ce4a78db"
+        }
+      ],
+      "expected_usable_information": [
+        "Do not extend the 90-day period to unrelated audit records without a separate decision."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Ember project artifacts.",
+        "The limiting condition must stay attached."
+      ],
+      "must_not_infer": [
+        "Do not turn a conditional rule into an unconditional one."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S16",
+            "S17"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p06-negative",
+      "q_refs": [
+        "Q-p06-negative"
+      ],
+      "coverage_tags": [
+        "no_answer",
+        "hard_negative"
+      ],
+      "question": "Does the synthetic record prove an unconditional rule outside Ember project artifacts?",
+      "split": "development",
+      "source_ids": [
+        "S16",
+        "S17",
+        "S18"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S16",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s16-r3",
+          "content_hash": "7f465939f5d977582931db2116593307da90a1da239fedd6be3d1ed3e602470e"
+        },
+        {
+          "source_id": "S17",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s17-r3",
+          "content_hash": "a2c093cf037da5d420d7d54532d02d332b40819eb3634feee62c3b7116d2310a"
+        },
+        {
+          "source_id": "S18",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s18-r3",
+          "content_hash": "4d9321df104b791fd3a5127c0c69d397fe6a757d730dd34989d752e7ce4a78db"
+        }
+      ],
+      "expected_usable_information": [],
+      "must_preserve_conditions": [
+        "There is no supported unconditional rule outside Ember project artifacts."
+      ],
+      "must_not_infer": [
+        "Do not invent an answer from similar wording.",
+        "Do not convert one observation or exception into a global policy."
+      ],
+      "expected_no_answer": true,
+      "expected_status": "unanswered",
+      "expected_source_relations": [
+        {
+          "kind": "unknown_scope_or_time",
+          "source_ids": [
+            "S16",
+            "S17",
+            "S18"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p06-ordering",
+      "q_refs": [
+        "Q-p06-ordering"
+      ],
+      "coverage_tags": [
+        "ordered_steps"
+      ],
+      "question": "What order is recorded for the Ember retention procedure?",
+      "split": "development",
+      "source_ids": [
+        "S16",
+        "S17",
+        "S18"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S16",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s16-r3",
+          "content_hash": "7f465939f5d977582931db2116593307da90a1da239fedd6be3d1ed3e602470e"
+        },
+        {
+          "source_id": "S17",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s17-r3",
+          "content_hash": "a2c093cf037da5d420d7d54532d02d332b40819eb3634feee62c3b7116d2310a"
+        },
+        {
+          "source_id": "S18",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s18-r3",
+          "content_hash": "4d9321df104b791fd3a5127c0c69d397fe6a757d730dd34989d752e7ce4a78db"
+        }
+      ],
+      "expected_usable_information": [
+        "Do not extend the 90-day period to unrelated audit records without a separate decision."
+      ],
+      "must_preserve_conditions": [
+        "Preserve the recorded step order.",
+        "Keep the steps within Ember project artifacts."
+      ],
+      "must_not_infer": [
+        "Do not reorder steps or add an automatic reopening step."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S17",
+            "S18"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p06-status",
+      "q_refs": [
+        "Q-p06-status"
+      ],
+      "coverage_tags": [
+        "state",
+        "status"
+      ],
+      "question": "What is the current state of the Ember retention record?",
+      "split": "development",
+      "source_ids": [
+        "S16",
+        "S17",
+        "S18"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S16",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s16-r3",
+          "content_hash": "7f465939f5d977582931db2116593307da90a1da239fedd6be3d1ed3e602470e"
+        },
+        {
+          "source_id": "S17",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s17-r3",
+          "content_hash": "a2c093cf037da5d420d7d54532d02d332b40819eb3634feee62c3b7116d2310a"
+        },
+        {
+          "source_id": "S18",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s18-r3",
+          "content_hash": "4d9321df104b791fd3a5127c0c69d397fe6a757d730dd34989d752e7ce4a78db"
+        }
+      ],
+      "expected_usable_information": [
+        "The synthetic record is current for Ember retention."
+      ],
+      "must_preserve_conditions": [
+        "Status is scoped to Ember project artifacts."
+      ],
+      "must_not_infer": [
+        "Do not claim completion, adoption, or general availability unless the source states it."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "same_source",
+          "source_ids": [
+            "S18"
+          ]
+        }
+      ],
+      "severity": "medium"
+    },
+    {
+      "id": "M6-p06-duplicate",
+      "q_refs": [
+        "Q-p06-duplicate"
+      ],
+      "coverage_tags": [
+        "duplicate_sources",
+        "controlled_synthesis"
+      ],
+      "question": "How should repeated Ember retention wording be represented?",
+      "split": "development",
+      "source_ids": [
+        "S16",
+        "S17",
+        "S18"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S16",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s16-r3",
+          "content_hash": "7f465939f5d977582931db2116593307da90a1da239fedd6be3d1ed3e602470e"
+        },
+        {
+          "source_id": "S17",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s17-r3",
+          "content_hash": "a2c093cf037da5d420d7d54532d02d332b40819eb3634feee62c3b7116d2310a"
+        },
+        {
+          "source_id": "S18",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s18-r3",
+          "content_hash": "4d9321df104b791fd3a5127c0c69d397fe6a757d730dd34989d752e7ce4a78db"
+        }
+      ],
+      "expected_usable_information": [
+        "Retain deployment manifests for 90 days; this is the adopted project decision.",
+        "Represent repeated support once and retain the source links."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Ember project artifacts.",
+        "Keep the limiting condition and provenance."
+      ],
+      "must_not_infer": [
+        "Do not count repeated wording as independent decisions.",
+        "Do not merge a different scope into this project."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "duplicate",
+          "source_ids": [
+            "S16",
+            "S18"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p07-support",
+      "q_refs": [
+        "Q-p07-support"
+      ],
+      "coverage_tags": [
+        "scope",
+        "condition",
+        "supported"
+      ],
+      "question": "What durable Fjord billing guidance is supported for Fjord billing rollout?",
+      "split": "holdout",
+      "source_ids": [
+        "S19",
+        "S20",
+        "S21"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S19",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s19-r3",
+          "content_hash": "8f36fde505e2ecf866355cb186d7badbe300bb5294712c15a8843583386e9a9c"
+        },
+        {
+          "source_id": "S20",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s20-r3",
+          "content_hash": "c6317e016944ef2c33e8865bd6f2533b1e22ed5719a0ed07348b642f594e1290"
+        },
+        {
+          "source_id": "S21",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s21-r3",
+          "content_hash": "941c5a3771bb5ee28fcbeeef672becb88563d16330c7c5ff515e5274a50389ad"
+        }
+      ],
+      "expected_usable_information": [
+        "The billing rollout is staged at 10 percent and requires reconciliation before the next step.",
+        "The answer must remain scoped to the named project."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Fjord billing rollout.",
+        "Conditions and exceptions remain attached to the decision."
+      ],
+      "must_not_infer": [
+        "Do not broaden the guidance to another project or environment.",
+        "Do not turn an observation into an adopted decision."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S19",
+            "S20"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p07-conditions",
+      "q_refs": [
+        "Q-p07-conditions"
+      ],
+      "coverage_tags": [
+        "condition",
+        "exception"
+      ],
+      "question": "What condition or exception limits the Fjord billing guidance?",
+      "split": "holdout",
+      "source_ids": [
+        "S19",
+        "S20",
+        "S21"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S19",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s19-r3",
+          "content_hash": "8f36fde505e2ecf866355cb186d7badbe300bb5294712c15a8843583386e9a9c"
+        },
+        {
+          "source_id": "S20",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s20-r3",
+          "content_hash": "c6317e016944ef2c33e8865bd6f2533b1e22ed5719a0ed07348b642f594e1290"
+        },
+        {
+          "source_id": "S21",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s21-r3",
+          "content_hash": "941c5a3771bb5ee28fcbeeef672becb88563d16330c7c5ff515e5274a50389ad"
+        }
+      ],
+      "expected_usable_information": [
+        "A failed reconciliation blocks expansion; reopening requires an explicit owner decision."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Fjord billing rollout.",
+        "The limiting condition must stay attached."
+      ],
+      "must_not_infer": [
+        "Do not turn a conditional rule into an unconditional one."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S19",
+            "S20"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p07-negative",
+      "q_refs": [
+        "Q-p07-negative"
+      ],
+      "coverage_tags": [
+        "no_answer",
+        "hard_negative"
+      ],
+      "question": "Does the synthetic record prove an unconditional rule outside Fjord billing rollout?",
+      "split": "holdout",
+      "source_ids": [
+        "S19",
+        "S20",
+        "S21"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S19",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s19-r3",
+          "content_hash": "8f36fde505e2ecf866355cb186d7badbe300bb5294712c15a8843583386e9a9c"
+        },
+        {
+          "source_id": "S20",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s20-r3",
+          "content_hash": "c6317e016944ef2c33e8865bd6f2533b1e22ed5719a0ed07348b642f594e1290"
+        },
+        {
+          "source_id": "S21",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s21-r3",
+          "content_hash": "941c5a3771bb5ee28fcbeeef672becb88563d16330c7c5ff515e5274a50389ad"
+        }
+      ],
+      "expected_usable_information": [],
+      "must_preserve_conditions": [
+        "There is no supported unconditional rule outside Fjord billing rollout."
+      ],
+      "must_not_infer": [
+        "Do not invent an answer from similar wording.",
+        "Do not convert one observation or exception into a global policy."
+      ],
+      "expected_no_answer": true,
+      "expected_status": "unanswered",
+      "expected_source_relations": [
+        {
+          "kind": "unknown_scope_or_time",
+          "source_ids": [
+            "S19",
+            "S20",
+            "S21"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p07-ordering",
+      "q_refs": [
+        "Q-p07-ordering"
+      ],
+      "coverage_tags": [
+        "ordered_steps"
+      ],
+      "question": "What order is recorded for the Fjord billing procedure?",
+      "split": "holdout",
+      "source_ids": [
+        "S19",
+        "S20",
+        "S21"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S19",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s19-r3",
+          "content_hash": "8f36fde505e2ecf866355cb186d7badbe300bb5294712c15a8843583386e9a9c"
+        },
+        {
+          "source_id": "S20",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s20-r3",
+          "content_hash": "c6317e016944ef2c33e8865bd6f2533b1e22ed5719a0ed07348b642f594e1290"
+        },
+        {
+          "source_id": "S21",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s21-r3",
+          "content_hash": "941c5a3771bb5ee28fcbeeef672becb88563d16330c7c5ff515e5274a50389ad"
+        }
+      ],
+      "expected_usable_information": [
+        "A failed reconciliation blocks expansion; reopening requires an explicit owner decision."
+      ],
+      "must_preserve_conditions": [
+        "Preserve the recorded step order.",
+        "Keep the steps within Fjord billing rollout."
+      ],
+      "must_not_infer": [
+        "Do not reorder steps or add an automatic reopening step."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S20",
+            "S21"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p07-status",
+      "q_refs": [
+        "Q-p07-status"
+      ],
+      "coverage_tags": [
+        "state",
+        "status"
+      ],
+      "question": "What is the current state of the Fjord billing record?",
+      "split": "holdout",
+      "source_ids": [
+        "S19",
+        "S20",
+        "S21"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S19",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s19-r3",
+          "content_hash": "8f36fde505e2ecf866355cb186d7badbe300bb5294712c15a8843583386e9a9c"
+        },
+        {
+          "source_id": "S20",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s20-r3",
+          "content_hash": "c6317e016944ef2c33e8865bd6f2533b1e22ed5719a0ed07348b642f594e1290"
+        },
+        {
+          "source_id": "S21",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s21-r3",
+          "content_hash": "941c5a3771bb5ee28fcbeeef672becb88563d16330c7c5ff515e5274a50389ad"
+        }
+      ],
+      "expected_usable_information": [
+        "The synthetic record is current for Fjord billing."
+      ],
+      "must_preserve_conditions": [
+        "Status is scoped to Fjord billing rollout."
+      ],
+      "must_not_infer": [
+        "Do not claim completion, adoption, or general availability unless the source states it."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "same_source",
+          "source_ids": [
+            "S21"
+          ]
+        }
+      ],
+      "severity": "medium"
+    },
+    {
+      "id": "M6-p07-duplicate",
+      "q_refs": [
+        "Q-p07-duplicate"
+      ],
+      "coverage_tags": [
+        "duplicate_sources",
+        "controlled_synthesis"
+      ],
+      "question": "How should repeated Fjord billing wording be represented?",
+      "split": "holdout",
+      "source_ids": [
+        "S19",
+        "S20",
+        "S21"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S19",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s19-r3",
+          "content_hash": "8f36fde505e2ecf866355cb186d7badbe300bb5294712c15a8843583386e9a9c"
+        },
+        {
+          "source_id": "S20",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s20-r3",
+          "content_hash": "c6317e016944ef2c33e8865bd6f2533b1e22ed5719a0ed07348b642f594e1290"
+        },
+        {
+          "source_id": "S21",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s21-r3",
+          "content_hash": "941c5a3771bb5ee28fcbeeef672becb88563d16330c7c5ff515e5274a50389ad"
+        }
+      ],
+      "expected_usable_information": [
+        "The billing rollout is staged at 10 percent and requires reconciliation before the next step.",
+        "Represent repeated support once and retain the source links."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Fjord billing rollout.",
+        "Keep the limiting condition and provenance."
+      ],
+      "must_not_infer": [
+        "Do not count repeated wording as independent decisions.",
+        "Do not merge a different scope into this project."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "duplicate",
+          "source_ids": [
+            "S19",
+            "S21"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p08-support",
+      "q_refs": [
+        "Q-p08-support"
+      ],
+      "coverage_tags": [
+        "scope",
+        "condition",
+        "supported"
+      ],
+      "question": "What durable Grove import guidance is supported for Grove import pipeline?",
+      "split": "holdout",
+      "source_ids": [
+        "S22",
+        "S23",
+        "S24"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S22",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s22-r3",
+          "content_hash": "bb52ec541a284d080e85c71a672146b3cb060b18810feecdbb2a816b797c3bfd"
+        },
+        {
+          "source_id": "S23",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s23-r3",
+          "content_hash": "3ed1a5f8c2fe0aef0c04dbdbf944f0601fa7e7bcfb9a04d6d60a17650950cf91"
+        },
+        {
+          "source_id": "S24",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s24-r3",
+          "content_hash": "a11d0fa86a0afc733e4e5b43a91659707d608ff87109bd4802b19b31c7c4a9b1"
+        }
+      ],
+      "expected_usable_information": [
+        "Only validated rows enter the Grove import; rejected rows remain in the quarantine report.",
+        "The answer must remain scoped to the named project."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Grove import pipeline.",
+        "Conditions and exceptions remain attached to the decision."
+      ],
+      "must_not_infer": [
+        "Do not broaden the guidance to another project or environment.",
+        "Do not turn an observation into an adopted decision."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S22",
+            "S23"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p08-conditions",
+      "q_refs": [
+        "Q-p08-conditions"
+      ],
+      "coverage_tags": [
+        "condition",
+        "exception"
+      ],
+      "question": "What condition or exception limits the Grove import guidance?",
+      "split": "holdout",
+      "source_ids": [
+        "S22",
+        "S23",
+        "S24"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S22",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s22-r3",
+          "content_hash": "bb52ec541a284d080e85c71a672146b3cb060b18810feecdbb2a816b797c3bfd"
+        },
+        {
+          "source_id": "S23",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s23-r3",
+          "content_hash": "3ed1a5f8c2fe0aef0c04dbdbf944f0601fa7e7bcfb9a04d6d60a17650950cf91"
+        },
+        {
+          "source_id": "S24",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s24-r3",
+          "content_hash": "a11d0fa86a0afc733e4e5b43a91659707d608ff87109bd4802b19b31c7c4a9b1"
+        }
+      ],
+      "expected_usable_information": [
+        "The sample import was successful once and does not prove all future files are valid."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Grove import pipeline.",
+        "The limiting condition must stay attached."
+      ],
+      "must_not_infer": [
+        "Do not turn a conditional rule into an unconditional one."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S22",
+            "S23"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p08-negative",
+      "q_refs": [
+        "Q-p08-negative"
+      ],
+      "coverage_tags": [
+        "no_answer",
+        "hard_negative"
+      ],
+      "question": "Does the synthetic record prove an unconditional rule outside Grove import pipeline?",
+      "split": "holdout",
+      "source_ids": [
+        "S22",
+        "S23",
+        "S24"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S22",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s22-r3",
+          "content_hash": "bb52ec541a284d080e85c71a672146b3cb060b18810feecdbb2a816b797c3bfd"
+        },
+        {
+          "source_id": "S23",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s23-r3",
+          "content_hash": "3ed1a5f8c2fe0aef0c04dbdbf944f0601fa7e7bcfb9a04d6d60a17650950cf91"
+        },
+        {
+          "source_id": "S24",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s24-r3",
+          "content_hash": "a11d0fa86a0afc733e4e5b43a91659707d608ff87109bd4802b19b31c7c4a9b1"
+        }
+      ],
+      "expected_usable_information": [],
+      "must_preserve_conditions": [
+        "There is no supported unconditional rule outside Grove import pipeline."
+      ],
+      "must_not_infer": [
+        "Do not invent an answer from similar wording.",
+        "Do not convert one observation or exception into a global policy."
+      ],
+      "expected_no_answer": true,
+      "expected_status": "unanswered",
+      "expected_source_relations": [
+        {
+          "kind": "unknown_scope_or_time",
+          "source_ids": [
+            "S22",
+            "S23",
+            "S24"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p08-ordering",
+      "q_refs": [
+        "Q-p08-ordering"
+      ],
+      "coverage_tags": [
+        "ordered_steps"
+      ],
+      "question": "What order is recorded for the Grove import procedure?",
+      "split": "holdout",
+      "source_ids": [
+        "S22",
+        "S23",
+        "S24"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S22",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s22-r3",
+          "content_hash": "bb52ec541a284d080e85c71a672146b3cb060b18810feecdbb2a816b797c3bfd"
+        },
+        {
+          "source_id": "S23",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s23-r3",
+          "content_hash": "3ed1a5f8c2fe0aef0c04dbdbf944f0601fa7e7bcfb9a04d6d60a17650950cf91"
+        },
+        {
+          "source_id": "S24",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s24-r3",
+          "content_hash": "a11d0fa86a0afc733e4e5b43a91659707d608ff87109bd4802b19b31c7c4a9b1"
+        }
+      ],
+      "expected_usable_information": [
+        "The sample import was successful once and does not prove all future files are valid."
+      ],
+      "must_preserve_conditions": [
+        "Preserve the recorded step order.",
+        "Keep the steps within Grove import pipeline."
+      ],
+      "must_not_infer": [
+        "Do not reorder steps or add an automatic reopening step."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S23",
+            "S24"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p08-status",
+      "q_refs": [
+        "Q-p08-status"
+      ],
+      "coverage_tags": [
+        "state",
+        "status"
+      ],
+      "question": "What is the current state of the Grove import record?",
+      "split": "holdout",
+      "source_ids": [
+        "S22",
+        "S23",
+        "S24"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S22",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s22-r3",
+          "content_hash": "bb52ec541a284d080e85c71a672146b3cb060b18810feecdbb2a816b797c3bfd"
+        },
+        {
+          "source_id": "S23",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s23-r3",
+          "content_hash": "3ed1a5f8c2fe0aef0c04dbdbf944f0601fa7e7bcfb9a04d6d60a17650950cf91"
+        },
+        {
+          "source_id": "S24",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s24-r3",
+          "content_hash": "a11d0fa86a0afc733e4e5b43a91659707d608ff87109bd4802b19b31c7c4a9b1"
+        }
+      ],
+      "expected_usable_information": [
+        "The synthetic record is current for Grove import."
+      ],
+      "must_preserve_conditions": [
+        "Status is scoped to Grove import pipeline."
+      ],
+      "must_not_infer": [
+        "Do not claim completion, adoption, or general availability unless the source states it."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "same_source",
+          "source_ids": [
+            "S24"
+          ]
+        }
+      ],
+      "severity": "medium"
+    },
+    {
+      "id": "M6-p08-duplicate",
+      "q_refs": [
+        "Q-p08-duplicate"
+      ],
+      "coverage_tags": [
+        "duplicate_sources",
+        "controlled_synthesis"
+      ],
+      "question": "How should repeated Grove import wording be represented?",
+      "split": "holdout",
+      "source_ids": [
+        "S22",
+        "S23",
+        "S24"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S22",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s22-r3",
+          "content_hash": "bb52ec541a284d080e85c71a672146b3cb060b18810feecdbb2a816b797c3bfd"
+        },
+        {
+          "source_id": "S23",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s23-r3",
+          "content_hash": "3ed1a5f8c2fe0aef0c04dbdbf944f0601fa7e7bcfb9a04d6d60a17650950cf91"
+        },
+        {
+          "source_id": "S24",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s24-r3",
+          "content_hash": "a11d0fa86a0afc733e4e5b43a91659707d608ff87109bd4802b19b31c7c4a9b1"
+        }
+      ],
+      "expected_usable_information": [
+        "Only validated rows enter the Grove import; rejected rows remain in the quarantine report.",
+        "Represent repeated support once and retain the source links."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Grove import pipeline.",
+        "Keep the limiting condition and provenance."
+      ],
+      "must_not_infer": [
+        "Do not count repeated wording as independent decisions.",
+        "Do not merge a different scope into this project."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "duplicate",
+          "source_ids": [
+            "S22",
+            "S24"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p09-support",
+      "q_refs": [
+        "Q-p09-support"
+      ],
+      "coverage_tags": [
+        "scope",
+        "condition",
+        "supported"
+      ],
+      "question": "What durable Helios search guidance is supported for Helios search index?",
+      "split": "holdout",
+      "source_ids": [
+        "S25",
+        "S26",
+        "S27"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S25",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s25-r3",
+          "content_hash": "3a76c3f1d285fa51918cae35823f7bd483eac57d96ce5d8fc97d1ba50fdee083"
+        },
+        {
+          "source_id": "S26",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s26-r3",
+          "content_hash": "e3a78beedfcd61524430755979c0b46fbffb0e6143bc16257786078ccf0451c0"
+        },
+        {
+          "source_id": "S27",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s27-r3",
+          "content_hash": "b9ec8e5cdf89b83a0a0d68fc1dc14d3e50b9a7d51c7bc4c974fed728da5cb1f6"
+        }
+      ],
+      "expected_usable_information": [
+        "Index rebuilds run after a snapshot and publish only after checksum verification.",
+        "The answer must remain scoped to the named project."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Helios search index.",
+        "Conditions and exceptions remain attached to the decision."
+      ],
+      "must_not_infer": [
+        "Do not broaden the guidance to another project or environment.",
+        "Do not turn an observation into an adopted decision."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S25",
+            "S26"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p09-conditions",
+      "q_refs": [
+        "Q-p09-conditions"
+      ],
+      "coverage_tags": [
+        "condition",
+        "exception"
+      ],
+      "question": "What condition or exception limits the Helios search guidance?",
+      "split": "holdout",
+      "source_ids": [
+        "S25",
+        "S26",
+        "S27"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S25",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s25-r3",
+          "content_hash": "3a76c3f1d285fa51918cae35823f7bd483eac57d96ce5d8fc97d1ba50fdee083"
+        },
+        {
+          "source_id": "S26",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s26-r3",
+          "content_hash": "e3a78beedfcd61524430755979c0b46fbffb0e6143bc16257786078ccf0451c0"
+        },
+        {
+          "source_id": "S27",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s27-r3",
+          "content_hash": "b9ec8e5cdf89b83a0a0d68fc1dc14d3e50b9a7d51c7bc4c974fed728da5cb1f6"
+        }
+      ],
+      "expected_usable_information": [
+        "A checksum mismatch means the index is not ready; do not claim search completeness."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Helios search index.",
+        "The limiting condition must stay attached."
+      ],
+      "must_not_infer": [
+        "Do not turn a conditional rule into an unconditional one."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S25",
+            "S26"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p09-negative",
+      "q_refs": [
+        "Q-p09-negative"
+      ],
+      "coverage_tags": [
+        "no_answer",
+        "hard_negative"
+      ],
+      "question": "Does the synthetic record prove an unconditional rule outside Helios search index?",
+      "split": "holdout",
+      "source_ids": [
+        "S25",
+        "S26",
+        "S27"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S25",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s25-r3",
+          "content_hash": "3a76c3f1d285fa51918cae35823f7bd483eac57d96ce5d8fc97d1ba50fdee083"
+        },
+        {
+          "source_id": "S26",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s26-r3",
+          "content_hash": "e3a78beedfcd61524430755979c0b46fbffb0e6143bc16257786078ccf0451c0"
+        },
+        {
+          "source_id": "S27",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s27-r3",
+          "content_hash": "b9ec8e5cdf89b83a0a0d68fc1dc14d3e50b9a7d51c7bc4c974fed728da5cb1f6"
+        }
+      ],
+      "expected_usable_information": [],
+      "must_preserve_conditions": [
+        "There is no supported unconditional rule outside Helios search index."
+      ],
+      "must_not_infer": [
+        "Do not invent an answer from similar wording.",
+        "Do not convert one observation or exception into a global policy."
+      ],
+      "expected_no_answer": true,
+      "expected_status": "unanswered",
+      "expected_source_relations": [
+        {
+          "kind": "unknown_scope_or_time",
+          "source_ids": [
+            "S25",
+            "S26",
+            "S27"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p09-ordering",
+      "q_refs": [
+        "Q-p09-ordering"
+      ],
+      "coverage_tags": [
+        "ordered_steps"
+      ],
+      "question": "What order is recorded for the Helios search procedure?",
+      "split": "holdout",
+      "source_ids": [
+        "S25",
+        "S26",
+        "S27"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S25",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s25-r3",
+          "content_hash": "3a76c3f1d285fa51918cae35823f7bd483eac57d96ce5d8fc97d1ba50fdee083"
+        },
+        {
+          "source_id": "S26",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s26-r3",
+          "content_hash": "e3a78beedfcd61524430755979c0b46fbffb0e6143bc16257786078ccf0451c0"
+        },
+        {
+          "source_id": "S27",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s27-r3",
+          "content_hash": "b9ec8e5cdf89b83a0a0d68fc1dc14d3e50b9a7d51c7bc4c974fed728da5cb1f6"
+        }
+      ],
+      "expected_usable_information": [
+        "A checksum mismatch means the index is not ready; do not claim search completeness."
+      ],
+      "must_preserve_conditions": [
+        "Preserve the recorded step order.",
+        "Keep the steps within Helios search index."
+      ],
+      "must_not_infer": [
+        "Do not reorder steps or add an automatic reopening step."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S26",
+            "S27"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p09-status",
+      "q_refs": [
+        "Q-p09-status"
+      ],
+      "coverage_tags": [
+        "state",
+        "status"
+      ],
+      "question": "What is the current state of the Helios search record?",
+      "split": "holdout",
+      "source_ids": [
+        "S25",
+        "S26",
+        "S27"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S25",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s25-r3",
+          "content_hash": "3a76c3f1d285fa51918cae35823f7bd483eac57d96ce5d8fc97d1ba50fdee083"
+        },
+        {
+          "source_id": "S26",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s26-r3",
+          "content_hash": "e3a78beedfcd61524430755979c0b46fbffb0e6143bc16257786078ccf0451c0"
+        },
+        {
+          "source_id": "S27",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s27-r3",
+          "content_hash": "b9ec8e5cdf89b83a0a0d68fc1dc14d3e50b9a7d51c7bc4c974fed728da5cb1f6"
+        }
+      ],
+      "expected_usable_information": [
+        "The synthetic record is current for Helios search."
+      ],
+      "must_preserve_conditions": [
+        "Status is scoped to Helios search index."
+      ],
+      "must_not_infer": [
+        "Do not claim completion, adoption, or general availability unless the source states it."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "same_source",
+          "source_ids": [
+            "S27"
+          ]
+        }
+      ],
+      "severity": "medium"
+    },
+    {
+      "id": "M6-p09-duplicate",
+      "q_refs": [
+        "Q-p09-duplicate"
+      ],
+      "coverage_tags": [
+        "duplicate_sources",
+        "controlled_synthesis"
+      ],
+      "question": "How should repeated Helios search wording be represented?",
+      "split": "holdout",
+      "source_ids": [
+        "S25",
+        "S26",
+        "S27"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S25",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s25-r3",
+          "content_hash": "3a76c3f1d285fa51918cae35823f7bd483eac57d96ce5d8fc97d1ba50fdee083"
+        },
+        {
+          "source_id": "S26",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s26-r3",
+          "content_hash": "e3a78beedfcd61524430755979c0b46fbffb0e6143bc16257786078ccf0451c0"
+        },
+        {
+          "source_id": "S27",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s27-r3",
+          "content_hash": "b9ec8e5cdf89b83a0a0d68fc1dc14d3e50b9a7d51c7bc4c974fed728da5cb1f6"
+        }
+      ],
+      "expected_usable_information": [
+        "Index rebuilds run after a snapshot and publish only after checksum verification.",
+        "Represent repeated support once and retain the source links."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Helios search index.",
+        "Keep the limiting condition and provenance."
+      ],
+      "must_not_infer": [
+        "Do not count repeated wording as independent decisions.",
+        "Do not merge a different scope into this project."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "duplicate",
+          "source_ids": [
+            "S25",
+            "S27"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p10-support",
+      "q_refs": [
+        "Q-p10-support"
+      ],
+      "coverage_tags": [
+        "scope",
+        "condition",
+        "supported"
+      ],
+      "question": "What durable Iris mobile guidance is supported for Iris mobile release?",
+      "split": "holdout",
+      "source_ids": [
+        "S28",
+        "S29",
+        "S30"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S28",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s28-r3",
+          "content_hash": "234ea911a5ecb243f36e6fd008005ad546d05e1ee0075241bf24748d5f28e57a"
+        },
+        {
+          "source_id": "S29",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s29-r3",
+          "content_hash": "5dbf82ea0ba028afdfca10fbe1761d1b09ad1163572017f550f970d2efab0885"
+        },
+        {
+          "source_id": "S30",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s30-r3",
+          "content_hash": "1d64e308a2fd379f8fde4b217a1058e92abf69868fa5127c40f7a592755471c7"
+        }
+      ],
+      "expected_usable_information": [
+        "The mobile release is in staged observation and is not yet a general-availability launch.",
+        "The answer must remain scoped to the named project."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Iris mobile release.",
+        "Conditions and exceptions remain attached to the decision."
+      ],
+      "must_not_infer": [
+        "Do not broaden the guidance to another project or environment.",
+        "Do not turn an observation into an adopted decision."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S28",
+            "S29"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p10-conditions",
+      "q_refs": [
+        "Q-p10-conditions"
+      ],
+      "coverage_tags": [
+        "condition",
+        "exception"
+      ],
+      "question": "What condition or exception limits the Iris mobile guidance?",
+      "split": "holdout",
+      "source_ids": [
+        "S28",
+        "S29",
+        "S30"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S28",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s28-r3",
+          "content_hash": "234ea911a5ecb243f36e6fd008005ad546d05e1ee0075241bf24748d5f28e57a"
+        },
+        {
+          "source_id": "S29",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s29-r3",
+          "content_hash": "5dbf82ea0ba028afdfca10fbe1761d1b09ad1163572017f550f970d2efab0885"
+        },
+        {
+          "source_id": "S30",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s30-r3",
+          "content_hash": "1d64e308a2fd379f8fde4b217a1058e92abf69868fa5127c40f7a592755471c7"
+        }
+      ],
+      "expected_usable_information": [
+        "Crash-free observation is required before expansion; a single good session is insufficient."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Iris mobile release.",
+        "The limiting condition must stay attached."
+      ],
+      "must_not_infer": [
+        "Do not turn a conditional rule into an unconditional one."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S28",
+            "S29"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p10-negative",
+      "q_refs": [
+        "Q-p10-negative"
+      ],
+      "coverage_tags": [
+        "no_answer",
+        "hard_negative"
+      ],
+      "question": "Does the synthetic record prove an unconditional rule outside Iris mobile release?",
+      "split": "holdout",
+      "source_ids": [
+        "S28",
+        "S29",
+        "S30"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S28",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s28-r3",
+          "content_hash": "234ea911a5ecb243f36e6fd008005ad546d05e1ee0075241bf24748d5f28e57a"
+        },
+        {
+          "source_id": "S29",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s29-r3",
+          "content_hash": "5dbf82ea0ba028afdfca10fbe1761d1b09ad1163572017f550f970d2efab0885"
+        },
+        {
+          "source_id": "S30",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s30-r3",
+          "content_hash": "1d64e308a2fd379f8fde4b217a1058e92abf69868fa5127c40f7a592755471c7"
+        }
+      ],
+      "expected_usable_information": [],
+      "must_preserve_conditions": [
+        "There is no supported unconditional rule outside Iris mobile release."
+      ],
+      "must_not_infer": [
+        "Do not invent an answer from similar wording.",
+        "Do not convert one observation or exception into a global policy."
+      ],
+      "expected_no_answer": true,
+      "expected_status": "unanswered",
+      "expected_source_relations": [
+        {
+          "kind": "unknown_scope_or_time",
+          "source_ids": [
+            "S28",
+            "S29",
+            "S30"
+          ]
+        }
+      ],
+      "severity": "critical"
+    },
+    {
+      "id": "M6-p10-ordering",
+      "q_refs": [
+        "Q-p10-ordering"
+      ],
+      "coverage_tags": [
+        "ordered_steps"
+      ],
+      "question": "What order is recorded for the Iris mobile procedure?",
+      "split": "holdout",
+      "source_ids": [
+        "S28",
+        "S29",
+        "S30"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S28",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s28-r3",
+          "content_hash": "234ea911a5ecb243f36e6fd008005ad546d05e1ee0075241bf24748d5f28e57a"
+        },
+        {
+          "source_id": "S29",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s29-r3",
+          "content_hash": "5dbf82ea0ba028afdfca10fbe1761d1b09ad1163572017f550f970d2efab0885"
+        },
+        {
+          "source_id": "S30",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s30-r3",
+          "content_hash": "1d64e308a2fd379f8fde4b217a1058e92abf69868fa5127c40f7a592755471c7"
+        }
+      ],
+      "expected_usable_information": [
+        "Crash-free observation is required before expansion; a single good session is insufficient."
+      ],
+      "must_preserve_conditions": [
+        "Preserve the recorded step order.",
+        "Keep the steps within Iris mobile release."
+      ],
+      "must_not_infer": [
+        "Do not reorder steps or add an automatic reopening step."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "supplements",
+          "source_ids": [
+            "S29",
+            "S30"
+          ]
+        }
+      ],
+      "severity": "high"
+    },
+    {
+      "id": "M6-p10-status",
+      "q_refs": [
+        "Q-p10-status"
+      ],
+      "coverage_tags": [
+        "state",
+        "status"
+      ],
+      "question": "What is the current state of the Iris mobile record?",
+      "split": "holdout",
+      "source_ids": [
+        "S28",
+        "S29",
+        "S30"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S28",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s28-r3",
+          "content_hash": "234ea911a5ecb243f36e6fd008005ad546d05e1ee0075241bf24748d5f28e57a"
+        },
+        {
+          "source_id": "S29",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s29-r3",
+          "content_hash": "5dbf82ea0ba028afdfca10fbe1761d1b09ad1163572017f550f970d2efab0885"
+        },
+        {
+          "source_id": "S30",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s30-r3",
+          "content_hash": "1d64e308a2fd379f8fde4b217a1058e92abf69868fa5127c40f7a592755471c7"
+        }
+      ],
+      "expected_usable_information": [
+        "The synthetic record is current for Iris mobile."
+      ],
+      "must_preserve_conditions": [
+        "Status is scoped to Iris mobile release."
+      ],
+      "must_not_infer": [
+        "Do not claim completion, adoption, or general availability unless the source states it."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "same_source",
+          "source_ids": [
+            "S30"
+          ]
+        }
+      ],
+      "severity": "medium"
+    },
+    {
+      "id": "M6-p10-duplicate",
+      "q_refs": [
+        "Q-p10-duplicate"
+      ],
+      "coverage_tags": [
+        "duplicate_sources",
+        "controlled_synthesis"
+      ],
+      "question": "How should repeated Iris mobile wording be represented?",
+      "split": "holdout",
+      "source_ids": [
+        "S28",
+        "S29",
+        "S30"
+      ],
+      "source_fence": [
+        {
+          "source_id": "S28",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s28-r3",
+          "content_hash": "234ea911a5ecb243f36e6fd008005ad546d05e1ee0075241bf24748d5f28e57a"
+        },
+        {
+          "source_id": "S29",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s29-r3",
+          "content_hash": "5dbf82ea0ba028afdfca10fbe1761d1b09ad1163572017f550f970d2efab0885"
+        },
+        {
+          "source_id": "S30",
+          "file_revision": 3,
+          "source_revision_id": "m6-revision-s30-r3",
+          "content_hash": "1d64e308a2fd379f8fde4b217a1058e92abf69868fa5127c40f7a592755471c7"
+        }
+      ],
+      "expected_usable_information": [
+        "The mobile release is in staged observation and is not yet a general-availability launch.",
+        "Represent repeated support once and retain the source links."
+      ],
+      "must_preserve_conditions": [
+        "Scope is Iris mobile release.",
+        "Keep the limiting condition and provenance."
+      ],
+      "must_not_infer": [
+        "Do not count repeated wording as independent decisions.",
+        "Do not merge a different scope into this project."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "available",
+      "expected_source_relations": [
+        {
+          "kind": "duplicate",
+          "source_ids": [
+            "S28",
+            "S30"
+          ]
+        }
+      ],
+      "severity": "high"
+    }
+  ]
+}

@@ -326,44 +326,18 @@ only missing/stale reference-only chunks. Until those jobs complete,
 `search_notes`/`recall` explicitly report semantic degradation and continue
 lexically.
 
-To enable AI memory extraction after first setup, use Admin in this order:
+Automatic v3 memory extraction is disabled in this runtime. Do not enable a
+provider role, start a backfill, or expect note events to admit `memory.*`
+jobs. The retired Admin extraction, generation, overview and initialization
+routes return `410 legacy_automatic_memory_disabled`; this is a deliberate
+protocol boundary, not a compatibility shim. Existing v3 rows, Markdown
+artifacts, ordinary notes, revisions and history remain untouched.
 
-1. choose `local_only` or `remote_allowed` data-send policy;
-2. create the Provider and discover its model list, or manually register the
-   exact provider model ID when discovery is absent/inaccurate;
-3. bind that model to `memory_extraction`;
-4. enable automatic memory; source admission is fixed to `automatic`;
-5. optionally request “处理新增或有变化的笔记” once, then rely on future
-   Markdown create/update/move/restore events.
-
-No note frontmatter, tag, folder, or path convention is required. Enabling the
-Vault-level feature allows eligible ordinary Markdown changes to reach the
-extraction model. Legacy `explicit_only` and `all_notes` settings deserialize
-as aliases for `automatic`; operators do not need to rewrite stored settings or
-edit notes during upgrade.
-
-Successful evaluation publishes one complete current set for its source even
-when `memories` is empty. Later automatic events and default manual runs
-compare the current File ID, normalized content hash, and effective extraction
-profile before sending content, so an unchanged current note costs no
-generation call.
-
-Enable “包含已处理且未变化的笔记” only when intentionally forcing a complete
-re-evaluation despite unchanged recorded configuration, for example after an
-upstream model alias changes behavior without a local revision. It may replace
-the complete current set for an unchanged note and consume the same per-note
-model budget again. A failed forced evaluation does not publish a partial or
-empty replacement.
-
-The one-call contract is
-`{"memories":[{"content":"...","kind":"fact","tags":["..."]}]}`.
-Only the array and each non-empty content value are required; invalid optional
-kind/tag metadata is dropped locally. MCP Vault allocates identifiers and
-derives Vault/File ID/path/revision/content-hash provenance locally. The model
-does not return lifecycle actions, evidence coordinates, confidence,
-importance, or bookkeeping identifiers. A fully validated prepared snapshot
-is atomically materialized as one portable Markdown set after exact source
-hash, pause-state, and set-revision checks. There is no second model phase.
+Use the semantic Admin page for current cards, evidence and Memory Packs. Use
+the raw explicit page or explicit Agent memory calls when the user clearly
+authorizes a durable memory body. If semantic context is unavailable, degrade
+to authorized `search_notes`/`read_note` source retrieval. No live Provider
+request is required for that fallback.
 
 Select the first-class AI service type whenever possible. The Admin form fills
 the current official global API root for DeepSeek, MiMo, Zhipu, Kimi, and

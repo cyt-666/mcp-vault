@@ -69,6 +69,8 @@ pub struct AppConfig {
     pub backup_limits: BackupLimits,
     /// Whether the non-sensitive Prometheus endpoint is exposed.
     pub metrics_enabled: bool,
+    /// Whether durable background workers and periodic reconciliation run.
+    pub workers_enabled: bool,
     /// Optional OTLP HTTP endpoint; disabled when absent.
     pub otlp_endpoint: Option<String>,
 }
@@ -96,6 +98,7 @@ impl Default for AppConfig {
             backup_root: PathBuf::from("./data/backups"),
             backup_limits: BackupLimits::default(),
             metrics_enabled: false,
+            workers_enabled: true,
             otlp_endpoint: None,
         }
     }
@@ -152,6 +155,7 @@ impl AppConfig {
         let backup_root = parse_path(&lookup, "MCP_VAULT_BACKUP_DIR", data_dir.join("backups"))?;
         let backup_limits = parse_backup_limits(&lookup)?;
         let metrics_enabled = parse_bool(&lookup, "MCP_VAULT_METRICS_ENABLED", false)?;
+        let workers_enabled = parse_bool(&lookup, "MCP_VAULT_WORKERS_ENABLED", true)?;
         let otlp_endpoint = optional_text(&lookup, "MCP_VAULT_OTEL_ENDPOINT")?;
 
         Self {
@@ -171,6 +175,7 @@ impl AppConfig {
             backup_root,
             backup_limits,
             metrics_enabled,
+            workers_enabled,
             otlp_endpoint,
         }
         .validate()
@@ -636,6 +641,7 @@ mod tests {
         assert_eq!(result.log_format, LogFormat::Json);
         assert_eq!(result.shutdown_timeout, Duration::from_secs(30));
         assert_eq!(result.reconciliation_interval, Duration::from_secs(300));
+        assert!(result.workers_enabled);
         assert_eq!(
             result.admin_origins.allowed_origins().collect::<Vec<_>>(),
             vec!["http://127.0.0.1:8081", "http://localhost:8081"]
@@ -695,6 +701,7 @@ mod tests {
             ("MCP_VAULT_BACKUP_MAX_ENTRIES", "100"),
             ("MCP_VAULT_BACKUP_KEEP_COUNT", "2"),
             ("MCP_VAULT_METRICS_ENABLED", "true"),
+            ("MCP_VAULT_WORKERS_ENABLED", "false"),
             (
                 "MCP_VAULT_OTEL_ENDPOINT",
                 "http://otel-collector:4318/v1/traces",
@@ -723,6 +730,7 @@ mod tests {
         assert_eq!(result.backup_limits.max_total_bytes, 2_097_152);
         assert_eq!(result.backup_limits.keep_count, 2);
         assert!(result.metrics_enabled);
+        assert!(!result.workers_enabled);
         assert_eq!(
             result.otlp_endpoint.as_deref(),
             Some("http://otel-collector:4318/v1/traces")

@@ -207,3 +207,7 @@ new object rechecks its current resolved input before publication. Values and
 references never cross Vaults. Rebuild jobs use reference_version=2 to avoid
 reusing older terminal jobs that incorrectly returned a different object's record;
 the projection/profile version remains unchanged, preserving valid vector values.
+
+## Generation streaming
+
+Generation adapters consume bounded SSE streams and return only after the provider-specific terminal event/finish reason and the existing structured JSON/schema validator succeed. The seven OpenAI-compatible Chat presets use Chat SSE; OpenAI Responses and Anthropic Messages use their native event contracts. Embedding and local FastEmbed adapters remain non-streaming. First-event and chunk-idle defaults are 120 seconds; streaming total is bounded at 600 seconds for the eval profile, while an explicit per-call timeout remains authoritative. Missing usage is reported as unknown.

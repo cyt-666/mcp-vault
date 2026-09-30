@@ -1023,6 +1023,19 @@ impl IndexService {
         self.state.index()
     }
 
+    /// Return one note projection only when its revision and content hash
+    /// still match the canonical active file record.
+    pub async fn current_note_projection(
+        &self,
+        context: &VaultContext,
+        file_id: FileId,
+    ) -> Result<Option<NoteSearchRecord>, IndexError> {
+        self.repository()
+            .get_note_for_retrieval(context, file_id)
+            .await
+            .map_err(IndexError::State)
+    }
+
     /// Search indexed notes with a safe FTS query and Vault scope.
     #[allow(clippy::too_many_arguments)]
     pub async fn search_notes(
@@ -3719,16 +3732,18 @@ mod tests {
             .await
             .unwrap();
 
-        let search = service
+        let stale_search = service
             .search_notes(&context, "beta", Some("archive/"), None, None, None, 10, 0)
             .await
             .unwrap();
-        assert_eq!(search.len(), 1);
-        assert_eq!(search[0].path, moved_path);
-        // The snippet still represents the pre-rebuild projection. Keeping its
-        // analyzed revision preserves optimistic-conflict safety.
-        assert_eq!(search[0].revision, second.file.current_revision);
-        assert_ne!(search[0].revision, moved.file.current_revision);
+        assert!(stale_search.is_empty());
+        assert!(
+            service
+                .current_note_projection(&context, second.file.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(
             service
                 .search_notes(
@@ -3746,6 +3761,22 @@ mod tests {
                 .is_empty()
         );
 
+        service.rebuild_vault(&core, &context).await.unwrap();
+        let current_search = service
+            .search_notes(&context, "beta", Some("archive/"), None, None, None, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(current_search.len(), 1);
+        assert_eq!(current_search[0].path, moved_path);
+        assert_eq!(current_search[0].revision, moved.file.current_revision);
+        assert!(
+            service
+                .current_note_projection(&context, second.file.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
         let related = service
             .related_notes(&context, first.file.id, 10, 0)
             .await
@@ -3756,7 +3787,7 @@ mod tests {
             .list_node_notes(&context, "topic:docs", 10, 0)
             .await
             .unwrap();
-        assert!(node_notes.iter().any(|note| note.path == moved_path));
+        assert!(!node_notes.iter().any(|note| note.path == moved_path));
 
         core.delete(
             &context,

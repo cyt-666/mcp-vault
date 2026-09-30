@@ -1,0 +1,540 @@
+
+=== DIRECTORY TREE (max depth 3, source files only) ===
+.DS_Store
+.dockerignore
+.github
+.github/workflows
+.github/workflows/ci.yml
+.github/workflows/release.yml
+.gitignore
+.pnpm-store
+.pnpm-store/v11
+.pnpm-store/v11/files
+.pnpm-store/v11/files/00
+.pnpm-store/v11/files/01
+.pnpm-store/v11/files/02
+.pnpm-store/v11/files/03
+.pnpm-store/v11/files/04
+.pnpm-store/v11/files/05
+.pnpm-store/v11/files/06
+.pnpm-store/v11/files/07
+.pnpm-store/v11/files/08
+.pnpm-store/v11/files/09
+.pnpm-store/v11/files/0a
+.pnpm-store/v11/files/0b
+.pnpm-store/v11/files/0c
+.pnpm-store/v11/files/0d
+.pnpm-store/v11/files/0e
+.pnpm-store/v11/files/0f
+.pnpm-store/v11/files/10
+.pnpm-store/v11/files/11
+.pnpm-store/v11/files/12
+.pnpm-store/v11/files/13
+.pnpm-store/v11/files/14
+.pnpm-store/v11/files/15
+.pnpm-store/v11/files/16
+.pnpm-store/v11/files/17
+.pnpm-store/v11/files/18
+.pnpm-store/v11/files/19
+.pnpm-store/v11/files/1a
+.pnpm-store/v11/files/1b
+.pnpm-store/v11/files/1c
+.pnpm-store/v11/files/1d
+.pnpm-store/v11/files/1e
+.pnpm-store/v11/files/1f
+.pnpm-store/v11/files/20
+.pnpm-store/v11/files/21
+.pnpm-store/v11/files/22
+.pnpm-store/v11/files/23
+.pnpm-store/v11/files/24
+.pnpm-store/v11/files/25
+.pnpm-store/v11/files/26
+.pnpm-store/v11/files/27
+.pnpm-store/v11/files/28
+.pnpm-store/v11/files/29
+.pnpm-store/v11/files/2a
+.pnpm-store/v11/files/2b
+.pnpm-store/v11/files/2c
+.pnpm-store/v11/files/2d
+.pnpm-store/v11/files/2e
+.pnpm-store/v11/files/2f
+.pnpm-store/v11/files/30
+.pnpm-store/v11/files/31
+.pnpm-store/v11/files/32
+.pnpm-store/v11/files/33
+.pnpm-store/v11/files/34
+.pnpm-store/v11/files/35
+.pnpm-store/v11/files/36
+.pnpm-store/v11/files/37
+.pnpm-store/v11/files/38
+.pnpm-store/v11/files/39
+.pnpm-store/v11/files/3a
+.pnpm-store/v11/files/3b
+.pnpm-store/v11/files/3c
+.pnpm-store/v11/files/3d
+.pnpm-store/v11/files/3e
+.pnpm-store/v11/files/3f
+.pnpm-store/v11/files/40
+.pnpm-store/v11/files/41
+.pnpm-store/v11/files/42
+.pnpm-store/v11/files/43
+.pnpm-store/v11/files/44
+.pnpm-store/v11/files/45
+.pnpm-store/v11/files/46
+.pnpm-store/v11/files/47
+.pnpm-store/v11/files/48
+.pnpm-store/v11/files/49
+.pnpm-store/v11/files/4a
+.pnpm-store/v11/files/4b
+.pnpm-store/v11/files/4c
+.pnpm-store/v11/files/4d
+.pnpm-store/v11/files/4e
+.pnpm-store/v11/files/4f
+.pnpm-store/v11/files/50
+.pnpm-store/v11/files/51
+.pnpm-store/v11/files/52
+.pnpm-store/v11/files/53
+.pnpm-store/v11/files/54
+.pnpm-store/v11/files/55
+.pnpm-store/v11/files/56
+.pnpm-store/v11/files/57
+.pnpm-store/v11/files/58
+.pnpm-store/v11/files/59
+.pnpm-store/v11/files/5a
+.pnpm-store/v11/files/5b
+.pnpm-store/v11/files/5c
+.pnpm-store/v11/files/5d
+.pnpm-store/v11/files/5e
+.pnpm-store/v11/files/5f
+.pnpm-store/v11/files/60
+.pnpm-store/v11/files/61
+.pnpm-store/v11/files/62
+.pnpm-store/v11/files/63
+.pnpm-store/v11/files/64
+.pnpm-store/v11/files/65
+.pnpm-store/v11/files/66
+.pnpm-store/v11/files/67
+.pnpm-store/v11/files/68
+.pnpm-store/v11/files/69
+.pnpm-store/v11/files/6a
+.pnpm-store/v11/files/6b
+.pnpm-store/v11/files/6c
+.pnpm-store/v11/files/6d
+.pnpm-store/v11/files/6e
+.pnpm-store/v11/files/6f
+.pnpm-store/v11/files/70
+.pnpm-store/v11/files/71
+.pnpm-store/v11/files/72
+.pnpm-store/v11/files/73
+.pnpm-store/v11/files/74
+.pnpm-store/v11/files/75
+.pnpm-store/v11/files/76
+.pnpm-store/v11/files/77
+.pnpm-store/v11/files/78
+.pnpm-store/v11/files/79
+.pnpm-store/v11/files/7a
+.pnpm-store/v11/files/7b
+.pnpm-store/v11/files/7c
+.pnpm-store/v11/files/7d
+.pnpm-store/v11/files/7e
+.pnpm-store/v11/files/7f
+.pnpm-store/v11/files/80
+.pnpm-store/v11/files/81
+.pnpm-store/v11/files/82
+.pnpm-store/v11/files/83
+.pnpm-store/v11/files/84
+.pnpm-store/v11/files/85
+.pnpm-store/v11/files/86
+.pnpm-store/v11/files/87
+.pnpm-store/v11/files/88
+.pnpm-store/v11/files/89
+.pnpm-store/v11/files/8a
+.pnpm-store/v11/files/8b
+.pnpm-store/v11/files/8c
+.pnpm-store/v11/files/8d
+.pnpm-store/v11/files/8e
+.pnpm-store/v11/files/8f
+.pnpm-store/v11/files/90
+.pnpm-store/v11/files/91
+.pnpm-store/v11/files/92
+.pnpm-store/v11/files/93
+.pnpm-store/v11/files/94
+.pnpm-store/v11/files/95
+.pnpm-store/v11/files/96
+.pnpm-store/v11/files/97
+.pnpm-store/v11/files/98
+.pnpm-store/v11/files/99
+.pnpm-store/v11/files/9a
+.pnpm-store/v11/files/9b
+.pnpm-store/v11/files/9c
+.pnpm-store/v11/files/9d
+.pnpm-store/v11/files/9e
+.pnpm-store/v11/files/9f
+.pnpm-store/v11/files/a0
+.pnpm-store/v11/files/a1
+.pnpm-store/v11/files/a2
+.pnpm-store/v11/files/a3
+.pnpm-store/v11/files/a4
+.pnpm-store/v11/files/a5
+.pnpm-store/v11/files/a6
+.pnpm-store/v11/files/a7
+.pnpm-store/v11/files/a8
+.pnpm-store/v11/files/a9
+.pnpm-store/v11/files/aa
+.pnpm-store/v11/files/ab
+.pnpm-store/v11/files/ac
+.pnpm-store/v11/files/ad
+.pnpm-store/v11/files/ae
+.pnpm-store/v11/files/af
+.pnpm-store/v11/files/b0
+.pnpm-store/v11/files/b1
+.pnpm-store/v11/files/b2
+.pnpm-store/v11/files/b3
+.pnpm-store/v11/files/b4
+.pnpm-store/v11/files/b5
+.pnpm-store/v11/files/b6
+.pnpm-store/v11/files/b7
+.pnpm-store/v11/files/b8
+.pnpm-store/v11/files/b9
+.pnpm-store/v11/files/ba
+.pnpm-store/v11/files/bb
+.pnpm-store/v11/files/bc
+.pnpm-store/v11/files/bd
+
+=== STACK DETECTION (manifest files) ===
+
+--- Cargo.lock ---
+# This file is automatically @generated by Cargo.
+# It is not intended for manual editing.
+version = 4
+
+[[package]]
+name = "adler2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+
+[[package]]
+name = "aead"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d122413f284cf2d62fb1b7db97e02edb8cda96d769b16e443a4f6195e35662b0"
+dependencies = [
+ "crypto-common 0.1.7",
+ "generic-array",
+]
+
+[[package]]
+name = "ahash"
+version = "0.8.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
+dependencies = [
+ "cfg-if",
+ "getrandom 0.3.4",
+ "once_cell",
+ "serde",
+ "version_check",
+ "zerocopy",
+]
+
+[[package]]
+name = "aho-corasick"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "aligned"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee4508988c62edf04abd8d92897fca0c2995d907ce1dfeaf369dac3716a40685"
+dependencies = [
+ "as-slice",
+]
+
+[[package]]
+name = "aligned-vec"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc890384c8602f339876ded803c97ad529f3842aba97f6392b3dba0dd171769b"
+dependencies = [
+ "equator",
+]
+
+[[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
+name = "android_system_properties"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae221649c9976a6f6c56ae1facf410f3ddb33cc661c4b7b61020a912d4237fbc"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "anstream"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[TRUNCATED] Showing first 80 of 5941 lines.
+--- Cargo.toml ---
+[workspace]
+members = [
+    "crates/domain",
+    "crates/vault-core",
+    "crates/storage-fs",
+    "crates/state",
+    "crates/auth",
+    "crates/webdav",
+    "crates/mcp",
+    "crates/indexer",
+    "crates/memory",
+    "crates/providers",
+    "crates/admin-api",
+    "crates/backup",
+    "crates/server",
+]
+default-members = ["crates/server"]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.4"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+axum = "0.8"
+async-trait = "=0.1.92"
+argon2 = "=0.5.3"
+base64 = "=0.22.1"
+bytes = "1"
+comrak = "=0.54.0"
+fastembed = "=5.17.4"
+dav-server = "=0.11.0"
+fs2 = "=0.4.3"
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+hmac = "=0.12.1"
+http = "=1.5.0"
+http-body-util = "0.1"
+mime_guess = "2"
+opentelemetry = "=0.31.0"
+opentelemetry-otlp = { version = "=0.31.0", default-features = false, features = ["trace", "http-proto", "reqwest-client", "reqwest-rustls"] }
+opentelemetry_sdk = { version = "=0.31.0", default-features = false, features = ["trace", "rt-tokio"] }
+percent-encoding = "2"
+rmcp = { version = "=3.0.1", features = ["server"] }
+rsa = { version = "=0.9.10", features = ["sha2"] }
+rust-embed = "8"
+rustix = { version = "=1.1.4", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "json"] }
+subtle = "=2.6.1"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tower = "0.5"
+tempfile = "3"
+tracing = "0.1"
+tracing-opentelemetry = "=0.32.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+rand = "=0.8.7"
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "stream", "rustls-tls", "http2"] }
+regex = "=1.13.1"
+url = "=2.5.8"
+zeroize = "=1.9.0"
+
+# Decisions recorded for later work packages. These are intentionally pinned
+# when their implementation crates start using them.
+chacha20poly1305 = "=0.10.1"
+unicode-normalization = "0.1"
+uuid = { version = "1", features = ["serde", "v7"] }
+sha2 = "=0.10.9"
+tar = "=0.4.45"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+
+
+[TRUNCATED] Showing first 80 of 84 lines.
+--- Makefile ---
+.PHONY: fmt fmt-check lint test frontend-install frontend-lint frontend-test frontend-build docs-check check build docker-build image-sbom image-scan run conformance webdav-litmus e2e migration-check perf-baseline release-check
+
+CARGO ?= cargo
+PNPM ?= pnpm
+PNPM_ENV ?= CI=true PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false
+
+fmt:
+	$(CARGO) fmt --all
+
+fmt-check:
+	$(CARGO) fmt --all --check
+
+lint:
+	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
+
+test: frontend-build
+	$(CARGO) test --workspace --all-features
+
+frontend-install:
+	$(PNPM_ENV) $(PNPM) --dir frontend/admin install --frozen-lockfile
+
+frontend-lint: frontend-install
+	$(PNPM_ENV) $(PNPM) --dir frontend/admin lint
+
+frontend-test: frontend-install
+	$(PNPM_ENV) $(PNPM) --dir frontend/admin test
+
+frontend-build: frontend-install
+	$(PNPM_ENV) $(PNPM) --dir frontend/admin build
+
+docs-check:
+	bash scripts/check-docs.sh
+	$(CARGO) doc --workspace --no-deps
+
+check: fmt-check lint test frontend-lint frontend-test frontend-build docs-check
+
+build: frontend-build
+	$(CARGO) build --workspace --locked
+
+docker-build:
+	docker build --tag mcp-vault:dev .
+
+image-sbom:
+	command -v syft >/dev/null || (echo "syft is required for image-sbom" >&2; exit 1)
+	syft mcp-vault:dev -o spdx-json=sbom-mcp-vault.json
+
+image-scan:
+	command -v trivy >/dev/null || (echo "trivy is required for image-scan" >&2; exit 1)
+	trivy image --severity HIGH,CRITICAL --exit-code 1 mcp-vault:dev
+
+run: frontend-build
+	$(CARGO) run -p mcp-vault-server --bin mcp-vault
+
+conformance:
+	bash scripts/conformance/mcp.sh
+
+webdav-litmus:
+	bash scripts/interop/webdav-litmus.sh
+
+e2e:
+	bash scripts/interop/http-smoke.sh
+
+migration-check:
+	bash scripts/release/check-migrations.sh
+
+perf-baseline:
+	bash scripts/perf/baseline.sh
+
+release-check:
+	bash scripts/release/check-release.sh
+
+
+=== ENTRY POINTS ===
+No common entry points found. Check 'main' or 'scripts.start' in manifest files above.
+
+=== LINTING AND FORMATTING CONFIG ===
+No linting or formatting config files found in project root.
+
+=== ENVIRONMENT VARIABLE TEMPLATES ===
+No .env.example or .env.template found. Identify required environment variables by searching the code and config for environment variable reads.
+
+=== TODO / FIXME / HACK (production code only, test dirs excluded) ===
+None found.
+
+=== GIT RECENT COMMITS (last 20) ===
+e046ceb feat(memory): ship source-preserving memory v3 (0.2.4)
+8f559de fix(memory): prioritize new memories and resume dedup only when needed
+9e585bb feat(memory): automatically adopt and merge duplicate memories on upgrade
+c82a633 make description better
+be30f70 fix: clarify MCP tool guidance and compact default results
+b5d4da0 fix: stabilize retrieval and deployment upgrades for 0.2.3
+6500214 feat: complete memory calibration and admin workflows
+92d9367 feat: simplify memory pipeline and release 0.2.1
+7b49137 feat: harden multilingual and semantic retrieval
+3d9632c Improve MCP tool metadata for model routing
+60acdeb Merge pull request #2 from cyt-666/codex/multi-vault-support
+26d0c22 test: retain WebDAV fixture lifetime
+72dbcf1 Merge pull request #1 from cyt-666/codex/multi-vault-support
+598840e feat: add continuous memory source health
+f6e4f96 feat: add managed multi-vault lifecycle
+1f3e32b fix: normalize HTTP smoke headers
+11d2dec test: pinpoint HTTP smoke failures
+cc61a89 test: report HTTP smoke failure stages
+e70ca21 fix: stabilize GitHub Actions validation
+6fb43c4 feat: add long-lived OAuth refresh support
+
+=== HIGH-CHURN FILES (last 90 days, top 20) ===
+  19 docs/interfaces.md
+  17 docs/deployment-and-operations.md
+  15 docs/data-model.md
+  15 docs/security.md
+  14 crates/admin-api/src/lib.rs
+  14 crates/mcp/src/lib.rs
+  14 docs/admin-and-configuration.md
+  14 docs/product-requirements.md
+  14 frontend/admin/src/App.test.tsx
+  13 crates/server/src/workers.rs
+  13 docs/architecture.md
+  13 frontend/admin/src/pages.tsx
+  12 Cargo.lock
+  12 crates/server/src/lib.rs
+  12 docs/adr/README.md
+  12 docs/memory-system.md
+  12 frontend/admin/src/App.tsx
+  12 docs/exec-plans/active/wp-14-conformance-interoperability-release.md
+  11 README.md
+  11 crates/state/src/pool.rs
+
+=== MONOREPO SIGNALS ===
+No monorepo signals detected.
+
+=== CODE METRICS ===
+Total files scanned: 697
+Total lines of code: 92776
+
+Files by language:
+  Other: 585
+  Rust: 99
+  TypeScript/React: 7
+  TypeScript: 4
+  JavaScript: 1
+  Python: 1
+
+Top 10 largest files:
+data/state/mcp-vault.sqlite3: 8772.0KB
+data/vaults/default/CvX46~Pasted image 20240522101222.png: 2834.0KB
+data/vaults/default/CvX46~Pasted image 20240522101151.png: 2505.8KB
+data/vaults/default/CvX46~Pasted image 20240522100500.png: 1868.6KB
+data/vaults/default/CvX46~Pasted image 20240522101103.png: 1849.8KB
+data/vaults/default/00000~CleanShot 2025-04-08 at 17.10.15@2x.png: 1131.6KB
+data/vaults/default/q-V4s~engine离线升级数据流图.graffle: 814.5KB
+data/vaults/default/q-V4s~engine在线升级数据流图.graffle: 811.7KB
+data/vaults/default/d,2^C~file_protect_flow.graffle: 755.6KB
+data/vaults/default/CvX46~Pasted image 20240403135854.png: 691.6KB
+
+=== CI/CD PIPELINES ===
+CI/CD: GitHub Actions
+
+=== CONTAINERS & ORCHESTRATION ===
+Container: Docker found
+
+=== SECURITY & COMPLIANCE ===
+No security configs detected.
+
+=== PERFORMANCE & TESTING ===
+No performance testing configs detected.
+
+=== SCAN COMPLETE ===

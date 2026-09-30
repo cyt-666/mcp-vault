@@ -1,0 +1,883 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mcp-vault:m6-agent-blind-review-v1",
+  "title": "M6 independent agent blind review record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_status",
+    "candidate_sha256",
+    "review_package_sha256",
+    "human_review",
+    "producer",
+    "reviewer",
+    "gold_reviews",
+    "artifact_scores",
+    "blind_scores",
+    "adjudications",
+    "quality_claim"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "m6-agent-blind-review-v1"
+    },
+    "record_status": {
+      "enum": [
+        "template_only",
+        "pending",
+        "gold_reviewed",
+        "needs_revision",
+        "agent_reviewed",
+        "insufficient_evidence"
+      ]
+    },
+    "candidate_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "review_package_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "human_review": {
+      "const": false
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "identity"
+      ],
+      "properties": {
+        "role": {
+          "const": "candidate_producer"
+        },
+        "identity": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "reviewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "identity",
+        "model_version",
+        "independent_from_producer"
+      ],
+      "properties": {
+        "role": {
+          "const": "independent_agent_reviewer"
+        },
+        "identity": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "independent_from_producer": {
+          "const": true
+        }
+      }
+    },
+    "gold_reviews": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/goldReview"
+      },
+      "minItems": 0,
+      "maxItems": 30
+    },
+    "artifact_scores": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/artifactScore"
+      },
+      "minItems": 0
+    },
+    "blind_scores": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/blindScore"
+      },
+      "minItems": 0,
+      "maxItems": 90
+    },
+    "quality_claim": {
+      "enum": [
+        "not_evaluated",
+        "agent_reviewed",
+        "not_passed"
+      ]
+    },
+    "adjudications": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/adjudication"
+      }
+    },
+    "score_locked_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "gold_locked_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "arm_mapping_revealed_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "path",
+        "line_start",
+        "line_end",
+        "git_blob_oid",
+        "content_sha256"
+      ],
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line_start": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "line_end": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "git_blob_oid": {
+          "type": "string",
+          "minLength": 40
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "goldReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "decision",
+        "field_decisions",
+        "evidence",
+        "risk_notes"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "pattern": "^T-S[0-9]{2}-[0-9]+$"
+        },
+        "decision": {
+          "enum": [
+            "agent_reviewed",
+            "revise_candidate",
+            "insufficient_evidence",
+            "pending"
+          ]
+        },
+        "field_decisions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "query",
+            "usable_information",
+            "must_preserve",
+            "must_not_infer",
+            "status",
+            "relations",
+            "severity",
+            "no_answer_scope"
+          ],
+          "properties": {
+            "query": {
+              "$ref": "#/$defs/fieldDecision"
+            },
+            "usable_information": {
+              "$ref": "#/$defs/fieldDecision"
+            },
+            "must_preserve": {
+              "$ref": "#/$defs/fieldDecision"
+            },
+            "must_not_infer": {
+              "$ref": "#/$defs/fieldDecision"
+            },
+            "status": {
+              "$ref": "#/$defs/fieldDecision"
+            },
+            "relations": {
+              "$ref": "#/$defs/fieldDecision"
+            },
+            "severity": {
+              "$ref": "#/$defs/fieldDecision"
+            },
+            "no_answer_scope": {
+              "$ref": "#/$defs/fieldDecision"
+            }
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          },
+          "minItems": 1
+        },
+        "risk_notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "decision": {
+                "const": "agent_reviewed"
+              }
+            },
+            "required": [
+              "decision"
+            ]
+          },
+          "then": {
+            "properties": {
+              "field_decisions": {
+                "properties": {
+                  "query": {
+                    "$ref": "#/$defs/terminalFieldDecision"
+                  },
+                  "usable_information": {
+                    "$ref": "#/$defs/terminalFieldDecision"
+                  },
+                  "must_preserve": {
+                    "$ref": "#/$defs/terminalFieldDecision"
+                  },
+                  "must_not_infer": {
+                    "$ref": "#/$defs/terminalFieldDecision"
+                  },
+                  "status": {
+                    "$ref": "#/$defs/terminalFieldDecision"
+                  },
+                  "relations": {
+                    "$ref": "#/$defs/terminalFieldDecision"
+                  },
+                  "severity": {
+                    "$ref": "#/$defs/terminalFieldDecision"
+                  },
+                  "no_answer_scope": {
+                    "$ref": "#/$defs/terminalFieldDecision"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "fieldDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision",
+        "rationale"
+      ],
+      "properties": {
+        "decision": {
+          "enum": [
+            "supported",
+            "revise",
+            "insufficient_evidence",
+            "not_applicable"
+          ]
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "blindScore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "blind_output_id",
+        "decision",
+        "fact_claims",
+        "qualifiers",
+        "coverage",
+        "no_answer",
+        "task_result",
+        "evidence"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "pattern": "^T-S[0-9]{2}-[0-9]+$"
+        },
+        "blind_output_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9-]{16,64}$"
+        },
+        "decision": {
+          "enum": [
+            "agent_reviewed",
+            "insufficient_evidence",
+            "pending"
+          ]
+        },
+        "fact_claims": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "output_locator",
+              "support",
+              "evidence"
+            ],
+            "properties": {
+              "output_locator": {
+                "type": "string",
+                "minLength": 1
+              },
+              "support": {
+                "enum": [
+                  "supported",
+                  "unsupported",
+                  "contradicted",
+                  "unverifiable"
+                ]
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/evidence"
+                }
+              }
+            }
+          }
+        },
+        "qualifiers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "gold_item_id",
+              "result",
+              "output_locator"
+            ],
+            "properties": {
+              "gold_item_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "result": {
+                "enum": [
+                  "preserved",
+                  "partial",
+                  "lost",
+                  "unverifiable"
+                ]
+              },
+              "output_locator": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "coverage": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "gold_item_id",
+              "available_in_pack",
+              "used_in_answer"
+            ],
+            "properties": {
+              "gold_item_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "available_in_pack": {
+                "type": "boolean"
+              },
+              "used_in_answer": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "no_answer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "applicable",
+            "gap_acknowledged",
+            "unsupported_current_claim_count"
+          ],
+          "properties": {
+            "applicable": {
+              "type": "boolean"
+            },
+            "gap_acknowledged": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "unsupported_current_claim_count": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "task_result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "critical_constraints",
+            "state",
+            "next_step",
+            "forbidden_inference",
+            "evidence"
+          ],
+          "properties": {
+            "critical_constraints": {
+              "$ref": "#/$defs/taskDimension"
+            },
+            "state": {
+              "$ref": "#/$defs/taskDimension"
+            },
+            "next_step": {
+              "$ref": "#/$defs/taskDimension"
+            },
+            "forbidden_inference": {
+              "$ref": "#/$defs/taskDimension"
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/evidence"
+              }
+            }
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          },
+          "minItems": 1
+        }
+      }
+    },
+    "artifactScore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "blind_output_id",
+        "source_id",
+        "artifact_kind",
+        "result_state",
+        "decision",
+        "fact_claims",
+        "qualifiers",
+        "relations",
+        "evidence"
+      ],
+      "properties": {
+        "blind_output_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9-]{16,64}$"
+        },
+        "source_id": {
+          "type": "string",
+          "pattern": "^S[0-9]{2}$"
+        },
+        "artifact_kind": {
+          "enum": [
+            "observation_set",
+            "card_set",
+            "relation_result",
+            "memory_pack"
+          ]
+        },
+        "result_state": {
+          "enum": [
+            "nonempty",
+            "empty",
+            "not_applicable"
+          ]
+        },
+        "decision": {
+          "enum": [
+            "agent_reviewed",
+            "insufficient_evidence",
+            "pending"
+          ]
+        },
+        "fact_claims": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifactClaim"
+          }
+        },
+        "qualifiers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "gold_item_id",
+              "result"
+            ],
+            "properties": {
+              "gold_item_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "result": {
+                "enum": [
+                  "preserved",
+                  "partial",
+                  "lost",
+                  "unverifiable"
+                ]
+              }
+            }
+          }
+        },
+        "relations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "relation_kind",
+              "result",
+              "evidence"
+            ],
+            "properties": {
+              "relation_kind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "result": {
+                "enum": [
+                  "correct",
+                  "incorrect",
+                  "unsupported",
+                  "unverifiable"
+                ]
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/evidence"
+                }
+              }
+            }
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    },
+    "artifactClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_locator",
+        "support",
+        "evidence"
+      ],
+      "properties": {
+        "output_locator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "support": {
+          "enum": [
+            "supported",
+            "unsupported",
+            "contradicted",
+            "unverifiable"
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    },
+    "taskDimension": {
+      "type": "string",
+      "enum": [
+        "met",
+        "not_met",
+        "insufficient_evidence"
+      ]
+    },
+    "adjudication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "issue_id",
+        "initial_decision",
+        "final_decision",
+        "adjudicator",
+        "rationale",
+        "evidence"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "pattern": "^T-S[0-9]{2}-[0-9]+$"
+        },
+        "issue_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "initial_decision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "final_decision": {
+          "enum": [
+            "resolved_supported",
+            "resolved_revise",
+            "insufficient_evidence"
+          ]
+        },
+        "adjudicator": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "role",
+            "identity",
+            "model_version",
+            "independent_from_producer"
+          ],
+          "properties": {
+            "role": {
+              "const": "independent_agent_adjudicator"
+            },
+            "identity": {
+              "type": "string",
+              "minLength": 1
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "independent_from_producer": {
+              "const": true
+            }
+          }
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          },
+          "minItems": 1
+        }
+      }
+    },
+    "terminalFieldDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision",
+        "rationale"
+      ],
+      "properties": {
+        "decision": {
+          "enum": [
+            "supported",
+            "not_applicable"
+          ]
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "record_status": {
+            "const": "agent_reviewed"
+          }
+        },
+        "required": [
+          "record_status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "gold_reviews": {
+            "minItems": 30,
+            "maxItems": 30
+          },
+          "artifact_scores": {
+            "minItems": 1
+          },
+          "blind_scores": {
+            "minItems": 90,
+            "maxItems": 90
+          },
+          "quality_claim": {
+            "const": "agent_reviewed"
+          },
+          "score_locked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "arm_mapping_revealed_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "score_locked_at",
+          "arm_mapping_revealed_at"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "record_status": {
+            "const": "gold_reviewed"
+          }
+        },
+        "required": [
+          "record_status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "gold_reviews": {
+            "minItems": 30,
+            "maxItems": 30,
+            "items": {
+              "properties": {
+                "decision": {
+                  "const": "agent_reviewed"
+                }
+              },
+              "required": [
+                "decision"
+              ],
+              "allOf": [
+                {
+                  "properties": {
+                    "field_decisions": {
+                      "properties": {
+                        "query": {
+                          "$ref": "#/$defs/terminalFieldDecision"
+                        },
+                        "usable_information": {
+                          "$ref": "#/$defs/terminalFieldDecision"
+                        },
+                        "must_preserve": {
+                          "$ref": "#/$defs/terminalFieldDecision"
+                        },
+                        "must_not_infer": {
+                          "$ref": "#/$defs/terminalFieldDecision"
+                        },
+                        "status": {
+                          "$ref": "#/$defs/terminalFieldDecision"
+                        },
+                        "relations": {
+                          "$ref": "#/$defs/terminalFieldDecision"
+                        },
+                        "severity": {
+                          "$ref": "#/$defs/terminalFieldDecision"
+                        },
+                        "no_answer_scope": {
+                          "$ref": "#/$defs/terminalFieldDecision"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "blind_scores": {
+            "maxItems": 0
+          },
+          "quality_claim": {
+            "const": "not_evaluated"
+          },
+          "gold_locked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "artifact_scores": {
+            "maxItems": 0
+          },
+          "adjudications": {
+            "maxItems": 0
+          }
+        },
+        "required": [
+          "gold_locked_at"
+        ]
+      }
+    }
+  ]
+}

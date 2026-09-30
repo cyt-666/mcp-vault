@@ -652,7 +652,6 @@ note_summary
 topic_enrichment
 embedding_note
 embedding_memory
-rerank
 ```
 
 `embedding_note` powers ordinary-note semantic/hybrid search and the
@@ -664,6 +663,26 @@ lexical note recall remains available when it is unbound.
 Binding or changing it schedules current explicit and note-derived memories
 directly from current projections. This does not invoke extraction or
 canonical writes.
+
+Before saving a binding, the Provider application service requires an enabled
+model and enabled Provider. `embedding_note`/`embedding_memory` require the
+real `embeddings` operation capability. The generation roles
+`memory_extraction`/`memory_overview`/`note_summary`/`topic_enrichment` require
+an adapter that provides structured generation; a missing
+`structured_output` discovery field is treated as unverified native schema
+support, while the generated response still undergoes local schema validation.
+The retired `rerank` binding is retained only for historical State compatibility
+and is not offered in the Admin UI. A rejected binding leaves the current
+binding and its revision unchanged and schedules no embedding jobs. The Admin
+UI relies on this server check rather than maintaining a duplicate capability-
+to-role table.
+
+For Zhipu embeddings, select the first-class `zhipu_glm` service type and keep
+the official API root filled by the console. If discovery does not list the
+embedding model, manually register `embedding-3` with `embeddings: true` and
+dimension `2048`, then bind it to `embedding_memory`; bind `embedding_note` as
+well if ordinary-note semantic search is desired. This registration is model
+metadata, not a live capability test.
 
 The first-release console writes a current-Vault override and displays an
 effective global binding when one exists. Future multi-Vault administration can
@@ -714,23 +733,37 @@ Rebuild actions must state which data is derived and which canonical data will n
 
 ## 13. Memory page
 
-The current v3 page exposes complete original memory units and their source paths, revisions, headings and lines. Explicit units are stored directly and edited with expected revisions. Automatic units are selected from complete source spans; their bodies are never generated or translated. They can be copied into the explicit authoring form. Deleting an automatic unit rewrites the source collection and pauses future extraction for that source, while preserving its other current units. Resume requires the current set revision.
+The default memory page exposes only explicit/raw units for ordinary browsing,
+creation, editing and deletion. They are stored directly and use expected
+revisions. The page contains no extraction, generation, overview,
+initialization, source-resume or automatic-memory controls.
 
-Configure `memory_extraction` for source selection, `embedding_memory` for memory vectors, and optionally `memory_overview` for navigation descriptions. The overview role falls back to the extraction model. Provider policy must allow the configured provider. No model is needed for direct explicit writes or lexical reads.
+Historical v3 automatic units, canonical files and history remain retained but
+are not shown as ordinary memories and are not regenerated. Requests to the
+retired automatic Admin routes return `410 legacy_automatic_memory_disabled`;
+they never perform cleanup or Provider work.
 
-Automatic extraction is disabled on a fresh installation. Enabling it admits future ordinary Markdown events; the action **处理新增或变化的笔记** processes existing sources. An explicit re-evaluation option reprocesses unchanged sources and can incur additional requests. A changed extraction profile also requires fresh evaluation. Requests have a typed 30–1800 second timeout, default 300 seconds, per batch. There are no old source-mode or evidence-limit compatibility fields.
+For bulk cleanup, the page may select current explicit units and submit one
+coordinated request of up to 100 IDs with expected revisions. The confirmation
+contains counts, not memory bodies. Explicit records are removed independently
+and a result lists each ID as deleted, conflicted or failed.
 
-Each invocation selects at most one uncached batch of up to 32 complete candidates within a 60 KiB JSON input bound. The complete source set publishes only after all batches finish. Progress shows processed sources, batch progress, model-output failures and skipped indivisible or sensitive units. An oversized unit remains accessible through ordinary note retrieval. Failed or pending batches do not appear as a completed partial memory set.
+Semantic cards and MemoryPacks are the default contextual memory path. If a card
+or pack is unavailable, disable that read and use authorized `search_notes` /
+`read_note`; never fall back to the retired v3 automatic reader. Provider policy
+does not change this boundary. No model is needed for direct explicit writes or
+lexical reads.
 
-The generation panel uses `GET/POST /memory/generation` for status and `run`, `pause`, `resume`. Pausing preserves checkpoints and stops new source/overview dispatches and publication; source invalidation still applies immediately. Resuming admits current-source backfill and derived overview work. The overview panel distinguishes generated navigation from current original evidence and provides full-unit reads and paginated source navigation. Reads use deterministic entries if a cache is missing or stale.
+The semantic status/card/pack controls are the supported contextual memory
+operations. Semantic read failures must degrade to authorized source retrieval
+rather than v3 automatic memory.
 
 Vector coverage is independent: missing current vectors can be rebuilt without selecting sources again or editing memory bodies. Normal reads fall back to lexical evidence on provider failure. Vector similarity does not prove that a source answers a question.
 
-Existing databases require controlled v3 initialization before memory reads/writes. Admin initialization is preferred; the alternative command `mcp-vault initialize-memory --discard-legacy-memory` requires stopped services and exclusive SQLite access, records a resumable manifest and removes all predecessor memory records and managed files. It preserves ordinary notes/attachments, unrelated managed files, history, Vault/account/credential records and Provider/model bindings. It never converts old explicit or generated memories. Once complete, repeating the command cannot delete new v3 memories. A new maintenance pause allows login, WebDAV and MCP checks before **继续生成** starts full backfill.
-
-For the normal service workflow, use the Memory page's **旧记忆一次性初始化** panel. After updating the image, log in, select the target Vault, review the old record/file counts, and click **确认清理旧记忆**. The authenticated, Origin/CSRF-protected request returns `202` and runs through the shared maintenance lease in the background. The page polls the durable phase and progress, shows safe failure codes, and offers **确认继续初始化** only for resumable tasks. A service restart marks queued/running work as interrupted and leaves it for explicit resume; it never starts cleanup automatically. After success, generation remains paused until login, WebDAV and MCP checks pass, then **继续生成** can be clicked.
-
-If canonical initialization is already `ready` but task metadata was interrupted before its terminal update, maintenance recovery repairs only the task metadata and reopens the service in its normal mode. It does not delete files again. A successful initialization task restores the maintenance mode that was active before that task. After confirmation and manifest persistence, initialization does not replay Core intents in the managed legacy `_mcp-vault/memory/` namespace: it terminalizes only journals whose complete operation paths prove they stayed inside that namespace, then retires the manifest files through Vault Core with the original hash guards. A journal that crosses into ordinary/V3 paths, or whose scope cannot be proven, remains unchanged and blocks initialization. Unrelated ordinary-note journals remain available to normal Core recovery and are not changed by memory cleanup. The CLI remains available as an alternative when the Admin listener cannot be used, but it still requires the service to be stopped and SQLite to be exclusively owned.
+Existing databases retain their v3 data and canonical files. The former v3
+initialization/cleanup flow is disabled; it is not run automatically or through
+Admin. Ordinary notes, attachments, history, accounts, credentials and Provider
+configuration remain untouched, and this runtime change performs no cleanup.
 
 The UI has no former organization, merge, legacy migration or synthetic calibration controls. See [Source-preserving memory units](memory-system.md) for canonical formats and authorization.
 
@@ -952,9 +985,9 @@ Accessibility requirements:
 - changing embedding model schedules re-embedding rather than mixing vectors;
 - provider models can be discovered or manually registered and bound to the
   current Vault's model roles;
-- memory extraction defaults disabled, reports readiness blockers, admits
-  future note events only after enablement, and supports an explicit existing-
-  note backfill job;
+- legacy automatic-memory Admin routes return `410
+  legacy_automatic_memory_disabled`, do not enqueue jobs or call Providers,
+  and retain existing rows/files/history;
 - completed jobs never render as 0%, unknown progress remains visibly unknown,
   and index coverage uses current non-managed Markdown as its denominator;
 - provider outage is visible without breaking core readiness;

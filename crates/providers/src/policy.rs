@@ -111,6 +111,12 @@ pub enum ProviderMode {
 pub struct ProviderSettings {
     /// Overall request timeout.
     pub timeout_ms: u64,
+    /// First-byte/event deadline for streaming generation.
+    pub stream_first_event_timeout_ms: u64,
+    /// Inactivity deadline between streaming events.
+    pub stream_idle_timeout_ms: u64,
+    /// Bounded total deadline for streaming generation.
+    pub stream_total_timeout_ms: u64,
     /// TCP/TLS connect timeout.
     pub connect_timeout_ms: u64,
     /// Maximum transient retry count.
@@ -135,6 +141,9 @@ impl Default for ProviderSettings {
     fn default() -> Self {
         Self {
             timeout_ms: 30_000,
+            stream_first_event_timeout_ms: 120_000,
+            stream_idle_timeout_ms: 120_000,
+            stream_total_timeout_ms: 600_000,
             connect_timeout_ms: 5_000,
             max_retries: 2,
             max_concurrency: 4,
@@ -161,6 +170,12 @@ impl ProviderSettings {
     pub fn validate(&self) -> Result<(), ProviderError> {
         if self.timeout_ms == 0
             || self.timeout_ms > 10 * 60 * 1000
+            || self.stream_first_event_timeout_ms == 0
+            || self.stream_idle_timeout_ms == 0
+            || self.stream_total_timeout_ms == 0
+            || self.stream_total_timeout_ms > 30 * 60 * 1000
+            || self.stream_first_event_timeout_ms > self.stream_total_timeout_ms
+            || self.stream_idle_timeout_ms > self.stream_total_timeout_ms
             || self.connect_timeout_ms == 0
             || self.connect_timeout_ms > self.timeout_ms
             || self.max_retries > 8

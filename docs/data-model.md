@@ -796,6 +796,12 @@ All keys, queries and child relationships enforce the Vault boundary. Automatic 
 
 Predecessor tables remain in historical DDL so applied migration checksums remain stable. Only the exclusive offline initializer reads their content-free counts and deletes allow-listed Vault-scoped rows. No runtime memory reader or format parser converts or adopts them. Migration 0028 copies no predecessor memory rows and marks every pre-existing Vault as requiring initialization. The initializer preserves non-memory operational records, ordinary files and revision history; repeat execution after ready cannot clear new units.
 
+Transition note: through M7, this v3 schema and its runtime data remain the
+current model. ADR-0035 and `semantic-memory-contract.md` define the separate
+semantic-memory target namespace; v3 interfaces/data are not evidence for the
+new target. This note does not authorize predecessor cleanup, conversion, or a
+read-path switch.
+
 ## 14. Provider and model configuration
 
 ```sql

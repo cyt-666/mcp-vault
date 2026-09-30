@@ -1,0 +1,1938 @@
+{
+  "schema_version": "m6-agent-blind-review-v1",
+  "record_status": "gold_reviewed",
+  "candidate_sha256": "bdc5f4d0ce3c06a8531b97a1ec5d781eb59095df7195c1e92b962a55fc5ff2c2",
+  "review_package_sha256": "8750f57608e393fc393faea73f21f36fd595b6b7d0150be522f68553e2c1119a",
+  "human_review": false,
+  "quality_claim": "not_evaluated",
+  "producer": {
+    "role": "candidate_producer",
+    "identity": "gpt-6-luna"
+  },
+  "reviewer": {
+    "role": "independent_agent_reviewer",
+    "identity": "primary Codex agent",
+    "model_version": "not specified",
+    "independent_from_producer": true
+  },
+  "gold_reviews": [
+    {
+      "task_id": "T-S16-1",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 明确限定 ADR-0015 的历史分类和无 marker 条件；S16/ADR-0015 L10-11 记录分类被 ADR-0026 取代，S17/ADR-0016 L3-9 提供相应历史范围。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0015 当时为 marker-free admission 设定窄的 personal/temporal 自动物化类别；ADR-0026 后来取代该分类。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0015 当时为 marker-free admission 设定窄的 personal/temporal 自动物化类别；ADR-0026 后来取代该分类。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0015 当时为 marker-free admission 设定窄的 personal/temporal 自动物化类别；ADR-0026 后来取代该分类。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0015 当时为 marker-free admission 设定窄的 personal/temporal 自动物化类别；ADR-0026 后来取代该分类。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 high：若把 ADR-0015 历史窄分类当现行规则，会误导自动记忆分类；ADR-0026 已取代该分类。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S16",
+          "path": "docs/adr/0015-vault-level-automatic-memory-requires-no-note-markers.md",
+          "line_start": 29,
+          "line_end": 48,
+          "git_blob_oid": "8cf902e61afe0eba7aabd5767a1fb755c7c8e85c",
+          "content_sha256": "4a25ea5436e2042e11778c927649b3c05faafbfa68355d231767529f4fed4b4c"
+        },
+        {
+          "source_id": "S17",
+          "path": "docs/adr/0016-use-codex-style-two-phase-memory.md",
+          "line_start": 3,
+          "line_end": 9,
+          "git_blob_oid": "064b2d135106a5412d6fa706d4c2f296bb2015e1",
+          "content_sha256": "03240f67dfc6b1b3881d50829627b9cca11236bc299c298db342c936989905a0"
+        },
+        {
+          "source_id": "S16",
+          "path": "docs/adr/0015-vault-level-automatic-memory-requires-no-note-markers.md",
+          "line_start": 10,
+          "line_end": 11,
+          "git_blob_oid": "8cf902e61afe0eba7aabd5767a1fb755c7c8e85c",
+          "content_sha256": "4a25ea5436e2042e11778c927649b3c05faafbfa68355d231767529f4fed4b4c"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。",
+        "历史 ADR 结论不可表述为 current runtime 事实。"
+      ]
+    },
+    {
+      "task_id": "T-S16-2",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 同时询问 marker 是否保留和 ADR-0016 supersede 的范围；S16/ADR-0015 L5-11 与 S17/ADR-0016 L3-9 支持 marker-free、direct promotion 范围及 S17→S16 方向。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0015 取消 per-note marker；ADR-0016 只取代 direct automatic promotion，marker-free Vault admission 与 exact evidence 继续保留。关系方向为 ADR-0016（S17）→ ADR-0015（S16）。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0015 取消 per-note marker；ADR-0016 只取代 direct automatic promotion，marker-free Vault admission 与 exact evidence 继续保留。关系方向为 ADR-0016（S17）→ ADR-0015（S16）。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0015 取消 per-note marker；ADR-0016 只取代 direct automatic promotion，marker-free Vault admission 与 exact evidence 继续保留。关系方向为 ADR-0016（S17）→ ADR-0015（S16）。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0015 取消 per-note marker；ADR-0016 只取代 direct automatic promotion，marker-free Vault admission 与 exact evidence 继续保留。关系方向为 ADR-0016（S17）→ ADR-0015（S16）。"
+        },
+        "relations": {
+          "decision": "supported",
+          "rationale": "ADR-0015 取消 per-note marker；ADR-0016 只取代 direct automatic promotion，marker-free Vault admission 与 exact evidence 继续保留。关系方向为 ADR-0016（S17）→ ADR-0015（S16）。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：混淆 marker-free admission 与 direct-promotion supersession 范围，会错误改变 ADR-0015/0016 的规则关系。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S16",
+          "path": "docs/adr/0015-vault-level-automatic-memory-requires-no-note-markers.md",
+          "line_start": 5,
+          "line_end": 11,
+          "git_blob_oid": "8cf902e61afe0eba7aabd5767a1fb755c7c8e85c",
+          "content_sha256": "4a25ea5436e2042e11778c927649b3c05faafbfa68355d231767529f4fed4b4c"
+        },
+        {
+          "source_id": "S17",
+          "path": "docs/adr/0016-use-codex-style-two-phase-memory.md",
+          "line_start": 3,
+          "line_end": 9,
+          "git_blob_oid": "064b2d135106a5412d6fa706d4c2f296bb2015e1",
+          "content_sha256": "03240f67dfc6b1b3881d50829627b9cca11236bc299c298db342c936989905a0"
+        },
+        {
+          "source_id": "S16",
+          "path": "docs/adr/0015-vault-level-automatic-memory-requires-no-note-markers.md",
+          "line_start": 3,
+          "line_end": 9,
+          "git_blob_oid": "8cf902e61afe0eba7aabd5767a1fb755c7c8e85c",
+          "content_sha256": "4a25ea5436e2042e11778c927649b3c05faafbfa68355d231767529f4fed4b4c"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。",
+        "历史 ADR 结论不可表述为 current runtime 事实。"
+      ]
+    },
+    {
+      "task_id": "T-S17-1",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 询问 ADR-0016 的两阶段；S17/ADR-0016 L39-58 支持阶段内容，L3-13 限定这是旧架构。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0016 的历史 Phase 1 产生 sourced raw-memory inputs，Phase 2 为 global consolidation；ADR-0026 后来取代该架构。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0016 的历史 Phase 1 产生 sourced raw-memory inputs，Phase 2 为 global consolidation；ADR-0026 后来取代该架构。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0016 的历史 Phase 1 产生 sourced raw-memory inputs，Phase 2 为 global consolidation；ADR-0026 后来取代该架构。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0016 的历史 Phase 1 产生 sourced raw-memory inputs，Phase 2 为 global consolidation；ADR-0026 后来取代该架构。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 high：若把旧 Phase 1/2 global 架构当现行实现，会误导当前 ownership/extraction/deletion/retrieval 设计。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S17",
+          "path": "docs/adr/0016-use-codex-style-two-phase-memory.md",
+          "line_start": 3,
+          "line_end": 13,
+          "git_blob_oid": "064b2d135106a5412d6fa706d4c2f296bb2015e1",
+          "content_sha256": "03240f67dfc6b1b3881d50829627b9cca11236bc299c298db342c936989905a0"
+        },
+        {
+          "source_id": "S17",
+          "path": "docs/adr/0016-use-codex-style-two-phase-memory.md",
+          "line_start": 39,
+          "line_end": 58,
+          "git_blob_oid": "064b2d135106a5412d6fa706d4c2f296bb2015e1",
+          "content_sha256": "03240f67dfc6b1b3881d50829627b9cca11236bc299c298db342c936989905a0"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。",
+        "历史 ADR 结论不可表述为 current runtime 事实。"
+      ]
+    },
+    {
+      "task_id": "T-S17-2",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "完整措辞询问当前性与 ADR-0016 自身状态；S17/ADR-0016 L3、L8 明示当前架构被 ADR-0026 supersede，L11-13 是 ADR-0017 的 prerelease 注。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0016 L3/L8 明示当前 ownership/extraction/deletion/retrieval 架构被 ADR-0026 supersede；L11–13 是关于 ADR-0017 取代 prerelease 段落的旧注，不代表当前 two-phase 架构仍生效。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0016 L3/L8 明示当前 ownership/extraction/deletion/retrieval 架构被 ADR-0026 supersede；L11–13 是关于 ADR-0017 取代 prerelease 段落的旧注，不代表当前 two-phase 架构仍生效。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0016 L3/L8 明示当前 ownership/extraction/deletion/retrieval 架构被 ADR-0026 supersede；L11–13 是关于 ADR-0017 取代 prerelease 段落的旧注，不代表当前 two-phase 架构仍生效。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0016 L3/L8 明示当前 ownership/extraction/deletion/retrieval 架构被 ADR-0026 supersede；L11–13 是关于 ADR-0017 取代 prerelease 段落的旧注，不代表当前 two-phase 架构仍生效。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：把更早 ADR-0017 prerelease 注当成当前有效，会遮蔽 ADR-0026 明示的架构 supersession。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S17",
+          "path": "docs/adr/0016-use-codex-style-two-phase-memory.md",
+          "line_start": 3,
+          "line_end": 13,
+          "git_blob_oid": "064b2d135106a5412d6fa706d4c2f296bb2015e1",
+          "content_sha256": "03240f67dfc6b1b3881d50829627b9cca11236bc299c298db342c936989905a0"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。",
+        "历史 ADR 结论不可表述为 current runtime 事实。"
+      ]
+    },
+    {
+      "task_id": "T-S18-1",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 明确限定 superseded ADR-0022 的 source-health 历史；S18/ADR-0022 L1-7 与 L24-41 支持状态和历史行为。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "历史 ADR-0022 对失去最后来源的 memory 标记 stale/source_unavailable 并移出 normal recall；ADR-0026 后来取代该 source-health 行为。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "历史 ADR-0022 对失去最后来源的 memory 标记 stale/source_unavailable 并移出 normal recall；ADR-0026 后来取代该 source-health 行为。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：历史 ADR-0022 对失去最后来源的 memory 标记 stale/source_unavailable 并移出 normal recall；ADR-0026 后来取代该 source-health 行为。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "历史 ADR-0022 对失去最后来源的 memory 标记 stale/source_unavailable 并移出 normal recall；ADR-0026 后来取代该 source-health 行为。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 high：把 ADR-0022 旧 stale/source_unavailable 行为当成当前策略，会错误描述来源失效后的 recall 行为。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S18",
+          "path": "docs/adr/0022-continuous-exact-memory-source-health.md",
+          "line_start": 1,
+          "line_end": 7,
+          "git_blob_oid": "e7d17d46f5f3a50ea20310495c9f24ba1c07f61f",
+          "content_sha256": "3fff6b508a349b956d5dc3496b73b0715110509e7b1df0f23b0a45ef0a56901b"
+        },
+        {
+          "source_id": "S18",
+          "path": "docs/adr/0022-continuous-exact-memory-source-health.md",
+          "line_start": 24,
+          "line_end": 41,
+          "git_blob_oid": "e7d17d46f5f3a50ea20310495c9f24ba1c07f61f",
+          "content_sha256": "3fff6b508a349b956d5dc3496b73b0715110509e7b1df0f23b0a45ef0a56901b"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。",
+        "历史 ADR 结论不可表述为 current runtime 事实。"
+      ]
+    },
+    {
+      "task_id": "T-S18-2",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 将范围限定为 ADR-0022 的 post-event retry/backoff；S18/ADR-0022 L43-46 说明事件入队，证据包要求审查该 ADR 全文以核对序列缺失。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0022 全文没有 post-event retry/backoff sequence；L43–44 明确 source events 会 enqueue reconciliation。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0022 全文没有 post-event retry/backoff sequence；L43–44 明确 source events 会 enqueue reconciliation。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0022 全文没有 post-event retry/backoff sequence；L43–44 明确 source events 会 enqueue reconciliation。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0022 全文没有 post-event retry/backoff sequence；L43–44 明确 source events 会 enqueue reconciliation。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 high：编造 ADR-0022 未规定的 retry/backoff 会把不存在的重试契约用于 reconciliation 运维。"
+        },
+        "no_answer_scope": {
+          "decision": "supported",
+          "rationale": "主代理明确该题无答案，并要求逐来源检查 1..EOF。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S18",
+          "path": "docs/adr/0022-continuous-exact-memory-source-health.md",
+          "line_start": 43,
+          "line_end": 46,
+          "git_blob_oid": "e7d17d46f5f3a50ea20310495c9f24ba1c07f61f",
+          "content_sha256": "3fff6b508a349b956d5dc3496b73b0715110509e7b1df0f23b0a45ef0a56901b"
+        },
+        {
+          "source_id": "S18",
+          "path": "docs/adr/0022-continuous-exact-memory-source-health.md",
+          "line_start": 101,
+          "line_end": 103,
+          "git_blob_oid": "e7d17d46f5f3a50ea20310495c9f24ba1c07f61f",
+          "content_sha256": "3fff6b508a349b956d5dc3496b73b0715110509e7b1df0f23b0a45ef0a56901b"
+        },
+        {
+          "source_id": "S18",
+          "path": "docs/adr/0022-continuous-exact-memory-source-health.md",
+          "line_start": 1,
+          "line_end": 103,
+          "git_blob_oid": "e7d17d46f5f3a50ea20310495c9f24ba1c07f61f",
+          "content_sha256": "3fff6b508a349b956d5dc3496b73b0715110509e7b1df0f23b0a45ef0a56901b"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。"
+      ]
+    },
+    {
+      "task_id": "T-S19-1",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 只问 canonical language 和 search alias 角色；S19/ADR-0023 的来源语言与 alias 规则支持该范围，不要求推断部署效果。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0023 保留主要来源语言作为 canonical 信息；aliases 是派生的 search-only metadata。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0023 保留主要来源语言作为 canonical 信息；aliases 是派生的 search-only metadata。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0023 保留主要来源语言作为 canonical 信息；aliases 是派生的 search-only metadata。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0023 保留主要来源语言作为 canonical 信息；aliases 是派生的 search-only metadata。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 high：把派生 search alias 当 canonical 内容或 provenance，会混淆来源语言和搜索元数据。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S19",
+          "path": "docs/adr/0023-preserve-source-language-and-persist-multilingual-retrieval-metadata.md",
+          "line_start": 26,
+          "line_end": 45,
+          "git_blob_oid": "f7f82abbf94a4365ce8a54f0f41e3c5c16e13a6d",
+          "content_sha256": "10b5beda5638bee9de42b7231be7ab9c75c26dfc065f7e0f1860735353e67e08"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。"
+      ]
+    },
+    {
+      "task_id": "T-S19-2",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 明确要求 ADR-0023 的 post-rollout production evaluation；S19 全文范围是所列来源，判断对象不外推到其他 ADR。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0023 全文提供问题、设计与预期后果，没有 rollout 后真实召回效果的证据。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0023 全文提供问题、设计与预期后果，没有 rollout 后真实召回效果的证据。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0023 全文提供问题、设计与预期后果，没有 rollout 后真实召回效果的证据。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0023 全文提供问题、设计与预期后果，没有 rollout 后真实召回效果的证据。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：编造上线后召回改善数据会制造 ADR-0023 未提供的经验结论。"
+        },
+        "no_answer_scope": {
+          "decision": "supported",
+          "rationale": "主代理明确该题无答案，并要求逐来源检查 1..EOF。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S19",
+          "path": "docs/adr/0023-preserve-source-language-and-persist-multilingual-retrieval-metadata.md",
+          "line_start": 9,
+          "line_end": 16,
+          "git_blob_oid": "f7f82abbf94a4365ce8a54f0f41e3c5c16e13a6d",
+          "content_sha256": "10b5beda5638bee9de42b7231be7ab9c75c26dfc065f7e0f1860735353e67e08"
+        },
+        {
+          "source_id": "S19",
+          "path": "docs/adr/0023-preserve-source-language-and-persist-multilingual-retrieval-metadata.md",
+          "line_start": 38,
+          "line_end": 42,
+          "git_blob_oid": "f7f82abbf94a4365ce8a54f0f41e3c5c16e13a6d",
+          "content_sha256": "10b5beda5638bee9de42b7231be7ab9c75c26dfc065f7e0f1860735353e67e08"
+        },
+        {
+          "source_id": "S19",
+          "path": "docs/adr/0023-preserve-source-language-and-persist-multilingual-retrieval-metadata.md",
+          "line_start": 63,
+          "line_end": 76,
+          "git_blob_oid": "f7f82abbf94a4365ce8a54f0f41e3c5c16e13a6d",
+          "content_sha256": "10b5beda5638bee9de42b7231be7ab9c75c26dfc065f7e0f1860735353e67e08"
+        },
+        {
+          "source_id": "S19",
+          "path": "docs/adr/0023-preserve-source-language-and-persist-multilingual-retrieval-metadata.md",
+          "line_start": 1,
+          "line_end": 99,
+          "git_blob_oid": "f7f82abbf94a4365ce8a54f0f41e3c5c16e13a6d",
+          "content_sha256": "10b5beda5638bee9de42b7231be7ab9c75c26dfc065f7e0f1860735353e67e08"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。"
+      ]
+    },
+    {
+      "task_id": "T-S20-1",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 限定 note-vector 输入边界；S20/ADR-0024 对 UTF-8 byte/字符边界和 adapter 拆分行为的规则覆盖问题范围。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0024 以 UTF-8 bytes 和有效字符边界限制输入；adapter 不得把超限逻辑输入隐式拆成多次计费请求。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0024 以 UTF-8 bytes 和有效字符边界限制输入；adapter 不得把超限逻辑输入隐式拆成多次计费请求。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0024 以 UTF-8 bytes 和有效字符边界限制输入；adapter 不得把超限逻辑输入隐式拆成多次计费请求。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0024 以 UTF-8 bytes 和有效字符边界限制输入；adapter 不得把超限逻辑输入隐式拆成多次计费请求。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 high：错报 UTF-8 输入边界或 adapter 行为会误导调用上限，并可能造成额外计费拆分。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S20",
+          "path": "docs/adr/0024-bound-embedding-inputs-and-rebuild-current-model-vectors.md",
+          "line_start": 24,
+          "line_end": 43,
+          "git_blob_oid": "bb6f8e5b54d8a3c29c604c7c32bc3ce741ad13b3",
+          "content_sha256": "71fbe1fa6574d1174739a51fe0e6ae597d8385e26878af32a19a7b5c4be69723"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。"
+      ]
+    },
+    {
+      "task_id": "T-S20-2",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 明确要求上线后 field evidence 同时证明故障消除与 recall 未退化；S20/ADR-0024 全文是核对范围。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0024 记录改动前问题与设计，但没有证明上线后故障消除且 recall 未退化的 field evidence。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0024 记录改动前问题与设计，但没有证明上线后故障消除且 recall 未退化的 field evidence。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0024 记录改动前问题与设计，但没有证明上线后故障消除且 recall 未退化的 field evidence。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0024 记录改动前问题与设计，但没有证明上线后故障消除且 recall 未退化的 field evidence。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：把设计说明说成上线后故障及 recall 验证，会造成没有实测依据的可靠性保证。"
+        },
+        "no_answer_scope": {
+          "decision": "supported",
+          "rationale": "主代理明确该题无答案，并要求逐来源检查 1..EOF。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S20",
+          "path": "docs/adr/0024-bound-embedding-inputs-and-rebuild-current-model-vectors.md",
+          "line_start": 9,
+          "line_end": 20,
+          "git_blob_oid": "bb6f8e5b54d8a3c29c604c7c32bc3ce741ad13b3",
+          "content_sha256": "71fbe1fa6574d1174739a51fe0e6ae597d8385e26878af32a19a7b5c4be69723"
+        },
+        {
+          "source_id": "S20",
+          "path": "docs/adr/0024-bound-embedding-inputs-and-rebuild-current-model-vectors.md",
+          "line_start": 24,
+          "line_end": 28,
+          "git_blob_oid": "bb6f8e5b54d8a3c29c604c7c32bc3ce741ad13b3",
+          "content_sha256": "71fbe1fa6574d1174739a51fe0e6ae597d8385e26878af32a19a7b5c4be69723"
+        },
+        {
+          "source_id": "S20",
+          "path": "docs/adr/0024-bound-embedding-inputs-and-rebuild-current-model-vectors.md",
+          "line_start": 56,
+          "line_end": 65,
+          "git_blob_oid": "bb6f8e5b54d8a3c29c604c7c32bc3ce741ad13b3",
+          "content_sha256": "71fbe1fa6574d1174739a51fe0e6ae597d8385e26878af32a19a7b5c4be69723"
+        },
+        {
+          "source_id": "S20",
+          "path": "docs/adr/0024-bound-embedding-inputs-and-rebuild-current-model-vectors.md",
+          "line_start": 1,
+          "line_end": 83,
+          "git_blob_oid": "bb6f8e5b54d8a3c29c604c7c32bc3ce741ad13b3",
+          "content_sha256": "71fbe1fa6574d1174739a51fe0e6ae597d8385e26878af32a19a7b5c4be69723"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。"
+      ]
+    },
+    {
+      "task_id": "T-S21-1",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 询问单 note 多 chunk 的排名影响；S21/ADR-0025 L24-35 支持 bounded pool、当前 chunk 校验和 File ID 聚合，S20 仅作对照。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0025 使用 bounded over-fetch、验证当前 chunk 并按 File ID 聚合；ADR-0024 只作 B 对照上下文。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0025 使用 bounded over-fetch、验证当前 chunk 并按 File ID 聚合；ADR-0024 只作 B 对照上下文。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0025 使用 bounded over-fetch、验证当前 chunk 并按 File ID 聚合；ADR-0024 只作 B 对照上下文。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0025 使用 bounded over-fetch、验证当前 chunk 并按 File ID 聚合；ADR-0024 只作 B 对照上下文。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：遗漏 bounded aggregation/current-chunk 校验会误导长 note 对结果池和排序的影响。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S21",
+          "path": "docs/adr/0025-aggregate-note-vector-chunks-before-ranking.md",
+          "line_start": 24,
+          "line_end": 43,
+          "git_blob_oid": "e004ea2b38a24c0b4bafc405cd1d95d4e10065ef",
+          "content_sha256": "7d5fea2c72c9e5bf30acb464b41f3f821d4caafeedfdb761496a0dda89b493f6"
+        },
+        {
+          "source_id": "S20",
+          "path": "docs/adr/0024-bound-embedding-inputs-and-rebuild-current-model-vectors.md",
+          "line_start": 3,
+          "line_end": 9,
+          "git_blob_oid": "bb6f8e5b54d8a3c29c604c7c32bc3ce741ad13b3",
+          "content_sha256": "71fbe1fa6574d1174739a51fe0e6ae597d8385e26878af32a19a7b5c4be69723"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。"
+      ]
+    },
+    {
+      "task_id": "T-S21-2",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 明确询问 ADR-0025 与 ADR-0024 的关系、负 cosine 及输入上限是否被取代；S21/ADR-0025 L5、L24-35 与 S20/ADR-0024 输入界限共同限定答案。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0025 refines ADR-0024 的 ranking aggregation：丢弃负 cosine；这不取代 ADR-0024 的 UTF-8 input bound。关系方向 S21→S20。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0025 refines ADR-0024 的 ranking aggregation：丢弃负 cosine；这不取代 ADR-0024 的 UTF-8 input bound。关系方向 S21→S20。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0025 refines ADR-0024 的 ranking aggregation：丢弃负 cosine；这不取代 ADR-0024 的 UTF-8 input bound。关系方向 S21→S20。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0025 refines ADR-0024 的 ranking aggregation：丢弃负 cosine；这不取代 ADR-0024 的 UTF-8 input bound。关系方向 S21→S20。"
+        },
+        "relations": {
+          "decision": "supported",
+          "rationale": "ADR-0025 refines ADR-0024 的 ranking aggregation：丢弃负 cosine；这不取代 ADR-0024 的 UTF-8 input bound。关系方向 S21→S20。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：把排名 refinement 误说成移除 ADR-0024 输入上限，或保留负 cosine 排名，会错误描述检索行为。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S21",
+          "path": "docs/adr/0025-aggregate-note-vector-chunks-before-ranking.md",
+          "line_start": 5,
+          "line_end": 5,
+          "git_blob_oid": "e004ea2b38a24c0b4bafc405cd1d95d4e10065ef",
+          "content_sha256": "7d5fea2c72c9e5bf30acb464b41f3f821d4caafeedfdb761496a0dda89b493f6"
+        },
+        {
+          "source_id": "S20",
+          "path": "docs/adr/0024-bound-embedding-inputs-and-rebuild-current-model-vectors.md",
+          "line_start": 24,
+          "line_end": 28,
+          "git_blob_oid": "bb6f8e5b54d8a3c29c604c7c32bc3ce741ad13b3",
+          "content_sha256": "71fbe1fa6574d1174739a51fe0e6ae597d8385e26878af32a19a7b5c4be69723"
+        },
+        {
+          "source_id": "S21",
+          "path": "docs/adr/0025-aggregate-note-vector-chunks-before-ranking.md",
+          "line_start": 24,
+          "line_end": 35,
+          "git_blob_oid": "e004ea2b38a24c0b4bafc405cd1d95d4e10065ef",
+          "content_sha256": "7d5fea2c72c9e5bf30acb464b41f3f821d4caafeedfdb761496a0dda89b493f6"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。"
+      ]
+    },
+    {
+      "task_id": "T-S22-1",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 询问 note-derived 与 explicit ownership 的差别；S22/ADR-0026 的所有权条款直接覆盖两类 memory。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0026 区分 note-derived 的单来源 set 与显式 assertion 的独立所有权。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0026 区分 note-derived 的单来源 set 与显式 assertion 的独立所有权。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0026 区分 note-derived 的单来源 set 与显式 assertion 的独立所有权。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0026 区分 note-derived 的单来源 set 与显式 assertion 的独立所有权。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：混淆 note-derived 与 explicit ownership 会误导来源删除/变更后哪类 memory 应保留。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S22",
+          "path": "docs/adr/0026-current-source-owned-memory-sets.md",
+          "line_start": 38,
+          "line_end": 57,
+          "git_blob_oid": "6d9aa9816fd808ecf5ee7a71fea3a047f8c4ef54",
+          "content_sha256": "2a36b0c8cebf0e80c021ea607eb733901fbb1ce0e69677b472ca77fbff234afd"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。"
+      ]
+    },
+    {
+      "task_id": "T-S22-2",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 明确限定 ADR-0026 对 forgotten memory 在 offline backup 中的保留期和恢复保证；S22/ADR-0026 全文是核查范围。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0026 全文区分 forget、Core history/audit 与 offline backup，但没有保证备份保留期或恢复流程。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0026 全文区分 forget、Core history/audit 与 offline backup，但没有保证备份保留期或恢复流程。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0026 全文区分 forget、Core history/audit 与 offline backup，但没有保证备份保留期或恢复流程。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0026 全文区分 forget、Core history/audit 与 offline backup，但没有保证备份保留期或恢复流程。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 critical：虚构 forget 后备份保留期或 restore guarantee，会使操作者依赖没有承诺的恢复路径。"
+        },
+        "no_answer_scope": {
+          "decision": "supported",
+          "rationale": "主代理明确该题无答案，并要求逐来源检查 1..EOF。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S22",
+          "path": "docs/adr/0026-current-source-owned-memory-sets.md",
+          "line_start": 51,
+          "line_end": 57,
+          "git_blob_oid": "6d9aa9816fd808ecf5ee7a71fea3a047f8c4ef54",
+          "content_sha256": "2a36b0c8cebf0e80c021ea607eb733901fbb1ce0e69677b472ca77fbff234afd"
+        },
+        {
+          "source_id": "S22",
+          "path": "docs/adr/0026-current-source-owned-memory-sets.md",
+          "line_start": 137,
+          "line_end": 143,
+          "git_blob_oid": "6d9aa9816fd808ecf5ee7a71fea3a047f8c4ef54",
+          "content_sha256": "2a36b0c8cebf0e80c021ea607eb733901fbb1ce0e69677b472ca77fbff234afd"
+        },
+        {
+          "source_id": "S22",
+          "path": "docs/adr/0026-current-source-owned-memory-sets.md",
+          "line_start": 1,
+          "line_end": 202,
+          "git_blob_oid": "6d9aa9816fd808ecf5ee7a71fea3a047f8c4ef54",
+          "content_sha256": "2a36b0c8cebf0e80c021ea607eb733901fbb1ce0e69677b472ca77fbff234afd"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。"
+      ]
+    },
+    {
+      "task_id": "T-S23-1",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 要求解释 ADR-0028 如何修订 ADR-0027 gate 及 bundled evaluation 的当前角色；S24/ADR-0028 amendment 声明和 S23/ADR-0027 原 gate 两端都列入 source_ids。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0027 的旧 automatic gate 被 ADR-0028 修订为 bundled evaluation diagnostic-only；source eligibility、permissions 与 vector validity 仍适用。关系方向 S24→S23。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0027 的旧 automatic gate 被 ADR-0028 修订为 bundled evaluation diagnostic-only；source eligibility、permissions 与 vector validity 仍适用。关系方向 S24→S23。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0027 的旧 automatic gate 被 ADR-0028 修订为 bundled evaluation diagnostic-only；source eligibility、permissions 与 vector validity 仍适用。关系方向 S24→S23。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0027 的旧 automatic gate 被 ADR-0028 修订为 bundled evaluation diagnostic-only；source eligibility、permissions 与 vector validity 仍适用。关系方向 S24→S23。"
+        },
+        "relations": {
+          "decision": "supported",
+          "rationale": "ADR-0027 的旧 automatic gate 被 ADR-0028 修订为 bundled evaluation diagnostic-only；source eligibility、permissions 与 vector validity 仍适用。关系方向 S24→S23。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：错误描述 gate 修订会把诊断误作生产前置条件，或忽略仍须遵守的 source/permission/vector 约束。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 5,
+          "line_end": 5,
+          "git_blob_oid": "895bc109af9d69ca4da8bb6ab17d785a66ed8240",
+          "content_sha256": "61078371607c13b97d395cc95996ca3821a8e57982605d1a36f0c417b1fb3ba2"
+        },
+        {
+          "source_id": "S23",
+          "path": "docs/adr/0027-bounded-automatic-retrieval-calibration.md",
+          "line_start": 9,
+          "line_end": 16,
+          "git_blob_oid": "58a06463c2cffe11462e5e996ab612c5f32491db",
+          "content_sha256": "e1a568e4ed2a53397e67c9be2993a89feffa1f0e2fbe70af0702dea2c574d55c"
+        },
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 10,
+          "line_end": 15,
+          "git_blob_oid": "895bc109af9d69ca4da8bb6ab17d785a66ed8240",
+          "content_sha256": "61078371607c13b97d395cc95996ca3821a8e57982605d1a36f0c417b1fb3ba2"
+        },
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 34,
+          "line_end": 42,
+          "git_blob_oid": "895bc109af9d69ca4da8bb6ab17d785a66ed8240",
+          "content_sha256": "61078371607c13b97d395cc95996ca3821a8e57982605d1a36f0c417b1fb3ba2"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。"
+      ]
+    },
+    {
+      "task_id": "T-S23-2",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 明确限制在 ADR-0028 修订前的 ADR-0027 历史 amendment；S23/ADR-0027 与 S22/ADR-0026 是题目允许的两个来源。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0027→ADR-0026 的历史 amendment 指定合并 no-answer holdout gate；这不代表 ADR-0028 后的现行策略。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0027→ADR-0026 的历史 amendment 指定合并 no-answer holdout gate；这不代表 ADR-0028 后的现行策略。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0027→ADR-0026 的历史 amendment 指定合并 no-answer holdout gate；这不代表 ADR-0028 后的现行策略。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0027→ADR-0026 的历史 amendment 指定合并 no-answer holdout gate；这不代表 ADR-0028 后的现行策略。"
+        },
+        "relations": {
+          "decision": "supported",
+          "rationale": "ADR-0027→ADR-0026 的历史 amendment 指定合并 no-answer holdout gate；这不代表 ADR-0028 后的现行策略。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：把 ADR-0027 历史 gate 当 ADR-0028 后的现行策略，会错误阻止 semantic admission。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S23",
+          "path": "docs/adr/0027-bounded-automatic-retrieval-calibration.md",
+          "line_start": 5,
+          "line_end": 5,
+          "git_blob_oid": "58a06463c2cffe11462e5e996ab612c5f32491db",
+          "content_sha256": "e1a568e4ed2a53397e67c9be2993a89feffa1f0e2fbe70af0702dea2c574d55c"
+        },
+        {
+          "source_id": "S22",
+          "path": "docs/adr/0026-current-source-owned-memory-sets.md",
+          "line_start": 114,
+          "line_end": 124,
+          "git_blob_oid": "6d9aa9816fd808ecf5ee7a71fea3a047f8c4ef54",
+          "content_sha256": "2a36b0c8cebf0e80c021ea607eb733901fbb1ce0e69677b472ca77fbff234afd"
+        },
+        {
+          "source_id": "S23",
+          "path": "docs/adr/0027-bounded-automatic-retrieval-calibration.md",
+          "line_start": 9,
+          "line_end": 16,
+          "git_blob_oid": "58a06463c2cffe11462e5e996ab612c5f32491db",
+          "content_sha256": "e1a568e4ed2a53397e67c9be2993a89feffa1f0e2fbe70af0702dea2c574d55c"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。",
+        "历史 ADR 结论不可表述为 current runtime 事实。"
+      ]
+    },
+    {
+      "task_id": "T-S24-1",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 明确询问 ADR-0028 当前 amendment、bundled evaluation 角色及 model chunk grouping；S24/ADR-0028 L10-15、L34-42 覆盖这些子问。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0028 将 bundled evaluation 定义为诊断用途；L34–42 撤销 model grouping，当前使用 rule-only chunking。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0028 将 bundled evaluation 定义为诊断用途；L34–42 撤销 model grouping，当前使用 rule-only chunking。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0028 将 bundled evaluation 定义为诊断用途；L34–42 撤销 model grouping，当前使用 rule-only chunking。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0028 将 bundled evaluation 定义为诊断用途；L34–42 撤销 model grouping，当前使用 rule-only chunking。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：声称 model grouping 仍可用于当前 chunking，会误导生产调用和已撤回的 ingestion 流程。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 10,
+          "line_end": 15,
+          "git_blob_oid": "895bc109af9d69ca4da8bb6ab17d785a66ed8240",
+          "content_sha256": "61078371607c13b97d395cc95996ca3821a8e57982605d1a36f0c417b1fb3ba2"
+        },
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 34,
+          "line_end": 42,
+          "git_blob_oid": "895bc109af9d69ca4da8bb6ab17d785a66ed8240",
+          "content_sha256": "61078371607c13b97d395cc95996ca3821a8e57982605d1a36f0c417b1fb3ba2"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。"
+      ]
+    },
+    {
+      "task_id": "T-S24-2",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 只问 ADR-0028 报告的最高 similarity group 实测 answerability probability；S24 全文为固定核查范围。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0028 全文明确 similarity 不是 answer probability，且未报告最高相似组的实测 answerability rate。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0028 全文明确 similarity 不是 answer probability，且未报告最高相似组的实测 answerability rate。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0028 全文明确 similarity 不是 answer probability，且未报告最高相似组的实测 answerability rate。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0028 全文明确 similarity 不是 answer probability，且未报告最高相似组的实测 answerability rate。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 high：把 similarity 说成 answer probability，会给相关但不回答问题的 passage 添加无依据的可靠性保证。"
+        },
+        "no_answer_scope": {
+          "decision": "supported",
+          "rationale": "主代理明确该题无答案，并要求逐来源检查 1..EOF。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 10,
+          "line_end": 15,
+          "git_blob_oid": "895bc109af9d69ca4da8bb6ab17d785a66ed8240",
+          "content_sha256": "61078371607c13b97d395cc95996ca3821a8e57982605d1a36f0c417b1fb3ba2"
+        },
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 28,
+          "line_end": 32,
+          "git_blob_oid": "895bc109af9d69ca4da8bb6ab17d785a66ed8240",
+          "content_sha256": "61078371607c13b97d395cc95996ca3821a8e57982605d1a36f0c417b1fb3ba2"
+        },
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 1,
+          "line_end": 42,
+          "git_blob_oid": "895bc109af9d69ca4da8bb6ab17d785a66ed8240",
+          "content_sha256": "61078371607c13b97d395cc95996ca3821a8e57982605d1a36f0c417b1fb3ba2"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。"
+      ]
+    },
+    {
+      "task_id": "T-S25-1",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 询问 compact presentation 保留内容和 detail 请求方式；S25/ADR-0029 L9-20 为实质依据，S24 是题中明确的 B-only 干扰上下文。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0029 compact output 保留 next-action/safe-write 信息；17 tools 支持 include_details，get_memory 可 drill-down。S24 仅作 B 干扰上下文。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0029 compact output 保留 next-action/safe-write 信息；17 tools 支持 include_details，get_memory 可 drill-down。S24 仅作 B 干扰上下文。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0029 compact output 保留 next-action/safe-write 信息；17 tools 支持 include_details，get_memory 可 drill-down。S24 仅作 B 干扰上下文。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0029 compact output 保留 next-action/safe-write 信息；17 tools 支持 include_details，get_memory 可 drill-down。S24 仅作 B 干扰上下文。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：漏报 next-action/safe-write 或 detail drill-down，会误导客户端的安全下一步操作。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S25",
+          "path": "docs/adr/0029-actionable-compact-mcp-results.md",
+          "line_start": 9,
+          "line_end": 20,
+          "git_blob_oid": "76c2fed14c749f7b7c02f1be13309e5132e94c73",
+          "content_sha256": "6e9a714ff3d6aa75320435d90bfaf09158f867e29cd9582bddcf65bc69ef1c96"
+        },
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 3,
+          "line_end": 9,
+          "git_blob_oid": "895bc109af9d69ca4da8bb6ab17d785a66ed8240",
+          "content_sha256": "61078371607c13b97d395cc95996ca3821a8e57982605d1a36f0c417b1fb3ba2"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。",
+        "B 对照来源只作干扰/上下文；不得让其支撑主 gold。"
+      ]
+    },
+    {
+      "task_id": "T-S25-2",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 的精确百分比问题限定在 source_ids S25/S24；S25/ADR-0029 与 S24/ADR-0028 全文核查，不能从其他 ADR 外推数值。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0029 与 ADR-0028 全文均未给出精确 response-size reduction percentage；S24 是 B 干扰来源。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0029 与 ADR-0028 全文均未给出精确 response-size reduction percentage；S24 是 B 干扰来源。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0029 与 ADR-0028 全文均未给出精确 response-size reduction percentage；S24 是 B 干扰来源。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0029 与 ADR-0028 全文均未给出精确 response-size reduction percentage；S24 是 B 干扰来源。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：编造 response-size reduction 百分比，会形成来源未支持的成本/体积承诺。"
+        },
+        "no_answer_scope": {
+          "decision": "supported",
+          "rationale": "主代理明确该题无答案，并要求逐来源检查 1..EOF。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S25",
+          "path": "docs/adr/0029-actionable-compact-mcp-results.md",
+          "line_start": 1,
+          "line_end": 28,
+          "git_blob_oid": "76c2fed14c749f7b7c02f1be13309e5132e94c73",
+          "content_sha256": "6e9a714ff3d6aa75320435d90bfaf09158f867e29cd9582bddcf65bc69ef1c96"
+        },
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 1,
+          "line_end": 42,
+          "git_blob_oid": "895bc109af9d69ca4da8bb6ab17d785a66ed8240",
+          "content_sha256": "61078371607c13b97d395cc95996ca3821a8e57982605d1a36f0c417b1fb3ba2"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。",
+        "B 对照来源只作干扰/上下文；不得让其支撑主 gold。"
+      ]
+    },
+    {
+      "task_id": "T-S26-1",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 明确限定 superseded ADR-0030 的历史方案；S26/ADR-0030 L3-11、L15-31 支持范围和规则。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0030 的历史多贡献 formal 规则要求每个来源独立支持完整命题，不含 explicit assertions，也不以主题/传递相似作为支持；当前 runtime 被 ADR-0033 取代。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0030 的历史多贡献 formal 规则要求每个来源独立支持完整命题，不含 explicit assertions，也不以主题/传递相似作为支持；当前 runtime 被 ADR-0033 取代。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0030 的历史多贡献 formal 规则要求每个来源独立支持完整命题，不含 explicit assertions，也不以主题/传递相似作为支持；当前 runtime 被 ADR-0033 取代。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0030 的历史多贡献 formal 规则要求每个来源独立支持完整命题，不含 explicit assertions，也不以主题/传递相似作为支持；当前 runtime 被 ADR-0033 取代。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：把旧多来源 formal 规则当当前规则，会误导来源支持、explicit assertion 与 similarity 的处理边界。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S26",
+          "path": "docs/adr/0030-automatic-memory-equivalence.md",
+          "line_start": 3,
+          "line_end": 11,
+          "git_blob_oid": "fe49abe24b82664092839bd813ed24caeebddcaa",
+          "content_sha256": "70bd0b1c8df8ccc29810f2f2ed2f2257d63a78780401800b2be73c743cb760ef"
+        },
+        {
+          "source_id": "S26",
+          "path": "docs/adr/0030-automatic-memory-equivalence.md",
+          "line_start": 15,
+          "line_end": 31,
+          "git_blob_oid": "fe49abe24b82664092839bd813ed24caeebddcaa",
+          "content_sha256": "70bd0b1c8df8ccc29810f2f2ed2f2257d63a78780401800b2be73c743cb760ef"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。",
+        "历史 ADR 结论不可表述为 current runtime 事实。"
+      ]
+    },
+    {
+      "task_id": "T-S26-2",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 精确询问 ADR-0030 status 所保留的不变量；S26/ADR-0030 L3-11 是直接状态依据。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0030 L5 保留 formal publication/source-support invariants；其当前 runtime 方案后来由 ADR-0033 取代。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0030 L5 保留 formal publication/source-support invariants；其当前 runtime 方案后来由 ADR-0033 取代。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0030 L5 保留 formal publication/source-support invariants；其当前 runtime 方案后来由 ADR-0033 取代。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0030 L5 保留 formal publication/source-support invariants；其当前 runtime 方案后来由 ADR-0033 取代。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：否认 ADR-0030 明示保留的 publication/source-support invariants，会弱化正式发布和来源依据要求。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S26",
+          "path": "docs/adr/0030-automatic-memory-equivalence.md",
+          "line_start": 3,
+          "line_end": 11,
+          "git_blob_oid": "fe49abe24b82664092839bd813ed24caeebddcaa",
+          "content_sha256": "70bd0b1c8df8ccc29810f2f2ed2f2257d63a78780401800b2be73c743cb760ef"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。",
+        "历史 ADR 结论不可表述为 current runtime 事实。"
+      ]
+    },
+    {
+      "task_id": "T-S27-1",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 明确限定 superseded ADR-0031 的历史候选处理规则；S27/ADR-0031 L3-9、L13-24 支持其历史范围。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0031 的历史规则让仅相关、部分重叠或不确定候选保持独立；当前 formal merge 已由 ADR-0033 替代。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0031 的历史规则让仅相关、部分重叠或不确定候选保持独立；当前 formal merge 已由 ADR-0033 替代。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0031 的历史规则让仅相关、部分重叠或不确定候选保持独立；当前 formal merge 已由 ADR-0033 替代。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0031 的历史规则让仅相关、部分重叠或不确定候选保持独立；当前 formal merge 已由 ADR-0033 替代。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：把历史规则中的 partial/uncertain 合并条件当当前规则，会误述现行 formal merge 行为。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S27",
+          "path": "docs/adr/0031-incremental-memory-organization.md",
+          "line_start": 3,
+          "line_end": 9,
+          "git_blob_oid": "d408693309d985ad1598ad73326c23d86630ee85",
+          "content_sha256": "ea0e7449ebea657a7d8ecde54823c0c1474ef3bf2989f2adc60bc04cc1ba438b"
+        },
+        {
+          "source_id": "S27",
+          "path": "docs/adr/0031-incremental-memory-organization.md",
+          "line_start": 13,
+          "line_end": 24,
+          "git_blob_oid": "d408693309d985ad1598ad73326c23d86630ee85",
+          "content_sha256": "ea0e7449ebea657a7d8ecde54823c0c1474ef3bf2989f2adc60bc04cc1ba438b"
+        },
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 3,
+          "line_end": 9,
+          "git_blob_oid": "b60e6f4ad6460bf6d2f6c9bf26b0fc1120657b53",
+          "content_sha256": "c842aa464b888307fbcd67ee92731852906855bb55dc19b9c5d2f2bf4bd48f79"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。",
+        "历史 ADR 结论不可表述为 current runtime 事实。"
+      ]
+    },
+    {
+      "task_id": "T-S27-2",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 对照 ADR-0031、0032、0033；S27 与 S29 的关系/状态行限定了 fixed-body 被替换及 retained boundaries 的时间范围。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0032 替换 ADR-0031 fixed-body merge；ADR-0033 取代 formal merge。旧调度/来源安全/恢复边界只在 ADR-0032 修订时明示保留，不外推为 ADR-0033 下相同调度仍运行。关系方向 S29→S27。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0032 替换 ADR-0031 fixed-body merge；ADR-0033 取代 formal merge。旧调度/来源安全/恢复边界只在 ADR-0032 修订时明示保留，不外推为 ADR-0033 下相同调度仍运行。关系方向 S29→S27。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0032 替换 ADR-0031 fixed-body merge；ADR-0033 取代 formal merge。旧调度/来源安全/恢复边界只在 ADR-0032 修订时明示保留，不外推为 ADR-0033 下相同调度仍运行。关系方向 S29→S27。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0032 替换 ADR-0031 fixed-body merge；ADR-0033 取代 formal merge。旧调度/来源安全/恢复边界只在 ADR-0032 修订时明示保留，不外推为 ADR-0033 下相同调度仍运行。关系方向 S29→S27。"
+        },
+        "relations": {
+          "decision": "supported",
+          "rationale": "ADR-0032 替换 ADR-0031 fixed-body merge；ADR-0033 取代 formal merge。旧调度/来源安全/恢复边界只在 ADR-0032 修订时明示保留，不外推为 ADR-0033 下相同调度仍运行。关系方向 S29→S27。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：把 ADR-0032 时保留的调度机制外推到 ADR-0033，会误报当前恢复/调度实现。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S27",
+          "path": "docs/adr/0031-incremental-memory-organization.md",
+          "line_start": 3,
+          "line_end": 9,
+          "git_blob_oid": "d408693309d985ad1598ad73326c23d86630ee85",
+          "content_sha256": "ea0e7449ebea657a7d8ecde54823c0c1474ef3bf2989f2adc60bc04cc1ba438b"
+        },
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 3,
+          "line_end": 9,
+          "git_blob_oid": "b60e6f4ad6460bf6d2f6c9bf26b0fc1120657b53",
+          "content_sha256": "c842aa464b888307fbcd67ee92731852906855bb55dc19b9c5d2f2bf4bd48f79"
+        },
+        {
+          "source_id": "S27",
+          "path": "docs/adr/0031-incremental-memory-organization.md",
+          "line_start": 3,
+          "line_end": 9,
+          "git_blob_oid": "d408693309d985ad1598ad73326c23d86630ee85",
+          "content_sha256": "ea0e7449ebea657a7d8ecde54823c0c1474ef3bf2989f2adc60bc04cc1ba438b"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。",
+        "历史 ADR 结论不可表述为 current runtime 事实。"
+      ]
+    },
+    {
+      "task_id": "T-S28-1",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 明确询问 superseded ADR-0032 历史 overlap proposal；S28/ADR-0032 L19-37 是规则依据，S29 提供后续 supersession 上下文。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0032 的历史提案要求逐事实来源支持，并保留来源独有步骤、条件、例外、限制与否定；ADR-0033 后来取代 formal-body merge。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0032 的历史提案要求逐事实来源支持，并保留来源独有步骤、条件、例外、限制与否定；ADR-0033 后来取代 formal-body merge。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0032 的历史提案要求逐事实来源支持，并保留来源独有步骤、条件、例外、限制与否定；ADR-0033 后来取代 formal-body merge。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0032 的历史提案要求逐事实来源支持，并保留来源独有步骤、条件、例外、限制与否定；ADR-0033 后来取代 formal-body merge。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：遗漏逐事实来源支持和独有条件/例外，会把无依据细节错误归给多个来源。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S28",
+          "path": "docs/adr/0032-lossless-memory-consolidation.md",
+          "line_start": 19,
+          "line_end": 37,
+          "git_blob_oid": "2960ecaef1e0af6136cf760dd180b5cab9c21440",
+          "content_sha256": "1b7bf389c07dc1906f6b248a6fe1d27e78e334518ef874e711039898d5b1a42b"
+        },
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 3,
+          "line_end": 9,
+          "git_blob_oid": "b60e6f4ad6460bf6d2f6c9bf26b0fc1120657b53",
+          "content_sha256": "c842aa464b888307fbcd67ee92731852906855bb55dc19b9c5d2f2bf4bd48f79"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。",
+        "历史 ADR 结论不可表述为 current runtime 事实。"
+      ]
+    },
+    {
+      "task_id": "T-S28-2",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 限定 ADR-0032 历史 publication rule；S28/ADR-0032 与 S29/ADR-0033 的状态/关系声明共同支持 S29→S28。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0032 的历史规则规定 support/coverage 失败不得发布；ADR-0033→ADR-0032 supersedes。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0032 的历史规则规定 support/coverage 失败不得发布；ADR-0033→ADR-0032 supersedes。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0032 的历史规则规定 support/coverage 失败不得发布；ADR-0033→ADR-0032 supersedes。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0032 的历史规则规定 support/coverage 失败不得发布；ADR-0033→ADR-0032 supersedes。"
+        },
+        "relations": {
+          "decision": "supported",
+          "rationale": "ADR-0032 的历史规则规定 support/coverage 失败不得发布；ADR-0033→ADR-0032 supersedes。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：错误允许 support/coverage 失败后发布，会放行未满足历史发布校验的合并。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S28",
+          "path": "docs/adr/0032-lossless-memory-consolidation.md",
+          "line_start": 3,
+          "line_end": 8,
+          "git_blob_oid": "2960ecaef1e0af6136cf760dd180b5cab9c21440",
+          "content_sha256": "1b7bf389c07dc1906f6b248a6fe1d27e78e334518ef874e711039898d5b1a42b"
+        },
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 3,
+          "line_end": 9,
+          "git_blob_oid": "b60e6f4ad6460bf6d2f6c9bf26b0fc1120657b53",
+          "content_sha256": "c842aa464b888307fbcd67ee92731852906855bb55dc19b9c5d2f2bf4bd48f79"
+        },
+        {
+          "source_id": "S28",
+          "path": "docs/adr/0032-lossless-memory-consolidation.md",
+          "line_start": 3,
+          "line_end": 9,
+          "git_blob_oid": "2960ecaef1e0af6136cf760dd180b5cab9c21440",
+          "content_sha256": "1b7bf389c07dc1906f6b248a6fe1d27e78e334518ef874e711039898d5b1a42b"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。",
+        "历史 ADR 结论不可表述为 current runtime 事实。"
+      ]
+    },
+    {
+      "task_id": "T-S29-1",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 询问可选自动记忆信息及时间/版本/范围/顺序/例外；S29/ADR-0033 L13-25 覆盖这些限制，L3 说明实施状态。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0033 规定完整来源单元与时间/范围/前提/顺序/例外保留；状态为 accepted/in implementation，不代表已部署。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0033 规定完整来源单元与时间/范围/前提/顺序/例外保留；状态为 accepted/in implementation，不代表已部署。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0033 规定完整来源单元与时间/范围/前提/顺序/例外保留；状态为 accepted/in implementation，不代表已部署。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0033 规定完整来源单元与时间/范围/前提/顺序/例外保留；状态为 accepted/in implementation，不代表已部署。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：丢失时间、版本、范围或例外会使自动记忆被错误应用；设计目前仍为实施中。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 1,
+          "line_end": 6,
+          "git_blob_oid": "b60e6f4ad6460bf6d2f6c9bf26b0fc1120657b53",
+          "content_sha256": "c842aa464b888307fbcd67ee92731852906855bb55dc19b9c5d2f2bf4bd48f79"
+        },
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 13,
+          "line_end": 25,
+          "git_blob_oid": "b60e6f4ad6460bf6d2f6c9bf26b0fc1120657b53",
+          "content_sha256": "c842aa464b888307fbcd67ee92731852906855bb55dc19b9c5d2f2bf4bd48f79"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。"
+      ]
+    },
+    {
+      "task_id": "T-S29-2",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 只问返回来源单元的权限；S29/ADR-0033 L23 明确自动单元权限，且状态行显示仍在实施中。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0033 规定自动原文单元需要 memory:read 与 vault:read，explicit memory 按自身权限；状态为实施中。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0033 规定自动原文单元需要 memory:read 与 vault:read，explicit memory 按自身权限；状态为实施中。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0033 规定自动原文单元需要 memory:read 与 vault:read，explicit memory 按自身权限；状态为实施中。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0033 规定自动原文单元需要 memory:read 与 vault:read，explicit memory 按自身权限；状态为实施中。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 critical：错误省略 memory:read 或 vault:read 会导致返回原始来源内容越权。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 1,
+          "line_end": 6,
+          "git_blob_oid": "b60e6f4ad6460bf6d2f6c9bf26b0fc1120657b53",
+          "content_sha256": "c842aa464b888307fbcd67ee92731852906855bb55dc19b9c5d2f2bf4bd48f79"
+        },
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 21,
+          "line_end": 25,
+          "git_blob_oid": "b60e6f4ad6460bf6d2f6c9bf26b0fc1120657b53",
+          "content_sha256": "c842aa464b888307fbcd67ee92731852906855bb55dc19b9c5d2f2bf4bd48f79"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。"
+      ]
+    },
+    {
+      "task_id": "T-S30-1",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "Query 询问 superseded journal terminal state 的证明范围；S30/ADR-0034 L13-19 定义状态，L3 标明接受且实施中。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0034 的 superseded journal 只证明后续独立 create 安全接管物理结果，不代表原操作完成、不改变新 File ID/history；状态为实施中。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0034 的 superseded journal 只证明后续独立 create 安全接管物理结果，不代表原操作完成、不改变新 File ID/history；状态为实施中。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0034 的 superseded journal 只证明后续独立 create 安全接管物理结果，不代表原操作完成、不改变新 File ID/history；状态为实施中。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0034 的 superseded journal 只证明后续独立 create 安全接管物理结果，不代表原操作完成、不改变新 File ID/history；状态为实施中。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 medium：把物理结果接管误报为原 journal 完成，会错误改变 File ID、revision、history 或 outbox 事实。"
+        },
+        "no_answer_scope": {
+          "decision": "not_applicable",
+          "rationale": "该题在候选中为可回答任务，no-answer scope 不适用。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S30",
+          "path": "docs/adr/0034-replayed-create-witness-recovery.md",
+          "line_start": 1,
+          "line_end": 5,
+          "git_blob_oid": "3f8f834e7546027c1b2ec67efff6db73b551aa4e",
+          "content_sha256": "2dc7ab998014c123a55d697ee3c9b5ea32895d5480531162bae740f0e75cfd5e"
+        },
+        {
+          "source_id": "S30",
+          "path": "docs/adr/0034-replayed-create-witness-recovery.md",
+          "line_start": 13,
+          "line_end": 19,
+          "git_blob_oid": "3f8f834e7546027c1b2ec67efff6db73b551aa4e",
+          "content_sha256": "2dc7ab998014c123a55d697ee3c9b5ea32895d5480531162bae740f0e75cfd5e"
+        },
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 3,
+          "line_end": 9,
+          "git_blob_oid": "b60e6f4ad6460bf6d2f6c9bf26b0fc1120657b53",
+          "content_sha256": "c842aa464b888307fbcd67ee92731852906855bb55dc19b9c5d2f2bf4bd48f79"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。",
+        "B 对照来源只作干扰/上下文；不得让其支撑主 gold。"
+      ]
+    },
+    {
+      "task_id": "T-S30-2",
+      "decision": "agent_reviewed",
+      "field_decisions": {
+        "query": {
+          "decision": "supported",
+          "rationale": "“this journal”由 source S30/ADR-0034 的 journal recovery 语境绑定；source S29/ADR-0033 仅为已列对照，问题限于这两份全文中的精确 retry/time window。"
+        },
+        "usable_information": {
+          "decision": "supported",
+          "rationale": "ADR-0034 与 ADR-0033 全文没有该 journal recovery 的精确 retry 次数或时间窗。"
+        },
+        "must_preserve": {
+          "decision": "supported",
+          "rationale": "ADR-0034 与 ADR-0033 全文没有该 journal recovery 的精确 retry 次数或时间窗。"
+        },
+        "must_not_infer": {
+          "decision": "supported",
+          "rationale": "仅记录主代理明确给出的历史/当前边界、否定或证据范围，不将候选摘要扩展到来源未述的结论；具体范围：ADR-0034 与 ADR-0033 全文没有该 journal recovery 的精确 retry 次数或时间窗。"
+        },
+        "status": {
+          "decision": "supported",
+          "rationale": "ADR-0034 与 ADR-0033 全文没有该 journal recovery 的精确 retry 次数或时间窗。"
+        },
+        "relations": {
+          "decision": "not_applicable",
+          "rationale": "主代理给出的结论未标注来源间关系；按指示记为 not_applicable。"
+        },
+        "severity": {
+          "decision": "supported",
+          "rationale": "主代理指定 critical：为该 journal 虚构 retry 次数/时间窗会向运维提供错误的具体恢复承诺。"
+        },
+        "no_answer_scope": {
+          "decision": "supported",
+          "rationale": "主代理明确该题无答案，并要求逐来源检查 1..EOF。"
+        }
+      },
+      "evidence": [
+        {
+          "source_id": "S30",
+          "path": "docs/adr/0034-replayed-create-witness-recovery.md",
+          "line_start": 1,
+          "line_end": 30,
+          "git_blob_oid": "3f8f834e7546027c1b2ec67efff6db73b551aa4e",
+          "content_sha256": "2dc7ab998014c123a55d697ee3c9b5ea32895d5480531162bae740f0e75cfd5e"
+        },
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 1,
+          "line_end": 39,
+          "git_blob_oid": "b60e6f4ad6460bf6d2f6c9bf26b0fc1120657b53",
+          "content_sha256": "c842aa464b888307fbcd67ee92731852906855bb55dc19b9c5d2f2bf4bd48f79"
+        }
+      ],
+      "risk_notes": [
+        "该裁决来自 primary Codex agent 的独立复核并由记录员转写；本记录为 agent-reviewed pre-run gold freeze，不代表 human-reviewed 或 M6 质量通过。",
+        "需复核同项目跨 split 主题重叠；agent review 必须标记 human_review=false。",
+        "B 对照来源只作干扰/上下文；不得让其支撑主 gold。"
+      ]
+    }
+  ],
+  "artifact_scores": [],
+  "blind_scores": [],
+  "adjudications": [],
+  "gold_locked_at": "2026-09-28T04:02:40Z",
+  "score_locked_at": null,
+  "arm_mapping_revealed_at": null
+}

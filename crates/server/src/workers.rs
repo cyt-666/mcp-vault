@@ -22,9 +22,12 @@ use mcp_vault_domain::{
 };
 use mcp_vault_memory::{
     MEMORY_CONTRACT_GENERATION, MemoryError, MemoryService, NoteExtractionOptions,
+    SemanticMemoryService, SemanticSourceEventDisposition,
 };
 use mcp_vault_providers::EmbeddingSourceRef;
-use mcp_vault_state::{JobRecord, JobRepository, OutboxEventRecord, OutboxRepository, StateStore};
+use mcp_vault_state::{
+    EntryType, JobRecord, JobRepository, OutboxEventRecord, OutboxRepository, StateStore,
+};
 use serde_json::{Value, json};
 use tokio::{
     sync::{Notify, Semaphore},
@@ -543,6 +546,23 @@ impl WorkerSupervisor {
             .min(self.config.lease_duration / 3);
         let lease_duration = self.config.lease_duration;
         for job in jobs {
+            // The semantic-card/pack pipeline is the only automatic memory
+            // pipeline admitted by the current runtime.  Keep historical v3
+            // rows and handlers available for storage/recovery diagnostics,
+            // but never execute a queued automatic unit after restart or
+            // rebuild.  Explicit raw memories do not use background jobs.
+            if is_retired_automatic_memory_job(&job.job_type) {
+                info!(
+                    target: "mcp_vault::jobs",
+                    event = "legacy_automatic_memory_job_retired",
+                    job_id = %job.id,
+                    job_type = %job.job_type,
+                    vault_id = ?job.vault_id,
+                    "retired v3 automatic memory job was cancelled before handler execution"
+                );
+                let _ = repository.cancel_claimed(job.id, worker_id).await;
+                continue;
+            }
             if let Some(vault_id) = job.vault_id {
                 let availability = match self.state.vaults().find_by_id(vault_id).await {
                     Ok(Some(vault)) => self.state.vaults().availability(&vault).await,
@@ -1103,7 +1123,6 @@ pub fn outbox_to_job_handler(state: StateStore, _memory: MemoryService) -> Outbo
         let state = state.clone();
         Box::pin(async move {
             let event_id = event.id.to_string();
-            let is_file_event = event.aggregate_type == "file";
             let payload = json!({
                 "event_id": event.id,
                 "event_type": event.event_type,
@@ -1134,9 +1153,35 @@ pub fn outbox_to_job_handler(state: StateStore, _memory: MemoryService) -> Outbo
                     .get("path")
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|path| path_in_reserved_namespace(&vault.reserved_root, path));
-                let is_memory_source_reconcile_event = is_file_event
-                    && is_memory_source_reconcile_event_type(&event.event_type)
-                    && !reserved_path;
+                // Semantic fan-out is admitted only for a current, Vault-scoped
+                // regular FileRecord. The event payload is never authoritative:
+                // malformed IDs, missing/tombstone-free rows, and directory
+                // aggregates must not create semantic work. Tombstones remain
+                // eligible because their FileRecord preserves entry_type/path
+                // for source invalidation after a delete.
+                let semantic_nonmanaged_file = if event.aggregate_type == "file"
+                    && is_semantic_source_reconcile_event_type(&event.event_type)
+                {
+                    match FileId::parse(&event.aggregate_id).ok() {
+                        Some(file_id) => match state.files().get_by_id(&context, file_id).await {
+                            Ok(Some(file)) if file.entry_type == EntryType::File => {
+                                Some(!path_in_reserved_namespace(
+                                    &vault.reserved_root,
+                                    file.path.as_str(),
+                                ))
+                            }
+                            Ok(Some(_)) | Ok(None) => None,
+                            Err(_) => {
+                                return Err(WorkerFailure::retryable(
+                                    "semantic_source_reconcile_file_lookup_failed",
+                                ));
+                            }
+                        },
+                        None => None,
+                    }
+                } else {
+                    None
+                };
                 if event.aggregate_type == "file" && !reserved_path {
                     state
                         .jobs()
@@ -1151,25 +1196,28 @@ pub fn outbox_to_job_handler(state: StateStore, _memory: MemoryService) -> Outbo
                         )
                         .await
                         .map_err(|_| WorkerFailure::retryable("index_job_admission_failed"))?;
-                    if is_memory_source_reconcile_event {
-                        state
-                            .jobs()
-                            .enqueue(
-                                &context,
-                                "memory.source_reconcile",
-                                &format!("vault:{vault_id}:memory-source-reconcile:{event_id}"),
-                                &memory_payload,
-                                0,
-                                10,
-                                now_millis(),
+                }
+                if event.aggregate_type == "file"
+                    && is_semantic_source_reconcile_event_type(&event.event_type)
+                    && semantic_nonmanaged_file == Some(true)
+                {
+                    state
+                        .jobs()
+                        .enqueue(
+                            &context,
+                            "semantic.source_reconcile",
+                            &format!("vault:{vault_id}:semantic-source-reconcile:{event_id}"),
+                            &payload,
+                            0,
+                            10,
+                            now_millis(),
+                        )
+                        .await
+                        .map_err(|_| {
+                            WorkerFailure::retryable(
+                                "semantic_source_reconcile_job_admission_failed",
                             )
-                            .await
-                            .map_err(|_| {
-                                WorkerFailure::retryable(
-                                    "memory_source_reconcile_job_admission_failed",
-                                )
-                            })?;
-                    }
+                        })?;
                 }
                 state
                     .jobs()
@@ -1203,14 +1251,11 @@ pub fn outbox_to_job_handler(state: StateStore, _memory: MemoryService) -> Outbo
     })
 }
 
-fn is_memory_extract_event_type(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        "FileCreated" | "FileUpdated" | "FileRestored" | "external_change"
-    )
+fn is_retired_automatic_memory_job(job_type: &str) -> bool {
+    job_type.starts_with("memory.")
 }
 
-fn is_memory_source_reconcile_event_type(event_type: &str) -> bool {
+fn is_semantic_source_reconcile_event_type(event_type: &str) -> bool {
     matches!(
         event_type,
         "FileCreated"
@@ -1506,10 +1551,9 @@ pub fn vault_initialize_job_handler(
     state: StateStore,
     history_root: std::path::PathBuf,
     core_runtime: mcp_vault_core::VaultCoreRuntime,
-    memory: MemoryService,
+    _memory: MemoryService,
 ) -> JobHandler {
     Arc::new(move |job, shutdown| {
-        let memory = memory.clone();
         let state = state.clone();
         let history_root = history_root.clone();
         let core_runtime = core_runtime.clone();
@@ -1573,7 +1617,6 @@ pub fn vault_initialize_job_handler(
                     "managed Vault initialization could not schedule optional note embeddings"
                 );
             }
-            let _ = memory.ensure_memory_jobs_scheduled(&context).await;
             JobOutcome::Complete
         })
     })
@@ -2788,17 +2831,6 @@ pub fn memory_source_reconcile_job_handler(
                     code: "memory_source_reconcile_file_missing",
                 };
             };
-            let event_type = job
-                .payload
-                .get("event_type")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("external_change")
-                .to_owned();
-            let event_id = job
-                .payload
-                .get("event_id")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|value| EventId::parse(value).ok());
             let vault = match state.vaults().find_by_id(vault_id).await {
                 Ok(Some(vault)) => vault,
                 Ok(None) => {
@@ -2849,58 +2881,6 @@ pub fn memory_source_reconcile_job_handler(
                 }
             };
 
-            if memory.ensure_memory_jobs_scheduled(&context).await.is_err() {
-                return JobOutcome::Retry {
-                    delay: Duration::from_secs(5),
-                    code: "memory_overview_admission_failed",
-                };
-            }
-            let path = job
-                .payload
-                .get("payload")
-                .and_then(|payload| payload.get("path"))
-                .and_then(serde_json::Value::as_str);
-            let should_extract = is_memory_extract_event_type(&event_type)
-                && path.is_some_and(|path| {
-                    path.to_ascii_lowercase().ends_with(".md")
-                        && !path_in_reserved_namespace(&vault.reserved_root, path)
-                });
-            let mut extraction_followup = "not_applicable";
-            if should_extract {
-                let extraction_ready = memory
-                    .extraction_readiness(&context)
-                    .await
-                    .ok()
-                    .is_some_and(|readiness| readiness.ready);
-                if extraction_ready {
-                    let dedup_event = event_id
-                        .map(|id| id.to_string())
-                        .unwrap_or_else(|| job.id.to_string());
-                    if state
-                        .jobs()
-                        .enqueue(
-                            &context,
-                            "memory.extract",
-                            &format!("vault:{vault_id}:memory-extract:{dedup_event}"),
-                            &job.payload,
-                            0,
-                            10,
-                            now_millis(),
-                        )
-                        .await
-                        .is_err()
-                    {
-                        return JobOutcome::Retry {
-                            delay: Duration::from_secs(5),
-                            code: "memory_source_reconcile_extract_admission_failed",
-                        };
-                    }
-                    extraction_followup = "memory.extract";
-                } else {
-                    extraction_followup = "disabled_or_unconfigured";
-                }
-            }
-
             if let Some(worker_id) = job.lease_owner.as_deref()
                 && state
                     .jobs()
@@ -2916,7 +2896,7 @@ pub fn memory_source_reconcile_job_handler(
                             "deleted": report.deleted,
                             "memories_hidden": report.memories_hidden,
                             "memories_removed": report.memories_removed,
-                            "extraction_followup": extraction_followup,
+                            "extraction_followup": "retired_automatic_memory_extraction",
                         }),
                     )
                     .await
@@ -2928,6 +2908,207 @@ pub fn memory_source_reconcile_job_handler(
                 };
             }
             JobOutcome::Complete
+        })
+    })
+}
+
+/// Reconcile one source event for the independent semantic-memory pipeline.
+///
+/// This deliberately does not use the v3 `MemoryService` handler. The
+/// semantic service reloads the authoritative FileRecord and reads through
+/// Vault Core, so event payload paths, hashes, and revisions cannot steer the
+/// operation. A successful `NeedsRebuild` result admits exactly one semantic
+/// extraction job for the source event; the extraction handler is kept
+/// provider-free until the semantic Provider boundary is implemented.
+pub fn semantic_source_reconcile_job_handler(
+    state: StateStore,
+    history_root: std::path::PathBuf,
+    core_runtime: mcp_vault_core::VaultCoreRuntime,
+    semantic: SemanticMemoryService,
+) -> JobHandler {
+    Arc::new(move |job, shutdown| {
+        let state = state.clone();
+        let history_root = history_root.clone();
+        let core_runtime = core_runtime.clone();
+        let semantic = semantic.clone();
+        Box::pin(async move {
+            if shutdown.is_cancelled() {
+                return JobOutcome::Cancelled;
+            }
+            let Some(vault_id) = job.vault_id else {
+                return JobOutcome::Failed {
+                    code: "semantic_source_reconcile_vault_missing",
+                };
+            };
+            let Some(file_id) = job
+                .payload
+                .get("aggregate_id")
+                .and_then(Value::as_str)
+                .and_then(|value| FileId::parse(value).ok())
+            else {
+                return JobOutcome::Failed {
+                    code: "semantic_source_reconcile_file_missing",
+                };
+            };
+            let vault = match state.vaults().find_by_id(vault_id).await {
+                Ok(Some(vault)) => vault,
+                Ok(None) => {
+                    return JobOutcome::Failed {
+                        code: "semantic_source_reconcile_vault_missing",
+                    };
+                }
+                Err(_) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "semantic_source_reconcile_vault_lookup_failed",
+                    };
+                }
+            };
+            let context = match vault.context() {
+                Ok(context) => context,
+                Err(_) => {
+                    return JobOutcome::Failed {
+                        code: "semantic_source_reconcile_context_invalid",
+                    };
+                }
+            };
+            let core = match super::core_for_vault(&state, &history_root, &vault, &core_runtime) {
+                Ok(core) => core,
+                Err(_) => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "semantic_source_reconcile_core_unavailable",
+                    };
+                }
+            };
+
+            let report = tokio::select! {
+                _ = shutdown.cancelled() => return JobOutcome::Cancelled,
+                result = semantic.reconcile_source_event(&context, &core, file_id) => result,
+            };
+            let report = match report {
+                Ok(report) => report,
+                Err(error) if error.retryable() => {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(10),
+                        code: "semantic_source_reconcile_retryable",
+                    };
+                }
+                Err(_) => {
+                    return JobOutcome::Failed {
+                        code: "semantic_source_reconcile_failed",
+                    };
+                }
+            };
+
+            let disposition = semantic_source_event_disposition(report.disposition);
+            let mut extraction_followup = None;
+            if report.disposition == SemanticSourceEventDisposition::NeedsRebuild {
+                let event_id = job
+                    .payload
+                    .get("event_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| job.id.to_string());
+                // Carry only stable event identity into the semantic job. In
+                // particular, no source path/body/hash/revision from the
+                // outbox payload is made part of the extraction contract.
+                let extraction_payload = json!({
+                    "event_id": event_id,
+                    "aggregate_type": "file",
+                    "aggregate_id": file_id.to_string(),
+                });
+                if state
+                    .jobs()
+                    .enqueue(
+                        &context,
+                        "semantic.extract",
+                        &format!("vault:{vault_id}:semantic-extract:{event_id}"),
+                        &extraction_payload,
+                        0,
+                        1,
+                        now_millis(),
+                    )
+                    .await
+                    .is_err()
+                {
+                    return JobOutcome::Retry {
+                        delay: Duration::from_secs(5),
+                        code: "semantic_extract_job_admission_failed",
+                    };
+                }
+                extraction_followup = Some("semantic.extract");
+            }
+
+            if let Some(worker_id) = job.lease_owner.as_deref()
+                && state
+                    .jobs()
+                    .update_progress(
+                        job.id,
+                        worker_id,
+                        &json!({
+                            "phase": "completed",
+                            "disposition": disposition,
+                            "file_id": file_id.to_string(),
+                            "source_id": report.source_id.map(|id| id.to_string()),
+                            "source_revision_id": report.source_revision_id.map(|id| id.to_string()),
+                            "file_revision": report.file_revision.map(|revision| revision.value()),
+                            "source_generation": report.source_generation,
+                            "extraction_followup": extraction_followup,
+                        }),
+                    )
+                    .await
+                    .is_err()
+            {
+                return JobOutcome::Retry {
+                    delay: Duration::from_secs(5),
+                    code: "semantic_source_reconcile_progress_failed",
+                };
+            }
+            JobOutcome::Complete
+        })
+    })
+}
+
+fn semantic_source_event_disposition(disposition: SemanticSourceEventDisposition) -> &'static str {
+    match disposition {
+        SemanticSourceEventDisposition::NavigationOnly => "navigation_only",
+        SemanticSourceEventDisposition::Rebound => "rebound",
+        SemanticSourceEventDisposition::NeedsRebuild => "needs_rebuild",
+        SemanticSourceEventDisposition::Invalidated => "invalidated",
+        SemanticSourceEventDisposition::PolicyDisabled => "policy_disabled",
+        SemanticSourceEventDisposition::PolicyInvalid => "policy_invalid",
+    }
+}
+
+/// Safe placeholder for semantic extraction until the Provider boundary is
+/// explicitly authorized and implemented. It never reads a source, invokes a
+/// Provider, fabricates output, or retries a permanently unauthorized job.
+pub fn semantic_extract_job_handler(state: StateStore) -> JobHandler {
+    Arc::new(move |job, shutdown| {
+        let state = state.clone();
+        Box::pin(async move {
+            if shutdown.is_cancelled() {
+                return JobOutcome::Cancelled;
+            }
+            if let Some(worker_id) = job.lease_owner.as_deref() {
+                let _ = state
+                    .jobs()
+                    .update_progress(
+                        job.id,
+                        worker_id,
+                        &json!({
+                            "phase": "failed",
+                            "error_code": "semantic_provider_not_authorized",
+                            "provider_called": false,
+                            "source_read": false,
+                        }),
+                    )
+                    .await;
+            }
+            JobOutcome::Failed {
+                code: "semantic_provider_not_authorized",
+            }
         })
     })
 }
@@ -3002,9 +3183,6 @@ pub fn embedding_job_handler(
                         _ = shutdown.cancelled() => return JobOutcome::Cancelled,
                         result = index.reembed_note_sources(&context, model_id, &sources) => result,
                     };
-                    if result.is_ok() {
-                        let _ = memory.ensure_memory_jobs_scheduled(&context).await;
-                    }
                     note_embedding_error_outcome(result)
                 }
                 Some("memory_unit") => {
@@ -3012,9 +3190,6 @@ pub fn embedding_job_handler(
                         _ = shutdown.cancelled() => return JobOutcome::Cancelled,
                         result = memory.reembed_sources(&context, model_id, &sources) => result,
                     };
-                    if result.is_ok() {
-                        let _ = memory.ensure_memory_jobs_scheduled(&context).await;
-                    }
                     memory_embedding_error_outcome(result)
                 }
                 _ => JobOutcome::Failed {
@@ -3126,9 +3301,12 @@ mod tests {
         memory_extract_error_outcome, memory_extract_job_handler,
         memory_output_failure_limit_reached, memory_source_reconcile_job_handler,
         note_embedding_error_outcome, now_millis, outbox_event_job_handler, outbox_to_job_handler,
-        redacted_path_hash, vault_initialize_job_handler, wait_for_state,
+        redacted_path_hash, semantic_extract_job_handler, semantic_source_reconcile_job_handler,
+        vault_initialize_job_handler, wait_for_state,
     };
-    use axum::{Json, Router, extract::State as AxumState, routing::post};
+    use axum::{
+        Json, Router, body::Body, extract::State as AxumState, response::Response, routing::post,
+    };
     use mcp_vault_auth::{AuthService, MasterKeyRing};
     use mcp_vault_core::{ManagedVaultService, VaultCore, VaultCoreRuntime};
     use mcp_vault_domain::{
@@ -3137,6 +3315,7 @@ mod tests {
     };
     use mcp_vault_memory::{
         ExtractionPolicy, MEMORY_CONTRACT_GENERATION, MemoryError, MemoryService,
+        SemanticMemoryService,
     };
     use mcp_vault_providers::{
         ModelCapabilities, ModelInput, ModelSettings, ProviderError, ProviderInput, ProviderKind,
@@ -3348,7 +3527,7 @@ mod tests {
                 &format!("vault:{}:initialize", context.id()),
                 &json!({}),
                 20,
-                1,
+                100,
                 0,
             )
             .await
@@ -3414,7 +3593,7 @@ mod tests {
     async fn mixed_extraction_response(
         AxumState(calls): AxumState<Arc<AtomicUsize>>,
         Json(request): Json<Value>,
-    ) -> Json<Value> {
+    ) -> Response {
         let call = calls.fetch_add(1, Ordering::SeqCst);
         let user: Value =
             serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
@@ -3426,12 +3605,10 @@ mod tests {
         }
         .to_string();
         assert_eq!(request["model"], "fake-extraction");
-        Json(json!({
-            "choices": [{
-                "message": {"content": content},
-                "finish_reason": "stop"
-            }]
-        }))
+        let content = serde_json::to_string(&content).unwrap();
+        Response::builder().header("content-type", "text/event-stream").body(Body::from(format!(
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{content}}}}}]}}\n\ndata: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+        ))).unwrap()
     }
     #[test]
     fn memory_extraction_jobs_preserve_redacted_provider_error_codes() {
@@ -3502,7 +3679,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_events_admit_source_reconciliation_before_optional_extraction() {
+    async fn file_events_admit_only_semantic_work_and_never_legacy_automatic_memory() {
         let directory = tempfile::tempdir().unwrap();
         let state = StateStore::connect_and_migrate("sqlite::memory:")
             .await
@@ -3567,11 +3744,7 @@ mod tests {
             .list(&context, None, Some("memory.source_reconcile"), 10, 0)
             .await
             .unwrap();
-        assert_eq!(reconciliation_jobs.len(), 1);
-        assert_eq!(
-            reconciliation_jobs[0].payload["memory_contract_generation"],
-            MEMORY_CONTRACT_GENERATION
-        );
+        assert!(reconciliation_jobs.is_empty());
 
         state
             .settings()
@@ -3611,7 +3784,7 @@ mod tests {
                 .await
                 .unwrap()
                 .len(),
-            2
+            0
         );
         assert_eq!(
             state
@@ -3621,6 +3794,577 @@ mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn retired_automatic_memory_job_admission_is_explicitly_fail_closed() {
+        for job_type in [
+            "memory.extract",
+            "memory.source_reconcile",
+            "memory.overview",
+            "memory.source_resume",
+            "memory.consolidate",
+        ] {
+            assert!(super::is_retired_automatic_memory_job(job_type));
+        }
+        assert!(!super::is_retired_automatic_memory_job(
+            "semantic.source_reconcile"
+        ));
+        assert!(!super::is_retired_automatic_memory_job("semantic.extract"));
+    }
+
+    #[tokio::test]
+    async fn semantic_outbox_chain_is_v3_compatible_and_event_deduplicated() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("semantic-dual-chain").unwrap(),
+            directory.path().join("content"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Semantic dual chain", VaultStatus::Active)
+            .await
+            .unwrap();
+        let core = VaultCore::new(
+            state.clone(),
+            directory.path().join("history"),
+            VaultPathPolicy::default(),
+            StorageOptions::default(),
+            Default::default(),
+        );
+        let file = core
+            .create_bytes(
+                &context,
+                &VaultPath::parse("ordinary.md").unwrap(),
+                b"ordinary source",
+                Actor::system(),
+                SourcePlane::System,
+                None,
+            )
+            .await
+            .unwrap()
+            .file;
+        let event = state
+            .outbox()
+            .find_by_aggregate(&context, &file.id.to_string())
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let handler = outbox_to_job_handler(state.clone(), test_memory_service(&state));
+        handler(event.clone()).await.unwrap();
+        handler(event).await.unwrap();
+
+        assert_eq!(
+            state
+                .jobs()
+                .list(&context, None, Some("index.rebuild"), 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            state
+                .jobs()
+                .list(&context, None, Some("memory.source_reconcile"), 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            0,
+            "legacy v3 source reconciliation is retired"
+        );
+        assert_eq!(
+            state
+                .jobs()
+                .list(&context, None, Some("semantic.source_reconcile"), 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "semantic source reconciliation is deduplicated by outbox event ID"
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_worker_reconciles_current_source_and_fails_closed_without_provider() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("semantic-worker").unwrap(),
+            directory.path().join("content"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Semantic worker", VaultStatus::Active)
+            .await
+            .unwrap();
+        let memory = test_memory_service(&state);
+        memory
+            .set_extraction_policy(
+                &context,
+                ExtractionPolicy {
+                    enabled: true,
+                    ..ExtractionPolicy::default()
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let history_root = directory.path().join("history");
+        let core_runtime = VaultCoreRuntime::default();
+        let core = VaultCore::new(
+            state.clone(),
+            history_root.clone(),
+            VaultPathPolicy::default(),
+            StorageOptions::default(),
+            core_runtime.clone(),
+        );
+        let file = core
+            .create_bytes(
+                &context,
+                &VaultPath::parse("semantic.md").unwrap(),
+                b"semantic source",
+                Actor::system(),
+                SourcePlane::System,
+                None,
+            )
+            .await
+            .unwrap()
+            .file;
+        let event = state
+            .outbox()
+            .find_by_aggregate(&context, &file.id.to_string())
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        outbox_to_job_handler(state.clone(), memory)(event)
+            .await
+            .unwrap();
+        let source_job = state
+            .jobs()
+            .list(&context, None, Some("semantic.source_reconcile"), 10, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let claimed = state
+            .jobs()
+            .claim_batch(
+                "semantic-worker-test",
+                now_millis(),
+                now_millis() + 60_000,
+                100,
+            )
+            .await
+            .unwrap();
+        let source_job = claimed
+            .into_iter()
+            .find(|job| job.id == source_job.id)
+            .unwrap();
+        let source_job_id = source_job.id;
+        assert_eq!(
+            semantic_source_reconcile_job_handler(
+                state.clone(),
+                history_root,
+                core_runtime,
+                SemanticMemoryService::new(state.clone()),
+            )(source_job, Cancellation::default())
+            .await,
+            JobOutcome::Complete
+        );
+        let source_progress = state
+            .jobs()
+            .get(&context, source_job_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .progress
+            .unwrap();
+        assert_eq!(source_progress["disposition"], "needs_rebuild");
+        assert!(!source_progress.to_string().contains("semantic.md"));
+
+        let extraction_job = state
+            .jobs()
+            .list(&context, None, Some("semantic.extract"), 10, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let extraction_job = state
+            .jobs()
+            .claim_batch(
+                "semantic-extract-test",
+                now_millis(),
+                now_millis() + 60_000,
+                100,
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|job| job.id == extraction_job.id)
+            .unwrap();
+        let extraction_job_id = extraction_job.id;
+        assert_eq!(
+            semantic_extract_job_handler(state.clone())(extraction_job, Cancellation::default())
+                .await,
+            JobOutcome::Failed {
+                code: "semantic_provider_not_authorized"
+            }
+        );
+        let extraction_progress = state
+            .jobs()
+            .get(&context, extraction_job_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .progress
+            .unwrap();
+        assert_eq!(
+            extraction_progress["error_code"],
+            "semantic_provider_not_authorized"
+        );
+        assert_eq!(extraction_progress["provider_called"], false);
+        assert_eq!(extraction_progress["source_read"], false);
+        assert!(!extraction_progress.to_string().contains("semantic.md"));
+    }
+
+    #[tokio::test]
+    async fn semantic_admission_requires_authoritative_regular_file_and_keeps_delete_tombstones() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("semantic-admission-authority").unwrap(),
+            directory.path().join("content"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(
+                &context,
+                "Semantic admission authority",
+                VaultStatus::Active,
+            )
+            .await
+            .unwrap();
+        let vault = state
+            .vaults()
+            .find_by_id(context.id())
+            .await
+            .unwrap()
+            .unwrap();
+        let core = VaultCore::new(
+            state.clone(),
+            directory.path().join("history"),
+            VaultPathPolicy::default(),
+            StorageOptions::default(),
+            VaultCoreRuntime::default(),
+        );
+        let handler = test_outbox_handler(&state);
+        let event = |event_id: EventId, file_id: String, path: &str| OutboxEventRecord {
+            id: event_id,
+            vault_id: Some(context.id()),
+            event_type: "FileUpdated".to_owned(),
+            aggregate_type: "file".to_owned(),
+            aggregate_id: file_id,
+            payload: json!({"operation":"replace", "path":path}),
+            created_at: 1,
+            available_at: 1,
+            claimed_by: None,
+            claimed_until: None,
+            delivered_at: None,
+            attempts: 0,
+            last_error: None,
+            dead_lettered: false,
+            dead_letter_reason: None,
+        };
+
+        let directory_entry = core
+            .create_directory(
+                &context,
+                &VaultPath::parse("folder").unwrap(),
+                Actor::system(),
+                SourcePlane::System,
+            )
+            .await
+            .unwrap()
+            .file;
+        handler(event(
+            EventId::new(),
+            directory_entry.id.to_string(),
+            "ordinary.md",
+        ))
+        .await
+        .unwrap();
+        assert!(
+            state
+                .jobs()
+                .list(&context, None, Some("semantic.source_reconcile"), 10, 0)
+                .await
+                .unwrap()
+                .is_empty(),
+            "directory FileRecords must not enter semantic reconciliation"
+        );
+
+        let ordinary = core
+            .create_bytes(
+                &context,
+                &VaultPath::parse("ordinary.md").unwrap(),
+                b"ordinary source",
+                Actor::system(),
+                SourcePlane::System,
+                None,
+            )
+            .await
+            .unwrap()
+            .file;
+        let managed_path = vault
+            .reserved_root
+            .join(&VaultPath::parse("managed.md").unwrap())
+            .unwrap();
+        handler(event(
+            EventId::new(),
+            ordinary.id.to_string(),
+            managed_path.as_str(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            state
+                .jobs()
+                .list(&context, None, Some("semantic.source_reconcile"), 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the authoritative ordinary File must override a managed payload path"
+        );
+
+        let managed = core
+            .create_managed_bytes(
+                &context,
+                &managed_path,
+                b"managed artifact",
+                Actor::system(),
+                SourcePlane::System,
+                None,
+            )
+            .await
+            .unwrap()
+            .file;
+        handler(event(EventId::new(), managed.id.to_string(), "ordinary.md"))
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .jobs()
+                .list(&context, None, Some("semantic.source_reconcile"), 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the authoritative managed File must override an ordinary payload path"
+        );
+
+        let deleted = core
+            .delete(
+                &context,
+                &VaultPath::parse("ordinary.md").unwrap(),
+                ordinary.current_revision,
+                Actor::system(),
+                SourcePlane::System,
+                None,
+            )
+            .await
+            .unwrap()
+            .file;
+        handler(event(EventId::new(), deleted.id.to_string(), "managed.md"))
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .jobs()
+                .list(&context, None, Some("semantic.source_reconcile"), 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            2,
+            "a regular-file tombstone remains eligible for source invalidation"
+        );
+
+        handler(event(
+            EventId::new(),
+            "not-a-file-id".to_owned(),
+            "ordinary.md",
+        ))
+        .await
+        .unwrap();
+        handler(event(
+            EventId::new(),
+            FileId::new().to_string(),
+            "ordinary.md",
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            state
+                .jobs()
+                .list(&context, None, Some("semantic.source_reconcile"), 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            2,
+            "invalid and missing authoritative FileRecords must not fan out semantic work"
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_event_id_deduplication_is_vault_scoped() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let first = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("semantic-event-vault-a").unwrap(),
+            directory.path().join("a"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        let second = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("semantic-event-vault-b").unwrap(),
+            directory.path().join("b"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&first, "Semantic event A", VaultStatus::Active)
+            .await
+            .unwrap();
+        state
+            .vaults()
+            .insert(&second, "Semantic event B", VaultStatus::Active)
+            .await
+            .unwrap();
+        let first_core = VaultCore::new(
+            state.clone(),
+            directory.path().join("history-a"),
+            VaultPathPolicy::default(),
+            StorageOptions::default(),
+            VaultCoreRuntime::default(),
+        );
+        let second_core = VaultCore::new(
+            state.clone(),
+            directory.path().join("history-b"),
+            VaultPathPolicy::default(),
+            StorageOptions::default(),
+            VaultCoreRuntime::default(),
+        );
+        let first_file = first_core
+            .create_bytes(
+                &first,
+                &VaultPath::parse("same.md").unwrap(),
+                b"first",
+                Actor::system(),
+                SourcePlane::System,
+                None,
+            )
+            .await
+            .unwrap()
+            .file;
+        let second_file = second_core
+            .create_bytes(
+                &second,
+                &VaultPath::parse("same.md").unwrap(),
+                b"second",
+                Actor::system(),
+                SourcePlane::System,
+                None,
+            )
+            .await
+            .unwrap()
+            .file;
+        let event_id = EventId::new();
+        let event = |context: &VaultContext, file_id: FileId| OutboxEventRecord {
+            id: event_id,
+            vault_id: Some(context.id()),
+            event_type: "FileUpdated".to_owned(),
+            aggregate_type: "file".to_owned(),
+            aggregate_id: file_id.to_string(),
+            payload: json!({"operation":"replace", "path":"stale.md"}),
+            created_at: 1,
+            available_at: 1,
+            claimed_by: None,
+            claimed_until: None,
+            delivered_at: None,
+            attempts: 0,
+            last_error: None,
+            dead_lettered: false,
+            dead_letter_reason: None,
+        };
+        let handler = test_outbox_handler(&state);
+        handler(event(&first, first_file.id)).await.unwrap();
+        handler(event(&first, first_file.id)).await.unwrap();
+        handler(event(&second, second_file.id)).await.unwrap();
+        assert_eq!(
+            state
+                .jobs()
+                .list(&first, None, Some("semantic.source_reconcile"), 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            state
+                .jobs()
+                .list(&second, None, Some("semantic.source_reconcile"), 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            state
+                .jobs()
+                .list(&first, None, Some("semantic.source_reconcile"), 10, 0)
+                .await
+                .unwrap()[0]
+                .vault_id,
+            Some(first.id())
+        );
+        assert_eq!(
+            state
+                .jobs()
+                .list(&second, None, Some("semantic.source_reconcile"), 10, 0)
+                .await
+                .unwrap()[0]
+                .vault_id,
+            Some(second.id())
         );
     }
 
@@ -3704,7 +4448,8 @@ mod tests {
                 .await
                 .unwrap()
                 .len(),
-            1
+            0,
+            "legacy v3 source reconciliation is retired"
         );
 
         // A job admitted by the previous binary must drain without touching a
@@ -3809,7 +4554,7 @@ mod tests {
                 .await
                 .unwrap()
                 .len(),
-            1
+            0
         );
     }
 
@@ -4268,6 +5013,17 @@ mod tests {
             },
         )
         .unwrap();
+        supervisor
+            .register_job_handler(
+                "semantic.source_reconcile",
+                semantic_source_reconcile_job_handler(
+                    state.clone(),
+                    directory.path().join("history"),
+                    VaultCoreRuntime::default(),
+                    SemanticMemoryService::new(state.clone()),
+                ),
+            )
+            .unwrap();
         let shutdown = Cancellation::default();
         let running = tokio::spawn({
             let supervisor = supervisor.clone();
@@ -4716,6 +5472,23 @@ mod tests {
             .unwrap();
         supervisor
             .register_job_handler(
+                "semantic.source_reconcile",
+                semantic_source_reconcile_job_handler(
+                    state.clone(),
+                    history_root.clone(),
+                    core_runtime.clone(),
+                    SemanticMemoryService::new(state.clone()),
+                ),
+            )
+            .unwrap();
+        supervisor
+            .register_job_handler(
+                "semantic.extract",
+                semantic_extract_job_handler(state.clone()),
+            )
+            .unwrap();
+        supervisor
+            .register_job_handler(
                 "memory.overview",
                 super::memory_overview_job_handler(state.clone(), memory.clone()),
             )
@@ -4750,13 +5523,16 @@ mod tests {
             .list(&context, None, None, 10, 0)
             .await
             .unwrap();
-        assert_eq!(jobs.len(), 4);
-        // Extraction failed before publishing any memories: no semantic job is needed.
+        assert_eq!(jobs.len(), 5);
+        // The retired v3 automatic extraction is cancelled at admission;
+        // semantic extraction still terminates safely without a Provider.
         assert!(!jobs.iter().any(|job| job.job_type == "memory.overview"));
-        assert!(
-            jobs.iter()
-                .all(|job| matches!(job.status, JobStatus::Completed | JobStatus::Failed))
-        );
+        assert!(jobs.iter().all(|job| {
+            matches!(
+                job.status,
+                JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+            )
+        }));
         assert!(jobs.iter().all(|job| {
             !matches!(
                 job.job_type.as_str(),
@@ -4770,23 +5546,8 @@ mod tests {
             )
         }));
         let backfill = jobs.iter().find(|job| job.id == backfill.id).unwrap();
-        assert_eq!(backfill.status, JobStatus::Failed);
-        let progress = backfill.progress.as_ref().unwrap();
-        assert_eq!(progress["phase"], "failed");
-        assert_eq!(progress["completed"], 0);
-        assert_eq!(progress["total"], 1);
-        assert_eq!(progress["current_index"], 1);
-        assert_eq!(progress["current_path"], "note.md");
-        assert!(progress["last_completed_path"].is_null());
-        assert_eq!(progress["items_published"], 0);
-        assert_eq!(progress["source_ingestion_failures"], 0);
-        assert_eq!(progress["generated_output_failures"], 0);
-        assert_eq!(progress["error_code"], "memory_extraction_model_unbound");
-        assert!(progress["note_started_at"].is_number());
-        assert!(progress["last_note_elapsed_ms"].is_number());
-        assert!(progress.get("note_body").is_none());
-        assert!(progress.get("prompt").is_none());
-        assert!(progress.get("provider_response").is_none());
+        assert_eq!(backfill.status, JobStatus::Cancelled);
+        assert!(backfill.progress.is_none());
         assert_eq!(
             state
                 .index()

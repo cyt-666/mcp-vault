@@ -1,5 +1,5 @@
 //! Opt-in disposable Admin browser fixture. Never loaded by production server.
-use axum::{Json, Router, routing::post};
+use axum::{Json, Router, body::Body, response::Response, routing::post};
 use mcp_vault_auth::{AuthService, SecretString};
 use mcp_vault_core::{VaultCore, VaultCoreRuntime};
 use mcp_vault_domain::{Actor, SourcePlane, VaultContext, VaultPath};
@@ -192,7 +192,7 @@ pub async fn prepare(
     // Generation and overview controls use the real worker handlers.
     Ok(())
 }
-async fn extract(Json(request): Json<Value>) -> Json<Value> {
+async fn extract(Json(request): Json<Value>) -> Response {
     let input: Value =
         serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
     let value = if request["response_format"]["json_schema"]["name"] == "memory_overview" {
@@ -200,7 +200,16 @@ async fn extract(Json(request): Json<Value>) -> Json<Value> {
     } else {
         json!({"selections":input["units"].as_array().unwrap().iter().map(|unit|json!({"unit_id":unit["unit_id"],"kind":"experience","retrieval_hint":"local exercise"})).collect::<Vec<_>>()})
     };
-    Json(json!({"choices":[{"message":{"content":value.to_string()}}]}))
+    let content = serde_json::to_string(&value.to_string()).unwrap();
+    Response::builder()
+        .header("content-type", "text/event-stream")
+        .body(Body::from(
+            format!(
+                "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{content}}}}}]}}\n\n"
+            ) + "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+                + "data: [DONE]\n\n",
+        ))
+        .unwrap()
 }
 async fn embeddings(Json(body): Json<Value>) -> Json<Value> {
     Json(

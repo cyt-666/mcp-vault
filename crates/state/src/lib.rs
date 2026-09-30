@@ -15,6 +15,10 @@ pub use search::memory_search_terms;
 mod migrations;
 mod pool;
 mod providers;
+mod semantic_memory;
+mod semantic_organization;
+mod semantic_recovery;
+mod semantic_rules;
 mod settings;
 mod units;
 mod vaults;
@@ -55,7 +59,27 @@ pub use index::{
 pub use pool::{StateStore, StateTransaction};
 pub use providers::{
     EmbeddingCoverage, EmbeddingRecord, ModelBindingRecord, ModelRecord, ProviderDeletionSummary,
-    ProviderHealthRecord, ProviderRecord, ProviderRepository, VectorCandidate,
+    ProviderHealthRecord, ProviderRecord, ProviderRepository, ProviderSecretReference,
+    VectorCandidate,
+};
+pub use semantic_memory::{
+    SemanticCardHead, SemanticCardItemInput, SemanticCardItemRecord, SemanticCardRecord,
+    SemanticCardRevisionInput, SemanticEvidenceInput, SemanticEvidenceRecord,
+    SemanticExtractionBatchRecord, SemanticExtractionBatchSpec, SemanticExtractionRecord,
+    SemanticMemoryRepository, SemanticObservationInput, SemanticObservationRecord,
+    SemanticPreparedSnapshot, SemanticSourceRecord, SemanticSourceRevisionRecord,
+    SemanticSpanInput,
+};
+pub use semantic_organization::{
+    ComposedCardItemInput, ComposedCardItemRecord, ComposedCardRecord, ComposedCardRevisionInput,
+    ComposedSupportGroupRecord, ComposedSupportMemberRecord, OrganizationActionAuditInput,
+    OrganizationJobRecord, OrganizationObservation, OrganizationPreparedSnapshot,
+    OrganizationSourceFence, RelationCandidateInput, RelationDecisionInput, RelationEvidenceInput,
+    SemanticOrganizationRepository, SemanticRelationRecord, SupportGroupInput, SupportMemberInput,
+};
+pub use semantic_rules::{
+    SemanticRuleRecord, SemanticRulesRepository, SemanticTargetRecord, SemanticTargetResolution,
+    SemanticTargetSourceBinding, SemanticTaskStateRecord,
 };
 pub use settings::{SettingRecord, SettingsRepository};
 pub use vaults::{

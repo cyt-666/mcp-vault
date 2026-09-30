@@ -6,8 +6,11 @@
 mod adapter;
 mod error;
 mod fastembed;
+mod native_stream;
 mod policy;
 mod service;
+mod sse;
+mod stream_response;
 mod transport;
 mod vector;
 
@@ -15,9 +18,12 @@ pub use adapter::{
     AnthropicMessagesAdapter, DiscoveredModel, EmbeddingRequest, EmbeddingResult,
     GenerationOptions, HttpEmbeddingAdapter, MissingRequiredStringFallback,
     OpenAiCompatibleAdapter, OpenAiResponsesAdapter, ProviderAdapter, StructuredGenerationRequest,
-    StructuredGenerationResult,
+    StructuredGenerationResult, validate_structured_value,
 };
-pub use error::ProviderError;
+pub use error::{
+    ProviderError, StrictFunctionCallIssue, StructuredJsonDiagnostic, StructuredJsonFinishReason,
+    StructuredJsonParseIssue, StructuredJsonParserCategory,
+};
 pub use fastembed::FastEmbedAdapter;
 pub use policy::{
     DEFAULT_REASONING_GENERATION_TOKENS, ModelCapabilities, ModelSettings,
@@ -26,11 +32,13 @@ pub use policy::{
 };
 pub use service::{
     EMBEDDING_PROJECTION_VERSION, EmbeddingInput, EmbeddingService, EmbeddingSourceResolver,
-    ModelInput, ProviderInput, ProviderModeState, ProviderService, embedding_input_hash,
+    ModelInput, PROVIDER_SECRET_OWNER, PROVIDER_SECRET_PURPOSE, ProviderInput, ProviderModeState,
+    ProviderRuntimeSnapshot, ProviderService, SafeProviderSettings, embedding_input_hash,
 };
+pub use sse::{SseDecoder, SseEvent};
 pub use transport::{
-    AuthStyle, JsonResponse, ProviderTransport, RequestBudget, RequestOptions, endpoint_url,
-    retryable_status, validate_endpoint,
+    AuthStyle, JsonResponse, ProviderTransport, RequestBudget, RequestOptions, SseEventAction,
+    SseResponse, endpoint_url, retryable_status, validate_endpoint,
 };
 pub use vector::{
     EmbeddingSourceRef, SqliteVectorIndex, VectorHit, VectorIndex, exact_cosine_similarity,

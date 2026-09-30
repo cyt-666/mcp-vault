@@ -1,10 +1,17 @@
-use axum::{Json, Router, extract::State as AxumState, routing::post};
+use axum::{
+    Json, Router,
+    body::Body,
+    extract::State as AxumState,
+    http::{StatusCode, header},
+    response::Response,
+    routing::post,
+};
 use mcp_vault_auth::{AuthService, MasterKeyRing};
 use mcp_vault_core::VaultCore;
 use mcp_vault_domain::{Actor, Revision, SourcePlane, VaultContext, VaultId, VaultPath, VaultSlug};
 use mcp_vault_memory::v3::{
-    ExtractionPolicy, MemoryService, MemoryType, MemoryUpdateInput, NoteExtractionOptions,
-    RememberInput,
+    ExtractionPolicy, ForgetBatchInput, ForgetBatchStatus, MemoryService, MemoryType,
+    MemoryUpdateInput, NoteExtractionOptions, RememberInput,
 };
 use mcp_vault_providers::{
     ModelCapabilities, ModelInput, ModelSettings, ProviderInput, ProviderKind, ProviderMode,
@@ -163,6 +170,28 @@ async fn select_all(
     Json(json!({"choices":[{"message":{"content":json!({"selections":selections}).to_string()}}]}))
 }
 
+async fn select_all_stream(
+    state: AxumState<Arc<AtomicUsize>>,
+    Json(request): Json<Value>,
+) -> Response {
+    assert_eq!(
+        request["stream"], true,
+        "generation fixture must request SSE"
+    );
+    let Json(response) = select_all(state, Json(request)).await;
+    let content = response["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap();
+    let delta = json!({"choices":[{"index":0,"delta":{"content":content},"finish_reason":null}]});
+    let done = json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}});
+    let body = format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n", delta, done);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(Body::from(body))
+        .unwrap()
+}
+
 async fn configure(
     state: &StateStore,
     context: &VaultContext,
@@ -175,7 +204,7 @@ async fn configure(
         axum::serve(
             listener,
             Router::new()
-                .route("/v1/chat/completions", post(select_all))
+                .route("/v1/chat/completions", post(select_all_stream))
                 .with_state(calls),
         )
         .await
@@ -460,6 +489,232 @@ async fn selection_checkpoints_publish_only_after_all_batches_and_survive_deleti
             .extraction_paused
     );
     assert_eq!(calls.load(Ordering::SeqCst), 6);
+}
+
+#[tokio::test]
+async fn batch_forget_groups_one_source_set_preserves_pause_and_allows_explicit_reevaluation() {
+    let (dir, state, context, core, service) = fixture().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    configure(&state, &context, &service, calls.clone()).await;
+    let path = VaultPath::parse("generic-batch-source.md").unwrap();
+    let body = (0..4)
+        .map(|index| format!("# Unit {index}\nCurrent unit {index}.\n\n"))
+        .collect::<String>();
+    core.create_bytes(
+        &context,
+        &path,
+        body.as_bytes(),
+        Actor::system(),
+        SourcePlane::System,
+        None,
+    )
+    .await
+    .unwrap();
+    let mut extraction = service.extract_note(&context, &core, &path).await.unwrap();
+    for _ in 0..4 {
+        if extraction.items_published > 0 || extraction.pending_batches == 0 {
+            break;
+        }
+        extraction = service.extract_note(&context, &core, &path).await.unwrap();
+    }
+    assert_eq!(extraction.items_published, 4);
+
+    let derived = service
+        .list(&context, vec![], None, None, None, 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(derived.len(), 4);
+    let explicit = service
+        .remember(
+            &context,
+            &core,
+            RememberInput {
+                content: "Synthetic explicit batch item".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .memory
+        .unwrap();
+    let initial_set = state
+        .memory_units()
+        .get_note_set_by_source(&context, derived[0].sources[0].file_id.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let first_batch = service
+        .forget_many(
+            &context,
+            &core,
+            vec![
+                ForgetBatchInput {
+                    id: derived[0].id,
+                    expected_revision: derived[0].revision,
+                },
+                ForgetBatchInput {
+                    id: derived[1].id,
+                    expected_revision: derived[1].revision,
+                },
+                ForgetBatchInput {
+                    id: explicit.id,
+                    expected_revision: explicit.revision,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    assert!(
+        first_batch
+            .results
+            .iter()
+            .all(|item| item.status == ForgetBatchStatus::Deleted)
+    );
+    assert!(first_batch.results[0..2].iter().all(|item| {
+        item.ownership == Some(mcp_vault_memory::MemoryOwnership::NoteDerived)
+            && item.source_extraction_paused == Some(false)
+    }));
+    assert_eq!(
+        first_batch.results[2].ownership,
+        Some(mcp_vault_memory::MemoryOwnership::Explicit)
+    );
+    let after_batch_set = state
+        .memory_units()
+        .get_note_set_by_source(&context, initial_set.source_file_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after_batch_set.set_revision.value(),
+        initial_set.set_revision.value() + 1,
+        "two selected items from the same source produce one set revision"
+    );
+    assert_eq!(
+        after_batch_set.canonical_revision.value(),
+        initial_set.canonical_revision.value() + 1,
+        "the canonical set is rewritten once"
+    );
+    assert!(!after_batch_set.extraction_paused);
+    assert_eq!(
+        service
+            .list(&context, vec![], None, None, None, 10, 0)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let skipped = service.extract_note(&context, &core, &path).await.unwrap();
+    assert!(
+        skipped.already_evaluated,
+        "batch deletion leaves active source coverage intact"
+    );
+    let mut reevaluated = service
+        .extract_note_with_options(
+            &context,
+            &core,
+            &path,
+            NoteExtractionOptions {
+                include_evaluated: true,
+            },
+        )
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        if reevaluated.items_published > 0 || reevaluated.pending_batches == 0 {
+            break;
+        }
+        reevaluated = service
+            .extract_note_with_options(
+                &context,
+                &core,
+                &path,
+                NoteExtractionOptions {
+                    include_evaluated: true,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(reevaluated.items_published, 4);
+    let republished = service
+        .list(&context, vec![], None, None, None, 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(republished.len(), 4);
+
+    // Single-item deletion keeps its historical pause behavior.
+    service
+        .forget(&context, &core, republished[0].id, republished[0].revision)
+        .await
+        .unwrap();
+    let paused_set = state
+        .memory_units()
+        .get_note_set_by_source(&context, initial_set.source_file_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(paused_set.extraction_paused);
+    let paused_items = service
+        .list(&context, vec![], None, None, None, 10, 0)
+        .await
+        .unwrap();
+    let stale = ForgetBatchInput {
+        id: paused_items[0].id,
+        expected_revision: Revision::new(paused_items[0].revision.value() + 1),
+    };
+    let valid = ForgetBatchInput {
+        id: paused_items[1].id,
+        expected_revision: paused_items[1].revision,
+    };
+    let second_batch = service
+        .forget_many(&context, &core, vec![stale, valid])
+        .await
+        .unwrap();
+    assert_eq!(second_batch.results[0].status, ForgetBatchStatus::Conflict);
+    assert_eq!(second_batch.results[1].status, ForgetBatchStatus::Deleted);
+    assert_eq!(second_batch.results[1].source_extraction_paused, Some(true));
+    let still_paused = state
+        .memory_units()
+        .get_note_set_by_source(&context, initial_set.source_file_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(still_paused.extraction_paused);
+
+    // An ID owned by another Vault is returned as unavailable without affecting
+    // the original current record or revealing its body.
+    let other = VaultContext::new(
+        VaultId::new(),
+        VaultSlug::new("other").unwrap(),
+        dir.path().join("other"),
+        Revision::ZERO,
+    )
+    .unwrap();
+    state
+        .vaults()
+        .insert(&other, "other", VaultStatus::Active)
+        .await
+        .unwrap();
+    let cross_vault = service
+        .forget_many(
+            &other,
+            &core,
+            vec![ForgetBatchInput {
+                id: paused_items[2].id,
+                expected_revision: paused_items[2].revision,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(cross_vault.results[0].status, ForgetBatchStatus::Failed);
+    assert_eq!(
+        cross_vault.results[0].error_code.as_deref(),
+        Some("not_found")
+    );
+    assert!(service.get(&context, paused_items[2].id).await.is_ok());
+    assert!(calls.load(Ordering::SeqCst) >= 2);
 }
 
 #[tokio::test]

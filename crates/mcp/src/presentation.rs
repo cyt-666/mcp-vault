@@ -100,11 +100,11 @@ fn node(value: &mut Value) {
 pub(super) fn tool_data(tool: &str, mut data: Value, details: bool) -> Value {
     // Single-record get is the intentional drill-down. Extended mode preserves
     // the prior wire fields for clients needing exact provenance or diagnostics.
-    if details || tool == "get_memory" {
+    if details || tool == "get_raw_memory" {
         return data;
     }
     match tool {
-        "get_memory_overview" => {
+        "get_raw_memory_overview" => {
             retain(
                 &mut data,
                 &[
@@ -117,7 +117,7 @@ pub(super) fn tool_data(tool: &str, mut data: Value, details: bool) -> Value {
                 ],
             );
         }
-        "recall" => {
+        "build_memory_pack" => {
             retain(
                 &mut data,
                 &[
@@ -135,7 +135,7 @@ pub(super) fn tool_data(tool: &str, mut data: Value, details: bool) -> Value {
                 each(items, note);
             }
         }
-        "list_memories" => {
+        "list_raw_memories" => {
             if let Some(items) = data.get_mut("memories") {
                 each(items, memory);
             }
@@ -145,7 +145,7 @@ pub(super) fn tool_data(tool: &str, mut data: Value, details: bool) -> Value {
                 memory(item);
             }
         }
-        "update_memory" => memory(&mut data),
+        "update_raw_memory" => memory(&mut data),
         "search_notes" => {
             retain(
                 &mut data,
@@ -216,7 +216,7 @@ pub(super) fn tool_data(tool: &str, mut data: Value, details: bool) -> Value {
             }
         }
         // Exact reads and deletion receipts are already bounded and actionable.
-        "read_note" | "forget_memory" => {}
+        "read_note" | "forget_memory" | "forget_raw_memory" => {}
         _ => {}
     }
     data
@@ -230,10 +230,10 @@ mod tests {
     #[test]
     fn compact_recall_keeps_complete_source_coordinates_and_oversize_pointers() {
         let source = json!({"path":"notes/完整.md","file_id":"source-1","revision":4,"heading":["条件","步骤"],"start_line":8,"end_line":14});
-        let pointer = json!({"id":"large","revision":2,"resource_uri":"vault://memory/large","sources":[source.clone()],"reason":"complete_unit_exceeds_remaining_budget"});
+        let pointer = json!({"id":"large","revision":2,"resource_uri":"vault://raw-memory/large","sources":[source.clone()],"reason":"complete_unit_exceeds_remaining_budget"});
         let body = "  ## 步骤\r\n1. 前置条件满足后执行。\r\n2. 不得交换次序。\r\n";
         let result = tool_data(
-            "recall",
+            "build_memory_pack",
             json!({"memories":[{"id":"current","content":body,"sources":[source.clone()],"fact_count":2}],"pointers":[pointer.clone()]}),
             false,
         );

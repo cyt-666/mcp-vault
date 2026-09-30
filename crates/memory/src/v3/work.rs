@@ -79,37 +79,11 @@ impl MemoryService {
         &self,
         context: &VaultContext,
     ) -> Result<(), MemoryError> {
-        if self
-            .state
-            .memory_units()
-            .initialization_required(context)
-            .await?
-        {
-            return Ok(());
-        }
-        if self
-            .state
-            .jobs()
-            .find_active_by_type(context, "memory.extract")
-            .await?
-            .is_some()
-        {
-            return Ok(());
-        }
-        let runtime = self.state.memory_units().runtime(context).await?;
-        if runtime.paused || self.state.memory_units().counts(context).await?.total == 0 {
-            return Ok(());
-        }
-        let Some(signature) = self.overview_signature(context).await? else {
-            return Ok(());
-        };
-        let key = format!(
-            "vault:{}:memory-overview:{}:{}",
-            context.id(),
-            runtime.generation,
-            signature
-        );
-        self.state.jobs().enqueue_singleton(context,"memory.overview",&key,&json!({"memory_contract_generation":MEMORY_CONTRACT_GENERATION,"generation":runtime.generation,"model_signature":signature}),1,5,0).await?;
+        // v3 automatic extraction and overview generation are retired from
+        // the runtime.  Keep this method as a source-compatible no-op for
+        // old callers and fixtures; semantic source events use the
+        // `semantic.*` jobs, while raw explicit memories need no job.
+        let _ = context;
         Ok(())
     }
 }

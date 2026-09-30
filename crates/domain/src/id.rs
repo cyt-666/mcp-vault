@@ -118,6 +118,27 @@ typed_uuid_id!(MemoryConsolidationId, "memory consolidation ID");
 typed_uuid_id!(MemoryRetrievalProposalId, "memory retrieval proposal ID");
 typed_uuid_id!(MemorySourceId, "memory source ID");
 typed_uuid_id!(MemoryRelationId, "memory relation ID");
+typed_uuid_id!(SemanticSourceId, "semantic source ID");
+typed_uuid_id!(SourceRevisionId, "source revision ID");
+typed_uuid_id!(EvidenceRefId, "evidence reference ID");
+typed_uuid_id!(ExtractionSetId, "extraction set ID");
+typed_uuid_id!(ObservationId, "observation ID");
+typed_uuid_id!(MemoryCardId, "memory card ID");
+typed_uuid_id!(CardRevisionId, "card revision ID");
+typed_uuid_id!(CardItemId, "card item ID");
+typed_uuid_id!(PreparedSnapshotId, "prepared snapshot ID");
+typed_uuid_id!(OrganizationJobId, "organization job ID");
+typed_uuid_id!(RelationCandidateId, "relation candidate ID");
+typed_uuid_id!(RelationDecisionId, "relation decision ID");
+typed_uuid_id!(ComposedCardId, "composed card ID");
+typed_uuid_id!(ComposedCardRevisionId, "composed card revision ID");
+typed_uuid_id!(ComposedCardItemId, "composed card item ID");
+typed_uuid_id!(SupportGroupId, "support group ID");
+typed_uuid_id!(SupportMemberId, "support member ID");
+typed_uuid_id!(OrganizationSnapshotId, "organization snapshot ID");
+typed_uuid_id!(ComposedCardAliasId, "composed card alias ID");
+typed_uuid_id!(CorrectionId, "correction ID");
+typed_uuid_id!(SuppressionId, "suppression ID");
 typed_uuid_id!(BackupId, "backup ID");
 
 #[cfg(test)]

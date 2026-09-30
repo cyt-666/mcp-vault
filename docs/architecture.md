@@ -541,6 +541,15 @@ Fresh tables use the `memory_unit` namespace and canonical files use `memory-v3/
 
 See [Source-preserving memory units](memory-system.md) and [ADR-0033](adr/0033-source-preserving-memory-units.md).
 
+Transition note: the v3 storage/runtime and Admin contracts described above are
+retained as historical/operational boundaries, but they are not the current MCP
+public contract. The authorized clean-break MCP surface removes old v3 tool
+names and `vault://memory/*` URIs without a migration window; it exposes the
+semantic card/pack tools and the explicit raw-memory namespace documented by
+ADR-0035 and `semantic-memory-contract.md`. Retaining v3 storage/Admin does not
+restore those MCP registrations. This note authorizes neither data cleanup nor
+a Provider/production read-path switch.
+
 ## 12. Provider architecture
 
 Provider adapters implement internal traits for:

@@ -231,6 +231,8 @@ pub struct BackupService {
     config: BackupConfig,
     operation_lock: Arc<Mutex<()>>,
     operation_active: Arc<AtomicBool>,
+    #[cfg(test)]
+    fail_next_pre_restore_mark_running: Arc<AtomicBool>,
 }
 
 struct ActiveBackupOperation(Arc<AtomicBool>);
@@ -256,7 +258,15 @@ impl BackupService {
             config,
             operation_lock: Arc::new(Mutex::new(())),
             operation_active: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            fail_next_pre_restore_mark_running: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[cfg(test)]
+    fn inject_pre_restore_mark_running_failure(&self) {
+        self.fail_next_pre_restore_mark_running
+            .store(true, Ordering::Release);
     }
 
     /// Return the shared maintenance gate for composition/tests.
@@ -540,8 +550,27 @@ impl BackupService {
                 .await;
             return Err(error);
         }
-        if let Err(error) = self.state.backups().mark_running(pre_restore_id).await {
+        let pre_restore_running = {
+            #[cfg(test)]
+            if self
+                .fail_next_pre_restore_mark_running
+                .swap(false, Ordering::AcqRel)
+            {
+                Err(StateError::Conflict)
+            } else {
+                self.state.backups().mark_running(pre_restore_id).await
+            }
+            #[cfg(not(test))]
+            {
+                self.state.backups().mark_running(pre_restore_id).await
+            }
+        };
+        if let Err(error) = pre_restore_running {
             let error: BackupError = error.into();
+            // The safety backup admission failed after the process entered
+            // Offline mode. Keep that conservative mode, but make the
+            // readiness contract agree immediately; restore did not succeed.
+            self.config.readiness.store(false, Ordering::Release);
             let _ = self
                 .state
                 .backups()
@@ -1044,6 +1073,7 @@ impl BackupService {
                         self.config.storage_options,
                         self.config.core_runtime.clone(),
                     );
+                    self.state.preflight_semantic_recovery(&context).await?;
                     let recovery = core
                         .recover_during_maintenance(&context, &recovery_permit)
                         .await?;
@@ -1096,6 +1126,7 @@ impl BackupService {
                 self.config.storage_options,
                 self.config.core_runtime.clone(),
             );
+            self.state.preflight_semantic_recovery(&context).await?;
             if core
                 .recover_during_maintenance(&context, &recovery_permit)
                 .await?
@@ -1827,12 +1858,13 @@ mod tests {
     use std::{
         fs::{File, read, write},
         path::PathBuf,
+        sync::{Arc, atomic::AtomicBool},
     };
 
     use mcp_vault_domain::{
         MaintenanceGate, MaintenanceMode, Revision, VaultContext, VaultId, VaultSlug,
     };
-    use mcp_vault_state::{StateStore, VaultStatus};
+    use mcp_vault_state::{BackupStatus, StateStore, VaultStatus};
     use mcp_vault_storage_fs::{DurabilityPolicy, StorageOptions};
     use tar::{Builder, Header};
     use tempfile::TempDir;
@@ -1988,6 +2020,82 @@ mod tests {
         assert_eq!(
             tokio::fs::read(content.join("note.md")).await.unwrap(),
             b"before restore"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_safety_backup_admission_failure_keeps_offline_not_ready() {
+        let root = TempDir::new().unwrap();
+        let database = root.path().join("state.sqlite3");
+        let state = StateStore::connect_and_migrate(&format!("sqlite://{}", database.display()))
+            .await
+            .unwrap();
+        let content = root.path().join("vaults/default/content");
+        tokio::fs::create_dir_all(&content).await.unwrap();
+        tokio::fs::write(content.join("note.md"), b"before restore")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("restore-failure").unwrap(),
+            PathBuf::from(&content),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Restore failure", VaultStatus::Active)
+            .await
+            .unwrap();
+        let gate = MaintenanceGate::new();
+        let readiness = Arc::new(AtomicBool::new(true));
+        let service = BackupService::new(
+            state.clone(),
+            BackupConfig {
+                backup_root: root.path().join("backups"),
+                history_root: root.path().join("history"),
+                storage_options: StorageOptions {
+                    durability: DurabilityPolicy::None,
+                    minimum_free_bytes: 0,
+                    ..StorageOptions::default()
+                },
+                limits: BackupLimits::default(),
+                service_version: "test".to_owned(),
+                key_version_ids: vec![1],
+                maintenance: gate.clone(),
+                core_runtime: mcp_vault_core::VaultCoreRuntime::new(gate.clone()),
+                readiness: readiness.clone(),
+            },
+        );
+        let operation = service.enqueue_create(None).await.unwrap();
+        let backup_id = operation.backup.id;
+        service.create(backup_id).await.unwrap();
+        tokio::fs::write(content.join("note.md"), b"after restore")
+            .await
+            .unwrap();
+
+        service.inject_pre_restore_mark_running_failure();
+        let result = service.restore(backup_id).await;
+
+        assert!(result.is_err(), "safety-backup admission must fail restore");
+        assert_eq!(gate.mode(), MaintenanceMode::Offline);
+        assert!(!readiness.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!service.operation_active());
+        assert!(
+            gate.try_begin_offline().is_some(),
+            "the failed restore must release its maintenance lease"
+        );
+        assert_eq!(
+            tokio::fs::read(content.join("note.md")).await.unwrap(),
+            b"after restore",
+            "a failed safety-backup admission must not apply the real restore"
+        );
+        let records = state.backups().list(20, 0).await.unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(
+            records
+                .iter()
+                .all(|record| record.status == BackupStatus::Failed)
         );
     }
 

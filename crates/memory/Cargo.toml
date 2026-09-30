@@ -18,6 +18,7 @@ mcp-vault-state = { path = "../state" }
 mcp-vault-storage-fs = { path = "../storage-fs" }
 percent-encoding = { workspace = true }
 regex = { workspace = true }
+schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -25,6 +26,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 unicode-normalization = { workspace = true }
+uuid = { workspace = true }
 yaml-rust = "=0.4.5"
 
 [lints]

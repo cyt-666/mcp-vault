@@ -106,6 +106,14 @@ All writes MUST be atomic, auditable, revision-aware, and recoverable. A known c
 
 The service MUST make Vault content usable as durable Agent memory.
 
+Historical boundary: the v3 runtime/storage behavior described by the legacy
+bullets below remains an Admin/operational reference only. The current MCP
+public contract is the ADR-0035 semantic-card/pack surface plus the explicit
+raw-memory namespace. Old v3 MCP tool names and `vault://memory/*` URIs are
+removed with no migration window; retaining v3 storage/Admin does not restore
+them. Legacy data is not semantic evidence, and this note does not authorize
+cleanup, Provider calls, or production read-path switching.
+
 It MUST provide:
 
 - discovery instructions encouraging task-relevant current-only recall;
@@ -388,8 +396,9 @@ The service is complete for the first release when:
 2. Concurrent writes are detected, revision history is available, and recovery tests pass.
 3. An MCP client can authenticate, discover server instructions, explore the Vault index, search, read, and perform authorized edits.
 4. The MCP implementation passes conformance for supported revisions.
-5. An Agent can directly `remember` a decision and immediately recall its
-   canonical Markdown-backed current memory without a model call.
+5. An Agent can directly `remember` a decision and immediately read it through
+   the raw explicit-memory namespace without a model call; semantic task
+   context is obtained through `build_memory_pack`.
 6. Automatic extraction can verify an exact File ID/content hash, validate one
    complete-set model response, and atomically replace only that source's set.
 7. The owner can configure and test LLM and embedding providers from the LAN-only console.

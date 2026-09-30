@@ -885,7 +885,14 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+    use axum::{
+        Json, Router,
+        body::Body,
+        extract::State,
+        http::StatusCode,
+        response::{IntoResponse, Response},
+        routing::post,
+    };
     use mcp_vault_auth::MasterKeyRing;
     use mcp_vault_domain::VaultSlug;
     use mcp_vault_providers::{
@@ -907,7 +914,7 @@ mod tests {
     async fn fake_selection(
         State(state): State<FakeProviderState>,
         Json(request): Json<Value>,
-    ) -> (StatusCode, Json<Value>) {
+    ) -> Response {
         let Some(schema) = request
             .pointer("/response_format/json_schema/name")
             .and_then(Value::as_str)
@@ -915,7 +922,8 @@ mod tests {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error":"schema missing"})),
-            );
+            )
+                .into_response();
         };
         state.calls.fetch_add(1, Ordering::SeqCst);
         state.schemas.lock().await.push(schema.to_owned());
@@ -923,7 +931,8 @@ mod tests {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error":"unexpected schema"})),
-            );
+            )
+                .into_response();
         }
         let input: Value = match request["messages"][1]["content"]
             .as_str()
@@ -934,17 +943,15 @@ mod tests {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({"error":"selection input missing"})),
-                );
+                )
+                    .into_response();
             }
         };
         let unit_id = input["units"][0]["unit_id"].clone();
-        (
-            StatusCode::OK,
-            Json(json!({
-                "choices": [{"message": {"content": json!({"selections": [{"unit_id": unit_id, "kind": "procedure", "retrieval_hint": "local fake selection"}]}).to_string()}}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1}
-            })),
-        )
+        let content = serde_json::to_string(&json!({"selections": [{"unit_id": unit_id, "kind": "procedure", "retrieval_hint": "local fake selection"}]}).to_string()).unwrap();
+        Response::builder().status(StatusCode::OK).header("content-type", "text/event-stream").body(Body::from(format!(
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{content}}}}}]}}\n\ndata: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+        ))).unwrap()
     }
 
     #[test]

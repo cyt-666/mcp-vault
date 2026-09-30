@@ -14,8 +14,9 @@ Read these first:
 4. [`interfaces.md`](interfaces.md)
 5. [`data-model.md`](data-model.md)
 6. [`memory-system.md`](memory-system.md)
-7. [`security.md`](security.md)
-8. [`implementation-plan.md`](implementation-plan.md)
+7. [`semantic-memory-contract.md`](semantic-memory-contract.md) for the new M0–M7 semantic-memory baseline;
+8. [`security.md`](security.md)
+9. [`implementation-plan.md`](implementation-plan.md)
 
 Then consult:
 
@@ -26,6 +27,7 @@ Then consult:
 - [`compatibility-matrix.md`](compatibility-matrix.md) for automated WebDAV/MCP evidence and manual Obsidian client records;
 - [`requirements-traceability.md`](requirements-traceability.md) for requirement-to-test/release evidence mapping;
 - [`release-readiness.md`](release-readiness.md) for first-release gates and operator handoff;
+- [`runbooks/`](runbooks/) for scoped operational procedures, including the [Provider capability probe](runbooks/provider-capability-probe.md);
 - [`standards-and-references.md`](standards-and-references.md) for the protocol versions and primary references used when this specification was written;
 - [`adr/`](adr/) for accepted architectural decisions.
 
@@ -37,7 +39,8 @@ Then consult:
 | `architecture.md` | Components, dependencies, consistency, event/job flows, managed multi-Vault shape |
 | `interfaces.md` | MCP, WebDAV, Admin HTTP contracts and authorization scopes |
 | `data-model.md` | Filesystem layout, SQLite schema, revisions, migrations, rebuildability |
-| `memory-system.md` | Durable memory, low-noise extraction, related-note recall, lifecycle, ranking, provenance |
+| `memory-system.md` | Existing v3 source-preserving memory contract during transition |
+| `semantic-memory-contract.md` | New source/observation/card/support/permission and interface contract for the semantic-memory plan |
 | `admin-and-configuration.md` | Setup, UI pages, configuration hierarchy, provider management |
 | `provider-compatibility.md` | OpenAI, Anthropic, DeepSeek, MiMo, GLM, Kimi, Gemini, and Qwen wire compatibility |
 | `security.md` | Threat model, control/data/agent planes, secrets, path and provider safety |
@@ -68,4 +71,6 @@ These documents specify the intended complete service. `implementation-plan.md` 
 
 - [Automatic retrieval calibration and memory administration](memory-autocalibration-operations.md): startup preparation, Admin workflows, quality interpretation, upgrade and rollback.
 
-Current memory implementation and operations: [Source-preserving memory units](memory-system.md), [ADR-0033](adr/0033-source-preserving-memory-units.md), and [v3 cutover guide](memory-v3-cutover.md).
+The new semantic-memory implementation is governed by [ADR-0035](adr/0035-semantic-memory-cards-and-task-packs.md), [its data and interface contract](semantic-memory-contract.md), and the [active execution plan](exec-plans/active/semantic-memory-implementation.md). The MCP public surface is the authorized clean-break development contract: old v3 MCP tool names and `vault://memory/*` URIs are removed with no migration window. Retaining v3 storage and Admin adapters does not retain those old MCP registrations.
+
+Current v3 storage/Admin behavior and historical operational details: [Source-preserving memory units](memory-system.md), [ADR-0033](adr/0033-source-preserving-memory-units.md), and [v3 cutover guide](memory-v3-cutover.md). These are explicitly non-MCP historical/transition references; they do not restore old MCP names or grant permission for cleanup or production switching.

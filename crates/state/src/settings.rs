@@ -163,6 +163,19 @@ impl SettingsRepository {
             },
         )
         .await?;
+        if key == "memory.units.policy" {
+            // The policy revision is the semantic authorization fence. Any
+            // change requires a fresh qualification decision before the
+            // setting write becomes visible to callers.
+            crate::semantic_memory::invalidate_all_sources_tx(
+                &mut transaction,
+                &vault_id_string,
+                "authorization_changed",
+                Some(record.revision.as_i64()?),
+                updated_at,
+            )
+            .await?;
+        }
         transaction.commit().await?;
         Ok(record)
     }

@@ -13,6 +13,10 @@ pub enum StateError {
     /// An embedded migration failed or an applied migration was modified.
     #[error("state migration error")]
     Migration(#[from] sqlx::migrate::MigrateError),
+    /// A narrowly supported state operation found an incompatible table
+    /// shape. The caller must not infer or repair the missing schema.
+    #[error("state schema is incompatible")]
+    SchemaIncompatible,
     /// A stored value could not be converted into a domain value.
     #[error("invalid state value: {0}")]
     InvalidDomain(#[from] DomainError),
@@ -77,6 +81,7 @@ impl StateError {
             Self::InvalidDomain(_) => "state_invalid_domain",
             Self::Json(_) => "state_json_invalid",
             Self::Migration(_) => "state_migration_error",
+            Self::SchemaIncompatible => "state_schema_incompatible",
             Self::Connection(_) => "state_connection_error",
             Self::Filesystem(_) => "state_filesystem_error",
             Self::IntegrityFailure => "state_integrity_error",

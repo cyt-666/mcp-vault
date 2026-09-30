@@ -7,6 +7,10 @@ use thiserror::Error;
 /// Errors at the durable memory application boundary.
 #[derive(Debug, Error)]
 pub enum MemoryError {
+    /// The parsed caller lacks the Vault and memory capabilities required by
+    /// the protocol-neutral semantic facade.
+    #[error("semantic memory access denied")]
+    AccessDenied,
     /// Caller input or an untrusted Markdown record is invalid.
     #[error("memory input is invalid: {0}")]
     InvalidInput(&'static str),
@@ -61,6 +65,7 @@ impl MemoryError {
         use mcp_vault_core::VaultError;
         use mcp_vault_domain::DomainError;
         match self {
+            Self::AccessDenied => "memory_access_denied",
             Self::InitializationFailure { source, .. } => source.diagnostic_code(),
             Self::Core(VaultError::Domain(DomainError::PreconditionFailed { .. })) => {
                 "memory_core_precondition_failed"
@@ -84,6 +89,7 @@ impl MemoryError {
     /// Stable redacted error code for protocol adapters and jobs.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::AccessDenied => "memory_access_denied",
             Self::InitializationFailure { source, .. } => source.code(),
             Self::InvalidInput(_) => "memory_invalid_input",
             Self::SourceIngestion(code) | Self::GeneratedOutput(code) => code,

@@ -1,5 +1,6 @@
 //! Provider adapter contracts and wire-format translators.
 
+use std::future;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -11,7 +12,9 @@ use url::Url;
 use crate::{
     AuthStyle, ModelSettings, OpenAiCompatibilityPreset, OpenAiStructuredOutputMode,
     OpenAiThinkingMode, OpenAiTokenLimitField, ProviderError, ProviderKind, ProviderMode,
-    ProviderSettings, ProviderTransport, RequestOptions, endpoint_url,
+    ProviderSettings, ProviderTransport, RequestOptions, SseEventAction, StrictFunctionCallIssue,
+    StructuredJsonDiagnostic, StructuredJsonFinishReason, StructuredJsonParseIssue,
+    StructuredJsonParserCategory, endpoint_url, stream_response::StreamResponseAggregator,
 };
 
 /// One caller-authorized deterministic repair for a missing required root string.
@@ -46,6 +49,16 @@ pub struct StructuredGenerationRequest {
     pub schema_name: String,
     /// JSON Schema subset required for the response.
     pub schema: Value,
+    /// Optional stricter Provider wire schema. When set, tool arguments are
+    /// first validated against this schema and then against `schema` unless
+    /// the caller requests the explicit post-normalization boundary below.
+    pub strict_function_schema: Option<Value>,
+    /// Defer validation against `schema` only when a caller performs an exact,
+    /// documented wire normalization and immediately validates the result.
+    pub defer_local_schema_validation: bool,
+    /// Evaluation-only request to use one strict function schema instead of
+    /// JSON-object prompting. Ordinary Provider calls leave this false.
+    pub strict_function_call: bool,
     /// Accept extra top-level response properties locally; wire schema stays strict.
     pub allow_additional_output_properties: bool,
     /// Caller-authorized missing-string repairs applied before full validation.
@@ -205,7 +218,7 @@ impl ProviderAdapter for OpenAiResponsesAdapter {
         request: &StructuredGenerationRequest,
     ) -> Result<StructuredGenerationResult, ProviderError> {
         let endpoint = endpoint_url(base_url, "responses")?;
-        let body = json!({
+        let mut body = json!({
             "model": request.model,
             "instructions": request.system,
             "input": request.user,
@@ -219,17 +232,64 @@ impl ProviderAdapter for OpenAiResponsesAdapter {
                 }
             }
         });
+        body["stream"] = Value::Bool(true);
+        let mut aggregator = crate::native_stream::ResponsesStreamAggregator::new();
+        let mut completed = None;
         let response = transport
-            .request_json(
+            .request_sse(
                 reqwest::Method::POST,
                 &endpoint,
                 mode,
                 &body,
                 RequestOptions::new(AuthStyle::Bearer, options.secret)
                     .with_timeout(request.timeout),
+                |event| {
+                    let result = (|| {
+                        if event.event.as_deref() == Some("response.completed") {
+                            aggregator.push_event(
+                                event.event.as_deref().unwrap_or(""),
+                                &serde_json::from_str(&event.data).map_err(|_| {
+                                    ProviderError::InvalidResponse(
+                                        "native stream event is not JSON",
+                                    )
+                                })?,
+                            )?;
+                            completed = Some(aggregator.finish()?);
+                            Ok(SseEventAction::Terminal)
+                        } else if matches!(
+                            event.event.as_deref(),
+                            Some(
+                                "response.output_text.delta"
+                                    | "response.reasoning_summary_text.delta"
+                                    | "response.output_item.added"
+                                    | "response.output_item.done"
+                                    | "response.content_part.added"
+                                    | "response.content_part.done"
+                            )
+                        ) {
+                            let value: Value = serde_json::from_str(&event.data).map_err(|_| {
+                                ProviderError::InvalidResponse("native stream event is not JSON")
+                            })?;
+                            aggregator.push_event(event.event.as_deref().unwrap_or(""), &value)?;
+                            Ok(SseEventAction::Progress)
+                        } else {
+                            Ok(SseEventAction::Ignore)
+                        }
+                    })();
+                    future::ready(result)
+                },
             )
             .await?;
-        structured_result_for_request(&response.body, request, false)
+        if !response.terminal {
+            completed = Some(aggregator.finish()?);
+        }
+        structured_result_for_request(
+            &completed.ok_or(ProviderError::InvalidResponse(
+                "provider final content is missing",
+            ))?,
+            request,
+            false,
+        )
     }
 
     async fn embed(
@@ -270,29 +330,75 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
         request: &StructuredGenerationRequest,
     ) -> Result<StructuredGenerationResult, ProviderError> {
         let endpoint = endpoint_url(base_url, "chat/completions")?;
-        let body = openai_chat_body(
+        let mut body = openai_chat_body(
             request,
             options.model_settings,
             self.provider_kind,
             base_url.host_str(),
             options.generation_token_limit,
         )?;
-        let allow_envelope_repair = body
-            .get("response_format")
-            .and_then(|format| format.get("type"))
-            .and_then(Value::as_str)
-            != Some("json_schema");
+        let allow_envelope_repair = !request.strict_function_call
+            && body
+                .get("response_format")
+                .and_then(|format| format.get("type"))
+                .and_then(Value::as_str)
+                != Some("json_schema");
+        if request.strict_function_call {
+            body["stream"] = Value::Bool(false);
+            let response = transport
+                .request_json_once(
+                    reqwest::Method::POST,
+                    &endpoint,
+                    mode,
+                    &body,
+                    RequestOptions::new(AuthStyle::Bearer, options.secret)
+                        .with_timeout(request.timeout),
+                )
+                .await?;
+            let arguments = strict_function_call_arguments(&response.body, &request.schema_name)?;
+            let mut completed = json!({
+                "choices":[{"message":{"content":arguments},"finish_reason":"stop"}]
+            });
+            for key in ["model", "usage"] {
+                if let Some(value) = response.body.get(key) {
+                    completed[key] = value.clone();
+                }
+            }
+            return validate_strict_function_result(&completed, request);
+        }
+        body["stream"] = Value::Bool(true);
+        let mut aggregator = StreamResponseAggregator::new();
+        let mut completed = None;
         let response = transport
-            .request_json(
+            .request_sse(
                 reqwest::Method::POST,
                 &endpoint,
                 mode,
                 &body,
                 RequestOptions::new(AuthStyle::Bearer, options.secret)
                     .with_timeout(request.timeout),
+                |event| {
+                    let result = (|| {
+                        if event.data == "[DONE]" {
+                            aggregator.push_data(&event.data)?;
+                            completed = Some(aggregator.finish()?);
+                            Ok(SseEventAction::Terminal)
+                        } else {
+                            aggregator.push_data(&event.data)?;
+                            Ok(SseEventAction::Progress)
+                        }
+                    })();
+                    future::ready(result)
+                },
             )
             .await?;
-        structured_result_for_request(&response.body, request, allow_envelope_repair)
+        if !response.terminal {
+            completed = Some(aggregator.finish()?);
+        }
+        let body = completed.ok_or(ProviderError::InvalidResponse(
+            "provider final content is missing",
+        ))?;
+        structured_result_for_request(&body, request, allow_envelope_repair)
     }
 
     async fn embed(
@@ -343,19 +449,57 @@ impl ProviderAdapter for AnthropicMessagesAdapter {
             "model": request.model,
             "system": system,
             "max_tokens": options.generation_token_limit,
-            "messages": [{"role": "user", "content": request.user}]
+            "messages": [{"role": "user", "content": request.user}],
+            "stream": true
         });
+        let mut aggregator = crate::native_stream::AnthropicStreamAggregator::new();
+        let mut completed = None;
         let response = transport
-            .request_json(
+            .request_sse(
                 reqwest::Method::POST,
                 &endpoint,
                 mode,
                 &body,
                 RequestOptions::new(AuthStyle::Anthropic, options.secret)
                     .with_timeout(request.timeout),
+                |event| {
+                    let result = (|| {
+                        let value: Value = serde_json::from_str(&event.data).map_err(|_| {
+                            ProviderError::InvalidResponse("native stream event is not JSON")
+                        })?;
+                        aggregator.push_event(event.event.as_deref().unwrap_or(""), &value)?;
+                        if event.event.as_deref() == Some("message_stop") {
+                            completed = Some(aggregator.finish()?);
+                            Ok(SseEventAction::Terminal)
+                        } else if matches!(
+                            event.event.as_deref(),
+                            Some(
+                                "message_start"
+                                    | "content_block_start"
+                                    | "content_block_delta"
+                                    | "content_block_stop"
+                                    | "message_delta"
+                            )
+                        ) {
+                            Ok(SseEventAction::Progress)
+                        } else {
+                            Ok(SseEventAction::Ignore)
+                        }
+                    })();
+                    future::ready(result)
+                },
             )
             .await?;
-        structured_result_for_request(&response.body, request, true)
+        if !response.terminal {
+            completed = Some(aggregator.finish()?);
+        }
+        structured_result_for_request(
+            &completed.ok_or(ProviderError::InvalidResponse(
+                "provider final content is missing",
+            ))?,
+            request,
+            true,
+        )
     }
 
     async fn embed(
@@ -446,6 +590,117 @@ fn structured_result_for_request(
     )
 }
 
+fn validate_strict_function_result(
+    body: &Value,
+    request: &StructuredGenerationRequest,
+) -> Result<StructuredGenerationResult, ProviderError> {
+    if request.defer_local_schema_validation
+        && (!request.strict_function_call || request.strict_function_schema.is_none())
+    {
+        return Err(ProviderError::InvalidConfiguration(
+            "deferred local schema validation requires a strict wire schema",
+        ));
+    }
+    if let Some(strict_schema) = request.strict_function_schema.as_ref() {
+        let wire_result = structured_result_with_repairs(body, strict_schema, false, &[])?;
+        if request.defer_local_schema_validation {
+            return Ok(wire_result);
+        }
+    }
+    structured_result_for_request(body, request, false)
+}
+
+const STRICT_FUNCTION_ARGUMENT_MAX_BYTES: usize = 1024 * 1024;
+
+fn strict_function_call_arguments(
+    response: &Value,
+    expected_name: &str,
+) -> Result<String, ProviderError> {
+    let invalid = |issue| ProviderError::StrictFunctionCallInvalid { issue };
+    let Some(choices) = response.get("choices").and_then(Value::as_array) else {
+        return Err(invalid(StrictFunctionCallIssue::InvalidChoice));
+    };
+    if choices.is_empty() {
+        return Err(invalid(StrictFunctionCallIssue::NoToolCall));
+    }
+    if choices.len() != 1 {
+        return Err(invalid(StrictFunctionCallIssue::InvalidChoice));
+    }
+    let choice = &choices[0];
+    if choice.get("index").and_then(Value::as_u64) != Some(0) {
+        return Err(invalid(StrictFunctionCallIssue::InvalidChoice));
+    }
+    let Some(message) = choice.get("message").and_then(Value::as_object) else {
+        return Err(invalid(StrictFunctionCallIssue::NoToolCall));
+    };
+    let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) else {
+        return Err(invalid(StrictFunctionCallIssue::NoToolCall));
+    };
+    if tool_calls.is_empty() {
+        return Err(invalid(StrictFunctionCallIssue::NoToolCall));
+    }
+    if tool_calls.len() != 1 {
+        return Err(invalid(StrictFunctionCallIssue::MultipleToolCalls));
+    }
+    if choice.get("finish_reason").and_then(Value::as_str) != Some("tool_calls") {
+        return Err(invalid(StrictFunctionCallIssue::WrongFinishReason));
+    }
+    if let Some(content) = message.get("content") {
+        match content {
+            Value::Null => {}
+            Value::String(text) if text.trim().is_empty() => {}
+            Value::String(_) => {
+                return Err(invalid(StrictFunctionCallIssue::MixedMessageContent));
+            }
+            _ => return Err(invalid(StrictFunctionCallIssue::InvalidToolDelta)),
+        }
+    }
+    let call = tool_calls[0]
+        .as_object()
+        .ok_or_else(|| invalid(StrictFunctionCallIssue::InvalidToolDelta))?;
+    if call.get("type").and_then(Value::as_str) != Some("function") {
+        return Err(invalid(StrictFunctionCallIssue::InvalidToolDelta));
+    }
+    match call.get("index") {
+        Some(value) if value.as_u64() != Some(0) => {
+            return Err(invalid(StrictFunctionCallIssue::MultipleToolCalls));
+        }
+        Some(_) | None => {}
+    }
+    let id = match call.get("id") {
+        Some(Value::String(id)) if !id.is_empty() => id,
+        None | Some(Value::Null) | Some(Value::String(_)) => {
+            return Err(invalid(StrictFunctionCallIssue::MissingToolCallId));
+        }
+        Some(_) => return Err(invalid(StrictFunctionCallIssue::InvalidToolDelta)),
+    };
+    if id.len() > 128 {
+        return Err(ProviderError::ResponseTooLarge);
+    }
+    let function = call
+        .get("function")
+        .and_then(Value::as_object)
+        .ok_or_else(|| invalid(StrictFunctionCallIssue::InvalidToolDelta))?;
+    let name = function
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid(StrictFunctionCallIssue::InvalidToolDelta))?;
+    if name != expected_name {
+        return Err(invalid(StrictFunctionCallIssue::WrongToolName));
+    }
+    let arguments = match function.get("arguments") {
+        Some(Value::String(arguments)) if !arguments.is_empty() => arguments,
+        None | Some(Value::Null) | Some(Value::String(_)) => {
+            return Err(invalid(StrictFunctionCallIssue::MissingArguments));
+        }
+        Some(_) => return Err(invalid(StrictFunctionCallIssue::InvalidToolDelta)),
+    };
+    if arguments.len() > STRICT_FUNCTION_ARGUMENT_MAX_BYTES {
+        return Err(ProviderError::ResponseTooLarge);
+    }
+    Ok(arguments.clone())
+}
+
 #[cfg(test)]
 fn structured_result_with_envelope_repair(
     body: &Value,
@@ -461,10 +716,33 @@ fn structured_result_with_repairs(
     allow_envelope_repair: bool,
     missing_required_string_fallbacks: &[MissingRequiredStringFallback],
 ) -> Result<StructuredGenerationResult, ProviderError> {
-    let text = extract_text(body)?;
-    let text = structured_json_text(&text);
-    let value: Value = serde_json::from_str(text)
-        .map_err(|_| response_contract_error(body, "structured output is not JSON"))?;
+    let raw_text = extract_text(body)?;
+    let text = structured_json_text(&raw_text);
+    let fence_detected = raw_text.trim_start().starts_with("```");
+    let value: Value = serde_json::from_str(text).map_err(|error| {
+        let terminal = body
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("finish_reason"))
+            .and_then(Value::as_str);
+        if matches!(
+            terminal,
+            Some("length" | "content_filter" | "repetition_truncation")
+        ) {
+            response_contract_error(body, "structured output is not JSON")
+        } else {
+            ProviderError::StructuredJsonInvalid {
+                diagnostic: structured_json_diagnostic(
+                    body,
+                    &raw_text,
+                    text,
+                    fence_detected,
+                    &error,
+                ),
+            }
+        }
+    })?;
     let value = if allow_envelope_repair {
         normalize_single_array_envelope(value, schema)
     } else {
@@ -528,7 +806,9 @@ fn normalize_missing_required_strings(
 }
 
 fn extract_text(body: &Value) -> Result<String, ProviderError> {
-    if let Some(text) = body.get("output_text").and_then(Value::as_str) {
+    if let Some(text) = body.get("output_text").and_then(Value::as_str)
+        && !text.trim().is_empty()
+    {
         return Ok(text.to_owned());
     }
     if let Some(text) = body
@@ -590,13 +870,35 @@ fn openai_chat_body(
     let preset = model_settings
         .openai_compatibility_preset
         .resolve(provider_kind, provider_host);
+    if !request.strict_function_call
+        && (request.strict_function_schema.is_some() || request.defer_local_schema_validation)
+    {
+        return Err(ProviderError::InvalidConfiguration(
+            "strict function schema requires strict function mode",
+        ));
+    }
+    if request.defer_local_schema_validation && request.strict_function_schema.is_none() {
+        return Err(ProviderError::InvalidConfiguration(
+            "deferred local schema validation requires a strict wire schema",
+        ));
+    }
+    if request.strict_function_call && provider_kind != ProviderKind::XiaomiMimo {
+        return Err(ProviderError::InvalidConfiguration(
+            "strict evaluation function output requires MiMo",
+        ));
+    }
     let output_mode = model_settings.openai_structured_output_mode.resolve(preset);
     let token_field = model_settings.openai_token_limit_field.resolve(preset);
     let prompt_constrained = matches!(
         output_mode,
         OpenAiStructuredOutputMode::JsonObject | OpenAiStructuredOutputMode::PromptOnly
     );
-    let system = if prompt_constrained {
+    let system = if request.strict_function_call {
+        format!(
+            "{}\nReturn the result only through the single supplied strict function tool. Do not put JSON or commentary in assistant message content.",
+            request.system
+        )
+    } else if prompt_constrained {
         json_mode_system_prompt(&request.system, &request.schema)?
     } else {
         request.system.clone()
@@ -608,24 +910,45 @@ fn openai_chat_body(
             {"role": "user", "content": request.user}
         ]
     });
-    match output_mode {
-        OpenAiStructuredOutputMode::Auto => {
-            unreachable!("automatic structured-output mode must resolve")
+    if request.strict_function_call {
+        let parameters = strict_function_schema_subset(
+            request
+                .strict_function_schema
+                .as_ref()
+                .unwrap_or(&request.schema),
+        )?;
+        body["tools"] = json!([{
+            "type": "function",
+            "function": {
+                "name": request.schema_name,
+                "description": "Return one result matching the supplied schema.",
+                "strict": true,
+                "parameters": parameters
+            }
+        }]);
+        // MiMo documents `auto` as supported; non-auto choices are ignored by
+        // the service and therefore must never be treated as forced dispatch.
+        body["tool_choice"] = json!("auto");
+    } else {
+        match output_mode {
+            OpenAiStructuredOutputMode::Auto => {
+                unreachable!("automatic structured-output mode must resolve")
+            }
+            OpenAiStructuredOutputMode::StrictJsonSchema => {
+                body["response_format"] = json!({
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": request.schema_name,
+                        "strict": true,
+                        "schema": request.schema
+                    }
+                });
+            }
+            OpenAiStructuredOutputMode::JsonObject => {
+                body["response_format"] = json!({"type": "json_object"});
+            }
+            OpenAiStructuredOutputMode::PromptOnly => {}
         }
-        OpenAiStructuredOutputMode::StrictJsonSchema => {
-            body["response_format"] = json!({
-                "type": "json_schema",
-                "json_schema": {
-                    "name": request.schema_name,
-                    "strict": true,
-                    "schema": request.schema
-                }
-            });
-        }
-        OpenAiStructuredOutputMode::JsonObject => {
-            body["response_format"] = json!({"type": "json_object"});
-        }
-        OpenAiStructuredOutputMode::PromptOnly => {}
     }
 
     match token_field {
@@ -638,12 +961,20 @@ fn openai_chat_body(
         }
     }
 
-    let thinking_mode = match (preset, model_settings.openai_thinking_mode) {
-        (
-            OpenAiCompatibilityPreset::DeepSeek | OpenAiCompatibilityPreset::XiaomiMimo,
-            OpenAiThinkingMode::Auto,
-        ) => OpenAiThinkingMode::Enabled,
-        (_, configured) => configured,
+    let thinking_mode = if request.strict_function_call {
+        // MiMo documents tool calls as unstable/incomplete with thinking
+        // enabled. This override is deliberately scoped to the explicit M6
+        // strict-function request flag; ordinary provider calls retain their
+        // configured preset behavior.
+        OpenAiThinkingMode::Disabled
+    } else {
+        match (preset, model_settings.openai_thinking_mode) {
+            (
+                OpenAiCompatibilityPreset::DeepSeek | OpenAiCompatibilityPreset::XiaomiMimo,
+                OpenAiThinkingMode::Auto,
+            ) => OpenAiThinkingMode::Enabled,
+            (_, configured) => configured,
+        }
     };
     let model = request.model.to_ascii_lowercase();
     match preset {
@@ -679,26 +1010,103 @@ fn openai_chat_body(
         OpenAiCompatibilityPreset::Generic => {}
     }
 
-    let forwards_temperature = match preset {
-        OpenAiCompatibilityPreset::Generic => true,
-        OpenAiCompatibilityPreset::DeepSeek | OpenAiCompatibilityPreset::XiaomiMimo => {
-            thinking_mode == OpenAiThinkingMode::Disabled
-        }
-        OpenAiCompatibilityPreset::ZhipuGlm => {
-            request
-                .temperature
-                .is_some_and(|temperature| temperature > 0.0)
-                && thinking_mode != OpenAiThinkingMode::Enabled
-        }
-        OpenAiCompatibilityPreset::Auto
-        | OpenAiCompatibilityPreset::MoonshotKimi
-        | OpenAiCompatibilityPreset::GoogleGemini
-        | OpenAiCompatibilityPreset::AlibabaQwen => false,
-    };
+    let forwards_temperature = !request.strict_function_call
+        && match preset {
+            OpenAiCompatibilityPreset::Generic => true,
+            OpenAiCompatibilityPreset::DeepSeek | OpenAiCompatibilityPreset::XiaomiMimo => {
+                thinking_mode == OpenAiThinkingMode::Disabled
+            }
+            OpenAiCompatibilityPreset::ZhipuGlm => {
+                request
+                    .temperature
+                    .is_some_and(|temperature| temperature > 0.0)
+                    && thinking_mode != OpenAiThinkingMode::Enabled
+            }
+            OpenAiCompatibilityPreset::Auto
+            | OpenAiCompatibilityPreset::MoonshotKimi
+            | OpenAiCompatibilityPreset::GoogleGemini
+            | OpenAiCompatibilityPreset::AlibabaQwen => false,
+        };
     if forwards_temperature && let Some(temperature) = request.temperature {
         body["temperature"] = json!(temperature);
     }
     Ok(body)
+}
+
+fn strict_function_schema_subset(schema: &Value) -> Result<Value, ProviderError> {
+    fn strip_unsupported(value: &Value) -> Value {
+        match value {
+            Value::Object(object) => Value::Object(
+                object
+                    .iter()
+                    .filter(|(key, _)| {
+                        !matches!(
+                            key.as_str(),
+                            "minimum" | "maximum" | "minItems" | "maxItems"
+                        )
+                    })
+                    .map(|(key, value)| (key.clone(), strip_unsupported(value)))
+                    .collect(),
+            ),
+            Value::Array(values) => Value::Array(values.iter().map(strip_unsupported).collect()),
+            other => other.clone(),
+        }
+    }
+    fn validate(value: &Value) -> bool {
+        let Some(object) = value.as_object() else {
+            return false;
+        };
+        if object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "type" | "enum" | "properties" | "required" | "additionalProperties" | "items"
+            )
+        }) {
+            return false;
+        }
+        if let Some(enums) = object.get("enum")
+            && !enums.is_array()
+        {
+            return false;
+        }
+        match object.get("type").and_then(Value::as_str) {
+            Some("object") => {
+                if object.get("additionalProperties") != Some(&Value::Bool(false)) {
+                    return false;
+                }
+                let Some(properties) = object.get("properties").and_then(Value::as_object) else {
+                    return false;
+                };
+                let Some(required) = object.get("required").and_then(Value::as_array) else {
+                    return false;
+                };
+                let required = required
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<std::collections::BTreeSet<_>>();
+                let keys = properties
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<std::collections::BTreeSet<_>>();
+                required == keys && properties.values().all(validate)
+            }
+            Some("array") => object.get("items").is_some_and(validate),
+            Some("string" | "integer" | "number" | "boolean" | "null") => {
+                !object.contains_key("properties")
+                    && !object.contains_key("required")
+                    && !object.contains_key("items")
+                    && !object.contains_key("additionalProperties")
+            }
+            _ => false,
+        }
+    }
+    let subset = strip_unsupported(schema);
+    if !validate(&subset) {
+        return Err(ProviderError::InvalidConfiguration(
+            "MiMo strict function schema is outside supported subset",
+        ));
+    }
+    Ok(subset)
 }
 
 fn json_mode_system_prompt(system: &str, schema: &Value) -> Result<String, ProviderError> {
@@ -779,6 +1187,73 @@ fn structured_json_text(text: &str) -> &str {
         .strip_suffix("```")
         .map(str::trim)
         .unwrap_or(trimmed)
+}
+
+fn structured_json_diagnostic(
+    body: &Value,
+    raw_text: &str,
+    parsed_text: &str,
+    fence_detected: bool,
+    error: &serde_json::Error,
+) -> StructuredJsonDiagnostic {
+    let category = match error.classify() {
+        serde_json::error::Category::Eof => StructuredJsonParserCategory::Eof,
+        serde_json::error::Category::Data => StructuredJsonParserCategory::Data,
+        serde_json::error::Category::Io => StructuredJsonParserCategory::Io,
+        serde_json::error::Category::Syntax => StructuredJsonParserCategory::Syntax,
+    };
+    let message = error.to_string();
+    let issue = if error.is_eof() {
+        StructuredJsonParseIssue::UnexpectedEof
+    } else if message.contains("trailing characters") {
+        StructuredJsonParseIssue::TrailingCharacters
+    } else if message.contains("expected `:") {
+        StructuredJsonParseIssue::ExpectedColon
+    } else if message.contains("expected `,` or `}") {
+        StructuredJsonParseIssue::ExpectedCommaOrEnd
+    } else if message.contains("key must be a string") {
+        StructuredJsonParseIssue::ExpectedKey
+    } else if message.contains("invalid unicode") {
+        StructuredJsonParseIssue::InvalidUnicode
+    } else if message.contains("control character") {
+        StructuredJsonParseIssue::ControlCharacter
+    } else if message.contains("number out of range") {
+        StructuredJsonParseIssue::NumberOutOfRange
+    } else if message.contains("invalid number") {
+        StructuredJsonParseIssue::InvalidNumber
+    } else if message.contains("trailing comma") {
+        StructuredJsonParseIssue::TrailingComma
+    } else if message.contains("escape") {
+        StructuredJsonParseIssue::InvalidEscape
+    } else if message.contains("expected value") {
+        StructuredJsonParseIssue::ExpectedValue
+    } else {
+        StructuredJsonParseIssue::GenericSyntax
+    };
+    let finish_reason = body
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(Value::as_str)
+        .map(|reason| match reason {
+            "stop" => StructuredJsonFinishReason::Stop,
+            "length" => StructuredJsonFinishReason::Length,
+            "content_filter" => StructuredJsonFinishReason::ContentFilter,
+            "repetition_truncation" => StructuredJsonFinishReason::RepetitionTruncation,
+            "tool_calls" => StructuredJsonFinishReason::ToolCalls,
+            _ => StructuredJsonFinishReason::Unknown,
+        });
+    StructuredJsonDiagnostic {
+        parser_category: category,
+        issue,
+        line: error.line(),
+        column: error.column(),
+        content_bytes: raw_text.len(),
+        parsed_bytes: parsed_text.len(),
+        fence_detected,
+        finish_reason,
+    }
 }
 
 fn response_contract_error(body: &Value, fallback: &'static str) -> ProviderError {
@@ -935,6 +1410,10 @@ async fn list_openai_models(
         .collect()
 }
 
+pub fn validate_structured_value(value: &Value, schema: &Value) -> Result<(), ProviderError> {
+    validate_json_schema(value, schema)
+}
+
 fn validate_json_schema(value: &Value, schema: &Value) -> Result<(), ProviderError> {
     validate_json_schema_at(value, schema, "$")
 }
@@ -1045,13 +1524,13 @@ mod tests {
     use super::{
         MissingRequiredStringFallback, StructuredGenerationRequest, extract_text, openai_chat_body,
         structured_result, structured_result_with_envelope_repair, structured_result_with_repairs,
-        validate_json_schema,
+        validate_json_schema, validate_strict_function_result,
     };
     use crate::{
         ModelSettings, OpenAiCompatibilityPreset, OpenAiStructuredOutputMode, OpenAiThinkingMode,
-        OpenAiTokenLimitField, ProviderKind,
+        OpenAiTokenLimitField, ProviderKind, StructuredJsonFinishReason, StructuredJsonParseIssue,
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     #[test]
     fn embedding_batch_restores_input_order_and_rejects_ambiguous_indices() {
@@ -1099,6 +1578,9 @@ mod tests {
             system: "Extract durable memories.".to_owned(),
             user: "<untrusted_markdown>source</untrusted_markdown>".to_owned(),
             schema_name: "memory_extraction".to_owned(),
+            strict_function_schema: None,
+            defer_local_schema_validation: false,
+            strict_function_call: false,
             schema: json!({
                 "type": "object",
                 "properties": {"memories": {"type": "array", "items": {"type": "object"}}},
@@ -1163,6 +1645,156 @@ mod tests {
         assert_eq!(
             extract_text(&json!({"choices": [{"message": {"content": [{"type": "text", "text": "{\"ok\":true}"}]}}]})).unwrap(),
             "{\"ok\":true}"
+        );
+    }
+
+    #[test]
+    fn strict_mimo_function_call_uses_one_auto_tool_and_a_supported_schema_subset() {
+        let mut request = generation_request("mimo-v2.6-flash");
+        request.strict_function_call = true;
+        request.schema_name = "semantic_memory_observation".to_owned();
+        request.schema = json!({
+            "type":"object","additionalProperties":false,"required":["observations"],
+            "properties":{"observations":{"type":"array","minItems":1,"items":{
+                "type":"object","additionalProperties":false,"required":["status","indices"],
+                "properties":{"status":{"type":"string","enum":["unknown","source_stated"]},"indices":{"type":"array","items":{"type":"integer","minimum":1}}}
+            }}}
+        });
+        let body = openai_chat_body(
+            &request,
+            &ModelSettings::default(),
+            ProviderKind::XiaomiMimo,
+            Some("api.xiaomimimo.com"),
+            8_192,
+        )
+        .unwrap();
+        assert!(body.get("response_format").is_none());
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body.get("temperature").is_none());
+        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+        let function = &body["tools"][0]["function"];
+        assert_eq!(function["name"], "semantic_memory_observation");
+        assert_eq!(function["strict"], true);
+        assert_eq!(
+            function["description"],
+            "Return one result matching the supplied schema."
+        );
+        assert_eq!(function["parameters"]["required"], json!(["observations"]));
+        assert!(
+            function["parameters"]["properties"]["observations"]
+                .get("minItems")
+                .is_none()
+        );
+        assert!(
+            function["parameters"]["properties"]["observations"]["items"]["properties"]["indices"]
+                ["items"]
+                .get("minimum")
+                .is_none()
+        );
+        assert!(
+            request.schema["properties"]["observations"]
+                .get("minItems")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn strict_function_wire_schema_and_original_local_schema_are_both_enforced() {
+        let mut request = generation_request("mimo-v2.6-flash");
+        request.strict_function_call = true;
+        request.schema_name = "semantic_memory_m2_organization".to_owned();
+        request.schema = json!({
+            "type":"object","additionalProperties":false,"required":["actions"],
+            "properties":{"actions":{"type":"array","minItems":1,"items":{
+                "type":"object","additionalProperties":false,"required":["action","candidate_ids"],
+                "properties":{
+                    "action":{"type":"string","enum":["no_change"]},
+                    "candidate_ids":{"type":"array","minItems":1,"items":{"type":"string"}},
+                    "card_ref":{"type":"string"},"title":{"type":"string"},
+                    "content":{"type":"string"},"item_kind":{"type":"string"},
+                    "support_operator":{"type":"string"},"reason":{"type":"string"}
+                }
+            }}}
+        });
+        let mut wire_schema = request.schema.clone();
+        wire_schema["properties"]["actions"]["items"]["required"] = json!([
+            "action",
+            "candidate_ids",
+            "card_ref",
+            "title",
+            "content",
+            "item_kind",
+            "support_operator",
+            "reason"
+        ]);
+        request.strict_function_schema = Some(wire_schema);
+        let body = |value: Value| json!({"choices":[{"message":{"content":value.to_string()},"finish_reason":"stop"}]});
+        let complete_wire = json!({"actions":[{
+            "action":"no_change","candidate_ids":["candidate-1"],"card_ref":"",
+            "title":"","content":"","item_kind":"","support_operator":"","reason":""
+        }]});
+        let validated =
+            validate_strict_function_result(&body(complete_wire.clone()), &request).unwrap();
+        assert_eq!(validated.value, complete_wire);
+
+        let missing_wire_field = json!({"actions":[{
+            "action":"no_change","candidate_ids":["candidate-1"],"card_ref":"",
+            "title":"","content":"","item_kind":"","support_operator":""
+        }]});
+        assert!(validate_strict_function_result(&body(missing_wire_field), &request).is_err());
+
+        let invalid_original = json!({"actions":[{
+            "action":"no_change","candidate_ids":[],"card_ref":"",
+            "title":"","content":"","item_kind":"","support_operator":"","reason":""
+        }]});
+        assert!(validate_strict_function_result(&body(invalid_original), &request).is_err());
+
+        let request_body = openai_chat_body(
+            &request,
+            &ModelSettings::default(),
+            ProviderKind::XiaomiMimo,
+            Some("api.xiaomimimo.com"),
+            8_192,
+        )
+        .unwrap();
+        assert_eq!(request_body["tools"][0]["function"]["parameters"]["properties"]["actions"]["items"]["required"].as_array().unwrap().len(), 8);
+        assert_eq!(
+            request.schema["properties"]["actions"]["items"]["required"],
+            json!(["action", "candidate_ids"])
+        );
+    }
+
+    #[test]
+    fn strict_function_call_rejects_non_mimo_and_non_subset_schemas_before_dispatch() {
+        let mut request = generation_request("ordinary-model");
+        request.strict_function_call = true;
+        assert!(
+            openai_chat_body(
+                &request,
+                &ModelSettings::default(),
+                ProviderKind::OpenAiCompatible,
+                Some("proxy.example.test"),
+                8_192,
+            )
+            .is_err()
+        );
+
+        let mut optional = generation_request("mimo-v2.6-flash");
+        optional.strict_function_call = true;
+        optional.schema = json!({
+            "type":"object","additionalProperties":false,"required":[],
+            "properties":{"optional":{"type":"string"}}
+        });
+        assert!(
+            openai_chat_body(
+                &optional,
+                &ModelSettings::default(),
+                ProviderKind::XiaomiMimo,
+                Some("api.xiaomimimo.com"),
+                8_192,
+            )
+            .is_err()
         );
     }
 
@@ -1354,6 +1986,34 @@ mod tests {
     }
 
     #[test]
+    fn empty_output_text_falls_back_but_nonempty_invalid_text_does_not() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+            "additionalProperties": false
+        });
+        let valid = r#"{"ok":true}"#;
+        let choices = json!([{"message": {"content": valid}}]);
+        let empty =
+            structured_result(&json!({"output_text": "", "choices": choices}), &schema).unwrap();
+        assert_eq!(empty.value, json!({"ok": true}));
+
+        let content = json!([{"text": valid}]);
+        let whitespace =
+            structured_result(&json!({"output_text": " \n ", "content": content}), &schema)
+                .unwrap();
+        assert_eq!(whitespace.value, json!({"ok": true}));
+
+        let invalid = structured_result(
+            &json!({"output_text": "not-json", "choices": {"message": {"content": valid}}}),
+            &schema,
+        )
+        .unwrap_err();
+        assert_eq!(invalid.code(), "provider_structured_json_invalid");
+    }
+
+    #[test]
     fn structured_output_repairs_only_an_unambiguous_single_array_envelope() {
         let schema = json!({
             "type": "object",
@@ -1507,6 +2167,17 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(malformed.code(), "provider_structured_json_invalid");
+        let diagnostic = malformed.structured_json_diagnostic().unwrap();
+        assert_eq!(diagnostic.issue, StructuredJsonParseIssue::GenericSyntax);
+        assert_eq!(
+            diagnostic.finish_reason,
+            Some(StructuredJsonFinishReason::Stop)
+        );
+        assert!(
+            !serde_json::to_string(diagnostic)
+                .unwrap()
+                .contains("not json")
+        );
 
         let missing = structured_result(
             &json!({"choices": [{"message": {"content": null}, "finish_reason": "stop"}]}),
@@ -1521,5 +2192,46 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(incomplete.code(), "provider_output_truncated");
+    }
+
+    #[test]
+    fn structured_json_diagnostic_classifies_fences_and_eof_without_content() {
+        let schema = json!({"type": "object"});
+        let error = structured_result(
+            &json!({"choices": [{"message": {"content": "```json\n{\"secret\":}\n```"}, "finish_reason": "stop"}]}),
+            &schema,
+        )
+        .unwrap_err();
+        let diagnostic = error.structured_json_diagnostic().unwrap();
+        assert_eq!(diagnostic.issue, StructuredJsonParseIssue::ExpectedValue);
+        assert!(diagnostic.fence_detected);
+        assert!(diagnostic.content_bytes > diagnostic.parsed_bytes);
+        assert!(!format!("{error:?}").contains("secret"));
+    }
+
+    #[test]
+    fn structured_json_diagnostic_uses_controlled_issue_categories() {
+        let schema = json!({"type": "object"});
+        for (content, expected) in [
+            (r#"{"x":"\q"}"#, StructuredJsonParseIssue::InvalidEscape),
+            (r#"{"x":1,}"#, StructuredJsonParseIssue::TrailingComma),
+            (r#"{x:1}"#, StructuredJsonParseIssue::ExpectedKey),
+            (r#"{"x" 1}"#, StructuredJsonParseIssue::ExpectedColon),
+            (
+                r#"{"x":1 "y":2}"#,
+                StructuredJsonParseIssue::ExpectedCommaOrEnd,
+            ),
+            (r#"{}{}"#, StructuredJsonParseIssue::TrailingCharacters),
+            (r#"{"x":"\u{1}"}"#, StructuredJsonParseIssue::InvalidEscape),
+            (r#"{"x":\u0000}"#, StructuredJsonParseIssue::ExpectedValue),
+            (r#"{"x":01}"#, StructuredJsonParseIssue::InvalidNumber),
+        ] {
+            let error = structured_result(
+                &json!({"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}),
+                &schema,
+            )
+            .unwrap_err();
+            assert_eq!(error.structured_json_diagnostic().unwrap().issue, expected);
+        }
     }
 }

@@ -41,8 +41,9 @@ use mcp_vault_domain::{
 };
 use mcp_vault_indexer::IndexService;
 use mcp_vault_memory::{
-    ExtractionPolicy, InitializationStart, MemoryInitializationService, MemoryOrigin,
-    MemoryReadAccess, MemoryService, MemoryType, MemoryUpdateInput, OverviewRequest, RememberInput,
+    ExtractionPolicy, ForgetBatchInput, ForgetBatchStatus, InitializationStart,
+    MAX_FORGET_BATCH_ITEMS, MemoryInitializationService, MemoryOrigin, MemoryReadAccess,
+    MemoryService, MemoryType, MemoryUpdateInput, OverviewRequest, RememberInput,
 };
 use mcp_vault_providers::{
     ModelCapabilities, ModelInput, ModelSettings, ProviderError, ProviderInput, ProviderKind,
@@ -58,6 +59,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
 use url::Url;
+
+mod semantic;
 
 const SESSION_MAX_AGE: Duration = Duration::from_secs(12 * 60 * 60);
 const DEFAULT_PAGE_SIZE: u32 = 50;
@@ -611,6 +614,7 @@ fn vault_admin_routes() -> Router<AdminApiState> {
         .route("/index/embeddings/rebuild", post(rebuild_note_embeddings))
         .route("/index/nodes", get(index_nodes))
         .route("/memories", get(list_memories).post(create_memory))
+        .route("/memories/bulk-delete", post(delete_memories_bulk))
         .route(
             "/memories/{id}",
             get(get_memory).patch(update_memory).delete(delete_memory),
@@ -653,6 +657,7 @@ fn vault_admin_routes() -> Router<AdminApiState> {
         .route("/jobs/{id}/retry", post(retry_job))
         .route("/jobs/{id}/cancel", post(cancel_job))
         .route("/audit", get(list_audit))
+        .merge(semantic::routes())
 }
 
 async fn scoped_vault_dispatch(
@@ -3336,7 +3341,6 @@ async fn put_provider_mode(
         .await
     {
         Ok(setting) => {
-            let _ = state.memory().ensure_memory_jobs_scheduled(&context).await;
             state
                 .append_admin_audit(
                     Some(&context),
@@ -3608,14 +3612,6 @@ async fn update_provider(
         .await
     {
         Ok(provider) => {
-            if let Ok(vaults) = state.list_vaults().await {
-                for vault in vaults {
-                    if let Ok(context) = vault.context() {
-                        let _ = state.memory().ensure_memory_jobs_scheduled(&context).await;
-                    }
-                }
-            }
-
             state
                 .append_admin_audit(
                     None,
@@ -3910,8 +3906,9 @@ fn binding_json(binding: &ModelBindingRecord) -> Value {
     })
 }
 
-const MODEL_ROLES: [&str; 6] = [
+const MODEL_ROLES: [&str; 7] = [
     "memory_extraction",
+    "memory_overview",
     "note_summary",
     "topic_enrichment",
     "embedding_note",
@@ -4020,22 +4017,6 @@ async fn update_model_binding(
         .await
     {
         Ok(binding) => {
-            if matches!(role.as_str(), "embedding_memory" | "embedding_note") {
-                let targets = if binding.vault_id.is_some() {
-                    vec![context.clone()]
-                } else {
-                    state
-                        .list_vaults()
-                        .await
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|vault| vault.context().ok())
-                        .collect()
-                };
-                for target in targets {
-                    let _ = state.memory().ensure_memory_jobs_scheduled(&target).await;
-                }
-            }
             state
                 .append_admin_audit(
                     binding_context,
@@ -4573,7 +4554,7 @@ async fn list_memories(
     };
     match state
         .memory()
-        .list_after(
+        .list_with_access(
             &context,
             types,
             query.tag.clone(),
@@ -4582,6 +4563,7 @@ async fn list_memories(
             limit,
             offset,
             query.after_id,
+            MemoryReadAccess::ExplicitOnly,
         )
         .await
     {
@@ -4616,7 +4598,11 @@ async fn get_memory(
             );
         }
     };
-    match state.memory().get(&context, id).await {
+    match state
+        .memory()
+        .get_with_access(&context, id, MemoryReadAccess::ExplicitOnly)
+        .await
+    {
         Ok(memory) => api_ok(StatusCode::OK, memory, request_id.0),
         Err(error) => memory_error(error, request_id.0),
     }
@@ -4837,6 +4823,159 @@ async fn delete_current_memory(
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BulkMemoryDeleteRequest {
+    items: Vec<BulkMemoryDeleteItemRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BulkMemoryDeleteItemRequest {
+    id: String,
+    expected_revision: i64,
+}
+
+async fn delete_memories_bulk(
+    State(state): State<AdminApiState>,
+    headers: HeaderMap,
+    Extension(principal): Extension<AdminPrincipal>,
+    Extension(request_id): Extension<RequestId>,
+    Json(input): Json<BulkMemoryDeleteRequest>,
+) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
+        return auth_error(error, request_id.0);
+    }
+    if input.items.is_empty() || input.items.len() > MAX_FORGET_BATCH_ITEMS {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "validation_failed",
+            "The memory deletion batch size is invalid.",
+            None,
+            request_id.0,
+        );
+    }
+    let mut parsed = Vec::with_capacity(input.items.len());
+    let mut seen = Vec::with_capacity(input.items.len());
+    for item in input.items {
+        let id: MemoryId = match parse_id(&item.id, "A memory ID is invalid.") {
+            Ok(id) => id,
+            Err(_) => {
+                return api_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "validation_failed",
+                    "The memory deletion items are invalid.",
+                    None,
+                    request_id.0,
+                );
+            }
+        };
+        if seen.contains(&id) {
+            return api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_failed",
+                "The memory deletion items must contain unique IDs.",
+                None,
+                request_id.0,
+            );
+        }
+        seen.push(id);
+        let expected_revision = match Revision::try_from(item.expected_revision) {
+            Ok(revision) => revision,
+            Err(_) => {
+                return api_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "validation_failed",
+                    "A memory revision is invalid.",
+                    None,
+                    request_id.0,
+                );
+            }
+        };
+        parsed.push(ForgetBatchInput {
+            id,
+            expected_revision,
+        });
+    }
+
+    let vault = match current_vault(&state, &request_id.0).await {
+        Ok(vault) => vault,
+        Err(response) => return response,
+    };
+    let context = match vault.context() {
+        Ok(context) => context,
+        Err(_) => {
+            return state_error(
+                StateError::InvalidInput("Vault context is invalid"),
+                request_id.0,
+            );
+        }
+    };
+    let core = match state.core_for_vault(&vault) {
+        Ok(core) => core,
+        Err(error) => return state_error(error, request_id.0),
+    };
+    match state.memory().forget_many(&context, &core, parsed).await {
+        Ok(result) => {
+            let deleted = result
+                .results
+                .iter()
+                .filter(|item| item.status == ForgetBatchStatus::Deleted)
+                .count();
+            let conflicts = result
+                .results
+                .iter()
+                .filter(|item| item.status == ForgetBatchStatus::Conflict)
+                .count();
+            let failed = result.results.len().saturating_sub(deleted + conflicts);
+            let audit_items = result
+                .results
+                .iter()
+                .map(|item| {
+                    json!({
+                        "id": item.id,
+                        "status": item.status,
+                        "ownership": item.ownership,
+                        "source_extraction_paused": item.source_extraction_paused,
+                        "error_code": item.error_code,
+                    })
+                })
+                .collect::<Vec<_>>();
+            state
+                .append_admin_audit(
+                    Some(&context),
+                    &request_id.0,
+                    &principal.actor,
+                    "admin.memory.bulk_deleted",
+                    Some("memory_batch"),
+                    None,
+                    json!({
+                        "requested": result.results.len(),
+                        "deleted": deleted,
+                        "conflicts": conflicts,
+                        "failed": failed,
+                        "results": audit_items,
+                    }),
+                )
+                .await;
+            api_ok(
+                StatusCode::OK,
+                json!({
+                    "results": result.results,
+                    "summary": {
+                        "requested": deleted + conflicts + failed,
+                        "deleted": deleted,
+                        "conflicts": conflicts,
+                        "failed": failed,
+                    }
+                }),
+                request_id.0,
+            )
+        }
+        Err(error) => memory_error(error, request_id.0),
+    }
+}
+
 async fn get_memory_embeddings(
     State(state): State<AdminApiState>,
     Extension(request_id): Extension<RequestId>,
@@ -4871,6 +5010,9 @@ async fn list_memory_sources(
     Query(query): Query<MemorySourcesQuery>,
     Extension(request_id): Extension<RequestId>,
 ) -> Response {
+    let _ = (state, query);
+    return legacy_automatic_memory_disabled(request_id.0);
+    #[allow(unreachable_code)]
     let vault = match current_vault(&state, &request_id.0).await {
         Ok(vault) => vault,
         Err(response) => return response,
@@ -4959,6 +5101,7 @@ struct ResumeMemoryExtractionRequest {
     expected_set_revision: i64,
 }
 
+#[allow(unused_variables, unreachable_code)]
 async fn resume_memory_extraction(
     State(state): State<AdminApiState>,
     headers: HeaderMap,
@@ -4967,6 +5110,17 @@ async fn resume_memory_extraction(
     Extension(request_id): Extension<RequestId>,
     Json(input): Json<ResumeMemoryExtractionRequest>,
 ) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
+        return auth_error(error, request_id.0);
+    }
+    return api_error(
+        StatusCode::GONE,
+        "legacy_automatic_memory_disabled",
+        "旧版自动记忆来源恢复已停用；语义卡失效时请降级到授权 source retrieval/search_notes。",
+        Some(json!({"storage_retained": true, "cleanup": false})),
+        request_id.0,
+    );
+    #[allow(unreachable_code)]
     if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
         return auth_error(error, request_id.0);
     }
@@ -5070,11 +5224,20 @@ struct MemoryOverviewQuery {
     max_tokens: Option<u32>,
 }
 
+#[allow(unused_variables, unreachable_code)]
 async fn get_memory_overview(
     State(state): State<AdminApiState>,
     Query(query): Query<MemoryOverviewQuery>,
     Extension(request_id): Extension<RequestId>,
 ) -> Response {
+    return api_error(
+        StatusCode::GONE,
+        "legacy_automatic_memory_disabled",
+        "旧版自动记忆概览已停用；语义卡读取失败时请降级到授权 source retrieval/search_notes。",
+        Some(json!({"storage_retained": true, "cleanup": false})),
+        request_id.0,
+    );
+    #[allow(unreachable_code)]
     let vault = match current_vault(&state, &request_id.0).await {
         Ok(vault) => vault,
         Err(response) => return response,
@@ -5131,6 +5294,11 @@ async fn get_memory_generation(
     State(state): State<AdminApiState>,
     Extension(request_id): Extension<RequestId>,
 ) -> Response {
+    // The v3 automatic pipeline is retired.  Keep this route as an explicit
+    // tombstone so old Admin clients cannot inspect or mutate its policy.
+    let _ = state;
+    return legacy_automatic_memory_disabled(request_id.0);
+    #[allow(unreachable_code)]
     let vault = match current_vault(&state, &request_id.0).await {
         Ok(vault) => vault,
         Err(response) => return response,
@@ -5166,6 +5334,9 @@ async fn get_memory_initialization(
     State(state): State<AdminApiState>,
     Extension(request_id): Extension<RequestId>,
 ) -> Response {
+    let _ = state;
+    return legacy_automatic_memory_disabled(request_id.0);
+    #[allow(unreachable_code)]
     let vault = match current_vault(&state, &request_id.0).await {
         Ok(vault) => vault,
         Err(response) => return response,
@@ -5193,7 +5364,7 @@ async fn preview_memory_initialization(
     if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
         return auth_error(error, request_id.0);
     }
-    get_memory_initialization(State(state), Extension(request_id)).await
+    legacy_automatic_memory_disabled(request_id.0)
 }
 
 async fn start_memory_initialization(
@@ -5216,6 +5387,7 @@ async fn resume_memory_initialization(
     start_memory_initialization_inner(state, headers, principal, request_id, input, true).await
 }
 
+#[allow(unused_variables, unreachable_code)]
 async fn start_memory_initialization_inner(
     state: AdminApiState,
     headers: HeaderMap,
@@ -5224,6 +5396,18 @@ async fn start_memory_initialization_inner(
     input: MemoryInitializationRequest,
     resume_failed: bool,
 ) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
+        return auth_error(error, request_id.0);
+    }
+    let _ = (principal, input, resume_failed);
+    return api_error(
+        StatusCode::GONE,
+        "legacy_automatic_memory_disabled",
+        "旧版 v3 自动记忆初始化/清理已停用；旧数据、普通笔记与 history 保留，不执行 cleanup。",
+        Some(json!({"storage_retained": true, "cleanup": false})),
+        request_id.0,
+    );
+    #[allow(unreachable_code)]
     if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
         return auth_error(error, request_id.0);
     }
@@ -5280,6 +5464,7 @@ async fn start_memory_initialization_inner(
     api_ok(status_code, body, request_id.0)
 }
 
+#[allow(unused_variables, unreachable_code)]
 async fn control_memory_generation(
     State(state): State<AdminApiState>,
     headers: HeaderMap,
@@ -5287,6 +5472,20 @@ async fn control_memory_generation(
     Extension(request_id): Extension<RequestId>,
     Json(input): Json<MemoryGenerationControlRequest>,
 ) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
+        return auth_error(error, request_id.0);
+    }
+    let _ = (principal, input);
+    return legacy_automatic_memory_disabled(request_id.0);
+    #[allow(unreachable_code)]
+    return api_error(
+        StatusCode::GONE,
+        "legacy_automatic_memory_disabled",
+        "旧版 v3 自动记忆调度已停用；语义卡读取失败时请降级到授权 source retrieval/search_notes。",
+        Some(json!({"storage_retained": true, "cleanup": false})),
+        request_id.0,
+    );
+    #[allow(unreachable_code)]
     if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
         return auth_error(error, request_id.0);
     }
@@ -5357,6 +5556,9 @@ async fn get_memory_extraction(
     State(state): State<AdminApiState>,
     Extension(request_id): Extension<RequestId>,
 ) -> Response {
+    let _ = state;
+    return legacy_automatic_memory_disabled(request_id.0);
+    #[allow(unreachable_code)]
     let vault = match current_vault(&state, &request_id.0).await {
         Ok(vault) => vault,
         Err(response) => return response,
@@ -5390,6 +5592,12 @@ async fn put_memory_extraction(
     Extension(request_id): Extension<RequestId>,
     Json(input): Json<ExtractionPolicyRequest>,
 ) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::PUT) {
+        return auth_error(error, request_id.0);
+    }
+    let _ = (principal, input);
+    return legacy_automatic_memory_disabled(request_id.0);
+    #[allow(unreachable_code)]
     if let Err(error) = validate_state_change_origin(&state, &headers, &Method::PUT) {
         return auth_error(error, request_id.0);
     }
@@ -5462,6 +5670,7 @@ struct RunMemoryExtractionRequest {
     include_evaluated: bool,
 }
 
+#[allow(unused_variables, unreachable_code)]
 async fn run_memory_extraction(
     State(state): State<AdminApiState>,
     headers: HeaderMap,
@@ -5469,6 +5678,18 @@ async fn run_memory_extraction(
     Extension(request_id): Extension<RequestId>,
     input: Option<Json<RunMemoryExtractionRequest>>,
 ) -> Response {
+    if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
+        return auth_error(error, request_id.0);
+    }
+    let _ = (principal, input);
+    return api_error(
+        StatusCode::GONE,
+        "legacy_automatic_memory_disabled",
+        "旧版自动记忆提取已停用；请使用语义记忆或显式 raw 记忆管理。",
+        Some(json!({"storage_retained": true, "cleanup": false})),
+        request_id.0,
+    );
+    #[allow(unreachable_code)]
     if let Err(error) = validate_state_change_origin(&state, &headers, &Method::POST) {
         return auth_error(error, request_id.0);
     }
@@ -6183,11 +6404,35 @@ fn backup_error(error: BackupError, request_id: String) -> Response {
 }
 
 fn provider_error(error: ProviderError, request_id: String) -> Response {
+    if let ProviderError::ModelCapabilityMismatch { capability } = &error {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "model_capability_mismatch",
+            "The selected model does not declare the capability required for this role.",
+            Some(json!({"capability": capability})),
+            request_id,
+        );
+    }
     let (status, code, message) = match error {
         ProviderError::NotFound => (
             StatusCode::NOT_FOUND,
             "not_found",
             "The provider was not found.",
+        ),
+        ProviderError::ModelNotFound => (
+            StatusCode::NOT_FOUND,
+            "model_not_found",
+            "The selected model was not found.",
+        ),
+        ProviderError::ModelDisabled => (
+            StatusCode::CONFLICT,
+            "model_disabled",
+            "The selected model is disabled.",
+        ),
+        ProviderError::ModelCapabilityMismatch { .. } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "model_capability_mismatch",
+            "The selected model does not declare the capability required for this role.",
         ),
         ProviderError::Disabled => (
             StatusCode::CONFLICT,
@@ -6244,6 +6489,11 @@ fn index_error(error: mcp_vault_indexer::IndexError, request_id: String) -> Resp
 
 fn memory_error(error: mcp_vault_memory::MemoryError, request_id: String) -> Response {
     let (status, code, message) = match error {
+        mcp_vault_memory::MemoryError::AccessDenied => (
+            StatusCode::FORBIDDEN,
+            "permission_denied",
+            "The semantic memory operation is not permitted.",
+        ),
         mcp_vault_memory::MemoryError::InvalidInput(_) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             "validation_failed",
@@ -6303,6 +6553,16 @@ fn memory_error(error: mcp_vault_memory::MemoryError, request_id: String) -> Res
     api_error(status, code, message, None, request_id)
 }
 
+fn legacy_automatic_memory_disabled(request_id: String) -> Response {
+    api_error(
+        StatusCode::GONE,
+        "legacy_automatic_memory_disabled",
+        "旧版 v3 自动记忆管道已停用；旧数据、普通笔记与 history 保留，不执行 cleanup。请使用语义记忆或授权 source retrieval/search_notes。",
+        Some(json!({"storage_retained": true, "cleanup": false})),
+        request_id,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -6323,13 +6583,18 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use http_body_util::BodyExt;
     use mcp_vault_auth::{AuthService, MasterKeyRing, OriginPolicy};
-    use mcp_vault_domain::VaultSlug;
-    use mcp_vault_memory::ExtractionPolicy;
+    use mcp_vault_core::VaultCore;
+    use mcp_vault_domain::{
+        Actor, Revision, SourcePlane, VaultContext, VaultId, VaultPath, VaultPathPolicy, VaultSlug,
+        WritePrecondition,
+    };
+    use mcp_vault_memory::semantic::organize::SemanticOrganizationService;
+    use mcp_vault_memory::{ExtractionPolicy, SemanticMemoryService};
     use mcp_vault_providers::{
         ModelCapabilities, ModelInput, ModelSettings, ProviderInput, ProviderKind, ProviderMode,
         ProviderSettings,
     };
-    use mcp_vault_state::{JobStatus, StateStore};
+    use mcp_vault_state::{JobStatus, StateStore, VaultStatus};
     use mcp_vault_storage_fs::StorageOptions;
     use serde_json::{Value, json};
     use tempfile::TempDir;
@@ -6666,6 +6931,189 @@ mod tests {
         (router, root, maintenance, cookie, csrf)
     }
 
+    async fn register_semantic_vault(
+        state: &StateStore,
+        root: &TempDir,
+        slug: &str,
+    ) -> VaultContext {
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new(slug).unwrap(),
+            root.path().join("vaults").join(slug),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, slug, VaultStatus::Active)
+            .await
+            .unwrap();
+        state
+            .settings()
+            .set_vault(
+                &context,
+                "memory.units.policy",
+                &json!({"enabled":true,"request_timeout_seconds":300}),
+                WritePrecondition::Unconditional,
+                None,
+            )
+            .await
+            .unwrap();
+        context
+    }
+
+    async fn seed_semantic_source(
+        state: &StateStore,
+        root: &TempDir,
+        context: &VaultContext,
+        path_text: &str,
+    ) -> (
+        VaultCore,
+        mcp_vault_state::SemanticCardRecord,
+        String,
+        String,
+        String,
+    ) {
+        let core = VaultCore::new(
+            state.clone(),
+            root.path().join("history"),
+            VaultPathPolicy::default(),
+            StorageOptions::default(),
+            VaultCoreRuntime::new(MaintenanceGate::new()),
+        );
+        let path = VaultPath::parse(path_text).unwrap();
+        core.create_bytes(
+            context,
+            &path,
+            b"# Semantic Admin\nThe semantic Admin source is current.\n",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+        let memory = SemanticMemoryService::new(state.clone());
+        let input = memory.prepare_source(context, &core, &path).await.unwrap();
+        let body = input.blocks.last().unwrap();
+        let proposal = json!({
+            "outcome":"success_nonempty",
+            "observations":[{"kind":"decision","statement":"The semantic Admin source is current.","scope":"project","assertion_status":"source_asserted","admission_reason":"admin fixture","value_for_future_work":"retain","body_block_ids":[body.local_id.clone()]}],
+            "cards":[{"title":"Semantic Admin","kind":"decision","scope":"project","assertion_status":"source_asserted","observation_indices":[0]}]
+        });
+        memory
+            .submit_proposal_json(context, &core, &path, &proposal.to_string())
+            .await
+            .unwrap();
+        let card = state
+            .semantic_memory()
+            .list_cards(context, 20)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|card| card.source_path == path)
+            .unwrap();
+        let file = core.read(context, &path).await.unwrap().file;
+        let source = state
+            .semantic_memory()
+            .get_source_by_file(context, file.id)
+            .await
+            .unwrap()
+            .unwrap();
+        (
+            core,
+            card.clone(),
+            source.source_id.to_string(),
+            source.current_revision_id.unwrap().to_string(),
+            card.items[0].evidence_ref_ids[0].to_string(),
+        )
+    }
+
+    async fn semantic_admin_fixture() -> (
+        axum::Router,
+        TempDir,
+        String,
+        String,
+        AdminApiState,
+        VaultContext,
+        VaultCore,
+        mcp_vault_state::SemanticCardRecord,
+        String,
+        String,
+        String,
+        VaultContext,
+        mcp_vault_state::SemanticCardRecord,
+        String,
+        String,
+        String,
+    ) {
+        let (router, root, _maintenance, cookie, csrf, state) =
+            authenticated_fixture_with_state().await;
+        let default = state
+            .state
+            .vaults()
+            .find_by_slug(&VaultSlug::new("default").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let default_context = default.context().unwrap();
+        state
+            .state
+            .settings()
+            .set_vault(
+                &default_context,
+                "memory.units.policy",
+                &json!({"enabled":true,"request_timeout_seconds":300}),
+                WritePrecondition::Unconditional,
+                None,
+            )
+            .await
+            .unwrap();
+        let (default_core, first_card, first_source, first_revision, first_evidence) =
+            seed_semantic_source(&state.state, &root, &default_context, "notes/first.md").await;
+        let (_second_core, second_card, _second_source, _second_revision, _second_evidence) =
+            seed_semantic_source(&state.state, &root, &default_context, "notes/second.md").await;
+        let organization = SemanticOrganizationService::new(state.state.clone());
+        let candidate = organization
+            .discover_candidates(
+                &default_context,
+                &[first_card.source_id, second_card.source_id],
+            )
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        organization
+            .organize_json(
+                &default_context,
+                &default_core,
+                &[first_card.source_id, second_card.source_id],
+                &json!({"actions":[{"action":"create_composed_card","candidate_ids":[candidate.id.to_string()],"card_ref":"admin-composed","title":"Admin composed","support_operator":"or"}]}).to_string(),
+            )
+            .await
+            .unwrap();
+        let work_context = register_semantic_vault(&state.state, &root, "work").await;
+        let (_work_core, work_card, work_source, work_revision, work_evidence) =
+            seed_semantic_source(&state.state, &root, &work_context, "notes/work.md").await;
+        (
+            router,
+            root,
+            cookie,
+            csrf,
+            state,
+            default_context,
+            default_core,
+            first_card,
+            first_source,
+            first_revision,
+            first_evidence,
+            work_context,
+            work_card,
+            work_source,
+            work_revision,
+            work_evidence,
+        )
+    }
+
     #[tokio::test]
     async fn admin_creates_lists_and_preserves_the_legacy_default_vault() {
         let (router, root, _maintenance, cookie, csrf, state) =
@@ -6942,7 +7390,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enabling_extraction_requires_an_explicit_run_to_enqueue_work() {
+    async fn retired_extraction_policy_is_a_410_tombstone() {
         let (router, _root, _maintenance, cookie, csrf, state) =
             authenticated_fixture_with_state().await;
         let vault = state.list_vaults().await.unwrap().remove(0);
@@ -7003,21 +7451,10 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{extraction}");
-        assert_eq!(extraction["data"]["readiness"]["ready"], true);
+        assert_eq!(status, StatusCode::GONE, "{extraction}");
         assert_eq!(
-            extraction["data"]["contract"],
-            "source_preserving_memory_units_v3"
-        );
-        assert!(
-            state
-                .state
-                .jobs()
-                .find_active_by_type(&context, "memory.extract")
-                .await
-                .unwrap()
-                .is_none(),
-            "policy updates must not conceal an implicit extraction run"
+            extraction["error"]["code"],
+            "legacy_automatic_memory_disabled"
         );
     }
     #[tokio::test]
@@ -7055,7 +7492,7 @@ mod tests {
                 .status(),
             StatusCode::FORBIDDEN
         );
-        for (action, paused) in [("run", false), ("pause", true), ("resume", false)] {
+        for action in ["run", "pause", "resume"] {
             let (status, value) = json_response(
                 router
                     .clone()
@@ -7070,8 +7507,8 @@ mod tests {
                     .unwrap(),
             )
             .await;
-            assert!(status.is_success(), "{value}");
-            assert_eq!(value["data"]["runtime"]["paused"], paused);
+            assert_eq!(status, StatusCode::GONE, "{value}");
+            assert_eq!(value["error"]["code"], "legacy_automatic_memory_disabled");
         }
         assert!(
             state
@@ -7095,12 +7532,11 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::GONE, "{overview}");
         assert_eq!(
-            overview["data"]["navigation_kind"],
-            "deterministic_navigation"
+            overview["error"]["code"],
+            "legacy_automatic_memory_disabled"
         );
-        assert!(overview["data"]["entries"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -7120,8 +7556,8 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["data"]["read_only"], true);
+        assert_eq!(status, StatusCode::GONE, "{body}");
+        assert_eq!(body["error"]["code"], "legacy_automatic_memory_disabled");
 
         let (status, body) = json_response(
             router
@@ -7137,8 +7573,8 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-        assert_eq!(body["error"]["code"], "confirmation_required");
+        assert_eq!(status, StatusCode::GONE, "{body}");
+        assert_eq!(body["error"]["code"], "legacy_automatic_memory_disabled");
 
         let (status, body) = json_response(
             router
@@ -7153,14 +7589,50 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert!(
-            matches!(status, StatusCode::OK | StatusCode::ACCEPTED),
-            "{body}"
-        );
-        if status == StatusCode::ACCEPTED {
-            assert!(body["data"]["task"]["task_id"].is_string());
-        } else {
-            assert_eq!(body["data"]["preview"]["phase"], "ready");
+        assert_eq!(status, StatusCode::GONE, "{body}");
+        assert_eq!(body["error"]["code"], "legacy_automatic_memory_disabled");
+    }
+
+    #[tokio::test]
+    async fn every_legacy_automatic_admin_route_is_a_410_tombstone() {
+        let (router, _root, _maintenance, cookie, csrf) = authenticated_fixture().await;
+        let cases = [
+            ("GET", "/memory/extraction", json!({})),
+            ("PUT", "/memory/extraction", json!({"enabled": true})),
+            ("POST", "/memory/extraction/run", json!({})),
+            ("GET", "/memory/extraction/sources?paused=true", json!({})),
+            (
+                "POST",
+                "/memory/extraction/sources/file-1/resume",
+                json!({"expected_set_revision": 1}),
+            ),
+            ("GET", "/memory/generation", json!({})),
+            ("POST", "/memory/generation", json!({"action": "pause"})),
+            ("GET", "/memory/overview", json!({})),
+            ("GET", "/memory/initialization", json!({})),
+            ("POST", "/memory/initialization", json!({})),
+            (
+                "POST",
+                "/memory/initialization/start",
+                json!({"confirm_discard_legacy_memory": true}),
+            ),
+            (
+                "POST",
+                "/memory/initialization/resume",
+                json!({"confirm_discard_legacy_memory": true}),
+            ),
+        ];
+        for (method, path, body) in cases {
+            let (status, value) = json_response(
+                router
+                    .clone()
+                    .oneshot(request(method, path, body, Some(&cookie), Some(&csrf)))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::GONE, "{method} {path}: {value}");
+            assert_eq!(value["error"]["code"], "legacy_automatic_memory_disabled");
         }
     }
 
@@ -7249,22 +7721,344 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{extraction}");
-        assert_eq!(extraction["data"]["readiness"]["ready"], true);
+        assert_eq!(status, StatusCode::GONE, "{extraction}");
         assert_eq!(
-            extraction["data"]["readiness"]["external_model_id"],
-            "binding-memory-model"
+            extraction["error"]["code"],
+            "legacy_automatic_memory_disabled"
         );
-        assert!(
-            state
-                .state
-                .jobs()
-                .find_active_by_type(&context, "memory.extract")
+    }
+
+    #[tokio::test]
+    async fn invalid_model_bindings_are_rejected_without_binding_or_embedding_jobs() {
+        let (router, _root, _maintenance, cookie, csrf, state) =
+            authenticated_fixture_with_state().await;
+        let vault = state.list_vaults().await.unwrap().remove(0);
+        let context = vault.context().unwrap();
+        state
+            .providers()
+            .set_provider_mode(&context, ProviderMode::LocalOnly, None)
+            .await
+            .unwrap();
+        let provider = state
+            .providers()
+            .create_provider(ProviderInput {
+                name: "Role-capability provider".to_owned(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url: url::Url::parse("http://127.0.0.1:11434/v1/").unwrap(),
+                settings: ProviderSettings::default(),
+                enabled: true,
+                secret: None,
+            })
+            .await
+            .unwrap();
+        let valid_embedding_model = state
+            .providers()
+            .register_model(ModelInput {
+                provider_id: provider.id,
+                external_model_id: "role-capability-valid-embedding".to_owned(),
+                capabilities: ModelCapabilities {
+                    embeddings: true,
+                    dimension: Some(2048),
+                    ..ModelCapabilities::default()
+                },
+                settings: ModelSettings::default(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        state
+            .providers()
+            .bind_model(
+                Some(&context),
+                "embedding_memory",
+                valid_embedding_model.id,
+                json!({}),
+                None,
+            )
+            .await
+            .unwrap();
+        let wrong_capability_model = state
+            .providers()
+            .register_model(ModelInput {
+                provider_id: provider.id,
+                external_model_id: "role-capability-no-role-capabilities".to_owned(),
+                capabilities: ModelCapabilities::default(),
+                settings: ModelSettings::default(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        let disabled_model = state
+            .providers()
+            .register_model(ModelInput {
+                provider_id: provider.id,
+                external_model_id: "role-capability-disabled-embedding".to_owned(),
+                capabilities: ModelCapabilities {
+                    embeddings: true,
+                    dimension: Some(2048),
+                    ..ModelCapabilities::default()
+                },
+                settings: ModelSettings::default(),
+                enabled: false,
+            })
+            .await
+            .unwrap();
+        let before_embedding_jobs = state
+            .state
+            .jobs()
+            .list(&context, None, Some("embedding.rebuild"), 200, 0)
+            .await
+            .unwrap();
+
+        let incompatible_roles = [
+            ("embedding_note", "embeddings"),
+            ("embedding_memory", "embeddings"),
+            ("rerank", "reranking"),
+        ];
+        for (role, capability) in incompatible_roles {
+            let before = state
+                .providers()
+                .get_binding(Some(&context), role)
                 .await
-                .unwrap()
-                .is_none(),
-            "binding configuration must not enqueue an implicit legacy regeneration"
+                .unwrap();
+            let (status, response) = json_response(
+                router
+                    .clone()
+                    .oneshot(request(
+                        "PUT",
+                        &format!("/model-bindings/{role}"),
+                        json!({
+                            "model_id": wrong_capability_model.id,
+                            "settings": {},
+                            "vault_override": true,
+                            "expected_revision": before.as_ref().map(|binding| binding.revision.value())
+                        }),
+                        Some(&cookie),
+                        Some(&csrf),
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{role}: {response}"
+            );
+            assert_eq!(response["error"]["code"], "model_capability_mismatch");
+            assert_eq!(response["error"]["fields"]["capability"], capability);
+            assert_eq!(
+                state
+                    .providers()
+                    .get_binding(Some(&context), role)
+                    .await
+                    .unwrap(),
+                before,
+                "rejected {role} binding must not mutate State"
+            );
+        }
+
+        let (status, response) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "PUT",
+                    "/model-bindings/memory_extraction",
+                    json!({
+                        "model_id": wrong_capability_model.id,
+                        "settings": {},
+                        "vault_override": true,
+                    }),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "generation binding should use the adapter operation: {response}"
         );
+        assert_eq!(
+            response["data"]["model_id"],
+            wrong_capability_model.id.to_string()
+        );
+
+        let current_embedding_binding = state
+            .providers()
+            .get_binding(Some(&context), "embedding_memory")
+            .await
+            .unwrap()
+            .unwrap();
+        for (model_id, expected_code) in [
+            (mcp_vault_domain::ModelId::new(), "model_not_found"),
+            (disabled_model.id, "model_disabled"),
+        ] {
+            let (status, response) = json_response(
+                router
+                    .clone()
+                    .oneshot(request(
+                        "PUT",
+                        "/model-bindings/embedding_memory",
+                        json!({
+                            "model_id": model_id,
+                            "settings": {},
+                            "vault_override": true,
+                            "expected_revision": current_embedding_binding.revision.value()
+                        }),
+                        Some(&cookie),
+                        Some(&csrf),
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let expected_status = if expected_code == "model_not_found" {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::CONFLICT
+            };
+            assert_eq!(status, expected_status, "{response}");
+            assert_eq!(response["error"]["code"], expected_code);
+            assert_eq!(
+                state
+                    .providers()
+                    .get_binding(Some(&context), "embedding_memory")
+                    .await
+                    .unwrap(),
+                Some(current_embedding_binding.clone())
+            );
+        }
+
+        let after_embedding_jobs = state
+            .state
+            .jobs()
+            .list(&context, None, Some("embedding.rebuild"), 200, 0)
+            .await
+            .unwrap();
+        assert_eq!(after_embedding_jobs, before_embedding_jobs);
+    }
+
+    #[tokio::test]
+    async fn valid_embedding_binding_succeeds_and_keeps_revision_conflicts() {
+        let (router, _root, _maintenance, cookie, csrf, state) =
+            authenticated_fixture_with_state().await;
+        let vault = state.list_vaults().await.unwrap().remove(0);
+        let context = vault.context().unwrap();
+        state
+            .providers()
+            .set_provider_mode(&context, ProviderMode::LocalOnly, None)
+            .await
+            .unwrap();
+        let provider = state
+            .providers()
+            .create_provider(ProviderInput {
+                name: "Valid embedding provider".to_owned(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url: url::Url::parse("http://127.0.0.1:11434/v1/").unwrap(),
+                settings: ProviderSettings::default(),
+                enabled: true,
+                secret: None,
+            })
+            .await
+            .unwrap();
+        let model = |external_model_id: &str| ModelInput {
+            provider_id: provider.id,
+            external_model_id: external_model_id.to_owned(),
+            capabilities: ModelCapabilities {
+                embeddings: true,
+                dimension: Some(2048),
+                ..ModelCapabilities::default()
+            },
+            settings: ModelSettings::default(),
+            enabled: true,
+        };
+        let first = state
+            .providers()
+            .register_model(model("valid-embedding-first"))
+            .await
+            .unwrap();
+        let second = state
+            .providers()
+            .register_model(model("valid-embedding-second"))
+            .await
+            .unwrap();
+
+        let (status, first_response) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "PUT",
+                    "/model-bindings/embedding_memory",
+                    json!({
+                        "model_id": first.id,
+                        "settings": {},
+                        "vault_override": true
+                    }),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{first_response}");
+        assert_eq!(first_response["data"]["model_id"], first.id.to_string());
+        assert_eq!(first_response["data"]["revision"], 1);
+
+        let (status, second_response) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "PUT",
+                    "/model-bindings/embedding_memory",
+                    json!({
+                        "model_id": second.id,
+                        "settings": {},
+                        "vault_override": true,
+                        "expected_revision": 1
+                    }),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{second_response}");
+        assert_eq!(second_response["data"]["model_id"], second.id.to_string());
+        assert_eq!(second_response["data"]["revision"], 2);
+
+        let (status, conflict) = json_response(
+            router
+                .oneshot(request(
+                    "PUT",
+                    "/model-bindings/embedding_memory",
+                    json!({
+                        "model_id": first.id,
+                        "settings": {},
+                        "vault_override": true,
+                        "expected_revision": 1
+                    }),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+        assert_eq!(conflict["error"]["code"], "revision_conflict");
+        let binding = state
+            .providers()
+            .get_binding(Some(&context), "embedding_memory")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.model_id, second.id);
+        assert_eq!(binding.revision.value(), 2);
     }
     #[tokio::test]
     async fn jobs_overview_keeps_old_running_job_outside_recent_history_limit() {
@@ -7519,6 +8313,239 @@ mod tests {
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
     }
+
+    #[tokio::test]
+    async fn bulk_memory_delete_requires_session_origin_and_csrf_and_reports_each_item_safely() {
+        let (router, _root, _maintenance, cookie, csrf, state) =
+            authenticated_fixture_with_state().await;
+        let create = |key: &str, content: &str| {
+            json!({
+                "content": content,
+                "kind": "decision",
+                "idempotency_key": key
+            })
+        };
+        let (status, first) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/memories",
+                    create("batch-delete-first", "private body one"),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{first}");
+        let first_memory = &first["data"]["memory"];
+        let first_id = first_memory["id"].as_str().unwrap();
+        let first_revision = first_memory["revision"].as_i64().unwrap();
+
+        let (status, second) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/memories",
+                    create("batch-delete-second", "private body two"),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{second}");
+        let second_memory = &second["data"]["memory"];
+        let second_id = second_memory["id"].as_str().unwrap();
+        let second_revision = second_memory["revision"].as_i64().unwrap();
+
+        let body = json!({"items":[
+            {"id":first_id,"expected_revision":first_revision},
+            {"id":second_id,"expected_revision":second_revision + 1}
+        ]});
+        let unauthorized = router
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/memories/bulk-delete",
+                body.clone(),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let missing_csrf = router
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/memories/bulk-delete",
+                body.clone(),
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(missing_csrf.status(), StatusCode::FORBIDDEN);
+
+        let wrong_origin = router
+            .clone()
+            .oneshot(request_with_origin(
+                "POST",
+                "/memories/bulk-delete",
+                body.clone(),
+                Some(&cookie),
+                Some(&csrf),
+                "https://attacker.example",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(wrong_origin.status(), StatusCode::FORBIDDEN);
+
+        let duplicate = router
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/memories/bulk-delete",
+                json!({"items":[
+                    {"id":first_id,"expected_revision":first_revision},
+                    {"id":first_id,"expected_revision":first_revision}
+                ]}),
+                Some(&cookie),
+                Some(&csrf),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(duplicate.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let empty = router
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/memories/bulk-delete",
+                json!({"items":[]}),
+                Some(&cookie),
+                Some(&csrf),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(empty.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let too_many_items = (0..=super::MAX_FORGET_BATCH_ITEMS)
+            .map(|index| json!({"id":format!("unused-{index}"),"expected_revision":1}))
+            .collect::<Vec<_>>();
+        let oversized = router
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/memories/bulk-delete",
+                json!({"items":too_many_items}),
+                Some(&cookie),
+                Some(&csrf),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(oversized.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let invalid_revision = router
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/memories/bulk-delete",
+                json!({"items":[{"id":first_id,"expected_revision":0}]}),
+                Some(&cookie),
+                Some(&csrf),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(invalid_revision.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let (status, response) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/memories/bulk-delete",
+                    body,
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["data"]["summary"]["requested"], 2);
+        assert_eq!(response["data"]["summary"]["deleted"], 1);
+        assert_eq!(response["data"]["summary"]["conflicts"], 1);
+        assert_eq!(response["data"]["results"][0]["status"], "deleted");
+        assert_eq!(response["data"]["results"][0]["ownership"], "explicit");
+        assert_eq!(
+            response["data"]["results"][0]["source_extraction_paused"],
+            false
+        );
+        assert_eq!(response["data"]["results"][1]["status"], "conflict");
+        assert_eq!(
+            response["data"]["results"][1]["error_code"],
+            "revision_conflict"
+        );
+        let serialized = response.to_string();
+        assert!(!serialized.contains("private body one"));
+        assert!(!serialized.contains("private body two"));
+        let context = state
+            .list_vaults()
+            .await
+            .unwrap()
+            .remove(0)
+            .context()
+            .unwrap();
+        let audit = state
+            .state
+            .audit()
+            .list_for_vault(&context, Some("admin.memory.bulk_deleted"), None, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].metadata["deleted"], 1);
+        assert_eq!(audit[0].metadata["conflicts"], 1);
+        let audit_json = audit[0].metadata.to_string();
+        assert!(!audit_json.contains("private body one"));
+        assert!(!audit_json.contains("private body two"));
+
+        let (status, _) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    &format!("/memories/{first_id}"),
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, current_second) = json_response(
+            router
+                .oneshot(request(
+                    "GET",
+                    &format!("/memories/{second_id}"),
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{current_second}");
+        assert_eq!(current_second["data"]["content"], "private body two");
+    }
     #[tokio::test]
     async fn obsolete_memory_source_health_routes_are_not_exposed() {
         let (router, _root, _maintenance, cookie, csrf) = authenticated_fixture().await;
@@ -7549,7 +8576,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn source_management_lists_current_paused_sources_without_legacy_categories() {
+    async fn retired_source_listing_is_a_410_tombstone() {
         let (router, _root, _maintenance, cookie, _csrf) = authenticated_fixture().await;
         let (status, value) = json_response(
             router
@@ -7564,8 +8591,8 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{value}");
-        assert!(value["data"]["sources"].as_array().unwrap().is_empty());
+        assert_eq!(status, StatusCode::GONE, "{value}");
+        assert_eq!(value["error"]["code"], "legacy_automatic_memory_disabled");
     }
 
     #[tokio::test]
@@ -8418,7 +9445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn models_bindings_and_current_set_extraction_are_operable_through_admin() {
+    async fn retired_extraction_status_is_a_410_tombstone() {
         let (router, _root, _maintenance, cookie, csrf) = authenticated_fixture().await;
         let (status, _) = json_response(
             router
@@ -8538,16 +9565,10 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{extraction}");
+        assert_eq!(status, StatusCode::GONE, "{extraction}");
         assert_eq!(
-            extraction["data"]["contract"],
-            "source_preserving_memory_units_v3"
-        );
-        assert_eq!(extraction["data"]["readiness"]["ready"], true);
-        assert_eq!(extraction["data"]["behavior"]["model_calls_per_batch"], 1);
-        assert_eq!(
-            extraction["data"]["behavior"]["publication"],
-            "full_source_set_replacement"
+            extraction["error"]["code"],
+            "legacy_automatic_memory_disabled"
         );
 
         let rejected = router
@@ -8577,10 +9598,8 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(status, StatusCode::ACCEPTED, "{job}");
-        assert_eq!(job["data"]["job_type"], "memory.extract");
-        assert_eq!(job["data"]["admission"], "queued");
-        assert_eq!(job["data"]["details"]["include_evaluated"], true);
+        assert_eq!(status, StatusCode::GONE, "{job}");
+        assert_eq!(job["error"]["code"], "legacy_automatic_memory_disabled");
 
         let (status, existing) = json_response(
             router
@@ -8596,9 +9615,11 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(status, StatusCode::ACCEPTED, "{existing}");
-        assert_eq!(existing["data"]["id"], job["data"]["id"]);
-        assert_eq!(existing["data"]["admission"], "existing");
+        assert_eq!(status, StatusCode::GONE, "{existing}");
+        assert_eq!(
+            existing["error"]["code"],
+            "legacy_automatic_memory_disabled"
+        );
 
         for obsolete_path in [
             "/vaults/default/memory/retrieval",
@@ -8749,5 +9770,405 @@ mod tests {
         let (status, body) = json_response(router.oneshot(wrong_origin).await.unwrap()).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"]["code"], "origin_rejected");
+    }
+
+    #[tokio::test]
+    async fn semantic_admin_http_reads_are_scoped_and_validate_evidence_parents() {
+        let (
+            router,
+            _root,
+            cookie,
+            csrf,
+            state,
+            default_context,
+            _core,
+            first_card,
+            first_source,
+            first_revision,
+            first_evidence,
+            _work_context,
+            work_card,
+            work_source,
+            work_revision,
+            work_evidence,
+        ) = semantic_admin_fixture().await;
+        let composed = state
+            .state
+            .semantic_organization()
+            .list_composed_cards(&default_context, 20)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let uri = format!(
+            "/vaults/default/semantic/evidence?evidence_ref_id={first_evidence}&source_id={first_source}&source_revision_id={first_revision}"
+        );
+        let (status, body) = json_response(
+            router
+                .clone()
+                .oneshot(request("GET", &uri, json!({}), Some(&cookie), None))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "memory_conflict");
+
+        for parent in [
+            format!("card:{}", first_card.id),
+            format!("composed_card:{}", composed.id),
+        ] {
+            let uri = format!(
+                "/vaults/default/semantic/evidence?evidence_ref_id={first_evidence}&source_id={first_source}&source_revision_id={first_revision}&parent_ref={parent}"
+            );
+            let (status, body) = json_response(
+                router
+                    .clone()
+                    .oneshot(request("GET", &uri, json!({}), Some(&cookie), None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(
+                body["data"]["evidence"]["body_spans"][0]["end_byte"]
+                    .as_u64()
+                    .unwrap()
+                    > body["data"]["evidence"]["body_spans"][0]["start_byte"]
+                        .as_u64()
+                        .unwrap()
+            );
+        }
+        let (status, body) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    &format!(
+                        "/vaults/default/semantic/card?card_id={}&card_kind=composed_card",
+                        composed.id
+                    ),
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["data"]["composed_card"]["composed_card_id"],
+            composed.id.to_string()
+        );
+
+        for (slug, evidence, source, revision) in [
+            ("default", work_evidence, work_source, work_revision),
+            (
+                "work",
+                first_evidence,
+                first_source.clone(),
+                first_revision.clone(),
+            ),
+        ] {
+            let uri = format!(
+                "/vaults/{slug}/semantic/evidence?evidence_ref_id={evidence}&source_id={source}&source_revision_id={revision}"
+            );
+            let (status, body) = json_response(
+                router
+                    .clone()
+                    .oneshot(request("GET", &uri, json!({}), Some(&cookie), None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {body}");
+        }
+        let (status, body) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    "/semantic/cards?limit=20",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body["data"]["cards"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|card| card["card_id"] == first_card.id.to_string())
+        );
+        let (status, body) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    &format!("/vaults/work/semantic/card?card_id={}", first_card.id),
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_ne!(work_card.id, first_card.id);
+
+        for uri in [
+            "/vaults/default/semantic/status?limit=0",
+            "/vaults/default/semantic/status?limit=201",
+            "/vaults/default/semantic/cards?limit=0",
+            "/vaults/default/semantic/cards?limit=201",
+        ] {
+            let (status, _body) = json_response(
+                router
+                    .clone()
+                    .oneshot(request("GET", uri, json!({}), Some(&cookie), None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert!(
+                status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
+                "{uri}: {status}"
+            );
+        }
+        let unknown = router
+            .clone()
+            .oneshot(request(
+                "GET",
+                "/vaults/default/semantic/status?limit=1&unknown=true",
+                json!({}),
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+        let (status, body) = json_response(
+            router
+                .oneshot(request(
+                    "POST",
+                    "/vaults/default/semantic/pack",
+                    json!({"task":"violet submarine"}),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(!body["data"]["evidence_gaps"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn semantic_admin_http_mutations_replay_safely_and_audit_without_payloads() {
+        let (
+            router,
+            _root,
+            cookie,
+            csrf,
+            state,
+            default_context,
+            first_core,
+            first_card,
+            _source,
+            _revision,
+            _evidence,
+            _work_context,
+            _work_card,
+            _work_source,
+            _work_revision,
+            _work_evidence,
+        ) = semantic_admin_fixture().await;
+        let correction = json!({
+            "target_ref":format!("card:{}", first_card.id),
+            "mutation":"correction",
+            "payload":{"replace":"The semantic Admin source is reviewed.","remove":"The semantic Admin source is current."},
+            "expected_parent_revision":first_card.revision_number,
+            "expected_rules_revision":0,
+            "idempotency_key":"admin-semantic-correction"
+        });
+        let (status, first) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/vaults/default/semantic/correct",
+                    correction.clone(),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        let (status, replay) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/vaults/default/semantic/correct",
+                    correction,
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(first["data"]["id"], replay["data"]["id"]);
+
+        for body in [
+            json!({
+                "target_ref":format!("card:{}", first_card.id), "mutation":"correction",
+                "payload":{"replace":"The semantic Admin source is stale parent.","remove":"The semantic Admin source is current."},
+                "expected_parent_revision":first_card.revision_number + 1, "expected_rules_revision":1,
+                "idempotency_key":"admin-semantic-stale-parent"
+            }),
+            json!({
+                "target_ref":format!("card:{}", first_card.id), "mutation":"correction",
+                "payload":{"replace":"The semantic Admin source is stale rules.","remove":"The semantic Admin source is current."},
+                "expected_parent_revision":first_card.revision_number, "expected_rules_revision":0,
+                "idempotency_key":"admin-semantic-stale-rules"
+            }),
+        ] {
+            let (status, body) = json_response(
+                router
+                    .clone()
+                    .oneshot(request(
+                        "POST",
+                        "/vaults/default/semantic/correct",
+                        body,
+                        Some(&cookie),
+                        Some(&csrf),
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert_eq!(body["error"]["code"], "memory_conflict");
+        }
+
+        let forget = json!({
+            "target_ref":format!("card:{}", first_card.id), "mutation":"suppress_regeneration",
+            "payload":{"reason":"admin semantic replay"}, "expected_parent_revision":first_card.revision_number,
+            "expected_rules_revision":1, "idempotency_key":"admin-semantic-forget-replay"
+        });
+        let (status, forget_first) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/vaults/default/semantic/forget",
+                    forget.clone(),
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{forget_first}");
+        let (status, forget_replay) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/vaults/default/semantic/forget",
+                    forget,
+                    Some(&cookie),
+                    Some(&csrf),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{forget_replay}");
+        assert_eq!(forget_first["data"]["id"], forget_replay["data"]["id"]);
+
+        let (status, forgotten) = json_response(
+            router
+                .clone()
+                .oneshot(request("POST", "/vaults/default/semantic/forget", json!({
+                    "target_ref":format!("card:{}", first_card.id), "mutation":"forget_current",
+                    "payload":{"reason":"admin semantic forget"}, "expected_parent_revision":first_card.revision_number,
+                    "expected_rules_revision":2, "idempotency_key":"admin-semantic-forget-current"
+                }), Some(&cookie), Some(&csrf)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{forgotten}");
+        assert!(
+            first_core
+                .read(
+                    &default_context,
+                    &VaultPath::parse("notes/first.md").unwrap()
+                )
+                .await
+                .is_ok()
+        );
+
+        let (status, audit) = json_response(
+            router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    "/vaults/default/audit?action=admin.semantic.rule_applied&limit=20",
+                    json!({}),
+                    Some(&cookie),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{audit}");
+        let entries = audit["data"]["entries"].as_array().unwrap();
+        assert!(entries.len() >= 4);
+        assert!(entries.iter().all(|entry| entry["actor_type"] == "admin"));
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry["target_type"] == "semantic_rule")
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry["metadata"]["rules_revision"].is_number())
+        );
+        let serialized = audit.to_string();
+        assert!(!serialized.contains("The semantic Admin source is reviewed."));
+        assert!(!serialized.contains("The semantic Admin source is current."));
+        assert!(
+            state
+                .state
+                .audit()
+                .list_for_vault(
+                    &default_context,
+                    Some("admin.semantic.rule_applied"),
+                    None,
+                    20,
+                    0
+                )
+                .await
+                .unwrap()
+                .len()
+                >= 4
+        );
     }
 }

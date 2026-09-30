@@ -12,30 +12,21 @@ MCP Vault exposes three independent interfaces.
 
 All URLs are versioned. Examples use `v1`.
 
-### Admin memory initialization
+### Admin memory boundary
 
-For the selected, authenticated Vault, the control plane exposes:
+The current Admin memory contract is semantic-only. Explicit raw memory CRUD
+(`GET/POST /memories`, `GET/PATCH/DELETE /memories/{id}` and bulk delete) and
+the `/semantic/*` card, evidence, Memory Pack and rule endpoints remain
+available. The old v3 automatic extraction, generation, overview,
+initialization, source-resume and source-list routes remain registered only as
+clear tombstones: every authenticated request returns `410 Gone` with
+`error.code=legacy_automatic_memory_disabled` and a diagnostic stating that
+storage is retained and no cleanup is performed. State-changing tombstones
+still require the normal Admin Origin and CSRF checks.
 
-```text
-GET  /memory/initialization
-POST /memory/initialization   (refresh preview)
-POST /memory/initialization/start
-POST /memory/initialization/resume
-```
-
-The routes require an Admin session. State-changing requests require the
-validated Admin Origin and `X-CSRF-Token`. Vault selection is derived from the
-current Admin scope; handlers do not accept an arbitrary `vault_id`.
-
-The status and preview response includes the initialization phase, legacy
-record/file counts, durable manifest progress, task state, resumability and a
-safe error code. `start` and `resume` require
-`{"confirm_discard_legacy_memory":true}`. A newly accepted task returns
-`202 Accepted`; `ready` returns an idempotent status without touching new
-memory units. A failed task is resumable only when `task.resumable` is true.
-Normal service restart does not start cleanup. Maintenance Offline keeps these
-status, confirmation and resume routes available while ordinary Admin writes
-and data-plane writes remain blocked.
+Semantic reads do not fall back to the retired v3 reader. If a semantic card
+or pack is unavailable, clients should use authorized `search_notes` and
+`read_note` source retrieval.
 
 ## 2. Vault binding
 
@@ -183,17 +174,19 @@ memory Vault.
 Use vault_overview or browse_index when you need to understand what
 knowledge exists and do not yet know exact search terms.
 
-Use recall proactively before answering when the current request may
-depend on prior preferences, decisions, constraints, project state,
+Use build_memory_pack proactively before answering when the current request
+may depend on prior preferences, decisions, constraints, project state,
 progress, events, relationships, past work, or knowledge that may already
-exist in ordinary Vault notes.
+exist in ordinary Vault notes. Consume its sourced semantic cards, qualifiers,
+support and evidence gaps.
 
 Pass the task in its natural language. Persisted multilingual metadata handles
 covered cross-language memory recall; do not translate only for this call.
 
-Treat related_notes returned by recall as retrieval cues and use read_note to
-verify exact details. Treat recalled memories as sourced durable context,
-observing their confidence, validity, lifecycle status, and provenance.
+Use get_memory_card/list_memory_cards to inspect semantic cards and
+get_memory_evidence when a support reference must be verified. Use
+get_raw_memory_overview/get_raw_memory only for explicitly owned raw memory;
+raw results are complete user-owned bodies and are not semantic cards.
 
 Use mutation tools only when the user requests or clearly authorizes a
 persistent change. Preserve revisions and do not retry a conflict by
@@ -216,18 +209,25 @@ Return tools in this deterministic order, omitting tools the caller’s scopes d
 3. `recent_changes`
 4. `search_notes`
 5. `read_note`
-6. `recall`
-7. `get_memory`
-8. `list_memories`
-9. `create_note`
-10. `edit_note`
-11. `move_note`
-12. `delete_note`
-13. `note_history`
-14. `restore_note_revision`
-15. `remember`
-16. `update_memory`
-17. `forget_memory`
+6. `build_memory_pack`
+7. `get_memory_card`
+8. `list_memory_cards`
+9. `get_memory_evidence`
+10. `correct_memory`
+11. `forget_memory` (semantic suppression/forget rule)
+12. `get_processing_status`
+13. `create_note`
+14. `edit_note`
+15. `move_note`
+16. `delete_note`
+17. `note_history`
+18. `restore_note_revision`
+19. `remember` (raw explicit create)
+20. `get_raw_memory`
+21. `list_raw_memories`
+22. `get_raw_memory_overview`
+23. `update_raw_memory`
+24. `forget_raw_memory`
 
 Names may receive a stable namespace if required by SDK conventions, but once released they must remain backward compatible.
 
@@ -249,22 +249,30 @@ MUST provide:
 
 Descriptions follow the compact sequence `Use this when` / required input /
 `On success, data contains` / next action. They name actual wire fields such as
-`data.results`, `data.memories`, and `data.related_notes` rather than terms such
+`data.results`, `data.memories`, and `data.entries` rather than terms such
 as projection, query-time generation, or other architecture rationale. This
-lets a model distinguish discovery, source search, exact reads, task recall,
+lets a model distinguish discovery, source search, exact reads, semantic task
+packs, raw explicit memory,
 canonical-note mutation, and long-term-memory mutation without knowing how MCP
 Vault is implemented.
 
 The MCP foundation advertises deterministic discovery, browse, lexical
-`search_notes`, read, mutation, and history tools. WP-11 adds `recall`,
-`get_memory`, `list_memories`, `remember`, `update_memory`, and `forget_memory`
-when the credential grants the corresponding memory scopes. Memory resources
-are authorization-dependent and include `vault://memory/context` plus the
-`vault://memory/{memory_id}` template. `search_notes` remains lexical-safe
-when semantic providers are unavailable. With an `embedding_note` binding it
-uses deterministic note chunks for semantic/hybrid ranking. `recall` reports
-semantic degradation while preserving projection-based lexical/context
-results.
+`search_notes`, read, mutation, and history tools. The clean-break memory
+surface adds semantic card/task tools (`build_memory_pack`,
+`get_memory_card`, `list_memory_cards`, `get_memory_evidence`,
+`correct_memory`, `forget_memory`, and `get_processing_status`) plus explicit
+raw-memory tools (`remember`, `get_raw_memory`, `list_raw_memories`,
+`get_raw_memory_overview`, `update_raw_memory`, and `forget_raw_memory`). The
+retired names `recall`, `get_memory`, `list_memories`, `get_memory_overview`,
+`update_memory`, and the old `forget_memory` behavior are unavailable; clients
+must not rely on request/response compatibility under those names.
+Authorization-dependent resources use `vault://raw-memory/context`,
+`vault://raw-memory/{memory_id}`, and the semantic card template
+`vault://memory-card/{card_id}`. Raw resources and tools identify explicit raw
+ownership and can return complete user-owned bodies. Semantic tools return
+cards, support, bounded evidence spans, or task packs and never return a
+complete raw body. `search_notes` remains lexical-safe when semantic providers
+are unavailable.
 
 ## 5. MCP scopes
 
@@ -342,13 +350,14 @@ leaking SQL, filesystem, provider, or secret details.
 
 ### Compact tool results (2026-09-06 amendment)
 
-All 17 tools accept `include_details` (default false). Default responses preserve
+All note and raw-memory browsing tools accept `include_details` (default false). Default responses preserve
 information needed for the next action: IDs/paths, memory/file revisions, content or
 snippets, applicable confidence/validity, pagination, truncation/degradation and mutation
 side effects. Full metadata remains available with `include_details:true`; the detailed
 examples/field inventories below describe this extended form unless stated otherwise.
-`get_memory` intentionally returns a full single record without requiring this flag.
-`include_score_breakdown:true` also selects the extended search/recall output.
+`get_raw_memory` intentionally returns a full single raw record without requiring this flag.
+`include_score_breakdown:true` selects extended search diagnostics; semantic card and pack
+responses are bounded semantic structures and never complete raw bodies.
 
 Search/browse omit complete heading/link graphs and default scores. Recall/list omit
 internal memory-set IDs, managed-file paths/revisions and ranking internals. Mutation
@@ -359,19 +368,10 @@ compact operation records; history is paginated newest-first (default 25, maximu
 Exact `read_note` content remains bounded by max_bytes and its metadata describes the
 selected revision, including historical reads. Its file_id can be used as provenance.
 
-`recall.include_sources` defaults **true**. `memories[].sources[].path` is a source note
-path usable directly with `read_note`; no intermediate search is required. Compact
-sources contain paths only; detailed mode includes revision/heading/line metadata.
-Explicit false omits sources. Explicit memories may legitimately have no source.
-For source navigation, use get_memory only when a source is expected but omitted
-(for example include_sources=false or ownership=note_derived). An explicit memory
-may have no note source; do not repeatedly fetch details in search of one. Search
-when a known source is unreadable or additional evidence is needed.
-update_memory only supports ownership=explicit: verify ownership with get_memory;
-for note-derived memories, read and edit the source note instead. `related_notes` are additional cues, not guaranteed sources
-of a returned memory. Detailed `canonical_path` is managed memory Markdown, not the
-source note; do not pass it to read_note. Use memory `revision`, not canonical_revision,
-for memory updates/deletion. Source reads still require vault:read.
+Raw explicit-memory results include `raw_ownership:"explicit"` and
+`representation:"raw_explicit_memory"`; their `content` is the complete user-owned
+body. Semantic results expose only cards, support bindings, bounded evidence spans,
+or task-pack fields. They do not expose raw-memory bodies or managed raw paths.
 
 Unsupported read selections and permanent deletion are not advertised as enum choices;
 legacy requests still receive their existing unsupported errors. Update-memory omitted
@@ -598,25 +598,47 @@ Output:
 - structural summary;
 - memory references sourced from the note.
 
-### 6.7 `recall`
+### 6.7 `build_memory_pack`
 
-Purpose: retrieve complete current context useful for a task. Requires `memory:read`; automatic units, their navigation pointers and related notes additionally require `vault:read`.
+Purpose: build a bounded, task-specific semantic MemoryPack from currently
+authorized cards. Input is the natural-language task and its explicit budget.
+Output contains semantic assertions, required qualifiers, support bindings and
+evidence gaps only. It never returns a complete raw memory body and never calls
+the raw-memory namespace implicitly.
 
-Input includes `query`, optional `context.paths/entities/recent_topics` ranking hints, exact `source_path`, optional types/validity/importance filters and budgets. Defaults: `max_tokens:4096`, `max_results:12`, `max_related_notes:4`; maximum Token budget: 32000. Context hints do not exclude other scopes. There is no project registry or historical flag.
+An internal isolated evaluation caller may additionally provide `source_scope`
+with allow-lists for `source_ids`, canonical `source_paths`, and
+`source_revision_ids`. The memory service enforces all populated dimensions on
+every M1/M2 card reference and omits unauthorized cards and relations. An
+ordinary MCP request omitting `source_scope` retains the normal Vault-scoped
+pack behavior; the field is not a caller-selectable `vault_id`.
 
-Output contains `memories` with complete original bodies, ownership, revision, optional metadata and current source coordinates; `pointers` for complete units exceeding the remaining budget; and separately typed `related_notes` with current source navigation. Read a pointer using `get_memory`; use `read_note` for original note evidence. Descriptions and snippets do not establish that the source answers the task.
+### 6.8 `get_memory_card` and `list_memory_cards`
 
-Detailed mode retains bounded authorized candidate/eligibility counts, available counts, `truncated`, `degraded`, diagnostic metadata and score components. Scores rank candidates; a raw semantic cosine is not a correctness probability. The complete serialized service result is budgeted, including provenance and navigation. No body is clipped. Normal recall never invokes a generative model, translates the query with a model or scans canonical files.
+These tools read or browse current authorized semantic cards and composed cards.
+Cards contain semantic assertions, qualifiers, statuses, and source bindings;
+they do not contain complete raw-memory bodies. Use `get_memory_evidence` when a
+specific support reference must be checked, then use `read_note` for ordinary
+source material when the caller has `vault:read`.
 
-### 6.8 `get_memory`
+### 6.9 `get_memory_evidence`
 
-Purpose: read a known complete current unit and its provenance. Input: memory ID. Requires `memory:read`, plus `vault:read` for automatic units.
+Reads one currently authorized evidence reference after validating its source
+and revision binding. It returns bounded exact spans and coordinates, not a
+complete raw-memory record. A stale, foreign-Vault, or unauthorized binding is
+not found.
 
-Source eligibility uses stable File ID and exact full-source hash. Same-identity moves resolve the new path; changed/deleted sources and old/legacy IDs return not found. Output includes exact body, ownership, canonical file/revision and current source paths, headings and line coordinates. It is the explicit full-read operation for oversized recall pointers.
+### 6.10 `correct_memory` and `forget_memory`
 
-### 6.9 `list_memories`
+These names are reserved for semantic correction and suppression/forget rules.
+They require explicit authorization and `memory:manage`; they do not delete raw
+explicit Markdown. Use `forget_raw_memory` for deletion of a user-owned raw
+memory record.
 
-Purpose: deliberate browsing of current units, not task ranking. The same ownership/permission/source eligibility as get applies before paging. Filters include optional type, tag/entity, exact current source path and limit/cursor. Cursors remain Vault-scoped. No historic identities are exposed.
+### 6.11 `get_processing_status`
+
+Returns bounded semantic extraction/organization states and safe counters. It
+does not return Provider prompts, secrets, or raw bodies.
 
 ### 6.10 `create_note`
 
@@ -726,58 +748,78 @@ Input:
   "memory_type": "decision",
   "content": "The Admin Console must remain LAN-only.",
   "importance": 0.95,
-  "valid_from": "2026-08-19T00:00:00Z",
+  "valid_from": 1787097600,
   "tags": ["security", "admin"],
   "entities": ["Admin Console"],
-  "source_note": null,
+  "sources": [],
   "idempotency_key": "..."
 }
 ```
 
-Optional kind, importance, confidence, validity, tags, entities, and source
+Optional memory type, importance, confidence, validity, tags, entities, and source
 metadata remain omitted when the caller omits them. Output is immediately
 current:
 
 ```json
 {
-  "outcome": "stored",
-  "memory": {
-    "id": "...",
-    "ownership": "explicit",
-    "revision": 1,
-    "content": "The Admin Console must remain LAN-only."
+  "raw_ownership": "explicit",
+  "representation": "raw_explicit_memory",
+  "explicit": {
+    "outcome": "stored",
+    "memory": {
+      "memory_id": "...",
+      "ownership": "explicit",
+      "revision": 1,
+      "content": "The Admin Console must remain LAN-only.",
+      "canonical_path": "_mcp-vault/memory-v3/explicit/{memory_id}.md",
+      "source_bindings": [],
+      "embedding_eligible": true,
+      "embedding_binding_present": false
+    }
   }
 }
 ```
 
-No model is called. Reusing an idempotency key with identical input returns the
-same memory; using it with different input is rejected.
+The save performs no synchronous generation Provider call. If the Vault has an
+effective `embedding_memory` binding, it may enqueue the existing asynchronous
+embedding job; without that binding the save completes locally and does not
+contact a Provider. `content` and a non-empty `idempotency_key` are required;
+each source binding must contain the stable `path`, `file_id` and current
+`revision` obtained from a prior source read, and source-bearing calls require
+`vault:read`. Reusing an idempotency key with identical input returns the same
+explicit memory; using it with different input is rejected. This MCP tool does
+not create a semantic card, evidence record, or MemoryPack item. Admin's
+selected-Vault `remember-explicit` route is a separate control-plane adapter to
+the same underlying explicit-memory service.
 
-### 6.17 `update_memory`
+### 6.17 `get_raw_memory`, `list_raw_memories`, and `get_raw_memory_overview`
+
+These tools are the explicit raw-memory namespace. They require `memory:read`,
+and expose only current `ownership=explicit` records from the authenticated
+Vault. `get_raw_memory` takes `memory_id` and returns the complete body;
+`list_raw_memories` takes a bounded `limit` and an opaque last-ID cursor;
+`get_raw_memory_overview` provides navigation before a detail read. Every raw
+response identifies `raw_ownership:"explicit"` and
+`representation:"raw_explicit_memory"`. Raw IDs from another Vault, note-
+derived units, deleted units, and legacy IDs are not visible.
+
+### 6.18 `update_raw_memory`
 
 Scope: `memory:manage`.
 
-Requires the expected item revision and applies only to explicit memory. It can
-set content/kind/metadata fields; note-derived content is changed through its
-source note. There is no supersession operation.
+Input is `{memory_id, expected_revision, patch}`. The patch is revision fenced;
+omitted fields preserve values, `null` clears nullable metadata, and empty tag
+or entity arrays clear those sets. Only explicit raw ownership can be updated.
+The canonical Markdown write remains behind the protocol-neutral explicit
+facade and Vault Core boundary.
 
-### 6.18 `forget_memory`
+### 6.19 `forget_raw_memory`
 
 Scope: `memory:manage`.
 
-Requires the expected item revision and deletes the current memory. Explicit
-memory loses its canonical current file. Note-derived deletion rewrites its
-owning set without the item and pauses automatic extraction for that source.
-The response contains deletion metadata, not the deleted body. There is no
-archive/restore mode.
-
-### 6.19 `get_memory_overview`
-
-Purpose: navigate current memory units by source/directory/topic before reading exact bodies. Requires `memory:read`; automatic entries additionally require `vault:read`.
-
-Input: optional exact `source_path`, directory `path_prefix`, `topic_ids`, `after_id`, `limit` (default 40) and `max_tokens` (default 4096). `path_prefix` respects directory boundaries. `topic_ids` resolves current knowledge-map memberships; it does not create a project configuration.
-
-Output: `navigation_kind`, separately marked `generated_sections`, current `entries` with IDs/revisions/source coordinates/resource URIs, directory groups, scoped counts, `next_after_id`, `truncated`, and `degraded`. Generated descriptions are navigation only. Missing or invalid cache dependencies fall back to current deterministic entries without a model call. Read bodies using `get_memory`, and original notes using `read_note`.
+Input is `{memory_id, expected_revision, idempotency_key}`. Success returns a
+content-free raw deletion receipt. It deletes the raw explicit memory only and
+does not delete source notes, semantic cards, evidence, or task packs.
 
 ## 7. MCP resources
 
@@ -789,8 +831,9 @@ Recommended URI scheme:
 vault://overview
 vault://index/{node_id}
 vault://note/{percent-encoded-path}
-vault://memory/context
-vault://memory/{memory_id}
+vault://raw-memory/context
+vault://raw-memory/{memory_id}
+vault://memory-card/{card_id}
 vault://recent
 ```
 
@@ -802,10 +845,12 @@ Resource lists and reads:
 - include revision/cache metadata;
 - never enumerate another Vault.
 
-Both memory resources use only v3 `memory_units` current eligibility.
-`vault://memory/{memory_id}` returns not found for replaced, deleted,
-source-invalidated, or legacy IDs even when the caller has Vault history
-permission. `vault://memory/context` returns the bounded current overview; generated descriptions remain separate from original evidence. It never reads legacy summaries or raw artifacts.
+`vault://raw-memory/{memory_id}` returns a current explicit raw record and
+`vault://raw-memory/context` returns raw explicit navigation. Both identify raw
+ownership and can return complete user-owned bodies. The semantic
+`vault://memory-card/{card_id}` resource returns a current card or composed card
+with support bindings, never a complete raw body. Old `vault://memory/*` URIs
+are unavailable and are not aliases for either namespace.
 
 Tools remain available because not all MCP hosts automatically include resources.
 
@@ -1136,6 +1181,7 @@ POST   /api/v1/memories
 GET    /api/v1/memories/{id}
 PATCH  /api/v1/memories/{id}
 DELETE /api/v1/memories/{id}?expected_revision={revision}
+POST   /api/v1/memories/bulk-delete
 GET    /api/v1/memory/extraction
 PUT    /api/v1/memory/extraction
 POST   /api/v1/memory/extraction/run
@@ -1144,6 +1190,7 @@ POST   /api/v1/memory/migration/preflight
 POST   /api/v1/memory/migration/execute
 GET    /api/v1/memory/embeddings
 POST   /api/v1/memory/embeddings/rebuild
+POST   /api/v1/vaults/{slug}/semantic/remember-explicit
 
 GET    /api/v1/jobs
 GET    /api/v1/jobs/overview
@@ -1161,31 +1208,60 @@ POST   /api/v1/restore
 POST   /api/v1/maintenance/recover
 ```
 
+#### Provider model binding validation
+
+`PUT /api/v1/model-bindings/{role}` checks the candidate model and Provider
+before persisting the binding. The model and Provider must exist and be
+enabled. Role capabilities are explicit: `embedding_note` and
+`embedding_memory` require `embeddings=true`; `rerank` requires
+`reranking=true`; `memory_extraction`, `memory_overview`, `note_summary`, and
+`topic_enrichment` require `structured_output=true`. Capability rejection
+returns `422 model_capability_mismatch` with the required capability in the
+redacted `fields` object. Missing and disabled models return stable
+`model_not_found` and `model_disabled` errors. Rejection occurs before the
+binding write, audit entry, or embedding-job scheduling. Valid writes continue
+to use `expected_revision` optimistic concurrency.
+
 `GET /api/v1/mcp/connection-info` returns `mcp_endpoint`, the exact
 `oauth_protected_resource_metadata_url`, and the built-in
 `oauth_authorization_server_metadata_url` derived from the configured public
 data origin; no value is derived from an untrusted request `Host` header.
 
-#### Current memory Admin contract (v3)
+#### Current memory Admin contract (semantic-only)
 
-`POST /memories` stores an exact explicit body. Optional `source_memory:{id,expected_revision}` copies current provenance from a selected unit into this new explicit assertion; stale/cross-Vault IDs are rejected. `PATCH /memories/{id}` requires `expected_revision` and applies only to explicit units. Omitted fields preserve metadata; supported nullable fields clear on explicit null. `DELETE` deletes the current file or rewrites its source set; automatic deletion pauses only that source and preserves other current units.
+`POST /memories` stores an exact explicit body. Optional `source_memory:{id,expected_revision}` copies current provenance from a selected unit into this new explicit assertion; stale/cross-Vault IDs are rejected. Ordinary `GET /memories` browsing and single reads are explicit-only; historical automatic units are not presented as ordinary Admin memories. `PATCH /memories/{id}` and `DELETE` are raw explicit management paths; legacy automatic units remain in storage for explicitly labelled diagnostics and are not regenerated.
 
-`GET/PUT /memory/extraction` returns `contract:"source_preserving_memory_units_v3"`, typed policy/revision, readiness, `generation` state and a per-batch/complete-source-set behavior summary. Policy fields are `enabled` and `request_timeout_seconds`. `POST /memory/extraction/run` accepts `include_evaluated`; true explicitly forces fresh processing with additional model cost. `GET /memory/extraction/sources` pages paused source sets. `POST /memory/extraction/sources/{file_id}/resume` requires `expected_set_revision` and requests fresh selection.
+`POST /memories/bulk-delete` accepts 1–100 unique `{id,expected_revision}`
+items. Every revision must be positive. Empty, oversized, duplicate, malformed
+or unknown-field requests fail with `422` before any deletion starts. The
+authenticated Admin request also requires the normal exact-Origin and
+session-bound CSRF checks. The response is `200` with input-ordered per-item
+`results` (`status: deleted|conflict|failed`, ID, and known ownership/pause
+state), a fixed safe `error_code` where needed, and `summary` counts. A missing
+or cross-Vault ID is reported only as `failed/not_found`. The response and
+batch audit omit memory bodies, source paths and underlying storage errors.
 
-`GET /memory/generation` returns initialization readiness, runtime pause and dependency generations, current counts, extraction/overview job state and recent source batch/skipped-unit progress. `POST /memory/generation` accepts `action:"run"|"pause"|"resume"`, requires Admin session/origin/CSRF and records a content-free audit event. Resume preserves validated batch checkpoints and admits full current-source backfill when automatic extraction is enabled.
+Explicit items delete their canonical records independently. This batch action
+does not operate on legacy automatic units or resume source extraction. No note
+content is used to choose batch membership.
 
-`GET /memory/overview` accepts `source_path`, `path_prefix`, comma-separated `topic_ids`, `after_id`, `limit`, `max_tokens` and returns the same navigation contract as the MCP tool. It never invokes a model. Memory embedding status/rebuild validates current content, profile, prepared input, model, dimension and projection version independently of extraction.
+`/memory/extraction`, `/memory/extraction/run`,
+`/memory/extraction/sources`, `/memory/generation`, `/memory/overview`, and
+`/memory/initialization` (including start/resume/preview and source resume)
+return `410 legacy_automatic_memory_disabled` for authenticated requests.
+They never read or update the old policy, enqueue a job, call a Provider, or
+delete data. Existing v3 rows, canonical files, revisions and history remain
+retained. `/memory/embeddings` is a separate derived diagnostic and is not the
+semantic-card context path.
 
-No organization, merge, legacy migration preflight/execute, synthetic calibration, candidate-review, archive, supersession or pipeline-reset route is registered. The authenticated Admin initialization routes and offline-exclusive CLI both require explicit predecessor-memory discard confirmation and never convert predecessor data. The Admin worker first persists a Vault-scoped manifest, terminalizes only Core intents proven wholly inside `_mcp-vault/memory/` without replaying them, then retires those manifest files through Vault Core with exact hash guards; cross-boundary or unclassifiable journals fail closed. New and retained public tool names use the explicit v3 prerelease contract recorded by ADR-0033.
+No organization, merge, legacy migration preflight/execute, synthetic calibration, candidate-review, archive, supersession or pipeline-reset route is registered. Admin initialization/cleanup and offline-exclusive cleanup are disabled; old data, ordinary notes, history and credentials are retained. These Admin/v3 diagnostics do not restore the removed MCP v3 tool names or `vault://memory/*` resources. The current MCP contract is the clean-break surface documented in §4–§7 above.
 
 `GET /api/v1/index/status` and the dashboard return `indexed_notes`,
 `total_notes`, and a nullable numeric `coverage_ratio`; the structured
 `coverage` object remains the detailed analyzer/degradation record. A zero-note
 Vault reports an unknown ratio rather than a false `0%` failure.
 
-The v3 extraction endpoint returns the typed policy, optimistic revision, model readiness and explicit checkpointed-batch/full-set behavior.
-Manual admission requires extraction enabled, Provider policy enabled, and the
-`memory_extraction` role usable. `GET /api/v1/jobs` accepts optional `status`
+`GET /api/v1/jobs` accepts optional `status`
 and exact `job_type` filters. Completed jobs project progress ratio `1.0`;
 unknown non-terminal progress remains null.
 

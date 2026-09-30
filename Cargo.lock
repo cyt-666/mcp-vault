@@ -2398,6 +2398,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcp-vault-eval"
+version = "0.2.4"
+dependencies = [
+ "async-trait",
+ "axum",
+ "fs2",
+ "hmac",
+ "mcp-vault-auth",
+ "mcp-vault-core",
+ "mcp-vault-domain",
+ "mcp-vault-indexer",
+ "mcp-vault-memory",
+ "mcp-vault-providers",
+ "mcp-vault-state",
+ "mcp-vault-storage-fs",
+ "rand 0.8.7",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "mcp-vault-indexer"
 version = "0.2.4"
 dependencies = [
@@ -2466,6 +2497,7 @@ dependencies = [
  "mcp-vault-storage-fs",
  "percent-encoding",
  "regex",
+ "schemars",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2476,6 +2508,7 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "url",
+ "uuid",
  "yaml-rust",
 ]
 

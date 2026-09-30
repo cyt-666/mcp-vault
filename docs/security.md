@@ -345,6 +345,25 @@ Support:
 
 Admin API returns only configured state and masked hints. The browser never receives the old secret after save.
 
+### 8.5 M6 live-evaluation artifacts
+
+The explicit semantic-card M6 live runner is a separate evaluation boundary; its
+private-file policy does not change the service-wide master-key loader. On Unix,
+the run root, source/state/history/artifact roots, and master-key parent must be
+non-symlink directories with mode `0700`. Missing roots are created with
+explicit `0700` permissions. The isolated master key and every live-evaluation
+artifact are written as mode `0600` files. Artifact replacement uses a
+create-new temporary file, file sync, and atomic rename; an existing artifact
+with unsafe permissions, links, or file type is rejected. The live entry point
+fails closed on platforms where these permissions cannot be verified.
+
+Every real evaluation artifact must be treated as sensitive even when the
+runner applies its redaction and projection rules. Observations, cards, packs,
+answers, review records, usage/cost data, reports, checkpoints, and safe
+template metadata can contain derived private knowledge, evaluation details,
+or operational information. Keep them in the restricted run tree and review
+them under the same access controls as the source material.
+
 ## 9. Path and filesystem security
 
 ### 9.1 Normalization

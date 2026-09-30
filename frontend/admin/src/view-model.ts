@@ -8,6 +8,7 @@ export type Page =
   | 'providers'
   | 'index'
   | 'memory'
+  | 'semantic'
   | 'jobs'
   | 'audit'
   | 'backup'
@@ -60,10 +61,16 @@ export const pageMeta: Record<Page, PageMeta> = {
     icon: '索',
   },
   memory: {
-    label: '长期记忆',
+    label: '显式记忆',
     shortLabel: '记忆',
-    description: '查看自动生成的长期记忆、来源状态和异常处理结果。',
+    description: '管理明确提交的 raw memory；语义卡片、证据与 Memory Pack 请前往语义记忆。',
     icon: '忆',
+  },
+  semantic: {
+    label: '语义记忆',
+    shortLabel: '语义',
+    description: '查看经过来源和权限校验的语义卡片、证据与 Memory Pack。',
+    icon: '语',
   },
   jobs: {
     label: '后台任务',
@@ -94,7 +101,7 @@ export const pageMeta: Record<Page, PageMeta> = {
 export const navigationGroups: Array<{ label: string; pages: Page[] }> = [
   { label: '常用', pages: ['dashboard', 'vault'] },
   { label: '连接', pages: ['webdav', 'mcp'] },
-  { label: '智能', pages: ['providers', 'index', 'memory'] },
+  { label: '智能', pages: ['providers', 'index', 'memory', 'semantic'] },
   { label: '运维', pages: ['jobs', 'backup', 'audit', 'system'] },
 ];
 
@@ -120,7 +127,11 @@ const errorMessages: Record<string, string> = {
   not_found: '没有找到对应记录。',
   backup_unavailable: '备份服务暂时不可用。',
   provider_unavailable: 'AI 服务暂时不可用。',
+  provider_disabled: '该 AI 服务已禁用，请启用后再绑定模型。',
   capability_unavailable: '所选模型不支持这项用途。',
+  model_not_found: '所选模型已不存在，请刷新模型列表后重试。',
+  model_disabled: '所选模型已禁用，请启用后再绑定。',
+  model_capability_mismatch: '所选模型未声明该用途要求的能力，请在模型登记中确认 capability 后重试。',
   model_exists: '这个模型 ID 已经登记过了。',
   memory_initialization_required: '需要先在“记忆”页面确认一次旧记忆清理。',
   memory_selection_next_batch: '已保存批次，等待继续选择原文',

@@ -1,0 +1,22 @@
+.semantic-memory-page .hero-card p { max-width: 48rem; }
+.semantic-metrics { margin: 0; }
+.semantic-pack-form { align-items: center; display: flex; flex-wrap: wrap; gap: 0.75rem; }
+.semantic-pack-form input { background: var(--panel-strong); border: 1px solid var(--border); border-radius: 0.45rem; color: var(--text); flex: 1 1 18rem; min-height: 2.6rem; padding: 0.55rem 0.75rem; }
+.semantic-pack-result { display: grid; gap: 0.65rem; margin-top: 1rem; }
+.semantic-explicit-form { display: grid; gap: 0.75rem; }
+.semantic-explicit-form textarea { background: var(--panel-strong); border: 1px solid var(--border); border-radius: 0.45rem; color: var(--text); min-height: 7rem; padding: 0.75rem; resize: vertical; width: 100%; }
+.semantic-explicit-result { border-top: 1px solid var(--border); display: grid; gap: 0.75rem; margin-top: 1rem; padding-top: 1rem; }
+.semantic-card-grid { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }
+.semantic-card { background: var(--panel-strong); border: 1px solid var(--border); border-radius: 0.6rem; color: var(--text); display: grid; gap: 0.35rem; padding: 1rem; text-align: left; }
+.semantic-card:hover, .semantic-card--selected { border-color: var(--accent); }
+.semantic-card strong { font-size: 1rem; }
+.semantic-card span:not(.eyebrow) { color: var(--muted); font-size: 0.82rem; }
+.semantic-item { border-top: 1px solid var(--border); margin-top: 1rem; padding-top: 1rem; }
+.semantic-qualifiers p { margin: 0.35rem 0; }
+.semantic-evidence-list { display: flex; flex-wrap: wrap; gap: 0.55rem; margin-top: 1rem; }
+.semantic-evidence-list strong { flex-basis: 100%; }
+.semantic-evidence-detail, .semantic-mutation { border-top: 1px solid var(--border); margin-top: 1rem; padding-top: 1rem; }
+.semantic-evidence-detail h3, .semantic-mutation h3 { margin: 0 0 0.6rem; }
+.span-row { align-items: baseline; border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 0.6rem; padding: 0.65rem 0; }
+.span-row span { overflow-wrap: anywhere; }
+.semantic-memory-page .muted-text { color: var(--muted); font-size: 0.86rem; }

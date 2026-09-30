@@ -266,9 +266,11 @@ oauth_tools=$(curl --fail --silent --show-error -X POST "$mcp_url" \
 printf '%s' "$oauth_tools" | jq -e '
   [.result.tools[].name] == [
     "vault_overview", "browse_index", "recent_changes", "search_notes",
-    "read_note", "recall", "get_memory", "list_memories", "create_note",
-    "edit_note", "move_note", "delete_note", "note_history",
-    "restore_note_revision", "remember", "update_memory", "forget_memory"
+    "read_note", "build_memory_pack", "get_memory_card", "list_memory_cards",
+    "get_memory_evidence", "correct_memory", "forget_memory", "get_processing_status",
+    "create_note", "edit_note", "move_note", "delete_note", "note_history",
+    "restore_note_revision", "remember", "get_raw_memory", "list_raw_memories",
+    "get_raw_memory_overview", "update_raw_memory", "forget_raw_memory"
   ]
 ' >/dev/null
 

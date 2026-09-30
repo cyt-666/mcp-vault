@@ -22,6 +22,9 @@ use crate::{
     files::FileStateRepository,
     index::IndexRepository,
     providers::ProviderRepository,
+    semantic_memory::SemanticMemoryRepository,
+    semantic_organization::SemanticOrganizationRepository,
+    semantic_rules::SemanticRulesRepository,
     settings::SettingsRepository,
     vaults::VaultRepository,
 };
@@ -228,6 +231,75 @@ impl StateStore {
     /// Independent source-preserving memory storage; never reads legacy rows.
     pub fn memory_units(&self) -> crate::UnitRepository {
         crate::UnitRepository::new(self.pool.clone(), self.offline_exclusive)
+    }
+
+    /// Return the independent Vault-scoped semantic memory repository.
+    pub fn semantic_memory(&self) -> SemanticMemoryRepository {
+        SemanticMemoryRepository::new(self.pool.clone())
+    }
+
+    /// Return the independent Vault-scoped M2 organization repository.
+    pub fn semantic_organization(&self) -> SemanticOrganizationRepository {
+        SemanticOrganizationRepository::new(self.pool.clone())
+    }
+
+    pub async fn resolve_semantic_target(
+        &self,
+        context: &mcp_vault_domain::VaultContext,
+        target_ref: &str,
+        parent_ref: Option<&str>,
+    ) -> Result<Option<crate::SemanticTargetResolution>, StateError> {
+        let resolved = if let Some(parent_ref) = parent_ref {
+            self.semantic_rules()
+                .resolve_semantic_target_for_parent(context, target_ref, parent_ref)
+                .await?
+        } else {
+            self.semantic_rules()
+                .resolve_semantic_target(context, target_ref)
+                .await?
+        };
+        let Some(resolved) = resolved else {
+            return Ok(None);
+        };
+        if let Some(composed_card_id) = resolved.composed_card_id.as_deref() {
+            let id = composed_card_id.parse().map_err(StateError::from)?;
+            if self
+                .semantic_organization()
+                .get_composed_card(context, id)
+                .await?
+                .is_none()
+            {
+                return Ok(None);
+            }
+        }
+        Ok(Some(resolved))
+    }
+
+    /// Load only currently qualified semantic candidates for an internal
+    /// deterministic MemoryPack build. The repositories own all eligibility,
+    /// suppression, source-revision, and AND/OR qualification predicates.
+    pub async fn list_memory_pack_candidates(
+        &self,
+        context: &mcp_vault_domain::VaultContext,
+        limit: u32,
+    ) -> Result<
+        (
+            Vec<crate::SemanticCardRecord>,
+            Vec<crate::ComposedCardRecord>,
+        ),
+        StateError,
+    > {
+        Ok((
+            self.semantic_memory().list_cards(context, limit).await?,
+            self.semantic_organization()
+                .list_composed_cards(context, limit)
+                .await?,
+        ))
+    }
+
+    /// Return Vault-scoped M3 target and lifecycle-rule operations.
+    pub fn semantic_rules(&self) -> SemanticRulesRepository {
+        SemanticRulesRepository::new(self.pool.clone())
     }
 
     /// Return the narrowly scoped initialization repository authorized by an
@@ -767,7 +839,7 @@ mod tests {
         let report = store.integrity_check().await.unwrap();
         assert!(report.integrity_ok);
         assert_eq!(report.foreign_key_violations, 0);
-        assert_eq!(report.migration_version, 33);
+        assert_eq!(report.migration_version, 43);
         assert!(store.foreign_keys_enabled().await.unwrap());
     }
 
@@ -889,7 +961,7 @@ mod tests {
         }
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 33);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 43);
     }
 
     #[tokio::test]
@@ -931,7 +1003,7 @@ mod tests {
         assert!(jwks.is_none());
         assert_eq!(enabled, 0);
         assert!(store.has_table("installation_key_checks").await.unwrap());
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 33);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 43);
     }
 
     #[tokio::test]
@@ -982,7 +1054,7 @@ mod tests {
         assert_eq!(store.integrity_check().await.unwrap().migration_version, 10);
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 33);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 43);
     }
 
     #[tokio::test]
@@ -1138,7 +1210,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(pipeline_column, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 33);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 43);
     }
 
     #[tokio::test]
@@ -1200,7 +1272,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(retained, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 33);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 43);
     }
 
     #[tokio::test]
@@ -1285,7 +1357,7 @@ mod tests {
         .unwrap();
         assert_eq!(reason.as_deref(), Some("source_unavailable"));
         assert_eq!(changed_at, Some(20));
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 33);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 43);
     }
 
     #[tokio::test]
@@ -1423,7 +1495,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(fts_row, (String::new(), "keep canonical memory".to_owned()));
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 33);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 43);
     }
 
     #[tokio::test]

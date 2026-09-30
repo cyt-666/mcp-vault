@@ -3,6 +3,8 @@ import type { FormEvent, ReactNode } from 'react';
 
 import { adminApi } from './api';
 import { MemoryManagement, MemoryEditor } from './memory-management';
+import { RawExplicitMemoryPage } from './raw-memory';
+import { SemanticMemoryPage } from './semantic-memory';
 import {
   CopyField,
   EmptyState,
@@ -37,6 +39,7 @@ import {
 } from './view-model';
 
 type Notify = (message: string, tone?: NoticeTone) => void;
+const MAX_BULK_MEMORY_DELETE = 100;
 
 export function Dashboard({ data, onNavigate }: { data: JsonObject | null; onNavigate: (page: Page) => void }) {
   const vault = asRecord(data?.vault);
@@ -139,7 +142,10 @@ export function ManagementPage({ page, data, onRefresh }: { page: Page; data: Js
       content = <IndexPage data={data} notify={notify} onRefresh={onRefresh} />;
       break;
     case 'memory':
-      content = <MemoryPage data={data} notify={notify} onRefresh={onRefresh} />;
+      content = <RawExplicitMemoryPage data={data} notify={notify} onRefresh={onRefresh} />;
+      break;
+    case 'semantic':
+      content = <SemanticMemoryPage data={data} notify={notify} onRefresh={onRefresh} />;
       break;
     case 'jobs':
       content = <JobsPage data={data} notify={notify} onRefresh={onRefresh} />;
@@ -969,7 +975,6 @@ const modelRoles = [
   { value: 'topic_enrichment', label: '主题增强', detail: '辅助主题和知识结构分析' },
   { value: 'embedding_note', label: '笔记向量', detail: '让搜索和 recall 能按语义想起普通笔记' },
   { value: 'embedding_memory', label: '记忆向量', detail: '生成长期记忆语义向量' },
-  { value: 'rerank', label: '结果重排', detail: '对候选检索结果进行可选重排' },
 ];
 
 function ManualModelForm({ provider, notify, onRefresh }: { provider: JsonObject; notify: Notify; onRefresh: () => void }) {
@@ -1041,7 +1046,7 @@ function ManualModelForm({ provider, notify, onRefresh }: { provider: JsonObject
     <form className="compact-form" onSubmit={submit}>
       <div className="form-grid">
         <label>模型 ID<input required value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="例如：gpt-5-mini 或 qwen3:8b" /></label>
-        <label>主要能力<select value={capability} onChange={(event) => setCapability(event.target.value)}><option value="generation">结构化文本生成</option><option value="embedding">Embedding</option><option value="reranking">结果重排</option></select></label>
+        <label>主要能力<select value={capability} onChange={(event) => setCapability(event.target.value)}><option value="generation">结构化文本生成</option><option value="embedding">Embedding</option></select></label>
         {capability === 'embedding' ? <label>预期输出维度（校验用，可选）<input min="1" type="number" value={dimension} onChange={(event) => setDimension(event.target.value)} placeholder="例如：1536" /><small>填写模型实际返回的维度，不是最大支持维度。此项只校验响应，不会要求模型降维或截断向量。</small></label> : null}
         <label>上下文窗口（可选）<input min="1" type="number" value={contextWindow} onChange={(event) => setContextWindow(event.target.value)} placeholder="例如：128000" /></label>
       </div>
@@ -1087,6 +1092,16 @@ function ModelBindingsPanel({ models, bindings, notify, onRefresh }: { models: J
 function ModelBindingControl({ role, models, binding, notify, onRefresh }: { role: { value: string; label: string; detail: string }; models: JsonObject[]; binding?: JsonObject; notify: Notify; onRefresh: () => void }) {
   const [selected, setSelected] = useState(stringValue(binding?.model_id, ''));
   const [busy, setBusy] = useState(false);
+  const selectedModel = models.find((model) => stringValue(model.id) === selected);
+  const requiredCapability = ['memory_extraction', 'memory_overview', 'note_summary', 'topic_enrichment'].includes(role.value)
+    ? null
+    : role.value === 'embedding_note' || role.value === 'embedding_memory'
+      ? 'embeddings' : null;
+  const selectedHasCapability = !selectedModel || !requiredCapability
+    || booleanValue(asRecord(selectedModel.capabilities)[requiredCapability]);
+  const generationCapabilityUnknown = Boolean(selectedModel)
+    && ['memory_extraction', 'memory_overview', 'note_summary', 'topic_enrichment'].includes(role.value)
+    && !booleanValue(asRecord(selectedModel?.capabilities).structured_output);
 
   useEffect(() => setSelected(stringValue(binding?.model_id, '')), [binding?.model_id]);
 
@@ -1120,8 +1135,14 @@ function ModelBindingControl({ role, models, binding, notify, onRefresh }: { rol
           <option value="">请选择模型</option>
           {models.map((model) => <option key={stringValue(model.id)} value={stringValue(model.id)}>{stringValue(model.external_model_id)} — {stringValue(model.provider_name, 'AI 服务')}</option>)}
         </select>
+        {generationCapabilityUnknown ? <Notice tone="info">
+          模型列表未提供结构化输出能力信息，可以保存；是否可用需通过实际调用验证。
+        </Notice> : null}
+        {selectedModel && requiredCapability && !selectedHasCapability ? <Notice tone="warning">
+          所选模型尚未声明“{requiredCapability === 'embeddings' ? 'Embedding' : '结果重排'}”能力，无法用于当前用途。请在上方“手动登记模型”中选择已声明该能力的模型；当前页面不能修改已登记模型的 capability。
+        </Notice> : null}
       </div>
-      <button className="secondary-button" disabled={busy || !selected || selected === binding?.model_id} type="button" onClick={() => void save()}>{busy ? '正在保存…' : '保存'}</button>
+      <button className="secondary-button" disabled={busy || !selected || selected === binding?.model_id || !selectedHasCapability} type="button" onClick={() => void save()}>{busy ? '正在保存…' : !selectedHasCapability ? '能力未满足' : '保存'}</button>
     </article>
   );
 }
@@ -1575,6 +1596,9 @@ function MemoryOverviewPanel({ data, notify }: { data: JsonObject; notify: Notif
   </Panel>;
 }
 
+// Retained below only for historical test fixtures; the live route uses
+// RawExplicitMemoryPage and never renders the retired automatic panels.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; notify: Notify; onRefresh: () => void }) {
   const localVaultKey = `mcp-vault:obsidian-name:${stringValue(data?.vault_slug, 'default')}`;
   const [obsidianVault, setObsidianVault] = useState(() => { try { return localStorage.getItem(localVaultKey) ?? ''; } catch { return ''; } });
@@ -1585,6 +1609,9 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
   const embedding = asRecord(data?.embedding);
   const memoryJobs = arrayRecords(data?.memory_jobs);
   const [memoryActionId, setMemoryActionId] = useState('');
+  const [selectedMemoryIds, setSelectedMemoryIds] = useState<Set<string>>(() => new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [bulkDeleteResult, setBulkDeleteResult] = useState<JsonObject | null>(null);
   const [newContent, setNewContent] = useState('');
   const [newKind, setNewKind] = useState('');
   const [copySource, setCopySource] = useState<JsonObject | null>(null);
@@ -1592,6 +1619,10 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
   const [editing, setEditing] = useState<JsonObject | null>(null);
   const [nextOffset, setNextOffset] = useState<unknown>(data?.next_cursor ?? data?.next_offset);
   useEffect(() => setNextOffset(data?.next_cursor ?? data?.next_offset), [data?.next_cursor, data?.next_offset]);
+  useEffect(() => {
+    const loadedIds = new Set(memories.map((memory) => stringValue(memory.id)).filter(Boolean));
+    setSelectedMemoryIds((selected) => new Set([...selected].filter((id) => loadedIds.has(id))));
+  }, [memories]);
 
   const loadedPages = useRef(1);
   const vaultSlug = stringValue(data?.vault_slug, '');
@@ -1617,6 +1648,60 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
     return () => { cancelled = true; };
   }, [data?.memories, data?.next_cursor, data?.next_offset, vaultSlug]);
 
+  const selectedMemories = memories.filter((memory) => selectedMemoryIds.has(stringValue(memory.id)));
+  const selectedExplicitCount = selectedMemories.filter((memory) => stringValue(memory.ownership) === 'explicit').length;
+  const selectedDerivedCount = selectedMemories.filter((memory) => stringValue(memory.ownership) === 'note_derived').length;
+
+  async function deleteSelectedMemories() {
+    if (selectedMemories.length === 0) return;
+    if (selectedMemories.length > MAX_BULK_MEMORY_DELETE) {
+      notify(`一次最多批量删除 ${MAX_BULK_MEMORY_DELETE} 条，请取消部分选择后再提交。`, 'warning');
+      return;
+    }
+    const items = selectedMemories.map((memory) => ({
+      id: stringValue(memory.id),
+      expected_revision: numberValue(memory.revision),
+    }));
+    if (items.some((item) => !item.id || item.expected_revision <= 0)) {
+      notify('所选记忆 ID 或 revision 无效，请刷新后重试。', 'danger');
+      return;
+    }
+    const confirmText = [
+      `确定批量删除已选的 ${items.length} 条当前记忆吗？`,
+      `显式记忆 ${selectedExplicitCount} 条；笔记派生记忆 ${selectedDerivedCount} 条。`,
+      '显式记忆会删除规范记录；笔记派生项按来源集合合并改写，每个来源最多改写一次。批量删除不会暂停原本未暂停的来源；已经暂停的来源仍保持暂停。单条删除仍会暂停其笔记派生来源。',
+      '未暂停来源可用“重新提取全部笔记”显式重新评估，可能增加模型调用和 Token 成本；已暂停来源需要先在“暂停的来源”面板明确恢复。',
+    ].join('\n\n');
+    if (!window.confirm(confirmText)) return;
+
+    setBulkDeleting(true);
+    setBulkDeleteResult(null);
+    try {
+      const result = asRecord(await adminApi.request('/memories/bulk-delete', {
+        method: 'POST',
+        body: { items },
+      }));
+      const outcomes = arrayRecords(result.results);
+      const deletedIds = new Set(outcomes
+        .filter((item) => stringValue(item.status) === 'deleted')
+        .map((item) => stringValue(item.id)));
+      setMemories((current) => current.filter((memory) => !deletedIds.has(stringValue(memory.id))));
+      setSelectedMemoryIds((current) => new Set([...current].filter((id) => !deletedIds.has(id))));
+      setBulkDeleteResult(result);
+      const summary = asRecord(result.summary);
+      const deleted = numberValue(summary.deleted);
+      const conflicts = numberValue(summary.conflicts);
+      const failed = numberValue(summary.failed);
+      notify(`批量删除完成：删除 ${deleted} 条，修订冲突 ${conflicts} 条，失败 ${failed} 条。`,
+        conflicts + failed > 0 ? 'warning' : 'success');
+      onRefresh();
+    } catch (error: unknown) {
+      notify(formatRequestError(error), 'danger');
+    } finally {
+      setBulkDeleting(false);
+    }
+  }
+
   async function deleteMemory(memory: JsonObject) {
     const id = stringValue(memory.id, '');
     const revision = numberValue(memory.revision);
@@ -1634,6 +1719,7 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
     try {
       const result = asRecord(await adminApi.request(`/memories/${encodeURIComponent(id)}?expected_revision=${revision}`, { method: 'DELETE' }));
       setMemories((current) => current.filter((item) => stringValue(item.id) !== id));
+      setSelectedMemoryIds((current) => new Set([...current].filter((selected) => selected !== id)));
       notify(booleanValue(result.source_extraction_paused)
         ? '派生记忆已删除；该来源的自动提取已暂停。'
         : '显式记忆已删除。');
@@ -1709,6 +1795,52 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
         </form>
       </Panel>
       <Panel title={`长期记忆（已加载 ${memories.length} 条）`} eyebrow="有来源的上下文" description="默认召回不调用在线模型。">
+        {memories.length > 0 ? <div className="button-row" aria-label="批量记忆操作">
+          <button className="secondary-button" type="button" disabled={bulkDeleting || Boolean(memoryActionId)} onClick={() => {
+            setSelectedMemoryIds((current) => new Set([...current, ...memories.map((memory) => stringValue(memory.id)).filter(Boolean)]));
+            setBulkDeleteResult(null);
+          }}>全选当前已加载项（{memories.length}）</button>
+          <button className="secondary-button" type="button" disabled={bulkDeleting || Boolean(memoryActionId) || selectedMemories.length === 0} onClick={() => {
+            setSelectedMemoryIds(new Set());
+            setBulkDeleteResult(null);
+          }}>取消选择</button>
+          {selectedMemories.length > 0 ? <button className="danger-button" type="button" disabled={bulkDeleting || Boolean(memoryActionId) || selectedMemories.length > MAX_BULK_MEMORY_DELETE} onClick={() => void deleteSelectedMemories()}>
+            {bulkDeleting ? '正在批量删除…' : `删除所选 ${selectedMemories.length} 条`}
+          </button> : null}
+        </div> : null}
+        {selectedMemories.length > MAX_BULK_MEMORY_DELETE ? <Notice tone="warning">
+          一次最多批量删除 {MAX_BULK_MEMORY_DELETE} 条，请取消部分选择后再提交。
+        </Notice> : null}
+        {bulkDeleteResult ? (() => {
+          const summary = asRecord(bulkDeleteResult.summary);
+          const outcomes = arrayRecords(bulkDeleteResult.results);
+          const deleted = numberValue(summary.deleted);
+          const conflicts = numberValue(summary.conflicts);
+          const failed = numberValue(summary.failed);
+          return <div aria-live="polite" className="record-item record-item--stack">
+            <Notice tone={conflicts + failed > 0 ? 'warning' : 'success'}>
+              批量删除结果：成功 {deleted} 条、修订冲突 {conflicts} 条、失败 {failed} 条。批量操作不会新增来源暂停；已暂停来源仍保持暂停。成功项已从列表移除；冲突项请刷新后重新确认。
+            </Notice>
+            <div className="summary-list">
+              {outcomes.map((item) => {
+                const status = stringValue(item.status);
+                const label = status === 'deleted' ? '已删除' : status === 'conflict' ? '修订冲突' : '失败';
+                const ownership = stringValue(item.ownership);
+                const errorCode = stringValue(item.error_code);
+                let pauseState = '';
+                if (ownership === 'note_derived' && typeof item.source_extraction_paused === 'boolean') {
+                  pauseState = item.source_extraction_paused ? '来源保持暂停' : '来源未暂停';
+                }
+                return <SummaryRow
+                  key={stringValue(item.id)}
+                  label={stringValue(item.id)}
+                  value={[label, ownership, pauseState, errorCode].filter(Boolean).join(' · ')}
+                  mono
+                />;
+              })}
+            </div>
+          </div>;
+        })() : null}
         {memories.length === 0 ? (
           <EmptyState title="还没有长期记忆" detail="Agent 主动记住或系统从普通笔记自动识别出的耐久信息会出现在这里。" />
         ) : (
@@ -1716,8 +1848,28 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
             {memories.map((memory) => {
               const sources = arrayRecords(memory.sources);
               const derived = stringValue(memory.ownership) === 'note_derived';
+              const memoryId = stringValue(memory.id);
               return (
                 <article className="record-item record-item--stack" key={stringValue(memory.id)}>
+                  <label className="memory-selection">
+                    <input
+                      type="checkbox"
+                      aria-label={`选择当前记忆 ${memoryId}`}
+                      checked={selectedMemoryIds.has(memoryId)}
+                      disabled={bulkDeleting || Boolean(memoryActionId)}
+                      onChange={(event) => {
+                        const checked = event.currentTarget.checked;
+                        setSelectedMemoryIds((current) => {
+                          const next = new Set(current);
+                          if (checked) next.add(memoryId);
+                          else next.delete(memoryId);
+                          return next;
+                        });
+                        setBulkDeleteResult(null);
+                      }}
+                    />
+                    <span>选择</span>
+                  </label>
                   <div className="record-title"><strong className="memory-content">{stringValue(memory.content, '无内容')}</strong><StatusBadge tone={derived ? 'neutral' : 'success'}>{derived ? '笔记派生' : '显式'}</StatusBadge></div>
                   <p>{memory.memory_type ? memoryTypeLabel(memory.memory_type) : '未指定类型'} · 规范文件 <code>{stringValue(memory.canonical_path)}</code></p>
                   <small>当前修订 {numberValue(memory.revision)}</small>
@@ -1741,7 +1893,7 @@ function MemoryPage({ data, notify, onRefresh }: { data: JsonObject | null; noti
                   <div className="button-row">
                     {derived ? <button type="button" className="secondary-button" onClick={() => { setNewContent(stringValue(memory.content)); setCopySource({ id: memory.id, expected_revision: memory.revision }); setNewKind(stringValue(memory.memory_type, '')); notify('已将完整正文放入添加表单，可编辑后保存为明确记忆。'); }}>另存为明确记忆</button> : null}
                     {!derived ? <button type="button" className="secondary-button" aria-label={`编辑显式记忆 ${stringValue(memory.id)}`} onClick={() => setEditing(memory)}>编辑</button> : null}
-                    <button aria-label={`删除当前记忆 ${stringValue(memory.id)}`} className="danger-button" disabled={memoryActionId === stringValue(memory.id)} type="button" onClick={() => void deleteMemory(memory)}>删除</button>
+                    <button aria-label={`删除当前记忆 ${memoryId}`} className="danger-button" disabled={bulkDeleting || memoryActionId === memoryId} type="button" onClick={() => void deleteMemory(memory)}>删除</button>
                   </div>
                 </article>
               );
@@ -1805,6 +1957,7 @@ function memoryEmbeddingBlockerLabel(code: string): string {
     model_binding_missing: '尚未绑定“记忆向量”模型',
     model_missing: '绑定的模型记录不存在',
     model_disabled: '绑定的模型已停用',
+    embedding_model_capability_unavailable: '绑定模型未声明向量能力，请更换为支持嵌入的模型',
     provider_missing: '模型所属 AI 服务不存在',
     provider_disabled: '模型所属 AI 服务已停用',
     embedding_coverage_incomplete: '仍有记忆等待生成向量',
@@ -2381,7 +2534,6 @@ function modelCapabilityLabel(capabilities: JsonObject): string {
     const dimension = typeof capabilities.dimension === 'number' ? ` ${capabilities.dimension} 维` : '';
     values.push(`Embedding${dimension}`);
   }
-  if (booleanValue(capabilities.reranking)) values.push('重排');
   return values.length > 0 ? values.join(' · ') : '能力待确认';
 }
 

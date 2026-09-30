@@ -23,8 +23,8 @@ use mcp_vault_providers::{
     embedding_input_hash,
 };
 use mcp_vault_state::{
-    FileRecord, ModelBindingRecord, ModelRecord, ProviderRecord, StateStore, UnitBundle,
-    UnitFilter, UnitOwnership, UnitRecord, UnitSourceRecord, UnitSourceSetRecord,
+    FileRecord, IdempotencyLookup, ModelBindingRecord, ModelRecord, ProviderRecord, StateStore,
+    UnitBundle, UnitFilter, UnitOwnership, UnitRecord, UnitSourceRecord, UnitSourceSetRecord,
     UnitSourceSetSnapshotRecord, memory_search_terms,
 };
 use regex::Regex;
@@ -357,11 +357,23 @@ impl MemoryService {
             None => status.blockers.push("provider_missing".to_owned()),
         }
 
-        let profile_hash = self
+        let profile_hash = match self
             .providers
             .embeddings()
             .profile_hash(binding.model_id)
-            .await?;
+            .await
+        {
+            Ok(profile_hash) => profile_hash,
+            Err(mcp_vault_providers::ProviderError::ModelCapabilityMismatch {
+                capability: "embeddings",
+            }) => {
+                status
+                    .blockers
+                    .push("embedding_model_capability_unavailable".to_owned());
+                return Ok(status);
+            }
+            Err(error) => return Err(MemoryError::Provider(error)),
+        };
         status.profile_hash = Some(profile_hash.clone());
         let expected = inputs
             .iter()
@@ -819,6 +831,31 @@ impl MemoryService {
         expected_revision: Revision,
         patch: MemoryUpdateInput,
     ) -> Result<MemoryUnit, MemoryError> {
+        self.update_as(
+            context,
+            core,
+            memory_id,
+            expected_revision,
+            patch,
+            Actor::system(),
+            SourcePlane::System,
+        )
+        .await
+    }
+
+    /// Apply an explicit-memory update while preserving the authenticated
+    /// protocol actor and source plane in the canonical file audit/revision.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_as(
+        &self,
+        context: &VaultContext,
+        core: &VaultCore,
+        memory_id: MemoryId,
+        expected_revision: Revision,
+        patch: MemoryUpdateInput,
+        actor: Actor,
+        source_plane: SourcePlane,
+    ) -> Result<MemoryUnit, MemoryError> {
         self.ensure_initialized(context).await?;
         let vault_write_lock = self.vault_write_lock(context).await;
         let _write_guard = vault_write_lock.lock().await;
@@ -836,6 +873,12 @@ impl MemoryService {
         let previous_content_hash = bundle.memory.content_hash.clone();
         if bundle.memory.revision != expected_revision {
             return Err(MemoryError::Conflict);
+        }
+        if let Some(tags) = patch.tags.as_ref() {
+            validate_tags_entities(tags, &[])?;
+        }
+        if let Some(entities) = patch.entities.as_ref() {
+            validate_tags_entities(&[], entities)?;
         }
         if let Some(content) = patch.content {
             validate_content(&content)?;
@@ -901,8 +944,8 @@ impl MemoryService {
             &path,
             canonical_revision,
             &bytes,
-            Actor::system(),
-            SourcePlane::System,
+            actor,
+            source_plane,
         )
         .await?;
         bundle.memory.canonical_file_id = Some(file.id);
@@ -928,9 +971,111 @@ impl MemoryService {
         memory_id: MemoryId,
         expected_revision: Revision,
     ) -> Result<ForgetResult, MemoryError> {
+        self.forget_as(
+            context,
+            core,
+            memory_id,
+            expected_revision,
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+    }
+
+    /// Delete only an explicit memory while preserving caller provenance and
+    /// the durable managed-file idempotency replay contract. This is the
+    /// narrow entry point used by raw explicit-memory adapters; the legacy
+    /// [`Self::forget`] path continues to support note-derived deletion.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn forget_explicit_as(
+        &self,
+        context: &VaultContext,
+        core: &VaultCore,
+        memory_id: MemoryId,
+        expected_revision: Revision,
+        actor: Actor,
+        source_plane: SourcePlane,
+        idempotency_key: Option<&str>,
+    ) -> Result<ForgetResult, MemoryError> {
+        if let Some(key) = idempotency_key
+            && let Some(result) = self
+                .replay_explicit_delete(
+                    context,
+                    core,
+                    memory_id,
+                    expected_revision,
+                    &actor,
+                    source_plane,
+                    key,
+                )
+                .await?
+        {
+            return Ok(result);
+        }
+        self.get_with_access(context, memory_id, MemoryReadAccess::ExplicitOnly)
+            .await?;
+        self.forget_as(
+            context,
+            core,
+            memory_id,
+            expected_revision,
+            actor,
+            source_plane,
+            idempotency_key,
+        )
+        .await
+    }
+
+    /// Delete one current memory while preserving caller audit provenance and
+    /// replaying a committed managed-file delete for the same Vault-scoped
+    /// idempotency key. The key is compared against the canonical path and
+    /// expected revision before any current-memory lookup, so retries after
+    /// projection removal remain successful and mismatched requests conflict.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn forget_as(
+        &self,
+        context: &VaultContext,
+        core: &VaultCore,
+        memory_id: MemoryId,
+        expected_revision: Revision,
+        actor: Actor,
+        source_plane: SourcePlane,
+        idempotency_key: Option<&str>,
+    ) -> Result<ForgetResult, MemoryError> {
         self.ensure_initialized(context).await?;
+        if let Some(key) = idempotency_key
+            && let Some(result) = self
+                .replay_explicit_delete(
+                    context,
+                    core,
+                    memory_id,
+                    expected_revision,
+                    &actor,
+                    source_plane,
+                    key,
+                )
+                .await?
+        {
+            return Ok(result);
+        }
         let vault_write_lock = self.vault_write_lock(context).await;
         let write_guard = vault_write_lock.lock().await;
+        if let Some(key) = idempotency_key
+            && let Some(result) = self
+                .replay_explicit_delete(
+                    context,
+                    core,
+                    memory_id,
+                    expected_revision,
+                    &actor,
+                    source_plane,
+                    key,
+                )
+                .await?
+        {
+            return Ok(result);
+        }
         let bundle = match self.state.memory_units().get(context, memory_id).await? {
             Some(bundle) => bundle,
             None => {
@@ -1020,9 +1165,9 @@ impl MemoryService {
                     context,
                     path,
                     revision,
-                    Actor::system(),
-                    SourcePlane::System,
-                    None,
+                    actor,
+                    source_plane,
+                    idempotency_key,
                 )
                 .await?;
                 self.state
@@ -1120,6 +1265,454 @@ impl MemoryService {
                 })
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn replay_explicit_delete(
+        &self,
+        context: &VaultContext,
+        core: &VaultCore,
+        memory_id: MemoryId,
+        expected_revision: Revision,
+        actor: &Actor,
+        source_plane: SourcePlane,
+        idempotency_key: &str,
+    ) -> Result<Option<ForgetResult>, MemoryError> {
+        let Some(lookup) = self
+            .state
+            .files()
+            .find_idempotency(context, idempotency_key)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let IdempotencyLookup::Committed {
+            payload, revision, ..
+        } = lookup
+        else {
+            return Err(MemoryError::Core(VaultError::InFlight));
+        };
+        let path = current_markdown::explicit_path(core.managed_root(), memory_id)?;
+        let actor_value = serde_json::to_value(actor)
+            .map_err(|_| MemoryError::InvalidInput("memory delete actor is invalid"))?;
+        let request_matches = payload.get("operation").and_then(Value::as_str) == Some("delete")
+            && payload.get("audit_action").and_then(Value::as_str) == Some("managed.file.delete")
+            && payload.get("path").and_then(Value::as_str) == Some(path.as_str())
+            && payload.get("file_id").and_then(Value::as_str)
+                == Some(revision.file_id.to_string().as_str())
+            && payload.get("expected_revision").and_then(Value::as_u64)
+                == Some(expected_revision.value())
+            && payload.get("actor") == Some(&actor_value)
+            && payload.get("source_plane").and_then(Value::as_str) == Some(source_plane.as_str());
+        if !request_matches {
+            return Err(MemoryError::Conflict);
+        }
+
+        // A crash can leave the canonical delete committed before the memory
+        // projection cleanup. Complete that local cleanup on replay, while
+        // preserving the original successful result and audit operation.
+        if self
+            .state
+            .memory_units()
+            .get_unchecked(context, memory_id)
+            .await?
+            .is_some()
+        {
+            self.delete_current_memory_vectors(context, memory_id)
+                .await?;
+            let _ = self
+                .state
+                .memory_units()
+                .delete_explicit_projection(context, memory_id, expected_revision)
+                .await?;
+        }
+        Ok(Some(ForgetResult {
+            id: memory_id,
+            deleted: true,
+            ownership: MemoryOwnership::Explicit,
+            source_extraction_paused: false,
+        }))
+    }
+
+    /// Delete a bounded set of current memories as one coordinated Admin
+    /// operation. Note-derived items are grouped by source and each owning set
+    /// is rewritten once; this operation preserves the source's existing
+    /// extraction-pause state. The single-item [`Self::forget`] behavior is
+    /// intentionally unchanged.
+    pub async fn forget_many(
+        &self,
+        context: &VaultContext,
+        core: &VaultCore,
+        requested: Vec<ForgetBatchInput>,
+    ) -> Result<ForgetBatchResult, MemoryError> {
+        self.ensure_initialized(context).await?;
+        if requested.is_empty() || requested.len() > MAX_FORGET_BATCH_ITEMS {
+            return Err(MemoryError::InvalidInput(
+                "memory deletion batch size is invalid",
+            ));
+        }
+        let mut unique = HashSet::with_capacity(requested.len());
+        if requested
+            .iter()
+            .any(|item| item.expected_revision.value() == 0 || !unique.insert(item.id))
+        {
+            return Err(MemoryError::InvalidInput(
+                "memory deletion batch items are invalid",
+            ));
+        }
+
+        let write_lock = self.vault_write_lock(context).await;
+        let write_guard = write_lock.lock().await;
+        let mut results: Vec<Option<ForgetBatchItemResult>> = vec![None; requested.len()];
+        let mut candidates = Vec::with_capacity(requested.len());
+
+        // Resolve and compare every selected identity within this Vault before
+        // performing any mutation. A missing/cross-Vault ID is deliberately
+        // indistinguishable from any other unavailable current item.
+        for (index, item) in requested.iter().copied().enumerate() {
+            let Some(unchecked) = self
+                .state
+                .memory_units()
+                .get_unchecked(context, item.id)
+                .await?
+            else {
+                results[index] = Some(batch_forget_result(
+                    item.id,
+                    ForgetBatchStatus::Failed,
+                    None,
+                    None,
+                    Some("not_found"),
+                ));
+                continue;
+            };
+            let ownership = memory_ownership(unchecked.memory.ownership);
+            let paused = unchecked.note_set.as_ref().map(|set| set.extraction_paused);
+            if unchecked.memory.revision != item.expected_revision {
+                results[index] = Some(batch_forget_result(
+                    item.id,
+                    ForgetBatchStatus::Conflict,
+                    Some(ownership),
+                    paused,
+                    Some("revision_conflict"),
+                ));
+                continue;
+            }
+            let Some(current) = self.state.memory_units().get(context, item.id).await? else {
+                results[index] = Some(batch_forget_result(
+                    item.id,
+                    ForgetBatchStatus::Conflict,
+                    Some(ownership),
+                    paused,
+                    Some("revision_conflict"),
+                ));
+                continue;
+            };
+            if current.memory.revision != item.expected_revision {
+                results[index] = Some(batch_forget_result(
+                    item.id,
+                    ForgetBatchStatus::Conflict,
+                    Some(ownership),
+                    current.note_set.as_ref().map(|set| set.extraction_paused),
+                    Some("revision_conflict"),
+                ));
+                continue;
+            }
+            candidates.push((index, item, current));
+        }
+
+        // Explicit memories keep their existing per-record canonical delete
+        // and projection cleanup semantics.
+        for (index, item, bundle) in candidates
+            .iter()
+            .filter(|(_, _, bundle)| bundle.memory.ownership == UnitOwnership::Explicit)
+        {
+            let outcome = async {
+                let path = bundle
+                    .memory
+                    .canonical_path
+                    .as_ref()
+                    .ok_or(MemoryError::Conflict)?;
+                let canonical_revision = bundle
+                    .memory
+                    .canonical_revision
+                    .ok_or(MemoryError::Conflict)?;
+                self.delete_current_memory_vectors(context, item.id).await?;
+                core.delete_managed(
+                    context,
+                    path,
+                    canonical_revision,
+                    Actor::system(),
+                    SourcePlane::System,
+                    None,
+                )
+                .await?;
+                self.state
+                    .memory_units()
+                    .delete_explicit_projection(context, item.id, item.expected_revision)
+                    .await?;
+                Ok::<(), MemoryError>(())
+            }
+            .await;
+            results[*index] = Some(match outcome {
+                Ok(()) => batch_forget_result(
+                    item.id,
+                    ForgetBatchStatus::Deleted,
+                    Some(MemoryOwnership::Explicit),
+                    Some(false),
+                    None,
+                ),
+                Err(error) => batch_forget_error(
+                    item.id,
+                    Some(MemoryOwnership::Explicit),
+                    Some(false),
+                    &error,
+                ),
+            });
+        }
+
+        // A source set is the mutation unit for note-derived memories. Build
+        // exactly one prepared snapshot for each source containing any valid
+        // selected items, retaining every unselected item and its provenance.
+        let mut note_groups = BTreeMap::<FileId, Vec<(usize, ForgetBatchInput, UnitBundle)>>::new();
+        for candidate in candidates
+            .into_iter()
+            .filter(|(_, _, bundle)| bundle.memory.ownership == UnitOwnership::NoteDerived)
+        {
+            if let Some(set) = candidate.2.note_set.as_ref() {
+                note_groups
+                    .entry(set.source_file_id)
+                    .or_default()
+                    .push(candidate);
+            } else {
+                let (index, item, bundle) = candidate;
+                results[index] = Some(batch_forget_result(
+                    item.id,
+                    ForgetBatchStatus::Failed,
+                    Some(memory_ownership(bundle.memory.ownership)),
+                    None,
+                    Some("deletion_failed"),
+                ));
+            }
+        }
+
+        let mut prepared_groups = Vec::with_capacity(note_groups.len());
+        for (source_file_id, group) in note_groups {
+            let selected_set = group[0]
+                .2
+                .note_set
+                .as_ref()
+                .expect("note-derived current memory has an owning source set")
+                .clone();
+            let current_set = self
+                .state
+                .memory_units()
+                .get_note_set_by_source(context, source_file_id)
+                .await?;
+            if current_set.as_ref().map(|set| set.set_revision) != Some(selected_set.set_revision) {
+                for (index, item, bundle) in group {
+                    results[index] = Some(batch_forget_result(
+                        item.id,
+                        ForgetBatchStatus::Conflict,
+                        Some(memory_ownership(bundle.memory.ownership)),
+                        Some(selected_set.extraction_paused),
+                        Some("revision_conflict"),
+                    ));
+                }
+                continue;
+            }
+            if self
+                .state
+                .memory_units()
+                .prepared_note_set_snapshot(context, source_file_id)
+                .await?
+                .is_some()
+            {
+                for (index, item, bundle) in group {
+                    results[index] = Some(batch_forget_result(
+                        item.id,
+                        ForgetBatchStatus::Conflict,
+                        Some(memory_ownership(bundle.memory.ownership)),
+                        Some(selected_set.extraction_paused),
+                        Some("revision_conflict"),
+                    ));
+                }
+                continue;
+            }
+
+            let set_items = self
+                .state
+                .memory_units()
+                .list_note_set_items(context, selected_set.id)
+                .await?;
+            let set_by_id = set_items
+                .iter()
+                .map(|bundle| (bundle.memory.id, bundle))
+                .collect::<HashMap<_, _>>();
+            let mut deleting_ids = HashSet::with_capacity(group.len());
+            let mut valid_group = Vec::with_capacity(group.len());
+            for candidate in group {
+                let (index, item, bundle) = candidate;
+                let member_is_current = set_by_id
+                    .get(&item.id)
+                    .is_some_and(|member| member.memory.revision == item.expected_revision);
+                if member_is_current {
+                    deleting_ids.insert(item.id);
+                    valid_group.push((index, item, bundle));
+                } else {
+                    results[index] = Some(batch_forget_result(
+                        item.id,
+                        ForgetBatchStatus::Conflict,
+                        Some(MemoryOwnership::NoteDerived),
+                        Some(selected_set.extraction_paused),
+                        Some("revision_conflict"),
+                    ));
+                }
+            }
+            if valid_group.is_empty() {
+                continue;
+            }
+
+            let remaining = set_items
+                .iter()
+                .filter(|bundle| !deleting_ids.contains(&bundle.memory.id))
+                .map(prepared_current_item)
+                .collect::<Vec<_>>();
+            let mut updated_set = selected_set.clone();
+            updated_set.set_revision = match selected_set.set_revision.next() {
+                Ok(revision) => revision,
+                Err(_) => {
+                    for (index, item, _) in valid_group {
+                        results[index] = Some(batch_forget_result(
+                            item.id,
+                            ForgetBatchStatus::Failed,
+                            Some(MemoryOwnership::NoteDerived),
+                            Some(selected_set.extraction_paused),
+                            Some("deletion_failed"),
+                        ));
+                    }
+                    continue;
+                }
+            };
+            // Preserve any prior pause. Batch deletion never creates a new one.
+            updated_set.extraction_paused = selected_set.extraction_paused;
+            updated_set.updated_at = now_millis();
+            let provisional = current_bundles_from_prepared(
+                context,
+                &updated_set,
+                &remaining,
+                updated_set.updated_at,
+            );
+            let bytes = match current_markdown::render_note_set(&updated_set, &provisional) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    for (index, item, _) in valid_group {
+                        results[index] = Some(batch_forget_error(
+                            item.id,
+                            Some(MemoryOwnership::NoteDerived),
+                            Some(selected_set.extraction_paused),
+                            &error,
+                        ));
+                    }
+                    continue;
+                }
+            };
+            let snapshot = UnitSourceSetSnapshotRecord {
+                id: MemorySetSnapshotId::new(),
+                vault_id: context.id(),
+                note_set_id: selected_set.id,
+                source_file_id: selected_set.source_file_id,
+                source_path: selected_set.source_path.clone(),
+                source_content_hash: selected_set.source_content_hash.clone(),
+                source_revision: selected_set.source_revision,
+                expected_set_revision: Some(selected_set.set_revision),
+                proposed_set_revision: updated_set.set_revision,
+                extraction_paused: updated_set.extraction_paused,
+                items: match serde_json::to_value(&remaining) {
+                    Ok(items) => items,
+                    Err(_) => {
+                        for (index, item, _) in valid_group {
+                            results[index] = Some(batch_forget_result(
+                                item.id,
+                                ForgetBatchStatus::Failed,
+                                Some(MemoryOwnership::NoteDerived),
+                                Some(selected_set.extraction_paused),
+                                Some("deletion_failed"),
+                            ));
+                        }
+                        continue;
+                    }
+                },
+                canonical_bytes_hash: current_markdown::hash_bytes(&bytes),
+                canonical_path: selected_set.canonical_path.clone(),
+                profile_hash: selected_set.profile_hash.clone(),
+                prompt_version: selected_set.prompt_version.clone(),
+                provider_id: selected_set.provider_id,
+                model_id: selected_set.model_id,
+                status: "prepared".to_owned(),
+                created_at: updated_set.updated_at,
+                applied_at: None,
+            };
+            if let Err(error) = self
+                .state
+                .memory_units()
+                .prepare_note_set_snapshot(context, &snapshot)
+                .await
+            {
+                let error = MemoryError::State(error);
+                for (index, item, _) in valid_group {
+                    results[index] = Some(batch_forget_error(
+                        item.id,
+                        Some(MemoryOwnership::NoteDerived),
+                        Some(selected_set.extraction_paused),
+                        &error,
+                    ));
+                }
+                continue;
+            }
+            prepared_groups.push((snapshot, valid_group, selected_set.extraction_paused));
+        }
+        drop(write_guard);
+
+        for (snapshot, deleted_items, was_paused) in prepared_groups {
+            let outcome = self
+                .apply_prepared_note_set(context, core, snapshot, false)
+                .await;
+            for (index, item, bundle) in deleted_items {
+                results[index] = Some(match &outcome {
+                    Ok(_) => batch_forget_result(
+                        item.id,
+                        ForgetBatchStatus::Deleted,
+                        Some(MemoryOwnership::NoteDerived),
+                        Some(was_paused),
+                        None,
+                    ),
+                    Err(error) => batch_forget_error(
+                        item.id,
+                        Some(memory_ownership(bundle.memory.ownership)),
+                        Some(was_paused),
+                        error,
+                    ),
+                });
+            }
+        }
+
+        Ok(ForgetBatchResult {
+            results: results
+                .into_iter()
+                .enumerate()
+                .map(|(index, result)| {
+                    result.unwrap_or_else(|| {
+                        batch_forget_result(
+                            requested[index].id,
+                            ForgetBatchStatus::Failed,
+                            None,
+                            None,
+                            Some("deletion_failed"),
+                        )
+                    })
+                })
+                .collect(),
+        })
     }
 
     /// Recall current relevant memory without a query-time generative call.
@@ -1871,6 +2464,9 @@ impl MemoryService {
                     system: super::selection::SYSTEM.to_owned(),
                     user: batch.user.clone(),
                     schema_name: "memory_unit_selection".into(),
+                    strict_function_schema: None,
+                    defer_local_schema_validation: false,
+                    strict_function_call: false,
                     schema: super::selection::schema(&batch.units),
                     allow_additional_output_properties: false,
                     missing_required_string_fallbacks: Vec::new(),
@@ -1990,6 +2586,9 @@ impl MemoryService {
                     system: super::review::SYSTEM.to_owned(),
                     user: review_input,
                     schema_name: super::review::REVIEW_SCHEMA_VERSION.to_owned(),
+                    strict_function_schema: None,
+                    defer_local_schema_validation: false,
+                    strict_function_call: false,
                     schema: super::review::schema(scope),
                     allow_additional_output_properties: false,
                     missing_required_string_fallbacks: Vec::new(),
@@ -3282,6 +3881,95 @@ struct Score {
     components: BTreeMap<String, f64>,
 }
 
+fn memory_ownership(ownership: UnitOwnership) -> MemoryOwnership {
+    match ownership {
+        UnitOwnership::Explicit => MemoryOwnership::Explicit,
+        UnitOwnership::NoteDerived => MemoryOwnership::NoteDerived,
+    }
+}
+
+fn batch_forget_result(
+    id: MemoryId,
+    status: ForgetBatchStatus,
+    ownership: Option<MemoryOwnership>,
+    source_extraction_paused: Option<bool>,
+    error_code: Option<&str>,
+) -> ForgetBatchItemResult {
+    ForgetBatchItemResult {
+        id,
+        status,
+        ownership,
+        source_extraction_paused,
+        error_code: error_code.map(str::to_owned),
+    }
+}
+
+fn batch_forget_error(
+    id: MemoryId,
+    ownership: Option<MemoryOwnership>,
+    source_extraction_paused: Option<bool>,
+    error: &MemoryError,
+) -> ForgetBatchItemResult {
+    use mcp_vault_state::StateError;
+
+    if matches!(
+        error,
+        MemoryError::Conflict
+            | MemoryError::State(StateError::Conflict)
+            | MemoryError::Core(VaultError::RevisionConflict { .. })
+            | MemoryError::Core(VaultError::State(StateError::Conflict))
+    ) || matches!(error, MemoryError::State(state) if state.diagnostic_code() == "state_database_unique_violation")
+    {
+        batch_forget_result(
+            id,
+            ForgetBatchStatus::Conflict,
+            ownership,
+            source_extraction_paused,
+            Some("revision_conflict"),
+        )
+    } else if matches!(
+        error,
+        MemoryError::NotFound | MemoryError::Core(VaultError::NotFound)
+    ) {
+        batch_forget_result(
+            id,
+            ForgetBatchStatus::Failed,
+            ownership,
+            source_extraction_paused,
+            Some("not_found"),
+        )
+    } else {
+        batch_forget_result(
+            id,
+            ForgetBatchStatus::Failed,
+            ownership,
+            source_extraction_paused,
+            Some("deletion_failed"),
+        )
+    }
+}
+
+fn prepared_current_item(bundle: &UnitBundle) -> PreparedCurrentItem {
+    PreparedCurrentItem {
+        id: bundle.memory.id,
+        ordinal: bundle.memory.ordinal.unwrap_or_default(),
+        content: bundle.memory.content.clone(),
+        kind: bundle
+            .memory
+            .kind
+            .as_deref()
+            .and_then(|kind| MemoryType::try_from(kind).ok()),
+        tags: bundle.memory.tags.clone(),
+        content_hash: bundle.memory.content_hash.clone(),
+        revision: bundle.memory.revision,
+        created_at: bundle.memory.created_at,
+        preserved_memory: Some(bundle.memory.clone()),
+        preserved_sources: Some(bundle.sources.clone()),
+        source_unit: None,
+        retrieval_hint: String::new(),
+    }
+}
+
 fn current_bundles_from_prepared(
     context: &VaultContext,
     set: &UnitSourceSetRecord,
@@ -3495,13 +4183,9 @@ fn validate_remember_input(input: &RememberInput) -> Result<(), MemoryError> {
             "memory validity range is invalid",
         ));
     }
-    if input.tags.len() > 64 || input.entities.len() > 64 || input.sources.len() > 32 {
+    validate_tags_entities(&input.tags, &input.entities)?;
+    if input.sources.len() > 32 {
         return Err(MemoryError::InvalidInput("memory metadata is too large"));
-    }
-    for value in input.tags.iter().chain(input.entities.iter()) {
-        if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
-            return Err(MemoryError::InvalidInput("memory tag/entity is invalid"));
-        }
     }
     if let Some(key) = input.idempotency_key.as_deref()
         && (key.is_empty() || key.len() > 256 || key.chars().any(char::is_control))
@@ -3509,6 +4193,18 @@ fn validate_remember_input(input: &RememberInput) -> Result<(), MemoryError> {
         return Err(MemoryError::InvalidInput(
             "memory idempotency key is invalid",
         ));
+    }
+    Ok(())
+}
+
+fn validate_tags_entities(tags: &[String], entities: &[String]) -> Result<(), MemoryError> {
+    if tags.len() > 64 || entities.len() > 64 {
+        return Err(MemoryError::InvalidInput("memory metadata is too large"));
+    }
+    for value in tags.iter().chain(entities.iter()) {
+        if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+            return Err(MemoryError::InvalidInput("memory tag/entity is invalid"));
+        }
     }
     Ok(())
 }

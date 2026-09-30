@@ -71,6 +71,7 @@ export class AdminApiClient {
       '/index',
       '/memories',
       '/memory',
+      '/semantic',
       '/jobs',
       '/audit',
     ].some((prefix) => path === prefix || path.startsWith(`${prefix}/`) || path.startsWith(`${prefix}?`));

@@ -1,0 +1,2772 @@
+{
+  "candidate_schema": "mcp-vault-m6-candidate-v1",
+  "candidate_status": "candidate_pending_independent_agent_review",
+  "prepare_cli_ready": false,
+  "original_live_dataset_recovered": false,
+  "dataset_id": "mcp-vault-tracked-adr-m6-candidate-20260928-v4",
+  "repository_commit": "e046ceb59393db9a4977ba55899eba301ad28005",
+  "source_selection_rule": "30 committed ADR Markdown files from HEAD. Excludes ADR-0007/0013/0014/0017; includes ADR-0003/0004/0005/0019. Hashes are recomputed from committed bytes.",
+  "split_rule": "15 development sources and 15 holdout sources are disjoint by source; tasks use sources from their assigned split. Cross-ADR conceptual leakage and all semantic gold remain pending independent agent review.",
+  "semantic_gold_status": "unreviewed_candidate_only",
+  "sources": [
+    {
+      "logical_id": "S01",
+      "path": "docs/adr/0001-markdown-content-is-canonical.md",
+      "split": "development",
+      "theme_group": "canonical-vs-derived",
+      "git_blob_oid": "68f450fddbd27f1e601a0fd5a4b5419ed5ec478a",
+      "content_sha256": "a1252e4d9dd20524cd2079fe64de0cde5969c72aef117ae801f7826800b491ff",
+      "line_count": 41,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S02",
+      "path": "docs/adr/0002-vault-is-the-isolation-boundary.md",
+      "split": "development",
+      "theme_group": "vault-isolation",
+      "git_blob_oid": "6aa42c7fc8965c07d6b7376b4c0214ad4bc49913",
+      "content_sha256": "a3897dcd40f3179c7383316480bcc6baad80b1c47fd3a16150720dda79672a69",
+      "line_count": 35,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S03",
+      "path": "docs/adr/0006-llm-and-embeddings-are-pluggable-enrichment.md",
+      "split": "development",
+      "theme_group": "provider-pluggability",
+      "git_blob_oid": "a560536819b91973e5a1763b9e51efc9c159e5ad",
+      "content_sha256": "058b531f279575f85cd81d6133c0052d5ef91fd12ae7a271db9af475faf61f13",
+      "line_count": 48,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S04",
+      "path": "docs/adr/0003-use-standard-webdav-and-existing-obsidian-clients.md",
+      "split": "development",
+      "theme_group": "webdav-client-compatibility",
+      "git_blob_oid": "55552163f9b48cf84e5ead0dd20de4ca7748f68b",
+      "content_sha256": "218be242470b33eaae0b9fc2cf5b6310818e0ca03880559926ab0f0db963a68d",
+      "line_count": 36,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S05",
+      "path": "docs/adr/0008-mcp-credentials-bind-to-one-vault.md",
+      "split": "development",
+      "theme_group": "vault-bound-credentials",
+      "git_blob_oid": "918e7efa0531c3ef9f02c83ca7d73453e7ee28f4",
+      "content_sha256": "8debd17131651c2d8bc652dd81b181b63263277dd7b65b0da18fbc1b7b72e993",
+      "line_count": 39,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S06",
+      "path": "docs/adr/0009-webdav-overwrite-tombstone-archival.md",
+      "split": "development",
+      "theme_group": "overwrite-history",
+      "git_blob_oid": "23c1ab02f65ec539544787bc3da7068fca674092",
+      "content_sha256": "646d873cab2a1fc403740a0a997a23f8f3678ab2858a536b8d31f3479eb21a68",
+      "line_count": 44,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S07",
+      "path": "docs/adr/0010-provider-adapters-and-vector-fallback.md",
+      "split": "development",
+      "theme_group": "provider-safety",
+      "git_blob_oid": "cf12e1b539a1ff813e96ebf7a09723ecd124b907",
+      "content_sha256": "b69f0782e369d62ae1a19531109785497deab4624ed2cc4307faa4eca9234387",
+      "line_count": 66,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S08",
+      "path": "docs/adr/0011-managed-memory-canonical-files-use-vault-core.md",
+      "split": "development",
+      "theme_group": "managed-memory-core",
+      "git_blob_oid": "c54bb176664f2927a87e03c52314c60393abe824",
+      "content_sha256": "d522e4345ca73e3242fe557dec0051ba062248a2bffb8bc46e9703e9160a75ae",
+      "line_count": 66,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S09",
+      "path": "docs/adr/0012-compose-provider-presets-behind-the-shared-transport.md",
+      "split": "development",
+      "theme_group": "provider-presets",
+      "git_blob_oid": "9bb6a00468192a0c1a93e05eb41840261b543026",
+      "content_sha256": "165a0b2458bdfd26e28b4d297d03df674906482a1b107674d484ab49678d75f3",
+      "line_count": 78,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S10",
+      "path": "docs/adr/0004-admin-control-plane-is-lan-only.md",
+      "split": "development",
+      "theme_group": "control-plane-network-boundary",
+      "git_blob_oid": "51f371921eed2e2d603407041e925bebb72f52a1",
+      "content_sha256": "2d813435a3ae3a8e16e6398684bca0665545c9859b4b6b5800c66837f474de27",
+      "line_count": 78,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S11",
+      "path": "docs/adr/0005-use-a-modular-monolith.md",
+      "split": "development",
+      "theme_group": "modular-monolith-boundary",
+      "git_blob_oid": "ae947e7aadd02e8367ee1056ea61a09b7abafb35",
+      "content_sha256": "05c9f4ad9e28ffc3f1ab2c2cda87732a433713e02dffaeab45601c689613496e",
+      "line_count": 36,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S12",
+      "path": "docs/adr/0019-remove-webdav-proxy-peer-allowlist.md",
+      "split": "development",
+      "theme_group": "forwarded-header-security",
+      "git_blob_oid": "7c89ac1ffb835a44fa3f470ac0c8618d863b3309",
+      "content_sha256": "b0809a37661a006a0ee1484a4358e30ea41b668933b3bb5119966e4b6b09c1d1",
+      "line_count": 58,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S13",
+      "path": "docs/adr/0018-built-in-oauth-authorization-server.md",
+      "split": "development",
+      "theme_group": "oauth-security",
+      "git_blob_oid": "94ad8b1bd3af99bd2f6e6dfaa1b64cc86b7a273c",
+      "content_sha256": "ddb91b38b552e89b9ad96b283a007971205d806ea63420d491c68994b7e4e2b8",
+      "line_count": 115,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S14",
+      "path": "docs/adr/0020-managed-multi-vault-lifecycle.md",
+      "split": "development",
+      "theme_group": "multi-vault-lifecycle",
+      "git_blob_oid": "4ba1f3cf0f8111d2fe6eac69b24ff4d2cb962781",
+      "content_sha256": "9730fdc860d71bb2d8d38808fa0ca5ec603aa871e446f9e4f9f1150f54da750b",
+      "line_count": 77,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S15",
+      "path": "docs/adr/0021-serialize-legacy-noreplace-move-fallback.md",
+      "split": "development",
+      "theme_group": "no-replace-move",
+      "git_blob_oid": "c6f38944961995c6cc34cc3f93523741a87ec23b",
+      "content_sha256": "7567ce92a41a670b9439b1e8323022c3412a55bf4d6ac0c76be71a5ff8e2cc92",
+      "line_count": 67,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S16",
+      "path": "docs/adr/0015-vault-level-automatic-memory-requires-no-note-markers.md",
+      "split": "holdout",
+      "theme_group": "memory-admission-history",
+      "git_blob_oid": "8cf902e61afe0eba7aabd5767a1fb755c7c8e85c",
+      "content_sha256": "4a25ea5436e2042e11778c927649b3c05faafbfa68355d231767529f4fed4b4c",
+      "line_count": 86,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S17",
+      "path": "docs/adr/0016-use-codex-style-two-phase-memory.md",
+      "split": "holdout",
+      "theme_group": "two-phase-history",
+      "git_blob_oid": "064b2d135106a5412d6fa706d4c2f296bb2015e1",
+      "content_sha256": "03240f67dfc6b1b3881d50829627b9cca11236bc299c298db342c936989905a0",
+      "line_count": 198,
+      "selected_for_B": true
+    },
+    {
+      "logical_id": "S18",
+      "path": "docs/adr/0022-continuous-exact-memory-source-health.md",
+      "split": "holdout",
+      "theme_group": "source-health-history",
+      "git_blob_oid": "e7d17d46f5f3a50ea20310495c9f24ba1c07f61f",
+      "content_sha256": "3fff6b508a349b956d5dc3496b73b0715110509e7b1df0f23b0a45ef0a56901b",
+      "line_count": 103,
+      "selected_for_B": true
+    },
+    {
+      "logical_id": "S19",
+      "path": "docs/adr/0023-preserve-source-language-and-persist-multilingual-retrieval-metadata.md",
+      "split": "holdout",
+      "theme_group": "language-retrieval",
+      "git_blob_oid": "f7f82abbf94a4365ce8a54f0f41e3c5c16e13a6d",
+      "content_sha256": "10b5beda5638bee9de42b7231be7ab9c75c26dfc065f7e0f1860735353e67e08",
+      "line_count": 99,
+      "selected_for_B": true
+    },
+    {
+      "logical_id": "S20",
+      "path": "docs/adr/0024-bound-embedding-inputs-and-rebuild-current-model-vectors.md",
+      "split": "holdout",
+      "theme_group": "embedding-limits",
+      "git_blob_oid": "bb6f8e5b54d8a3c29c604c7c32bc3ce741ad13b3",
+      "content_sha256": "71fbe1fa6574d1174739a51fe0e6ae597d8385e26878af32a19a7b5c4be69723",
+      "line_count": 83,
+      "selected_for_B": true
+    },
+    {
+      "logical_id": "S21",
+      "path": "docs/adr/0025-aggregate-note-vector-chunks-before-ranking.md",
+      "split": "holdout",
+      "theme_group": "chunk-ranking",
+      "git_blob_oid": "e004ea2b38a24c0b4bafc405cd1d95d4e10065ef",
+      "content_sha256": "7d5fea2c72c9e5bf30acb464b41f3f821d4caafeedfdb761496a0dda89b493f6",
+      "line_count": 72,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S22",
+      "path": "docs/adr/0026-current-source-owned-memory-sets.md",
+      "split": "holdout",
+      "theme_group": "current-ownership-and-forget",
+      "git_blob_oid": "6d9aa9816fd808ecf5ee7a71fea3a047f8c4ef54",
+      "content_sha256": "2a36b0c8cebf0e80c021ea607eb733901fbb1ce0e69677b472ca77fbff234afd",
+      "line_count": 202,
+      "selected_for_B": true
+    },
+    {
+      "logical_id": "S23",
+      "path": "docs/adr/0027-bounded-automatic-retrieval-calibration.md",
+      "split": "holdout",
+      "theme_group": "retrieval-calibration",
+      "git_blob_oid": "58a06463c2cffe11462e5e996ab612c5f32491db",
+      "content_sha256": "e1a568e4ed2a53397e67c9be2993a89feffa1f0e2fbe70af0702dea2c574d55c",
+      "line_count": 50,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S24",
+      "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+      "split": "holdout",
+      "theme_group": "diagnostic-and-chunking",
+      "git_blob_oid": "895bc109af9d69ca4da8bb6ab17d785a66ed8240",
+      "content_sha256": "61078371607c13b97d395cc95996ca3821a8e57982605d1a36f0c417b1fb3ba2",
+      "line_count": 42,
+      "selected_for_B": true
+    },
+    {
+      "logical_id": "S25",
+      "path": "docs/adr/0029-actionable-compact-mcp-results.md",
+      "split": "holdout",
+      "theme_group": "compact-mcp-results",
+      "git_blob_oid": "76c2fed14c749f7b7c02f1be13309e5132e94c73",
+      "content_sha256": "6e9a714ff3d6aa75320435d90bfaf09158f867e29cd9582bddcf65bc69ef1c96",
+      "line_count": 28,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S26",
+      "path": "docs/adr/0030-automatic-memory-equivalence.md",
+      "split": "holdout",
+      "theme_group": "formal-memory-support",
+      "git_blob_oid": "fe49abe24b82664092839bd813ed24caeebddcaa",
+      "content_sha256": "70bd0b1c8df8ccc29810f2f2ed2f2257d63a78780401800b2be73c743cb760ef",
+      "line_count": 78,
+      "selected_for_B": true
+    },
+    {
+      "logical_id": "S27",
+      "path": "docs/adr/0031-incremental-memory-organization.md",
+      "split": "holdout",
+      "theme_group": "incremental-organization-history",
+      "git_blob_oid": "d408693309d985ad1598ad73326c23d86630ee85",
+      "content_sha256": "ea0e7449ebea657a7d8ecde54823c0c1474ef3bf2989f2adc60bc04cc1ba438b",
+      "line_count": 35,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S28",
+      "path": "docs/adr/0032-lossless-memory-consolidation.md",
+      "split": "holdout",
+      "theme_group": "lossless-merge-history",
+      "git_blob_oid": "2960ecaef1e0af6136cf760dd180b5cab9c21440",
+      "content_sha256": "1b7bf389c07dc1906f6b248a6fe1d27e78e334518ef874e711039898d5b1a42b",
+      "line_count": 78,
+      "selected_for_B": false
+    },
+    {
+      "logical_id": "S29",
+      "path": "docs/adr/0033-source-preserving-memory-units.md",
+      "split": "holdout",
+      "theme_group": "source-preserving-units",
+      "git_blob_oid": "b60e6f4ad6460bf6d2f6c9bf26b0fc1120657b53",
+      "content_sha256": "c842aa464b888307fbcd67ee92731852906855bb55dc19b9c5d2f2bf4bd48f79",
+      "line_count": 39,
+      "selected_for_B": true
+    },
+    {
+      "logical_id": "S30",
+      "path": "docs/adr/0034-replayed-create-witness-recovery.md",
+      "split": "holdout",
+      "theme_group": "recovery-witness",
+      "git_blob_oid": "3f8f834e7546027c1b2ec67efff6db73b551aa4e",
+      "content_sha256": "2dc7ab998014c123a55d697ee3c9b5ea32895d5480531162bae740f0e75cfd5e",
+      "line_count": 30,
+      "selected_for_B": false
+    }
+  ],
+  "b_source_ids": [
+    "S17",
+    "S18",
+    "S19",
+    "S20",
+    "S22",
+    "S24",
+    "S26",
+    "S29"
+  ],
+  "tasks": [
+    {
+      "id": "T-S01-1",
+      "split": "development",
+      "query_refs": [
+        "Q-S01-1"
+      ],
+      "query": "Which content is canonical, and what role do SQLite and indexes have?",
+      "source_ids": [
+        "S01"
+      ],
+      "must_preserve": [
+        "Notes, attachments, Obsidian configuration, and active durable-memory Markdown are canonical. SQLite holds operational state; FTS, embeddings, topic/link projections, and extraction candidates are derived and rebuildable."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Notes, attachments, Obsidian configuration, and active durable-memory Markdown are canonical. SQLite holds operational state; FTS, embeddings, topic/link projections, and extraction candidates are derived and rebuildable."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "canonical-vs-derived: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S01",
+          "path": "docs/adr/0001-markdown-content-is-canonical.md",
+          "line_start": 12,
+          "line_end": 21,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S01-2",
+      "split": "development",
+      "query_refs": [
+        "Q-S01-2"
+      ],
+      "query": "Does this ADR set a numeric retention period for derived indexes?",
+      "source_ids": [
+        "S01"
+      ],
+      "must_preserve": [
+        "把该 ADR 未给出的精确值保留为未知。"
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [],
+      "expected_no_answer": true,
+      "expected_status": "unknown",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "canonical-vs-derived: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S01",
+          "path": "docs/adr/0001-markdown-content-is-canonical.md",
+          "line_start": 1,
+          "line_end": 41,
+          "basis": "full_document_absence_candidate"
+        }
+      ]
+    },
+    {
+      "id": "T-S02-1",
+      "split": "development",
+      "query_refs": [
+        "Q-S02-1"
+      ],
+      "query": "What boundary must every user-data operation carry?",
+      "source_ids": [
+        "S02"
+      ],
+      "must_preserve": [
+        "Every user-data operation requires VaultContext; user-data state is Vault-scoped."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Every user-data operation requires VaultContext; user-data state is Vault-scoped."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "vault-isolation: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S02",
+          "path": "docs/adr/0002-vault-is-the-isolation-boundary.md",
+          "line_start": 12,
+          "line_end": 16,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S02-2",
+      "split": "development",
+      "query_refs": [
+        "Q-S02-2"
+      ],
+      "query": "What exact maximum number of Vaults may the service manage?",
+      "source_ids": [
+        "S02"
+      ],
+      "must_preserve": [
+        "把该 ADR 未给出的精确值保留为未知。"
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [],
+      "expected_no_answer": true,
+      "expected_status": "unknown",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "vault-isolation: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S02",
+          "path": "docs/adr/0002-vault-is-the-isolation-boundary.md",
+          "line_start": 1,
+          "line_end": 35,
+          "basis": "full_document_absence_candidate"
+        }
+      ]
+    },
+    {
+      "id": "T-S03-1",
+      "split": "development",
+      "query_refs": [
+        "Q-S03-1"
+      ],
+      "query": "Which provider components are pluggable, and what remains available without remote AI?",
+      "source_ids": [
+        "S03"
+      ],
+      "must_preserve": [
+        "LLM, embedding, reranker, and vector backends are pluggable. WebDAV, file/history, metadata/link index, FTS, explicit memory, and lexical recall remain available without remote AI."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "LLM, embedding, reranker, and vector backends are pluggable. WebDAV, file/history, metadata/link index, FTS, explicit memory, and lexical recall remain available without remote AI."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "provider-pluggability: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S03",
+          "path": "docs/adr/0006-llm-and-embeddings-are-pluggable-enrichment.md",
+          "line_start": 14,
+          "line_end": 27,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S03-2",
+      "split": "development",
+      "query_refs": [
+        "Q-S03-2"
+      ],
+      "query": "Which exact embedding model version is mandatory?",
+      "source_ids": [
+        "S03"
+      ],
+      "must_preserve": [
+        "把该 ADR 未给出的精确值保留为未知。"
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [],
+      "expected_no_answer": true,
+      "expected_status": "unknown",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "provider-pluggability: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S03",
+          "path": "docs/adr/0006-llm-and-embeddings-are-pluggable-enrichment.md",
+          "line_start": 1,
+          "line_end": 48,
+          "basis": "full_document_absence_candidate"
+        }
+      ]
+    },
+    {
+      "id": "T-S04-1",
+      "split": "development",
+      "query_refs": [
+        "Q-S04-1"
+      ],
+      "query": "How does the server expose WebDAV while preserving the Vault Core boundary?",
+      "source_ids": [
+        "S04"
+      ],
+      "must_preserve": [
+        "The service integrates WebDAV through a custom DAV filesystem/guard adapter that calls Vault Core; it does not expose a separate generic WebDAV process that bypasses revisions, audit, and events."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、条件、部署地址或安全保证。"
+      ],
+      "expected_usable_information": [
+        "The service integrates WebDAV through a custom DAV filesystem/guard adapter that calls Vault Core; it does not expose a separate generic WebDAV process that bypasses revisions, audit, and events."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "webdav-client-compatibility: 决定与限定",
+      "evidence_refs": [
+        {
+          "source_id": "S04",
+          "path": "docs/adr/0003-use-standard-webdav-and-existing-obsidian-clients.md",
+          "line_start": 12,
+          "line_end": 16,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S04-2",
+      "split": "development",
+      "query_refs": [
+        "Q-S04-2"
+      ],
+      "query": "Does this ADR require a custom Obsidian client implementation?",
+      "source_ids": [
+        "S04"
+      ],
+      "must_preserve": [
+        "No. It uses standard WebDAV and tests existing clients; custom Obsidian client code is not required."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、条件、部署地址或安全保证。"
+      ],
+      "expected_usable_information": [
+        "No. It uses standard WebDAV and tests existing clients; custom Obsidian client code is not required."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "webdav-client-compatibility: 决定与限定",
+      "evidence_refs": [
+        {
+          "source_id": "S04",
+          "path": "docs/adr/0003-use-standard-webdav-and-existing-obsidian-clients.md",
+          "line_start": 14,
+          "line_end": 16,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S05-1",
+      "split": "development",
+      "query_refs": [
+        "Q-S05-1"
+      ],
+      "query": "How are MCP credentials scoped, and may tools choose an arbitrary Vault ID?",
+      "source_ids": [
+        "S05"
+      ],
+      "must_preserve": [
+        "Each endpoint identifies a Vault; PAT/OAuth grants bind to that Vault. Tool schemas omit vault_id."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Each endpoint identifies a Vault; PAT/OAuth grants bind to that Vault. Tool schemas omit vault_id."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "vault-bound-credentials: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S05",
+          "path": "docs/adr/0008-mcp-credentials-bind-to-one-vault.md",
+          "line_start": 12,
+          "line_end": 18,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S05-2",
+      "split": "development",
+      "query_refs": [
+        "Q-S05-2"
+      ],
+      "query": "What is the maximum number of PAT/OAuth grants allowed for a Vault?",
+      "source_ids": [
+        "S05"
+      ],
+      "must_preserve": [
+        "把该 ADR 未给出的精确值保留为未知。"
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [],
+      "expected_no_answer": true,
+      "expected_status": "unknown",
+      "expected_source_relations": [],
+      "severity": "critical",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "vault-bound-credentials: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S05",
+          "path": "docs/adr/0008-mcp-credentials-bind-to-one-vault.md",
+          "line_start": 1,
+          "line_end": 39,
+          "basis": "full_document_absence_candidate"
+        }
+      ]
+    },
+    {
+      "id": "T-S06-1",
+      "split": "development",
+      "query_refs": [
+        "Q-S06-1"
+      ],
+      "query": "What happens to a destination tombstone during overwrite MOVE?",
+      "source_ids": [
+        "S06"
+      ],
+      "must_preserve": [
+        "Vault Core archives the prior tombstone under the reserved operational namespace in the same SQLite transaction, then records normal MOVE revision, audit, and outbox."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Vault Core archives the prior tombstone under the reserved operational namespace in the same SQLite transaction, then records normal MOVE revision, audit, and outbox."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "overwrite-history: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S06",
+          "path": "docs/adr/0009-webdav-overwrite-tombstone-archival.md",
+          "line_start": 18,
+          "line_end": 27,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S06-2",
+      "split": "development",
+      "query_refs": [
+        "Q-S06-2"
+      ],
+      "query": "What exact time-based deletion schedule applies to the archived tombstone?",
+      "source_ids": [
+        "S06"
+      ],
+      "must_preserve": [
+        "把该 ADR 未给出的精确值保留为未知。"
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [],
+      "expected_no_answer": true,
+      "expected_status": "unknown",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "overwrite-history: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S06",
+          "path": "docs/adr/0009-webdav-overwrite-tombstone-archival.md",
+          "line_start": 1,
+          "line_end": 44,
+          "basis": "full_document_absence_candidate"
+        }
+      ]
+    },
+    {
+      "id": "T-S07-1",
+      "split": "development",
+      "query_refs": [
+        "Q-S07-1"
+      ],
+      "query": "What transport constraints govern provider-adapter calls?",
+      "source_ids": [
+        "S07"
+      ],
+      "must_preserve": [
+        "ProviderService adapters share bounded SSRF-safe transport; redirects default off, DNS is validated, endpoint policy is explicit, requests are bounded, and only transient failures retry."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "ProviderService adapters share bounded SSRF-safe transport; redirects default off, DNS is validated, endpoint policy is explicit, requests are bounded, and only transient failures retry."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "provider-safety: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S07",
+          "path": "docs/adr/0010-provider-adapters-and-vector-fallback.md",
+          "line_start": 19,
+          "line_end": 40,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S07-2",
+      "split": "development",
+      "query_refs": [
+        "Q-S07-2"
+      ],
+      "query": "What exact retry count applies to every transient error?",
+      "source_ids": [
+        "S07"
+      ],
+      "must_preserve": [
+        "把该 ADR 未给出的精确值保留为未知。"
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [],
+      "expected_no_answer": true,
+      "expected_status": "unknown",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "provider-safety: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S07",
+          "path": "docs/adr/0010-provider-adapters-and-vector-fallback.md",
+          "line_start": 1,
+          "line_end": 66,
+          "basis": "full_document_absence_candidate"
+        }
+      ]
+    },
+    {
+      "id": "T-S08-1",
+      "split": "development",
+      "query_refs": [
+        "Q-S08-1"
+      ],
+      "query": "Which boundary owns managed memory file creation and replacement?",
+      "source_ids": [
+        "S08"
+      ],
+      "must_preserve": [
+        "Vault Core/storage-fs own managed writes with VaultContext, reserved paths, atomic write/fsync/journal/revision/history/audit/outbox."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Vault Core/storage-fs own managed writes with VaultContext, reserved paths, atomic write/fsync/journal/revision/history/audit/outbox."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "managed-memory-core: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S08",
+          "path": "docs/adr/0011-managed-memory-canonical-files-use-vault-core.md",
+          "line_start": 22,
+          "line_end": 40,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S08-2",
+      "split": "development",
+      "query_refs": [
+        "Q-S08-2"
+      ],
+      "query": "Can rebuilding memory projections delete canonical Markdown?",
+      "source_ids": [
+        "S08"
+      ],
+      "must_preserve": [
+        "No. Canonical Markdown is the portable copy; projection rebuilds do not delete it."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "No. Canonical Markdown is the portable copy; projection rebuilds do not delete it."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "managed-memory-core: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S08",
+          "path": "docs/adr/0011-managed-memory-canonical-files-use-vault-core.md",
+          "line_start": 22,
+          "line_end": 40,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S09-1",
+      "split": "development",
+      "query_refs": [
+        "Q-S09-1"
+      ],
+      "query": "How are provider presets selected for compatible APIs?",
+      "source_ids": [
+        "S09"
+      ],
+      "must_preserve": [
+        "Providers share adapter/transport and use documented presets. Vendor choice is not inferred from model name; proxy domains require explicit type or preset."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Providers share adapter/transport and use documented presets. Vendor choice is not inferred from model name; proxy domains require explicit type or preset."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "provider-presets: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S09",
+          "path": "docs/adr/0012-compose-provider-presets-behind-the-shared-transport.md",
+          "line_start": 21,
+          "line_end": 40,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S09-2",
+      "split": "development",
+      "query_refs": [
+        "Q-S09-2"
+      ],
+      "query": "Can a vendor brand in a legacy model name alone select its adapter?",
+      "source_ids": [
+        "S09"
+      ],
+      "must_preserve": [
+        "No. A model name alone does not select the vendor adapter."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "No. A model name alone does not select the vendor adapter."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "provider-presets: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S09",
+          "path": "docs/adr/0012-compose-provider-presets-behind-the-shared-transport.md",
+          "line_start": 21,
+          "line_end": 40,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S10-1",
+      "split": "development",
+      "query_refs": [
+        "Q-S10-1"
+      ],
+      "query": "Where may the Admin UI/API listen, and what must the data-plane proxy avoid?",
+      "source_ids": [
+        "S10"
+      ],
+      "must_preserve": [
+        "Admin uses a separate listener published only to localhost, a specific LAN address, or configured VPN address; the data-plane reverse proxy must not route it."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、条件、部署地址或安全保证。"
+      ],
+      "expected_usable_information": [
+        "Admin uses a separate listener published only to localhost, a specific LAN address, or configured VPN address; the data-plane reverse proxy must not route it."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "control-plane-network-boundary: 决定与限定",
+      "evidence_refs": [
+        {
+          "source_id": "S10",
+          "path": "docs/adr/0004-admin-control-plane-is-lan-only.md",
+          "line_start": 13,
+          "line_end": 15,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S10-2",
+      "split": "development",
+      "query_refs": [
+        "Q-S10-2"
+      ],
+      "query": "What exact CIDR allowlist does this ADR require for Admin access?",
+      "source_ids": [
+        "S10"
+      ],
+      "must_preserve": [
+        "把来源未规定的精确值保留为未知。"
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、条件、部署地址或安全保证。"
+      ],
+      "expected_usable_information": [],
+      "expected_no_answer": true,
+      "expected_status": "unknown",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "control-plane-network-boundary: 安全或缺失信息候选",
+      "evidence_refs": [
+        {
+          "source_id": "S10",
+          "path": "docs/adr/0004-admin-control-plane-is-lan-only.md",
+          "line_start": 1,
+          "line_end": 78,
+          "basis": "full_document_absence_candidate"
+        }
+      ]
+    },
+    {
+      "id": "T-S11-1",
+      "split": "development",
+      "query_refs": [
+        "Q-S11-1"
+      ],
+      "query": "What is the deployment shape and listener arrangement?",
+      "source_ids": [
+        "S11"
+      ],
+      "must_preserve": [
+        "One Rust deployable uses explicit modules/crates, two HTTP listeners, persistent jobs/outbox, and dependency rules."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、条件、部署地址或安全保证。"
+      ],
+      "expected_usable_information": [
+        "One Rust deployable uses explicit modules/crates, two HTTP listeners, persistent jobs/outbox, and dependency rules."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "modular-monolith-boundary: 决定与限定",
+      "evidence_refs": [
+        {
+          "source_id": "S11",
+          "path": "docs/adr/0005-use-a-modular-monolith.md",
+          "line_start": 12,
+          "line_end": 16,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S11-2",
+      "split": "development",
+      "query_refs": [
+        "Q-S11-2"
+      ],
+      "query": "Does a future deployment split require changing domain behavior?",
+      "source_ids": [
+        "S11"
+      ],
+      "must_preserve": [
+        "No. Protocol adapters and workers remain separable behind application interfaces so a future split can avoid domain-behavior changes."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、条件、部署地址或安全保证。"
+      ],
+      "expected_usable_information": [
+        "No. Protocol adapters and workers remain separable behind application interfaces so a future split can avoid domain-behavior changes."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "modular-monolith-boundary: 决定与限定",
+      "evidence_refs": [
+        {
+          "source_id": "S11",
+          "path": "docs/adr/0005-use-a-modular-monolith.md",
+          "line_start": 14,
+          "line_end": 16,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S12-1",
+      "split": "development",
+      "query_refs": [
+        "Q-S12-1"
+      ],
+      "query": "What changed about the WebDAV trusted proxy peer allowlist?",
+      "source_ids": [
+        "S12"
+      ],
+      "must_preserve": [
+        "The application removes MCP_VAULT_TRUSTED_PROXY_IPS and socket-peer comparison; a non-loopback request is transport-secure when X-Forwarded-Proto is https."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、条件、部署地址或安全保证。"
+      ],
+      "expected_usable_information": [
+        "The application removes MCP_VAULT_TRUSTED_PROXY_IPS and socket-peer comparison; a non-loopback request is transport-secure when X-Forwarded-Proto is https."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "forwarded-header-security: 决定与限定",
+      "evidence_refs": [
+        {
+          "source_id": "S12",
+          "path": "docs/adr/0019-remove-webdav-proxy-peer-allowlist.md",
+          "line_start": 19,
+          "line_end": 24,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S12-2",
+      "split": "development",
+      "query_refs": [
+        "Q-S12-2"
+      ],
+      "query": "What threat remains if a client can directly reach the plaintext data listener?",
+      "source_ids": [
+        "S12"
+      ],
+      "must_preserve": [
+        "A client with direct access can forge X-Forwarded-Proto; this ADR assumes deployment controls the proxy/listener boundary."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、条件、部署地址或安全保证。"
+      ],
+      "expected_usable_information": [
+        "A client with direct access can forge X-Forwarded-Proto; this ADR assumes deployment controls the proxy/listener boundary."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "forwarded-header-security: 决定与限定",
+      "evidence_refs": [
+        {
+          "source_id": "S12",
+          "path": "docs/adr/0019-remove-webdav-proxy-peer-allowlist.md",
+          "line_start": 32,
+          "line_end": 39,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S13-1",
+      "split": "development",
+      "query_refs": [
+        "Q-S13-1"
+      ],
+      "query": "What protections apply to built-in OAuth authorization?",
+      "source_ids": [
+        "S13"
+      ],
+      "must_preserve": [
+        "Authorization code uses mandatory PKCE S256, exact redirects, resource indicators, Vault-bound grants/tokens, and separate Vault OAuth login; Admin credentials are not accepted publicly."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Authorization code uses mandatory PKCE S256, exact redirects, resource indicators, Vault-bound grants/tokens, and separate Vault OAuth login; Admin credentials are not accepted publicly."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "oauth-security: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S13",
+          "path": "docs/adr/0018-built-in-oauth-authorization-server.md",
+          "line_start": 22,
+          "line_end": 41,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S13-2",
+      "split": "development",
+      "query_refs": [
+        "Q-S13-2"
+      ],
+      "query": "What exact access-token lifetime does this ADR configure?",
+      "source_ids": [
+        "S13"
+      ],
+      "must_preserve": [
+        "把该 ADR 未给出的精确值保留为未知。"
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [],
+      "expected_no_answer": true,
+      "expected_status": "unknown",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "oauth-security: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S13",
+          "path": "docs/adr/0018-built-in-oauth-authorization-server.md",
+          "line_start": 1,
+          "line_end": 115,
+          "basis": "full_document_absence_candidate"
+        }
+      ]
+    },
+    {
+      "id": "T-S14-1",
+      "split": "development",
+      "query_refs": [
+        "Q-S14-1"
+      ],
+      "query": "How are managed Vault roots and endpoint identities controlled?",
+      "source_ids": [
+        "S14"
+      ],
+      "must_preserve": [
+        "Roots use data-dir/vaults/slug; validated slug is immutable endpoint identity. Vaults may disable/re-enable but this lifecycle does not detach/delete them."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Roots use data-dir/vaults/slug; validated slug is immutable endpoint identity. Vaults may disable/re-enable but this lifecycle does not detach/delete them."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "multi-vault-lifecycle: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S14",
+          "path": "docs/adr/0020-managed-multi-vault-lifecycle.md",
+          "line_start": 22,
+          "line_end": 41,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S14-2",
+      "split": "development",
+      "query_refs": [
+        "Q-S14-2"
+      ],
+      "query": "What numeric maximum number of managed Vaults is specified?",
+      "source_ids": [
+        "S14"
+      ],
+      "must_preserve": [
+        "把该 ADR 未给出的精确值保留为未知。"
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [],
+      "expected_no_answer": true,
+      "expected_status": "unknown",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "multi-vault-lifecycle: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S14",
+          "path": "docs/adr/0020-managed-multi-vault-lifecycle.md",
+          "line_start": 1,
+          "line_end": 77,
+          "basis": "full_document_absence_candidate"
+        }
+      ]
+    },
+    {
+      "id": "T-S15-1",
+      "split": "development",
+      "query_refs": [
+        "Q-S15-1"
+      ],
+      "query": "When may no-replace move fallback use ordinary rename?",
+      "source_ids": [
+        "S15"
+      ],
+      "must_preserve": [
+        "Only explicit capability errors enter fallback; it rechecks the target through the opened descriptor. Existing target conflicts; unrelated and cross-device errors fail without copying/deleting."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Only explicit capability errors enter fallback; it rechecks the target through the opened descriptor. Existing target conflicts; unrelated and cross-device errors fail without copying/deleting."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "no-replace-move: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S15",
+          "path": "docs/adr/0021-serialize-legacy-noreplace-move-fallback.md",
+          "line_start": 22,
+          "line_end": 41,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S15-2",
+      "split": "development",
+      "query_refs": [
+        "Q-S15-2"
+      ],
+      "query": "What lock-acquisition timeout is specified for the namespace mutation lock?",
+      "source_ids": [
+        "S15"
+      ],
+      "must_preserve": [
+        "把该 ADR 未给出的精确值保留为未知。"
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [],
+      "expected_no_answer": true,
+      "expected_status": "unknown",
+      "expected_source_relations": [],
+      "severity": "critical",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "no-replace-move: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S15",
+          "path": "docs/adr/0021-serialize-legacy-noreplace-move-fallback.md",
+          "line_start": 1,
+          "line_end": 67,
+          "basis": "full_document_absence_candidate"
+        }
+      ]
+    },
+    {
+      "id": "T-S16-1",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S16-1"
+      ],
+      "query": "Under ADR-0015's historical classification rule, which categories could be materialized without note markers?",
+      "source_ids": [
+        "S16",
+        "S17"
+      ],
+      "must_preserve": [
+        "At that time, automatic materialization was limited to intrinsically personal or temporal classes (owner identity/preference/relationship, accepted project decisions, current project progress, significant events); exact source evidence checks still applied.",
+        "This describes ADR-0015's historical classification rule; ADR-0026 later superseded that classification while retaining marker-free Vault-level admission and source-evidence constraints."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "At that time, automatic materialization was limited to intrinsically personal or temporal classes (owner identity/preference/relationship, accepted project decisions, current project progress, significant events); exact source evidence checks still applied."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "historical_superseded",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "memory-admission-history: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S16",
+          "path": "docs/adr/0015-vault-level-automatic-memory-requires-no-note-markers.md",
+          "line_start": 29,
+          "line_end": 48,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S17",
+          "path": "docs/adr/0016-use-codex-style-two-phase-memory.md",
+          "line_start": 3,
+          "line_end": 9,
+          "basis": "B_comparison_source_context"
+        },
+        {
+          "source_id": "S16",
+          "path": "docs/adr/0015-vault-level-automatic-memory-requires-no-note-markers.md",
+          "line_start": 10,
+          "line_end": 11,
+          "basis": "classification_superseded_by_adr26"
+        }
+      ]
+    },
+    {
+      "id": "T-S16-2",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S16-2"
+      ],
+      "query": "Did ADR-0015 retain per-note markers, and which part of it did ADR-0016 supersede?",
+      "source_ids": [
+        "S16",
+        "S17"
+      ],
+      "must_preserve": [
+        "No note markers were required. ADR-0016 superseded only ADR-0015's direct automatic-promotion portions, while retaining marker-free Vault-level admission and exact supporting evidence.",
+        "Keep the narrow supersession scope: direct automatic promotion was superseded; marker-free Vault-level admission and exact supporting evidence were retained."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "No note markers were required. ADR-0016 superseded only ADR-0015's direct automatic-promotion portions, while retaining marker-free Vault-level admission and exact supporting evidence."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "historical_superseded",
+      "expected_source_relations": [
+        {
+          "kind": "supersedes",
+          "source_ids": [
+            "S17",
+            "S16"
+          ]
+        }
+      ],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "memory-admission-history: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S16",
+          "path": "docs/adr/0015-vault-level-automatic-memory-requires-no-note-markers.md",
+          "line_start": 5,
+          "line_end": 11,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S17",
+          "path": "docs/adr/0016-use-codex-style-two-phase-memory.md",
+          "line_start": 3,
+          "line_end": 9,
+          "basis": "explicit_adr_relation_header"
+        },
+        {
+          "source_id": "S16",
+          "path": "docs/adr/0015-vault-level-automatic-memory-requires-no-note-markers.md",
+          "line_start": 3,
+          "line_end": 9,
+          "basis": "explicit_adr_relation_header"
+        }
+      ]
+    },
+    {
+      "id": "T-S17-1",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S17-1"
+      ],
+      "query": "What two phases did ADR-0016 specify?",
+      "source_ids": [
+        "S17"
+      ],
+      "must_preserve": [
+        "Phase 1 creates sourced raw-memory inputs; Phase 2 is a separate Vault-scoped durable consolidation job validating create/update/keep/supersede/archive/drop decisions.",
+        "These are the two phases specified by historical ADR-0016; ADR-0026 later superseded its current memory ownership/extraction/deletion/retrieval architecture."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Phase 1 creates sourced raw-memory inputs; Phase 2 is a separate Vault-scoped durable consolidation job validating create/update/keep/supersede/archive/drop decisions."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "historical_superseded",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "two-phase-history: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S17",
+          "path": "docs/adr/0016-use-codex-style-two-phase-memory.md",
+          "line_start": 3,
+          "line_end": 13,
+          "basis": "status_and_scope"
+        },
+        {
+          "source_id": "S17",
+          "path": "docs/adr/0016-use-codex-style-two-phase-memory.md",
+          "line_start": 39,
+          "line_end": 58,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S17-2",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S17-2"
+      ],
+      "query": "Is ADR-0016's old global consolidation architecture current, and what does its own status say was superseded?",
+      "source_ids": [
+        "S17"
+      ],
+      "must_preserve": [
+        "Keep ADR-0016's chronology clear: its status at lines 3 and 8 supersedes current memory ownership/extraction/deletion/retrieval by ADR-0026; the lines 11-13 note concerns ADR-0017 and a prerelease paragraph, not a current-runtime exception."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "ADR-0016's current memory ownership, extraction, deletion, and retrieval architecture is superseded by ADR-0026, as its status lines 3 and 8 say. Lines 11-13 are an older note about ADR-0017 superseding a prerelease paragraph; they do not establish the two-phase architecture as current."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "historical_superseded",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "two-phase-history: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S17",
+          "path": "docs/adr/0016-use-codex-style-two-phase-memory.md",
+          "line_start": 3,
+          "line_end": 13,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S18-1",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S18-1"
+      ],
+      "query": "Under the superseded ADR-0022 source-health design, what happened when a memory lost its last current note source?",
+      "source_ids": [
+        "S18"
+      ],
+      "must_preserve": [
+        "Under that historical design, the health projection marked the memory stale/source_unavailable and removed it from normal recall; historical recall remained available.",
+        "This describes superseded ADR-0022 behavior, not the current runtime policy."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Under that historical design, the health projection marked the memory stale/source_unavailable and removed it from normal recall; historical recall remained available."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "historical_superseded",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "source-health-history: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S18",
+          "path": "docs/adr/0022-continuous-exact-memory-source-health.md",
+          "line_start": 1,
+          "line_end": 7,
+          "basis": "status_and_supersession"
+        },
+        {
+          "source_id": "S18",
+          "path": "docs/adr/0022-continuous-exact-memory-source-health.md",
+          "line_start": 24,
+          "line_end": 41,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S18-2",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S18-2"
+      ],
+      "query": "Which post-event retry or backoff sequence does ADR-0022 specify for memory.source_reconcile?",
+      "source_ids": [
+        "S18"
+      ],
+      "must_preserve": [
+        "ADR-0022 says source events enqueue reconciliation but gives no retry or backoff sequence.",
+        "Source invalidation remains local and exact rather than depending on Provider availability.",
+        "ADR-0022 is superseded by ADR-0026 for current memory ownership and source-health behavior; this question is limited to the older ADR-0022 retry/backoff details."
+      ],
+      "must_not_infer": [
+        "ADR-0022 does not specify the retry/backoff count, delay, or failure-trigger conditions after an event has enqueued reconciliation."
+      ],
+      "expected_usable_information": [],
+      "expected_no_answer": true,
+      "expected_status": "no_answer",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "困难无答案：reconcile 调度参数与 Provider 故障边界",
+      "evidence_refs": [
+        {
+          "source_id": "S18",
+          "path": "docs/adr/0022-continuous-exact-memory-source-health.md",
+          "line_start": 43,
+          "line_end": 46,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S18",
+          "path": "docs/adr/0022-continuous-exact-memory-source-health.md",
+          "line_start": 101,
+          "line_end": 103,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S18",
+          "path": "docs/adr/0022-continuous-exact-memory-source-health.md",
+          "line_start": 1,
+          "line_end": 103,
+          "basis": "full_document_absence_candidate"
+        }
+      ]
+    },
+    {
+      "id": "T-S19-1",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S19-1"
+      ],
+      "query": "What language is canonical and what is the role of search aliases?",
+      "source_ids": [
+        "S19"
+      ],
+      "must_preserve": [
+        "Canonical memory keeps the supporting source’s primary language. Validated aliases are derived search-only projections, not facts/provenance, and normal recall does not return them."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Canonical memory keeps the supporting source’s primary language. Validated aliases are derived search-only projections, not facts/provenance, and normal recall does not return them."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "language-retrieval: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S19",
+          "path": "docs/adr/0023-preserve-source-language-and-persist-multilingual-retrieval-metadata.md",
+          "line_start": 26,
+          "line_end": 45,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S19-2",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S19-2"
+      ],
+      "query": "What production evaluation result in ADR-0023 demonstrates that alias enrichment reduced real cross-language recall misses after rollout?",
+      "source_ids": [
+        "S19"
+      ],
+      "must_preserve": [
+        "ADR-0023 gives the retrieval problem, alias-enrichment design, and expected consequences, but no measured post-rollout result."
+      ],
+      "must_not_infer": [
+        "Do not treat an accepted design or anticipated consequence as evidence of deployment, causality, or measured recall improvement."
+      ],
+      "expected_usable_information": [],
+      "expected_no_answer": true,
+      "expected_status": "no_answer",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "困难无答案：多语言 alias 的真实部署效果",
+      "evidence_refs": [
+        {
+          "source_id": "S19",
+          "path": "docs/adr/0023-preserve-source-language-and-persist-multilingual-retrieval-metadata.md",
+          "line_start": 9,
+          "line_end": 16,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S19",
+          "path": "docs/adr/0023-preserve-source-language-and-persist-multilingual-retrieval-metadata.md",
+          "line_start": 38,
+          "line_end": 42,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S19",
+          "path": "docs/adr/0023-preserve-source-language-and-persist-multilingual-retrieval-metadata.md",
+          "line_start": 63,
+          "line_end": 76,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S19",
+          "path": "docs/adr/0023-preserve-source-language-and-persist-multilingual-retrieval-metadata.md",
+          "line_start": 1,
+          "line_end": 99,
+          "basis": "full_document_absence_candidate"
+        }
+      ]
+    },
+    {
+      "id": "T-S20-1",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S20-1"
+      ],
+      "query": "How are note-vector inputs bounded?",
+      "source_ids": [
+        "S20"
+      ],
+      "must_preserve": [
+        "The Index service creates versioned text-v2 chunks bounded by UTF-8 bytes and valid character boundaries; adapters do not split an oversized logical source into multiple billable calls."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "The Index service creates versioned text-v2 chunks bounded by UTF-8 bytes and valid character boundaries; adapters do not split an oversized logical source into multiple billable calls."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "embedding-limits: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S20",
+          "path": "docs/adr/0024-bound-embedding-inputs-and-rebuild-current-model-vectors.md",
+          "line_start": 24,
+          "line_end": 43,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S20-2",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S20-2"
+      ],
+      "query": "Which post-rollout field evidence in ADR-0024 shows that the UTF-8 byte envelope eliminated embedding failures without degrading note recall?",
+      "source_ids": [
+        "S20"
+      ],
+      "must_preserve": [
+        "ADR-0024 records a pre-change failure and specifies a byte-bounded design, but reports no post-rollout cross-Provider failure or retrieval evaluation."
+      ],
+      "must_not_infer": [
+        "Do not infer that the implementation eliminated failures across Providers or preserved recall quality from the design and expected consequences alone."
+      ],
+      "expected_usable_information": [],
+      "expected_no_answer": true,
+      "expected_status": "no_answer",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "困难无答案：embedding 输入封套的上线后效果",
+      "evidence_refs": [
+        {
+          "source_id": "S20",
+          "path": "docs/adr/0024-bound-embedding-inputs-and-rebuild-current-model-vectors.md",
+          "line_start": 9,
+          "line_end": 20,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S20",
+          "path": "docs/adr/0024-bound-embedding-inputs-and-rebuild-current-model-vectors.md",
+          "line_start": 24,
+          "line_end": 28,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S20",
+          "path": "docs/adr/0024-bound-embedding-inputs-and-rebuild-current-model-vectors.md",
+          "line_start": 56,
+          "line_end": 65,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S20",
+          "path": "docs/adr/0024-bound-embedding-inputs-and-rebuild-current-model-vectors.md",
+          "line_start": 1,
+          "line_end": 83,
+          "basis": "full_document_absence_candidate"
+        }
+      ]
+    },
+    {
+      "id": "T-S21-1",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S21-1"
+      ],
+      "query": "How does note ranking stop many chunks from one note dominating results?",
+      "source_ids": [
+        "S21",
+        "S20"
+      ],
+      "must_preserve": [
+        "The service over-fetches a bounded pool, validates current source identity/hash, and aggregates by File ID; only the first valid in-scope chunk supplies the note result."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "The service over-fetches a bounded pool, validates current source identity/hash, and aggregates by File ID; only the first valid in-scope chunk supplies the note result."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "chunk-ranking: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S21",
+          "path": "docs/adr/0025-aggregate-note-vector-chunks-before-ranking.md",
+          "line_start": 24,
+          "line_end": 43,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S20",
+          "path": "docs/adr/0024-bound-embedding-inputs-and-rebuild-current-model-vectors.md",
+          "line_start": 3,
+          "line_end": 9,
+          "basis": "B_comparison_source_context"
+        }
+      ]
+    },
+    {
+      "id": "T-S21-2",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S21-2"
+      ],
+      "query": "For note ranking, what does ADR-0025 refine about ADR-0024, and what happens to negative-cosine chunks? Does this replace ADR-0024's UTF-8 input cap?",
+      "source_ids": [
+        "S21",
+        "S20"
+      ],
+      "must_preserve": [
+        "ADR-0025 refines ranking by aggregating current-valid chunks per File ID in a bounded candidate pool; negative similarities are discarded and cannot advance rank. It does not replace ADR-0024's UTF-8 input cap.",
+        "Distinguish the ADR-0025 ranking refinement from ADR-0024's retained UTF-8 input bound; do not treat negative cosine as a positive ranking contribution."
+      ],
+      "must_not_infer": [
+        "不得把“refines”解释为取代 ADR-0024 的 UTF-8 输入上限；不得把负 cosine 当作正向排名贡献。"
+      ],
+      "expected_usable_information": [
+        "ADR-0025 refines ranking by aggregating current-valid chunks per File ID in a bounded candidate pool; negative similarities are discarded and cannot advance rank. It does not replace ADR-0024's UTF-8 input cap."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [
+        {
+          "kind": "refines",
+          "source_ids": [
+            "S21",
+            "S20"
+          ]
+        }
+      ],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "chunk-ranking: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S21",
+          "path": "docs/adr/0025-aggregate-note-vector-chunks-before-ranking.md",
+          "line_start": 5,
+          "line_end": 5,
+          "basis": "explicit_adr_relation_header"
+        },
+        {
+          "source_id": "S20",
+          "path": "docs/adr/0024-bound-embedding-inputs-and-rebuild-current-model-vectors.md",
+          "line_start": 24,
+          "line_end": 28,
+          "basis": "relation_endpoint_context"
+        },
+        {
+          "source_id": "S21",
+          "path": "docs/adr/0025-aggregate-note-vector-chunks-before-ranking.md",
+          "line_start": 24,
+          "line_end": 35,
+          "basis": "direct_refinement_and_ranking_rule"
+        }
+      ]
+    },
+    {
+      "id": "T-S22-1",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S22-1"
+      ],
+      "query": "How does note-derived ownership differ from explicit memory ownership?",
+      "source_ids": [
+        "S22"
+      ],
+      "must_preserve": [
+        "A note-derived item belongs to one source/current set. Explicit memory belongs to the authenticated assertion and survives a referenced note’s change/deletion."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "A note-derived item belongs to one source/current set. Explicit memory belongs to the authenticated assertion and survives a referenced note’s change/deletion."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "current-ownership-and-forget: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S22",
+          "path": "docs/adr/0026-current-source-owned-memory-sets.md",
+          "line_start": 38,
+          "line_end": 57,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S22-2",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S22-2"
+      ],
+      "query": "What recovery-retention period and restore procedure does ADR-0026 guarantee for a forgotten current memory in offline backups?",
+      "source_ids": [
+        "S22"
+      ],
+      "must_preserve": [
+        "ADR-0026 says forget deletes current memory and projections; Core revisions, audit, and offline backups are separate controls, not memory query sources.",
+        "The ADR specifies no backup retention period or restore guarantee for forgotten memory."
+      ],
+      "must_not_infer": [
+        "Do not promise a retention duration, snapshot count, or user restore procedure from the mention of separate backup controls."
+      ],
+      "expected_usable_information": [],
+      "expected_no_answer": true,
+      "expected_status": "no_answer",
+      "expected_source_relations": [],
+      "severity": "critical",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "困难无答案：forget 后的备份保留与恢复保证",
+      "evidence_refs": [
+        {
+          "source_id": "S22",
+          "path": "docs/adr/0026-current-source-owned-memory-sets.md",
+          "line_start": 51,
+          "line_end": 57,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S22",
+          "path": "docs/adr/0026-current-source-owned-memory-sets.md",
+          "line_start": 137,
+          "line_end": 143,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S22",
+          "path": "docs/adr/0026-current-source-owned-memory-sets.md",
+          "line_start": 1,
+          "line_end": 202,
+          "basis": "full_document_absence_candidate"
+        }
+      ]
+    },
+    {
+      "id": "T-S23-1",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S23-1"
+      ],
+      "query": "How does ADR-0028 amend ADR-0027's automatic activation gate, and what is bundled evaluation's current role?",
+      "source_ids": [
+        "S23",
+        "S24"
+      ],
+      "must_preserve": [
+        "ADR-0027 historically made a passing bundled benchmark a semantic-admission prerequisite. ADR-0028 amends that gate: bundled evaluation is a development/operator diagnostic, not a production prerequisite; current source eligibility, permissions, vector identity/dimensions, and bounded ranking still apply.",
+        "This is the ADR-0028 amendment to ADR-0027; a bundled benchmark pass is no longer a production activation prerequisite, while retrieval safety constraints remain."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "ADR-0027 historically made a passing bundled benchmark a semantic-admission prerequisite. ADR-0028 amends that gate: bundled evaluation is a development/operator diagnostic, not a production prerequisite; current source eligibility, permissions, vector identity/dimensions, and bounded ranking still apply."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [
+        {
+          "kind": "amends",
+          "source_ids": [
+            "S24",
+            "S23"
+          ]
+        }
+      ],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "retrieval-calibration: ADR-0028 amends ADR-0027 gate; current diagnostic-only scope",
+      "evidence_refs": [
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 5,
+          "line_end": 5,
+          "basis": "explicit_adr_relation_header"
+        },
+        {
+          "source_id": "S23",
+          "path": "docs/adr/0027-bounded-automatic-retrieval-calibration.md",
+          "line_start": 9,
+          "line_end": 16,
+          "basis": "amended_historical_gate"
+        },
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 10,
+          "line_end": 15,
+          "basis": "current_diagnostic_policy"
+        },
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 34,
+          "line_end": 42,
+          "basis": "current_retrieval_constraints"
+        }
+      ]
+    },
+    {
+      "id": "T-S23-2",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S23-2"
+      ],
+      "query": "Before the later ADR-0028 amendment, what did ADR-0027's historical amendment to ADR-0026 specify as the gate for semantic admission?",
+      "source_ids": [
+        "S23",
+        "S22"
+      ],
+      "must_preserve": [
+        "ADR-0027 amended ADR-0026's retrieval preparation and operational policy: it separated memory/note calibration reports, unioned applicable no-answer failures, and blocked semantic activation when the combined holdout gate failed. This is ADR-0027's historical policy, not a claim about current policy.",
+        "Keep the amendment relation and historical scope explicit: this reports ADR-0027's gate, not current production policy."
+      ],
+      "must_not_infer": [
+        "Do not infer from ADR-0027 alone that its historical bundled-benchmark gate remains current; do not treat vector coverage alone as sufficient under that stated policy."
+      ],
+      "expected_usable_information": [
+        "ADR-0027 amended ADR-0026's retrieval preparation and operational policy: it separated memory/note calibration reports, unioned applicable no-answer failures, and blocked semantic activation when the combined holdout gate failed. This is ADR-0027's historical policy, not a claim about current policy."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "historical_amended",
+      "expected_source_relations": [
+        {
+          "kind": "amends",
+          "source_ids": [
+            "S23",
+            "S22"
+          ]
+        }
+      ],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "retrieval-calibration: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S23",
+          "path": "docs/adr/0027-bounded-automatic-retrieval-calibration.md",
+          "line_start": 5,
+          "line_end": 5,
+          "basis": "explicit_adr_relation_header"
+        },
+        {
+          "source_id": "S22",
+          "path": "docs/adr/0026-current-source-owned-memory-sets.md",
+          "line_start": 114,
+          "line_end": 124,
+          "basis": "relation_endpoint_context"
+        },
+        {
+          "source_id": "S23",
+          "path": "docs/adr/0027-bounded-automatic-retrieval-calibration.md",
+          "line_start": 9,
+          "line_end": 16,
+          "basis": "direct_amendment_policy"
+        }
+      ]
+    },
+    {
+      "id": "T-S24-1",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S24-1"
+      ],
+      "query": "Under ADR-0028's current amendments, what is bundled evaluation's role, and may a model still choose chunk groups?",
+      "source_ids": [
+        "S24"
+      ],
+      "must_preserve": [
+        "Bundled evaluation is a development/operator diagnostic, not a production prerequisite. The later rule-only amendment withdrew model grouping; bounded deterministic rule chunks are used, with no grouping generation or Admin role admission.",
+        "Apply ADR-0028's lines 34–42 amendment: model grouping is withdrawn and rule-only chunking is current; diagnostic-only evaluation remains."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Bundled evaluation is a development/operator diagnostic, not a production prerequisite. The later rule-only amendment withdrew model grouping; bounded deterministic rule chunks are used, with no grouping generation or Admin role admission."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "diagnostic-and-chunking: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 10,
+          "line_end": 15,
+          "basis": "diagnostic_only_policy"
+        },
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 34,
+          "line_end": 42,
+          "basis": "rule_only_amendment"
+        }
+      ]
+    },
+    {
+      "id": "T-S24-2",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S24-2"
+      ],
+      "query": "What empirical answerability probability does ADR-0028 report for passages in its highest similarity-ranked group?",
+      "source_ids": [
+        "S24"
+      ],
+      "must_preserve": [
+        "ADR-0028 treats similarity as ranking evidence rather than answer probability and reports no measured answerability rate.",
+        "A related passage may still fail to answer the query."
+      ],
+      "must_not_infer": [
+        "Do not invent a calibrated probability, similarity band, or measured production/heldout result from ranking similarity."
+      ],
+      "expected_usable_information": [],
+      "expected_no_answer": true,
+      "expected_status": "no_answer",
+      "expected_source_relations": [],
+      "severity": "high",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "困难无答案：相似度与真实回答效果的实测证据",
+      "evidence_refs": [
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 10,
+          "line_end": 15,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 28,
+          "line_end": 32,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 1,
+          "line_end": 42,
+          "basis": "full_document_absence_candidate"
+        }
+      ]
+    },
+    {
+      "id": "T-S25-1",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S25-1"
+      ],
+      "query": "What does compact presentation preserve, and how can clients request details?",
+      "source_ids": [
+        "S25",
+        "S24"
+      ],
+      "must_preserve": [
+        "Compact results retain next-action/safe-write information. All 17 tools accept include_details; get_memory remains a full single-record drill-down."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Compact results retain next-action/safe-write information. All 17 tools accept include_details; get_memory remains a full single-record drill-down."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "compact-mcp-results: preserve next-action/safe-write and detail behavior; S24 is a B-only distractor, not evidence for compact-response claims",
+      "evidence_refs": [
+        {
+          "source_id": "S25",
+          "path": "docs/adr/0029-actionable-compact-mcp-results.md",
+          "line_start": 9,
+          "line_end": 20,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 3,
+          "line_end": 9,
+          "basis": "B_comparison_source_context"
+        }
+      ]
+    },
+    {
+      "id": "T-S25-2",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S25-2"
+      ],
+      "query": "What exact response-size reduction percentage is promised?",
+      "source_ids": [
+        "S25",
+        "S24"
+      ],
+      "must_preserve": [
+        "把该 ADR 未给出的精确值保留为未知。"
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [],
+      "expected_no_answer": true,
+      "expected_status": "no_answer",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "compact-mcp-results: exact percentage is absent; S24 is a B-only distractor and does not support a compact-response percentage",
+      "evidence_refs": [
+        {
+          "source_id": "S25",
+          "path": "docs/adr/0029-actionable-compact-mcp-results.md",
+          "line_start": 1,
+          "line_end": 28,
+          "basis": "full_document_absence_candidate"
+        },
+        {
+          "source_id": "S24",
+          "path": "docs/adr/0028-model-guided-chunks-and-diagnostic-evaluation.md",
+          "line_start": 1,
+          "line_end": 42,
+          "basis": "full_document_absence_candidate"
+        }
+      ]
+    },
+    {
+      "id": "T-S26-1",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S26-1"
+      ],
+      "query": "Under the superseded ADR-0030 historical scheme, when could multiple source contributions support one formal memory?",
+      "source_ids": [
+        "S26"
+      ],
+      "must_preserve": [
+        "Only when each current contribution independently supported the complete proposition; explicit assertions did not participate, and topic or transitive similarity could not establish support.",
+        "This is ADR-0030's historical multi-source formal-memory rule, superseded for the current runtime; do not report it as current behavior."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Only when each current contribution independently supported the complete proposition; explicit assertions did not participate, and topic or transitive similarity could not establish support."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "historical_superseded",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "formal-memory-support: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S26",
+          "path": "docs/adr/0030-automatic-memory-equivalence.md",
+          "line_start": 3,
+          "line_end": 11,
+          "basis": "status_and_supersession"
+        },
+        {
+          "source_id": "S26",
+          "path": "docs/adr/0030-automatic-memory-equivalence.md",
+          "line_start": 15,
+          "line_end": 31,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S26-2",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S26-2"
+      ],
+      "query": "After ADR-0031 partially superseded ADR-0030, which ADR-0030 invariants did its status say remained accepted?",
+      "source_ids": [
+        "S26"
+      ],
+      "must_preserve": [
+        "ADR-0030 says formal publication and source-support invariants remain accepted; ADR-0033 later supersedes ADR-0030 for the current memory runtime.",
+        "Do not reduce ADR-0030 to wholly invalid historical rationale: its status explicitly retains formal publication and source-support invariants, while its current runtime is superseded."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "ADR-0030 says formal publication and source-support invariants remain accepted; ADR-0033 later supersedes ADR-0030 for the current memory runtime."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "historical_superseded",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "formal-memory-support: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S26",
+          "path": "docs/adr/0030-automatic-memory-equivalence.md",
+          "line_start": 3,
+          "line_end": 11,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S27-1",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S27-1"
+      ],
+      "query": "Under superseded ADR-0031's historical policy, what happened when a candidate was only related, partially overlapping, or uncertain?",
+      "source_ids": [
+        "S27",
+        "S29"
+      ],
+      "must_preserve": [
+        "It stayed independent; that policy transferred only validated complete source support and kept the existing formal body stable.",
+        "This describes the historical ADR-0031 merge rule, not the current runtime policy."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "It stayed independent; that policy transferred only validated complete source support and kept the existing formal body stable."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "historical_superseded",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "incremental-organization-history: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S27",
+          "path": "docs/adr/0031-incremental-memory-organization.md",
+          "line_start": 3,
+          "line_end": 9,
+          "basis": "status_and_retained_boundaries"
+        },
+        {
+          "source_id": "S27",
+          "path": "docs/adr/0031-incremental-memory-organization.md",
+          "line_start": 13,
+          "line_end": 24,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 3,
+          "line_end": 9,
+          "basis": "B_comparison_source_context"
+        }
+      ]
+    },
+    {
+      "id": "T-S27-2",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S27-2"
+      ],
+      "query": "Is ADR-0031’s whole-item/fixed-body policy current after ADR-0032/0033?",
+      "source_ids": [
+        "S27",
+        "S29"
+      ],
+      "must_preserve": [
+        "Separate ADR-0032's replacement of the fixed-body merge rule from the boundaries ADR-0031 says were retained in that revision. ADR-0033's current-runtime retained principles are isolation, current-source eligibility, explicit ownership, and no model-readable history; do not claim ADR-0031's same scheduling mechanism still runs unchanged."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "ADR-0032 replaced ADR-0031's whole-item equivalence/fixed-body merge rule. ADR-0031 says its incremental scheduling, source-safety, and recovery boundaries were retained in that ADR-0032 revision. ADR-0033 later superseded formal-body merging; it explicitly retains Vault isolation, current-source eligibility, explicit ownership, and no model-readable history, but this task does not infer that ADR-0031's exact scheduling mechanism remains unchanged."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "historical_superseded",
+      "expected_source_relations": [
+        {
+          "kind": "supersedes",
+          "source_ids": [
+            "S29",
+            "S27"
+          ]
+        }
+      ],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "incremental-organization-history: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S27",
+          "path": "docs/adr/0031-incremental-memory-organization.md",
+          "line_start": 3,
+          "line_end": 9,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 3,
+          "line_end": 9,
+          "basis": "explicit_adr_relation_header"
+        },
+        {
+          "source_id": "S27",
+          "path": "docs/adr/0031-incremental-memory-organization.md",
+          "line_start": 3,
+          "line_end": 9,
+          "basis": "explicit_adr_relation_header"
+        }
+      ]
+    },
+    {
+      "id": "T-S28-1",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S28-1"
+      ],
+      "query": "Under superseded ADR-0032's historical lossless-merge proposal, what details had an overlap proposal to preserve?",
+      "source_ids": [
+        "S28",
+        "S29"
+      ],
+      "must_preserve": [
+        "Compatible overlap could merge only with per-fact support; shared facts appeared once, while source-specific steps, conditions, exceptions, limits, and negation stayed attached to their supporting source.",
+        "This is ADR-0032's historical proposal; ADR-0033 superseded its formal-body merging for the current runtime."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Compatible overlap could merge only with per-fact support; shared facts appeared once, while source-specific steps, conditions, exceptions, limits, and negation stayed attached to their supporting source."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "historical_superseded",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "lossless-merge-history: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S28",
+          "path": "docs/adr/0032-lossless-memory-consolidation.md",
+          "line_start": 19,
+          "line_end": 37,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 3,
+          "line_end": 9,
+          "basis": "B_comparison_source_context"
+        }
+      ]
+    },
+    {
+      "id": "T-S28-2",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S28-2"
+      ],
+      "query": "Under superseded ADR-0032's historical lossless-merge proposal, could a failed support/coverage check publish a merge?",
+      "source_ids": [
+        "S28",
+        "S29"
+      ],
+      "must_preserve": [
+        "No. Failed checks blocked publication; ADR-0033 later superseded this merge approach for the current runtime.",
+        "Keep the historical ADR-0032 rule and the supersession direction ADR-0033 → ADR-0032 explicit."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "No. Failed checks blocked publication; ADR-0033 later superseded this merge approach for the current runtime."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "historical_superseded",
+      "expected_source_relations": [
+        {
+          "kind": "supersedes",
+          "source_ids": [
+            "S29",
+            "S28"
+          ]
+        }
+      ],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "lossless-merge-history: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S28",
+          "path": "docs/adr/0032-lossless-memory-consolidation.md",
+          "line_start": 3,
+          "line_end": 8,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 3,
+          "line_end": 9,
+          "basis": "explicit_adr_relation_header"
+        },
+        {
+          "source_id": "S28",
+          "path": "docs/adr/0032-lossless-memory-consolidation.md",
+          "line_start": 3,
+          "line_end": 9,
+          "basis": "explicit_adr_relation_header"
+        }
+      ]
+    },
+    {
+      "id": "T-S29-1",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S29-1"
+      ],
+      "query": "Which information may become automatic memory, and how must time, version, scope, order, and exceptions be preserved?",
+      "source_ids": [
+        "S29"
+      ],
+      "must_preserve": [
+        "Durable agreements/decisions/states/experience may be selected from complete source units. Tutorials/general knowledge remain searchable; premises, scope, order, exceptions, and verification steps stay intact. Preserve source-stated time, version, and scope; when a date is absent, do not infer current validity.",
+        "ADR-0033 is accepted and in implementation; the design text is not evidence that production migration or rollout is complete."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Durable agreements/decisions/states/experience may be selected from complete source units. Tutorials/general knowledge remain searchable; premises, scope, order, exceptions, and verification steps stay intact. Preserve source-stated time, version, and scope; when a date is absent, do not infer current validity."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "source-preserving-units: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 1,
+          "line_end": 6,
+          "basis": "status_and_implementation_state"
+        },
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 13,
+          "line_end": 25,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S29-2",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S29-2"
+      ],
+      "query": "Which permissions are needed to read returned source units?",
+      "source_ids": [
+        "S29"
+      ],
+      "must_preserve": [
+        "Both memory:read and vault:read; explicit memory keeps its own permission rule.",
+        "ADR-0033 is accepted and in implementation; the design text is not evidence that production migration or rollout is complete."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "Both memory:read and vault:read; explicit memory keeps its own permission rule."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "critical",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "source-preserving-units: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 1,
+          "line_end": 6,
+          "basis": "status_and_implementation_state"
+        },
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 21,
+          "line_end": 25,
+          "basis": "direct_text"
+        }
+      ]
+    },
+    {
+      "id": "T-S30-1",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S30-1"
+      ],
+      "query": "What does the superseded journal terminal state prove?",
+      "source_ids": [
+        "S30",
+        "S29"
+      ],
+      "must_preserve": [
+        "Keep the narrow superseded-journal meaning and the explicit state 'accepted, in implementation'; this ADR alone does not prove production rollout is complete."
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [
+        "A later independent create safely took over the same path/content; this does not claim the original completed or alter the later File ID/revision/history/outbox/canonical file. ADR-0034 is accepted and in implementation, not proof that rollout is complete."
+      ],
+      "expected_no_answer": false,
+      "expected_status": "source_stated",
+      "expected_source_relations": [],
+      "severity": "medium",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "recovery-witness: 决定与主要结论",
+      "evidence_refs": [
+        {
+          "source_id": "S30",
+          "path": "docs/adr/0034-replayed-create-witness-recovery.md",
+          "line_start": 1,
+          "line_end": 5,
+          "basis": "status_and_implementation_state"
+        },
+        {
+          "source_id": "S30",
+          "path": "docs/adr/0034-replayed-create-witness-recovery.md",
+          "line_start": 13,
+          "line_end": 19,
+          "basis": "direct_text"
+        },
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 3,
+          "line_end": 9,
+          "basis": "B_comparison_source_context"
+        }
+      ]
+    },
+    {
+      "id": "T-S30-2",
+      "split": "holdout",
+      "query_refs": [
+        "Q-S30-2"
+      ],
+      "query": "What exact retry count or time window governs recovery of this journal?",
+      "source_ids": [
+        "S30",
+        "S29"
+      ],
+      "must_preserve": [
+        "把该 ADR 未给出的精确值保留为未知。"
+      ],
+      "must_not_infer": [
+        "不得补造来源未支持的数字、时间、条件、权限或来源关系。"
+      ],
+      "expected_usable_information": [],
+      "expected_no_answer": true,
+      "expected_status": "no_answer",
+      "expected_source_relations": [],
+      "severity": "critical",
+      "candidate_review_state": "pending-independent-agent-review",
+      "review_focus": "recovery-witness: 边界、限定或无答案",
+      "evidence_refs": [
+        {
+          "source_id": "S30",
+          "path": "docs/adr/0034-replayed-create-witness-recovery.md",
+          "line_start": 1,
+          "line_end": 30,
+          "basis": "full_document_absence_candidate"
+        },
+        {
+          "source_id": "S29",
+          "path": "docs/adr/0033-source-preserving-memory-units.md",
+          "line_start": 1,
+          "line_end": 39,
+          "basis": "full_document_absence_candidate"
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "New candidate tasks and labels; not recovered original M6 gold.",
+    "All source, task, relation, no-answer, severity, and split labels require independent agent evidence review; none is approved.",
+    "Some ADRs cite policy predecessors from the other split; reviewers must assess leakage and may reassign before freezing.",
+    "No Provider binding, credentials, run_root, key path, seal, or claim."
+  ]
+}

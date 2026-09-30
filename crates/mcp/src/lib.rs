@@ -24,8 +24,12 @@ use mcp_vault_indexer::{
     IndexError, IndexService, NoteRetrievalHit, NoteRetrievalMode, NoteRetrievalScope,
 };
 use mcp_vault_memory::{
-    MemoryError, MemoryOrigin, MemoryReadAccess, MemoryService, MemorySourceInput, MemoryType,
-    MemoryUpdateInput, OverviewRequest, RecallContext, RecallRequest, RememberInput,
+    MemoryError, MemoryOrigin, MemoryReadAccess, MemoryService, OverviewRequest, SemanticAccess,
+    SemanticActor, SemanticCardRequest, SemanticEvidenceAccess, SemanticEvidenceRequest,
+    SemanticExplicitDeleteRequest, SemanticExplicitFacade, SemanticExplicitListRequest,
+    SemanticExplicitUpdatePatch, SemanticExplicitUpdateRequest, SemanticListCardsRequest,
+    SemanticMutation, SemanticProcessingStatusRequest, SemanticPublicFacade,
+    SemanticRememberExplicitRequest, SemanticRuleCommand,
 };
 use mcp_vault_state::{FileRecord, FileRevisionRecord, StateStore};
 use mcp_vault_storage_fs::{ReadFile, StorageOptions};
@@ -52,6 +56,30 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::io::AsyncReadExt;
 use url::Url;
+
+/// RMCP deserializes `Parameters<T>` before invoking a tool. Keep the shared
+/// card DTO schema while retaining a small validation shim so an invalid enum
+/// is returned as the normal semantic `invalid_argument` envelope.
+struct SemanticCardParameters(Value);
+
+impl<'de> Deserialize<'de> for SemanticCardParameters {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Value::deserialize(deserializer).map(Self)
+    }
+}
+
+impl rmcp::schemars::JsonSchema for SemanticCardParameters {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        <SemanticCardRequest as rmcp::schemars::JsonSchema>::schema_name()
+    }
+
+    fn json_schema(generator: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+        <SemanticCardRequest as rmcp::schemars::JsonSchema>::json_schema(generator)
+    }
+}
 
 mod oauth_server;
 
@@ -982,60 +1010,6 @@ struct RestoreNoteRevisionInput {
 
 #[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct RecallMemoryInput {
-    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
-    #[serde(default)]
-    include_details: Option<bool>,
-    /// Current user question or task, written with enough context to rank relevant durable memory.
-    query: String,
-    /// Explicit exact source path filter; omission includes all authorized scopes.
-    #[serde(default)]
-    source_path: Option<String>,
-    /// Optional continuity signals that disambiguate the current project, entities, and recent topics.
-    #[serde(default)]
-    context: Option<RecallMemoryContextInput>,
-    /// Optional memory-type filter: preference, constraint, decision, experience, procedure, or state.
-    #[serde(default)]
-    types: Vec<String>,
-    /// Point in time for validity filtering as Unix milliseconds. Defaults to now.
-    #[serde(default)]
-    valid_at: Option<i64>,
-    /// Minimum stored importance in the inclusive range 0-1. Defaults to 0.
-    #[serde(default)]
-    min_importance: Option<f64>,
-    /// Return source-note paths that generated these memories; use sources[].path with read_note. Defaults to true. Explicit false omits sources; manually saved memories may have none. include_details adds source revision/heading/line metadata.
-    #[serde(default)]
-    include_sources: Option<bool>,
-    /// Include component ranking scores for diagnostics. Defaults to false.
-    #[serde(default)]
-    include_score_breakdown: Option<bool>,
-    /// Maximum durable memories to return. Range 1-100; default 12.
-    #[serde(default)]
-    max_results: Option<u32>,
-    /// Maximum ordinary-note retrieval cues to return. Range 0-100; default 4 when vault:read is granted.
-    #[serde(default)]
-    max_related_notes: Option<u32>,
-    /// Approximate combined result token budget. Range 128-32000; default 4096.
-    #[serde(default)]
-    max_tokens: Option<u32>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct RecallMemoryContextInput {
-    /// Current working paths; ranking signals, never implicit filters.
-    #[serde(default)]
-    paths: Vec<String>,
-    /// People, systems, organizations, or other named entities active in the task.
-    #[serde(default)]
-    entities: Vec<String>,
-    /// Recent conversation topics that help rank otherwise ambiguous memories.
-    #[serde(default)]
-    recent_topics: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 struct MemoryOverviewInput {
     /// Return scoped counts and directory grouping details; default false. Current entries and warnings are always retained.
     #[serde(default)]
@@ -1049,114 +1023,65 @@ struct MemoryOverviewInput {
     topic_ids: Vec<String>,
     /// Last unit ID returned by next_after_id, with the same source filter.
     after_id: Option<String>,
-    /// Maximum navigation entries, 1-100; default 40.
+    /// Maximum navigation entries. Range 1-100; default 40.
+    #[schemars(range(min = 1, max = 100))]
     limit: Option<u32>,
-    /// Complete response token estimate budget, 256-32000; default 4096.
+    /// Complete response token estimate budget. Range 256-32000; default 4096.
+    #[schemars(range(min = 256, max = 32000))]
     max_tokens: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
-struct MemoryIdInput {
-    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
-    #[serde(default)]
-    include_details: Option<bool>,
-    /// Stable durable-memory ID returned by recall or list_memories.
-    id: String,
+#[serde(deny_unknown_fields)]
+struct RawMemoryIdInput {
+    /// Stable raw explicit-memory ID returned by list_raw_memories or remember.
+    memory_id: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
-struct ListMemoryInput {
-    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
-    #[serde(default)]
-    include_details: Option<bool>,
-    /// Memory-type filters: preference, constraint, decision, experience, procedure, or state.
-    #[serde(default)]
-    types: Vec<String>,
-    /// Exact tag that returned memories must carry.
-    #[serde(default)]
-    tag: Option<String>,
-    /// Exact indexed entity that returned memories must reference.
-    #[serde(default)]
-    entity: Option<String>,
-    /// Current Vault-relative source-note path used as a provenance filter.
-    #[serde(default)]
-    source_path: Option<String>,
-    /// Maximum records to return. Range 1-100; default 50.
-    #[serde(default)]
-    limit: Option<u32>,
-    /// Opaque pagination cursor returned by a previous list_memories call.
-    #[serde(default)]
-    cursor: Option<String>,
+#[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RawUpdateInput {
+    /// Stable raw explicit-memory ID returned by get_raw_memory or list_raw_memories.
+    #[schemars(
+        description = "Stable raw explicit-memory ID returned by get_raw_memory or list_raw_memories."
+    )]
+    memory_id: String,
+    /// Current raw memory revision; reread after a conflict.
+    #[schemars(description = "Current raw memory revision; reread after a conflict.")]
+    expected_revision: u64,
+    /// Revision-fenced replacement fields; omitted values remain unchanged.
+    #[schemars(
+        description = "Revision-fenced replacement fields; omitted values remain unchanged."
+    )]
+    patch: SemanticExplicitUpdatePatch,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
-struct RememberMemoryInput {
-    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
-    #[serde(default)]
-    include_details: Option<bool>,
-    /// One concise durable proposition, not a transcript, temporary thought, or complete note body.
-    content: String,
-    /// Memory type: preference, constraint, decision, experience, procedure, or state.
-    #[serde(default)]
-    memory_type: Option<String>,
-    /// Optional long-term significance in the inclusive range 0-1.
-    #[serde(default)]
-    importance: Option<f64>,
-    /// Optional confidence supported by the stated source in the inclusive range 0-1.
-    #[serde(default)]
-    confidence: Option<f64>,
-    /// Optional validity start as Unix milliseconds.
-    #[serde(default)]
-    valid_from: Option<i64>,
-    /// Optional exclusive validity end as Unix milliseconds; must be later than valid_from.
-    #[serde(default)]
-    valid_to: Option<i64>,
-    /// Display and retrieval tags. At most 64 tags, each at most 512 characters.
-    #[serde(default)]
-    tags: Vec<String>,
-    /// Named people, systems, projects, or organizations. At most 64 entries, each at most 512 characters.
-    #[serde(default)]
-    entities: Vec<String>,
-    /// Optional exact source-note provenance. Read the source first instead of inventing coordinates.
-    #[serde(default)]
-    source_note: Option<MemorySourceInputDto>,
-    /// Stable key that makes retries idempotent; reuse only with the identical logical memory.
-    #[serde(default)]
-    idempotency_key: Option<String>,
+#[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RawDeleteInput {
+    /// Stable raw explicit-memory ID returned by get_raw_memory or list_raw_memories.
+    #[schemars(
+        description = "Stable raw explicit-memory ID returned by get_raw_memory or list_raw_memories."
+    )]
+    memory_id: String,
+    /// Current raw memory revision; reread after a conflict.
+    #[schemars(description = "Current raw memory revision; reread after a conflict.")]
+    expected_revision: u64,
+    /// Non-empty retry key for this logical deletion.
+    #[schemars(description = "Non-empty retry key for this logical deletion.")]
+    idempotency_key: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
-struct MemorySourceInputDto {
-    /// Current Vault-relative source-note path.
-    path: String,
-    /// Stable file ID returned by read_note or search_notes. Omit if unavailable; never infer it from the path.
-    #[serde(default)]
-    file_id: Option<String>,
-    /// Exact source revision returned by read_note or search_notes.
-    #[serde(default)]
-    revision: Option<u64>,
-    /// Ordered Markdown heading path that contains the supporting evidence.
-    #[serde(default)]
-    heading: Vec<String>,
-    /// Optional inclusive one-based evidence start line.
-    #[serde(default)]
-    start_line: Option<u32>,
-    /// Optional inclusive one-based evidence end line; provide it together with start_line.
-    #[serde(default)]
-    end_line: Option<u32>,
-    /// Optional server-compatible evidence hash already obtained from a trusted source; never invent it.
-    #[serde(default)]
-    excerpt_hash: Option<String>,
-}
-
+#[cfg(test)]
+#[allow(dead_code)]
 #[derive(Clone, Debug, Default, Deserialize, schemars::JsonSchema)]
 struct UpdateMemoryInput {
     /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
     #[serde(default)]
     include_details: Option<bool>,
-    /// Stable durable-memory ID returned by get_memory, recall, or list_memories.
+    /// Stable durable-memory ID returned by get_raw_memory, recall, or list_raw_memories.
     id: String,
-    /// Current memory revision returned by get_memory, not canonical_revision or a source-note revision. On conflict, get_memory again.
+    /// Current memory revision returned by get_raw_memory, not canonical_revision or a source-note revision. On conflict, get_raw_memory again.
     expected_revision: u64,
     /// Replacement durable proposition. Omit to preserve the current content.
     #[serde(default)]
@@ -1184,23 +1109,13 @@ struct UpdateMemoryInput {
     entities: Option<Vec<String>>,
 }
 
+#[cfg(test)]
 fn deserialize_patch_field<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(deserializer).map(Some)
-}
-
-#[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
-struct ForgetMemoryInput {
-    /// Return extended metadata. Default false; essential paths, revisions and warnings are always included.
-    #[serde(default)]
-    include_details: Option<bool>,
-    /// Stable durable-memory ID returned by get_memory, recall, or list_memories.
-    id: String,
-    /// Current metadata revision returned by get_memory.
-    expected_revision: u64,
 }
 
 #[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
@@ -1268,6 +1183,253 @@ enum ReadSource {
 
 #[tool_router]
 impl McpHandler {
+    #[tool(
+        name = "build_memory_pack",
+        title = "Build semantic memory pack",
+        description = "Use this when the task needs sourced semantic background. Build a Vault-scoped semantic MemoryPack using current verified M1/M2 cards. On success, `data` contains the semantic pack and its bounded evidence gaps.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
+    )]
+    async fn build_memory_pack(
+        &self,
+        Parameters(input): Parameters<mcp_vault_memory::MemoryPackRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let request = request_context(&context)?;
+        let facade = SemanticPublicFacade::new(request.state.clone());
+        match facade
+            .build_pack(
+                &request.vault,
+                &request.core,
+                &SemanticAccess::new(request.principal.permissions.clone()),
+                &input,
+            )
+            .await
+        {
+            Ok(data) => Ok(success_result(
+                &context,
+                serde_json::to_value(data).unwrap_or_else(|_| json!({})),
+            )),
+            Err(error) => Ok(error_result(&context, memory_error(error))),
+        }
+    }
+
+    #[tool(
+        name = "get_memory_card",
+        title = "Get semantic memory card",
+        description = "Use this when you know a semantic card reference and need its sourced semantic fields. Read one current verified semantic card without ordinary note正文. On success, `data.card` contains the card fields and source bindings.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
+    )]
+    async fn get_memory_card(
+        &self,
+        Parameters(raw): Parameters<SemanticCardParameters>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let input: SemanticCardRequest = match serde_json::from_value(raw.0) {
+            Ok(input) => input,
+            Err(_) => {
+                return Ok(error_result(
+                    &context,
+                    ToolErrorBody::new(
+                        "invalid_argument",
+                        "card_kind must be card or composed_card",
+                        false,
+                    ),
+                ));
+            }
+        };
+        let request = request_context(&context)?;
+        let facade = SemanticPublicFacade::new(request.state.clone());
+        let result = if matches!(
+            input.card_kind,
+            Some(mcp_vault_memory::SemanticCardKind::ComposedCard)
+        ) {
+            facade
+                .get_composed_card(
+                    &request.vault,
+                    &request.core,
+                    &SemanticAccess::new(request.principal.permissions.clone()),
+                    &input.card_id,
+                )
+                .await
+                .map(|data| data.map(|card| json!({"composed_card": card})))
+        } else {
+            facade
+                .get_card(
+                    &request.vault,
+                    &request.core,
+                    &SemanticAccess::new(request.principal.permissions.clone()),
+                    &input.card_id,
+                )
+                .await
+                .map(|data| data.map(|card| json!({"card": card})))
+        };
+        match result {
+            Ok(Some(data)) => Ok(success_result(&context, data)),
+            Ok(None) => Ok(error_result(
+                &context,
+                ToolErrorBody::new("not_found", "the semantic card was not found", false),
+            )),
+            Err(error) => Ok(error_result(&context, memory_error(error))),
+        }
+    }
+
+    #[tool(
+        name = "list_memory_cards",
+        title = "List semantic memory cards",
+        description = "Use this when you need to discover current sourced semantic cards. List current verified M1 and M2 semantic cards. On success, `data.cards` and `data.composed_cards` contain the results.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
+    )]
+    async fn list_memory_cards(
+        &self,
+        Parameters(input): Parameters<SemanticListCardsRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let request = request_context(&context)?;
+        let facade = SemanticPublicFacade::new(request.state.clone());
+        let limit = match input.limit.unwrap_or(50) {
+            1..=200 => input.limit.unwrap_or(50),
+            _ => {
+                return Ok(error_result(
+                    &context,
+                    ToolErrorBody::new("invalid_argument", "semantic card limit is invalid", false),
+                ));
+            }
+        };
+        match facade
+            .list_cards(
+                &request.vault,
+                &request.core,
+                &SemanticAccess::new(request.principal.permissions.clone()),
+                limit,
+            )
+            .await
+        {
+            Ok((cards, composed_cards)) => Ok(success_result(
+                &context,
+                json!({"cards":cards,"composed_cards":composed_cards}),
+            )),
+            Err(error) => Ok(error_result(&context, memory_error(error))),
+        }
+    }
+
+    #[tool(
+        name = "get_memory_evidence",
+        title = "Get semantic evidence",
+        description = "Use this when a semantic card cites evidence and you have its source binding. Read one current evidence reference with explicit source and optional parent binding. On success, `data.evidence` contains exact spans and coordinates.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
+    )]
+    async fn get_memory_evidence(
+        &self,
+        Parameters(input): Parameters<SemanticEvidenceRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let request = request_context(&context)?;
+        let facade = SemanticPublicFacade::new(request.state.clone());
+        let access = SemanticEvidenceAccess {
+            source_id: input.source_id,
+            source_revision_id: input.source_revision_id,
+            parent_ref: input.parent_ref,
+        };
+        match facade
+            .read_evidence(
+                &request.vault,
+                &request.core,
+                &SemanticAccess::new(request.principal.permissions.clone()),
+                &access,
+                &input.evidence_ref_id,
+            )
+            .await
+        {
+            Ok(Some(data)) => Ok(success_result(&context, json!({"evidence":data}))),
+            Ok(None) => Ok(error_result(
+                &context,
+                ToolErrorBody::new("not_found", "the semantic evidence was not found", false),
+            )),
+            Err(error) => Ok(error_result(&context, memory_error(error))),
+        }
+    }
+
+    #[tool(
+        name = "correct_memory",
+        title = "Correct semantic memory",
+        description = "Use this only when the user explicitly authorizes a semantic correction. Apply a typed persistent correction to a resolved semantic card target. On success, `data` contains the rule id and revision.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
+    )]
+    async fn correct_memory(
+        &self,
+        Parameters(input): Parameters<SemanticRuleCommand>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !matches!(input.mutation, SemanticMutation::Correction) {
+            return Ok(error_result(
+                &context,
+                ToolErrorBody::new("invalid_input", "correction mutation is required", false),
+            ));
+        }
+        semantic_rule_call(&context, input).await
+    }
+
+    #[tool(
+        name = "forget_memory",
+        title = "Forget semantic memory",
+        description = "Use this only when the user explicitly asks to forget semantic memory. Apply an explicit safe semantic forget/suppression action without deleting source notes. On success, `data` contains the rule id and revision.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
+    )]
+    async fn forget_memory(
+        &self,
+        Parameters(input): Parameters<SemanticRuleCommand>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !matches!(
+            input.mutation,
+            SemanticMutation::SuppressRead
+                | SemanticMutation::ForgetCurrent
+                | SemanticMutation::SuppressRegeneration
+        ) {
+            return Ok(error_result(
+                &context,
+                ToolErrorBody::new("invalid_input", "forget mutation is required", false),
+            ));
+        }
+        semantic_rule_call(&context, input).await
+    }
+
+    #[tool(
+        name = "get_processing_status",
+        title = "Get semantic processing status",
+        description = "Use this when you need to inspect semantic processing progress. Read bounded safe semantic extraction and organization processing status. On success, `data` contains safe counts and states.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
+    )]
+    async fn get_processing_status(
+        &self,
+        Parameters(input): Parameters<SemanticProcessingStatusRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let request = request_context(&context)?;
+        let facade = SemanticPublicFacade::new(request.state.clone());
+        match facade
+            .processing_status(
+                &request.vault,
+                &SemanticAccess::new(request.principal.permissions.clone()),
+                input.limit.unwrap_or(50),
+            )
+            .await
+        {
+            Ok(data) => Ok(success_result(
+                &context,
+                serde_json::to_value(data).unwrap_or_else(|_| json!({})),
+            )),
+            Err(error) => Ok(error_result(&context, memory_error(error))),
+        }
+    }
+
     #[tool(
         name = "vault_overview",
         title = "Inspect Vault overview",
@@ -1556,86 +1718,13 @@ impl McpHandler {
     }
 
     #[tool(
-        name = "recall",
-        title = "Recall relevant memory",
-        description = "Use this proactively before answering questions about saved decisions, preferences, constraints or past work. Pass the task in natural language. On success, `data.memories` contains context and sources[].path, the source-note paths that generated each memory; include_sources defaults to true. When original wording or more detail matters, pass that path directly to read_note, without another search. `data.related_notes` are additional retrieval cues, not necessarily sources of a memory. For source navigation, call get_memory only when a source is expected but was omitted (for example include_sources=false or ownership=note_derived). An explicit memory may legitimately have no note source; do not repeatedly fetch details to find one. Use search_notes if a known source is unreadable or more evidence is needed. Degraded or truncated results have incomplete coverage.",
+        name = "get_raw_memory_overview",
+        title = "Browse raw memory overview",
+        description = "Use this when you need bounded navigation of current raw explicit memories before reading one. On success, `data.entries` contains raw memory IDs, revisions and raw-memory resource URIs; labels are navigation only. Use the returned cursor with the same limit, then call get_raw_memory for a complete raw body. This view is explicit-memory-only and never returns semantic cards, evidence or task packs.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
-    async fn recall(
-        &self,
-        Parameters(input): Parameters<RecallMemoryInput>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let request = request_context(&context)?;
-        let include_details = input.include_details.unwrap_or(false)
-            || input.include_score_breakdown.unwrap_or(false);
-        let success = |data| {
-            success_result(
-                &context,
-                presentation::tool_data("recall", data, include_details),
-            )
-        };
-        if let Err(error) = require_permission(&request.principal, Permission::ReadMemory) {
-            return Ok(error_result(&context, error));
-        }
-        let types = match input
-            .types
-            .iter()
-            .map(|value| parse_memory_type(value))
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(types) => types,
-            Err(error) => return Ok(error_result(&context, error)),
-        };
-        let continuity = input.context.unwrap_or_default();
-        let include_related_notes = request
-            .principal
-            .permissions
-            .contains(Permission::ReadVault);
-        let result = request
-            .memory
-            .recall(
-                &request.vault,
-                RecallRequest {
-                    access: memory_read_access(&request.principal),
-                    source_path: input.source_path,
-                    query: input.query,
-                    context: RecallContext {
-                        paths: continuity.paths,
-                        entities: continuity.entities,
-                        recent_topics: continuity.recent_topics,
-                    },
-                    types,
-                    valid_at: input.valid_at,
-                    min_importance: input.min_importance.unwrap_or(0.0),
-                    include_sources: input.include_sources.unwrap_or(true),
-                    include_score_breakdown: input.include_score_breakdown.unwrap_or(false),
-                    include_related_notes,
-                    max_results: input.max_results.unwrap_or(12),
-                    max_related_notes: if include_related_notes {
-                        input.max_related_notes.unwrap_or(4)
-                    } else {
-                        0
-                    },
-                    max_tokens: input.max_tokens.unwrap_or(4096),
-                },
-            )
-            .await;
-        match result {
-            Ok(result) => Ok(success(recall_json(result))),
-            Err(error) => Ok(error_result(&context, memory_error(error))),
-        }
-    }
-
-    #[tool(
-        name = "get_memory_overview",
-        title = "Browse memory navigation",
-        description = "Use this when you need current memory scopes and unit IDs before narrowing a task. On success, `data.entries` contains source coordinates and get_memory resource URIs; `data.generated_sections` holds optional navigation descriptions and `data.next_after_id` continues the next page. Filter by source_path, path_prefix or topic_ids when scope is explicit. Generated descriptions are not source evidence; read complete units with get_memory and their original notes with read_note. No online generative model call is made. Automatic units require both memory:read and vault:read; memory-only access sees explicit units. Use recall for relevance to a specific task.",
-        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
-        output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
-    )]
-    async fn get_memory_overview(
+    async fn get_raw_memory_overview(
         &self,
         Parameters(input): Parameters<MemoryOverviewInput>,
         context: RequestContext<RoleServer>,
@@ -1644,6 +1733,10 @@ impl McpHandler {
         if let Err(error) = require_permission(&request.principal, Permission::ReadMemory) {
             return Ok(error_result(&context, error));
         }
+        let can_read_vault = request
+            .principal
+            .permissions
+            .contains(Permission::ReadVault);
         let after_id = match input.after_id.as_deref().map(parse_memory_id).transpose() {
             Ok(id) => id,
             Err(error) => return Ok(error_result(&context, error)),
@@ -1653,10 +1746,14 @@ impl McpHandler {
             .get_memory_overview(
                 &request.vault,
                 OverviewRequest {
-                    access: memory_read_access(&request.principal),
-                    source_path: input.source_path,
-                    path_prefix: input.path_prefix,
-                    topic_ids: input.topic_ids,
+                    access: MemoryReadAccess::ExplicitOnly,
+                    source_path: can_read_vault.then_some(input.source_path).flatten(),
+                    path_prefix: can_read_vault.then_some(input.path_prefix).flatten(),
+                    topic_ids: if can_read_vault {
+                        input.topic_ids
+                    } else {
+                        Vec::new()
+                    },
                     after_id,
                     limit: input.limit.unwrap_or(40),
                     max_tokens: input.max_tokens.unwrap_or(4096),
@@ -1666,10 +1763,11 @@ impl McpHandler {
         {
             Ok(value) => Ok(success_result(
                 &context,
-                presentation::tool_data(
-                    "get_memory_overview",
+                raw_tool_data(
+                    "get_raw_memory_overview",
                     json!(value),
                     input.include_details.unwrap_or(false),
+                    can_read_vault,
                 ),
             )),
             Err(error) => Ok(error_result(&context, memory_error(error))),
@@ -1677,128 +1775,89 @@ impl McpHandler {
     }
 
     #[tool(
-        name = "get_memory",
-        title = "Inspect a durable memory",
-        description = "Use this when you know a memory id and need its complete record or source details. On success, `data` includes content, revision, ownership and sources[].path. Automatic units contain complete original text and require both memory:read and vault:read. Read that source path directly with read_note. canonical_path is the system-managed memory Markdown file, NOT the original note and not a read_note target; canonical_revision is not the revision for memory edits. Use revision for update_memory or forget_memory. Replaced/deleted memories return not_found; recall again rather than using an obsolete ID.",
+        name = "get_raw_memory",
+        title = "Read a raw explicit memory",
+        description = "Use this when you know a raw explicit memory ID and need its complete user-owned body. On success, `data` contains raw ownership, content, revision and source bindings. This is an explicit-memory read only; it never returns a semantic card, evidence record or MemoryPack. Use the returned revision for update_raw_memory or forget_raw_memory; conflicts require a fresh read.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
-    async fn get_memory(
+    async fn get_raw_memory(
         &self,
-        Parameters(input): Parameters<MemoryIdInput>,
+        Parameters(input): Parameters<RawMemoryIdInput>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
-        let include_details = input.include_details.unwrap_or(false);
+        let include_details = false;
         let success = |data| {
             success_result(
                 &context,
-                presentation::tool_data("get_memory", data, include_details),
+                raw_tool_data(
+                    "get_raw_memory",
+                    data,
+                    include_details,
+                    request
+                        .principal
+                        .permissions
+                        .contains(Permission::ReadVault),
+                ),
             )
         };
         if let Err(error) = require_permission(&request.principal, Permission::ReadMemory) {
             return Ok(error_result(&context, error));
         }
-        let id = match parse_memory_id(&input.id) {
-            Ok(id) => id,
-            Err(error) => return Ok(error_result(&context, error)),
-        };
-        match request
-            .memory
-            .get_with_access(&request.vault, id, memory_read_access(&request.principal))
+        match SemanticExplicitFacade::new(request.memory.clone())
+            .get(&request.vault, &input.memory_id)
             .await
         {
-            Ok(memory) => Ok(success(
+            Ok(Some(memory)) => Ok(success(
                 serde_json::to_value(memory).unwrap_or_else(|_| json!({})),
+            )),
+            Ok(None) => Ok(error_result(
+                &context,
+                ToolErrorBody::new("not_found", "the raw explicit memory was not found", false),
             )),
             Err(error) => Ok(error_result(&context, memory_error(error))),
         }
     }
 
     #[tool(
-        name = "list_memories",
-        title = "List durable memories",
-        description = "Use this when browsing current memories by type, tag, entity or source path. On success, `data.memories` contains IDs, content, memory revisions and source paths; next_cursor continues with the same filters. Read sources[].path directly with read_note for evidence, or get_memory by id for full metadata. Use recall for task relevance rather than paging through all memories.",
+        name = "list_raw_memories",
+        title = "List raw explicit memories",
+        description = "Use this when browsing current raw explicit memories in bounded pages. On success, `data.memories` contains raw ownership, complete user-owned bodies and revisions; `next_cursor` continues the same page size. Use get_raw_memory for one known ID. This tool never returns semantic cards, evidence or MemoryPacks.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
-    async fn list_memories(
+    async fn list_raw_memories(
         &self,
-        Parameters(input): Parameters<ListMemoryInput>,
+        Parameters(input): Parameters<SemanticExplicitListRequest>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
-        let include_details = input.include_details.unwrap_or(false);
+        let include_details = false;
         let success = |data| {
             success_result(
                 &context,
-                presentation::tool_data("list_memories", data, include_details),
+                raw_tool_data(
+                    "list_raw_memories",
+                    data,
+                    include_details,
+                    request
+                        .principal
+                        .permissions
+                        .contains(Permission::ReadVault),
+                ),
             )
         };
         if let Err(error) = require_permission(&request.principal, Permission::ReadMemory) {
             return Ok(error_result(&context, error));
         }
-        let types = match input
-            .types
-            .iter()
-            .map(|value| parse_memory_type(value))
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(types) => types,
-            Err(error) => return Ok(error_result(&context, error)),
-        };
-        let limit = match bounded_limit(input.limit, 50) {
-            Ok(limit) => limit,
-            Err(error) => return Ok(error_result(&context, error)),
-        };
-        let (offset, after_id) = if let Some(value) = input
-            .cursor
-            .as_deref()
-            .and_then(|s| s.strip_prefix("memory:"))
-        {
-            let prefix = format!("{}:", request.vault.id());
-            match value
-                .strip_prefix(&prefix)
-                .and_then(|id| mcp_vault_domain::MemoryId::parse(id).ok())
-            {
-                Some(id) => (0, Some(id)),
-                None => {
-                    return Ok(error_result(
-                        &context,
-                        ToolErrorBody::new(
-                            "invalid_argument",
-                            "Memory cursor is invalid for this Vault.",
-                            false,
-                        ),
-                    ));
-                }
-            }
-        } else {
-            match parse_cursor(input.cursor.as_deref()) {
-                Ok(offset) => (offset, None),
-                Err(error) => return Ok(error_result(&context, error)),
-            }
-        };
-        match request
-            .memory
-            .list_with_access(
-                &request.vault,
-                types,
-                input.tag,
-                input.entity,
-                input.source_path,
-                limit,
-                offset,
-                after_id,
-                memory_read_access(&request.principal),
-            )
+        match SemanticExplicitFacade::new(request.memory.clone())
+            .list(&request.vault, &input)
             .await
         {
-            Ok(memories) => Ok(success(json!({
-                "memories": memories,
-                "next_cursor": (memories.len() == limit as usize).then(|| memories.last().map(|m|format!("memory:{}:{}",request.vault.id(),m.id))),
-                "truncated": memories.len() == limit as usize
-            }))),
+            Ok(result) => Ok(success(
+                serde_json::to_value(result).unwrap_or_else(|_| json!({})),
+            )),
             Err(error) => Ok(error_result(&context, memory_error(error))),
         }
     }
@@ -1806,126 +1865,80 @@ impl McpHandler {
     #[tool(
         name = "remember",
         title = "Save a durable memory",
-        description = "Use this only when the user authorizes saving a durable proposition. Supply content and only supported metadata; source_note must be verified by a prior source read. On success, `data.memory` contains the saved id, content, revision and available source paths; it is immediately available, and outcome identifies a new save or idempotent retry. Reuse the id with get_memory or update_memory. Use create_note/edit_note for ordinary note changes. Reuse idempotency_key only for the identical logical save.",
-        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false),
+        description = "Use this only when the user explicitly authorizes saving a durable explicit memory. Provide the exact content and a new idempotency_key for each logical save; reuse that key only for an identical retry. Optional source bindings require read access and path, file_id and current revision from read_note. On success, `data.explicit.memory` contains the saved memory, its file path and revision, source bindings and embedding_eligible; use the returned identity for later memory operations. This does not create a semantic card or evidence record.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
     async fn remember(
         &self,
-        Parameters(input): Parameters<RememberMemoryInput>,
+        Parameters(input): Parameters<SemanticRememberExplicitRequest>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
-        let include_details = input.include_details.unwrap_or(false);
-        let success = |data| {
-            success_result(
-                &context,
-                presentation::tool_data("remember", data, include_details),
-            )
-        };
         if let Err(error) = require_writable(&request) {
             return Ok(error_result(&context, error));
         }
         if let Err(error) = require_permission(&request.principal, Permission::WriteMemory) {
             return Ok(error_result(&context, error));
         }
-        let memory_type = match input.memory_type.as_deref() {
-            Some(value) => match parse_memory_type(value) {
-                Ok(memory_type) => Some(memory_type),
-                Err(error) => return Ok(error_result(&context, error)),
-            },
-            None => None,
-        };
-        let source = match input.source_note {
-            Some(source) => {
-                let path = match parse_user_tool_path(&request.core, &source.path) {
-                    Ok(path) => path,
-                    Err(error) => return Ok(error_result(&context, error)),
-                };
-                let file_id = match source.file_id.as_deref() {
-                    Some(value) => match value.parse() {
-                        Ok(id) => Some(id),
-                        Err(_) => {
-                            return Ok(error_result(
-                                &context,
-                                ToolErrorBody::new(
-                                    "invalid_argument",
-                                    "source file_id is invalid",
-                                    false,
-                                ),
-                            ));
-                        }
-                    },
-                    None => None,
-                };
-                vec![MemorySourceInput {
-                    source_type: "note".to_owned(),
-                    note_file_id: file_id,
-                    note_path: Some(path),
-                    note_revision: source.revision.map(Revision::new),
-                    heading_path: source.heading,
-                    start_line: source.start_line,
-                    end_line: source.end_line,
-                    excerpt_hash: source.excerpt_hash,
-                    actor_id: request
-                        .principal
-                        .actor
-                        .actor_id()
-                        .map(|value| value.as_str().to_owned()),
-                }]
-            }
-            None => Vec::new(),
-        };
-        match request
-            .memory
-            .remember_as(
+        if !input.sources.is_empty()
+            && let Err(error) = require_permission(&request.principal, Permission::ReadVault)
+        {
+            return Ok(error_result(&context, error));
+        }
+        match SemanticExplicitFacade::new(request.memory.clone())
+            .remember(
                 &request.vault,
                 &request.core,
                 request.principal.actor.clone(),
                 SourcePlane::Mcp,
-                RememberInput {
-                    content: input.content,
-                    memory_type,
-                    importance: input.importance,
-                    confidence: input.confidence,
-                    valid_from: input.valid_from,
-                    valid_to: input.valid_to,
-                    tags: input.tags,
-                    entities: input.entities,
-                    sources: source,
-                    idempotency_key: input.idempotency_key,
-                    origin: MemoryOrigin::ExplicitAgent,
-                    extraction: json!({}),
-                },
+                MemoryOrigin::ExplicitAgent,
+                input,
             )
             .await
         {
-            Ok(result) => Ok(success(json!({
-                "outcome": result.outcome,
-                "memory": result.memory,
-            }))),
+            Ok(result) => Ok(success_result(
+                &context,
+                raw_tool_data(
+                    "remember",
+                    json!({"explicit": result}),
+                    false,
+                    request
+                        .principal
+                        .permissions
+                        .contains(Permission::ReadVault),
+                ),
+            )),
             Err(error) => Ok(error_result(&context, memory_error(error))),
         }
     }
 
     #[tool(
-        name = "update_memory",
-        title = "Update a durable memory",
-        description = "Use this only when correcting a memory with ownership=explicit and user authorization. First call get_memory; verify ownership=explicit and use its revision as expected_revision. Note-derived memories cannot be updated here; read and edit their source note instead. Omitted fields stay unchanged; null clears nullable metadata, [] clears tags/entities. On success, `data` contains the updated id, content and revision. On conflict get_memory again and reconsider. This does not edit its source note: use read_note then edit_note for that. Use forget_memory for deletion.",
+        name = "update_raw_memory",
+        title = "Update a raw explicit memory",
+        description = "Use this only when the user authorizes changing a raw explicit memory. First call get_raw_memory and use its revision as expected_revision; omitted fields stay unchanged, null clears nullable metadata and [] clears tags/entities. On success, `data` contains raw ownership, the updated body and revision. This does not edit a source note or semantic card; conflicts require a fresh raw read. Use forget_raw_memory for deletion.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
-    async fn update_memory(
+    async fn update_raw_memory(
         &self,
-        Parameters(input): Parameters<UpdateMemoryInput>,
+        Parameters(input): Parameters<RawUpdateInput>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
-        let include_details = input.include_details.unwrap_or(false);
+        let include_details = false;
         let success = |data| {
             success_result(
                 &context,
-                presentation::tool_data("update_memory", data, include_details),
+                raw_tool_data(
+                    "update_raw_memory",
+                    data,
+                    include_details,
+                    request
+                        .principal
+                        .permissions
+                        .contains(Permission::ReadVault),
+                ),
             )
         };
         if let Err(error) = require_writable(&request) {
@@ -1934,35 +1947,18 @@ impl McpHandler {
         if let Err(error) = require_permission(&request.principal, Permission::ManageMemory) {
             return Ok(error_result(&context, error));
         }
-        let id = match parse_memory_id(&input.id) {
-            Ok(id) => id,
-            Err(error) => return Ok(error_result(&context, error)),
+        let input = SemanticExplicitUpdateRequest {
+            memory_id: input.memory_id,
+            expected_revision: input.expected_revision,
+            patch: input.patch,
         };
-        let memory_type = match input.memory_type.as_ref() {
-            Some(Some(value)) => match parse_memory_type(value) {
-                Ok(value) => Some(Some(value)),
-                Err(error) => return Ok(error_result(&context, error)),
-            },
-            Some(None) => Some(None),
-            None => None,
-        };
-        match request
-            .memory
+        match SemanticExplicitFacade::new(request.memory.clone())
             .update(
                 &request.vault,
                 &request.core,
-                id,
-                Revision::new(input.expected_revision),
-                MemoryUpdateInput {
-                    content: input.content,
-                    memory_type,
-                    importance: input.importance,
-                    confidence: input.confidence,
-                    valid_from: input.valid_from,
-                    valid_to: input.valid_to,
-                    tags: input.tags,
-                    entities: input.entities,
-                },
+                request.principal.actor.clone(),
+                SourcePlane::Mcp,
+                &input,
             )
             .await
         {
@@ -1974,23 +1970,23 @@ impl McpHandler {
     }
 
     #[tool(
-        name = "forget_memory",
-        title = "Forget a durable memory",
-        description = "Use this only when the user explicitly asks to forget a memory. First get_memory and use its revision as expected_revision. On success, `data` contains id, deleted, ownership and source_extraction_paused. Deleting a note-derived item removes its contributions from all known supporting source sets and pauses automatic extraction for those sources; it does not delete the original note. There is no memory undo/archive tool. On conflict get_memory again; source extraction can be resumed explicitly in Admin.",
+        name = "forget_raw_memory",
+        title = "Forget a raw explicit memory",
+        description = "Use this only when the user explicitly asks to delete a raw explicit memory. First call get_raw_memory and use its revision as expected_revision. `idempotency_key` is required: retry the identical request with the same key, but use a new key for a different request because reusing a key with different input conflicts. On success, `data` contains the raw deletion receipt without the deleted body. This deletes only the raw explicit memory and never deletes source notes, semantic cards, evidence or task packs; revision conflicts require a fresh raw read.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::tool::schema_for_output::<ToolEnvelope>()
     )]
-    async fn forget_memory(
+    async fn forget_raw_memory(
         &self,
-        Parameters(input): Parameters<ForgetMemoryInput>,
+        Parameters(input): Parameters<RawDeleteInput>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let request = request_context(&context)?;
-        let include_details = input.include_details.unwrap_or(false);
+        let include_details = false;
         let success = |data| {
             success_result(
                 &context,
-                presentation::tool_data("forget_memory", data, include_details),
+                raw_tool_data("forget_raw_memory", data, include_details, false),
             )
         };
         if let Err(error) = require_writable(&request) {
@@ -1999,17 +1995,18 @@ impl McpHandler {
         if let Err(error) = require_permission(&request.principal, Permission::ManageMemory) {
             return Ok(error_result(&context, error));
         }
-        let id = match parse_memory_id(&input.id) {
-            Ok(id) => id,
-            Err(error) => return Ok(error_result(&context, error)),
+        let input = SemanticExplicitDeleteRequest {
+            memory_id: input.memory_id,
+            expected_revision: input.expected_revision,
+            idempotency_key: input.idempotency_key,
         };
-        match request
-            .memory
-            .forget(
+        match SemanticExplicitFacade::new(request.memory.clone())
+            .delete(
                 &request.vault,
                 &request.core,
-                id,
-                Revision::new(input.expected_revision),
+                request.principal.actor.clone(),
+                SourcePlane::Mcp,
+                &input,
             )
             .await
         {
@@ -2431,7 +2428,7 @@ impl ServerHandler for McpHandler {
         .with_instructions(
             "This server is the user's persistent Markdown knowledge Vault.\n\
              Use vault_overview or browse_index when you need to understand the available knowledge.\n\
-             Use recall proactively when the task may depend on prior decisions, preferences, constraints, project state, past work, or knowledge that may already exist in the Vault. Pass the task in its natural language and use context.paths/entities/recent_topics as ranking hints; an explicit source_path filters results. Memory sources[].path identifies the original note: pass it directly to read_note when evidence is needed, without searching again. Automatic units preserve source language, conditions and order. pointers[] identify complete units that exceeded the budget; use get_memory by ID. get_memory_overview provides navigation; its generated descriptions are not source evidence. related_notes are additional cues, not guaranteed memory provenance. canonical_path in detailed memory records is a managed memory file, not an original note path. Results are compact by default; include_details retrieves extended metadata. get_memory gives a complete known record.\n\
+             Use build_memory_pack proactively when the task may depend on prior decisions, preferences, constraints, project state, past work, or knowledge that may already exist in the Vault. Pass the task in its natural language and consume only the returned sourced semantic cards, qualifiers, support and evidence gaps. Use get_memory_card or list_memory_cards to inspect semantic cards, and get_memory_evidence only when a card's support must be verified. Semantic tools never return complete raw memory bodies. Use get_raw_memory_overview, get_raw_memory and list_raw_memories only for explicitly owned raw memory; raw tools never return semantic cards, evidence or task packs.\n\
              When the user requests or clearly authorizes a persistent note change, use a known source path directly; search only if the path is unknown. Read its current revision, and use the narrowest mutation; create a note only when no existing note should be updated. Never overwrite a revision conflict.\n\
              Every result has request_id and ok. On success consume data; on failure inspect error.code and error.retryable, and retry the same logical operation only when retryable is true. Treat degraded or truncated results as incomplete coverage.",
         )
@@ -2515,8 +2512,8 @@ impl ServerHandler for McpHandler {
         }
         if can_read_memory {
             resources.push(
-                Resource::new("vault://memory/context", "vault-memory-context")
-                    .with_description("Compact high-value active memory context")
+                Resource::new("vault://raw-memory/context", "vault-raw-memory-context")
+                    .with_description("Compact current raw explicit-memory navigation")
                     .with_mime_type("application/json"),
             );
         }
@@ -2554,8 +2551,15 @@ impl ServerHandler for McpHandler {
         }
         if can_read_memory {
             templates.push(
-                ResourceTemplate::new("vault://memory/{memory_id}", "vault-memory")
-                    .with_description("Durable memory and provenance")
+                ResourceTemplate::new("vault://raw-memory/{memory_id}", "vault-raw-memory")
+                    .with_description("Complete current raw explicit memory and source bindings")
+                    .with_mime_type("application/json"),
+            );
+        }
+        if can_read_vault && can_read_memory {
+            templates.push(
+                ResourceTemplate::new("vault://memory-card/{card_id}", "vault-memory-card")
+                    .with_description("Current semantic memory card with support bindings")
                     .with_mime_type("application/json"),
             );
         }
@@ -2647,7 +2651,7 @@ impl ServerHandler for McpHandler {
                     .map_err(|_| ErrorData::invalid_params("resource is not UTF-8 text", None))?;
                 ResourceContents::text(text, request.uri.clone()).with_mime_type("text/markdown")
             }
-            "memory" => {
+            "raw-memory" => {
                 AuthService::require_permission(&request_context.principal, Permission::ReadMemory)
                     .map_err(|_| ErrorData::invalid_params("resource is not available", None))?;
                 let value = url.path().trim_matches('/');
@@ -2657,7 +2661,7 @@ impl ServerHandler for McpHandler {
                         .get_memory_overview(
                             &request_context.vault,
                             OverviewRequest {
-                                access: memory_read_access(&request_context.principal),
+                                access: MemoryReadAccess::ExplicitOnly,
                                 ..Default::default()
                             },
                         )
@@ -2666,7 +2670,16 @@ impl ServerHandler for McpHandler {
                             ErrorData::internal_error("memory resource is unavailable", None)
                         })?;
                     ResourceContents::text(
-                        serde_json::to_string(&memories).unwrap_or_else(|_| "{}".to_owned()),
+                        raw_tool_data(
+                            "get_raw_memory_overview",
+                            serde_json::to_value(memories).unwrap_or_else(|_| json!({})),
+                            true,
+                            request_context
+                                .principal
+                                .permissions
+                                .contains(Permission::ReadVault),
+                        )
+                        .to_string(),
                         request.uri.clone(),
                     )
                     .with_mime_type("application/json")
@@ -2679,16 +2692,74 @@ impl ServerHandler for McpHandler {
                         .get_with_access(
                             &request_context.vault,
                             memory_id,
-                            memory_read_access(&request_context.principal),
+                            MemoryReadAccess::ExplicitOnly,
                         )
                         .await
                         .map_err(|_| ErrorData::invalid_params("memory is not available", None))?;
                     ResourceContents::text(
-                        serde_json::to_string(&memory).unwrap_or_else(|_| "{}".to_owned()),
+                        raw_tool_data(
+                            "get_raw_memory",
+                            serde_json::to_value(memory).unwrap_or_else(|_| json!({})),
+                            true,
+                            request_context
+                                .principal
+                                .permissions
+                                .contains(Permission::ReadVault),
+                        )
+                        .to_string(),
                         request.uri.clone(),
                     )
                     .with_mime_type("application/json")
                 }
+            }
+            "memory-card" => {
+                AuthService::require_permission(&request_context.principal, Permission::ReadMemory)
+                    .and(AuthService::require_permission(
+                        &request_context.principal,
+                        Permission::ReadVault,
+                    ))
+                    .map_err(|_| ErrorData::invalid_params("resource is not available", None))?;
+                let card_id = url.path().trim_matches('/');
+                if card_id.is_empty() || card_id.contains('/') {
+                    return Err(ErrorData::invalid_params(
+                        "semantic card resource is invalid",
+                        None,
+                    ));
+                }
+                let facade = SemanticPublicFacade::new(request_context.state.clone());
+                let access = SemanticAccess::new(request_context.principal.permissions.clone());
+                let card = facade
+                    .get_card(
+                        &request_context.vault,
+                        &request_context.core,
+                        &access,
+                        card_id,
+                    )
+                    .await
+                    .map_err(|_| {
+                        ErrorData::invalid_params("semantic card is not available", None)
+                    })?;
+                let value = if let Some(card) = card {
+                    json!({"card": card})
+                } else {
+                    let composed = facade
+                        .get_composed_card(
+                            &request_context.vault,
+                            &request_context.core,
+                            &access,
+                            card_id,
+                        )
+                        .await
+                        .map_err(|_| {
+                            ErrorData::invalid_params("semantic card is not available", None)
+                        })?
+                        .ok_or_else(|| {
+                            ErrorData::invalid_params("semantic card is not available", None)
+                        })?;
+                    json!({"composed_card": composed})
+                };
+                ResourceContents::text(value.to_string(), request.uri.clone())
+                    .with_mime_type("application/json")
             }
             _ => return Err(ErrorData::invalid_params("resource is not supported", None)),
         };
@@ -2724,6 +2795,40 @@ fn require_permission(
     })
 }
 
+async fn semantic_rule_call(
+    context: &RequestContext<RoleServer>,
+    input: SemanticRuleCommand,
+) -> Result<CallToolResult, ErrorData> {
+    let request = request_context(context)?;
+    if let Err(error) = require_writable(&request) {
+        return Ok(error_result(context, error));
+    }
+    let facade = SemanticPublicFacade::new(request.state.clone());
+    let actor = SemanticActor::trusted(
+        request
+            .principal
+            .actor
+            .actor_id()
+            .map(|id| id.as_str().to_owned())
+            .unwrap_or_else(|| format!("{:?}", request.principal.actor.actor_type())),
+    );
+    match facade
+        .apply_rule(
+            &request.vault,
+            &SemanticAccess::new(request.principal.permissions.clone()),
+            &actor,
+            &input,
+        )
+        .await
+    {
+        Ok(data) => Ok(success_result(
+            context,
+            serde_json::to_value(data).unwrap_or_else(|_| json!({})),
+        )),
+        Err(error) => Ok(error_result(context, memory_error(error))),
+    }
+}
+
 fn require_writable(request: &McpRequestContext) -> Result<(), ToolErrorBody> {
     if request.maintenance.allows_write() {
         Ok(())
@@ -2741,21 +2846,11 @@ fn parse_memory_id(value: &str) -> Result<MemoryId, ToolErrorBody> {
         .map_err(|_| ToolErrorBody::new("invalid_argument", "memory id is invalid", false))
 }
 
-fn memory_read_access(principal: &AuthPrincipal) -> MemoryReadAccess {
-    if principal.permissions.contains(Permission::ReadVault) {
-        MemoryReadAccess::All
-    } else {
-        MemoryReadAccess::ExplicitOnly
-    }
-}
-
-fn parse_memory_type(value: &str) -> Result<MemoryType, ToolErrorBody> {
-    MemoryType::try_from(value)
-        .map_err(|_| ToolErrorBody::new("invalid_argument", "memory type is invalid", false))
-}
-
 fn memory_error(error: MemoryError) -> ToolErrorBody {
     match error {
+        MemoryError::AccessDenied => {
+            ToolErrorBody::new("permission_denied", "the operation is not available", false)
+        }
         MemoryError::InvalidInput(_) | MemoryError::Markdown => {
             ToolErrorBody::new("invalid_argument", "the memory request is invalid", false)
         }
@@ -2804,15 +2899,21 @@ fn tool_allowed(principal: &AuthPrincipal, name: &str) -> bool {
         "vault_overview" | "browse_index" | "recent_changes" => &[Permission::DiscoverVault][..],
         "search_notes" => &[Permission::ReadVault][..],
         "read_note" => &[Permission::ReadVault][..],
-        "recall" | "get_memory" | "list_memories" | "get_memory_overview" => {
-            &[Permission::ReadMemory][..]
-        }
+        "build_memory_pack"
+        | "get_memory_card"
+        | "list_memory_cards"
+        | "get_memory_evidence"
+        | "get_processing_status" => &[Permission::ReadMemory, Permission::ReadVault][..],
         "create_note" | "edit_note" | "move_note" => &[Permission::WriteVault][..],
         "delete_note" => &[Permission::DeleteVault][..],
         "note_history" => &[Permission::ReadHistory][..],
         "restore_note_revision" => &[Permission::ReadHistory, Permission::WriteVault][..],
         "remember" => &[Permission::WriteMemory][..],
-        "update_memory" | "forget_memory" => &[Permission::ManageMemory][..],
+        "update_raw_memory" | "forget_raw_memory" => &[Permission::ManageMemory][..],
+        "correct_memory" | "forget_memory" => &[Permission::ManageMemory][..],
+        "get_raw_memory" | "list_raw_memories" | "get_raw_memory_overview" => {
+            &[Permission::ReadMemory][..]
+        }
         _ => return false,
     };
     required
@@ -2827,18 +2928,25 @@ fn tool_order(name: &str) -> usize {
         "recent_changes" => 2,
         "search_notes" => 3,
         "read_note" => 4,
-        "recall" => 5,
-        "get_memory" => 6,
-        "list_memories" => 7,
-        "create_note" => 8,
-        "edit_note" => 9,
-        "move_note" => 10,
-        "delete_note" => 11,
-        "note_history" => 12,
-        "restore_note_revision" => 13,
-        "remember" => 14,
-        "update_memory" => 15,
-        "forget_memory" => 16,
+        "build_memory_pack" => 5,
+        "get_memory_card" => 6,
+        "list_memory_cards" => 7,
+        "get_memory_evidence" => 8,
+        "correct_memory" => 9,
+        "forget_memory" => 10,
+        "get_processing_status" => 11,
+        "create_note" => 12,
+        "edit_note" => 13,
+        "move_note" => 14,
+        "delete_note" => 15,
+        "note_history" => 16,
+        "restore_note_revision" => 17,
+        "remember" => 18,
+        "get_raw_memory" => 19,
+        "list_raw_memories" => 20,
+        "get_raw_memory_overview" => 21,
+        "update_raw_memory" => 22,
+        "forget_raw_memory" => 23,
         _ => usize::MAX,
     }
 }
@@ -2869,6 +2977,84 @@ fn error_result(context: &RequestContext<RoleServer>, error: ToolErrorBody) -> C
         })
         .expect("ToolEnvelope is serializable"),
     )
+}
+
+/// Isolated MCP shaping seam for the v3 explicit-memory facade. The semantic
+/// facade agent may replace this with protocol-neutral raw DTOs; until then,
+/// keep the public raw namespace explicit and never expose it as a card,
+/// evidence reference, or MemoryPack.
+fn raw_tool_data(tool: &str, mut data: Value, _details: bool, expose_sources: bool) -> Value {
+    if tool == "get_raw_memory_overview"
+        && let Some(entries) = data.get_mut("entries").and_then(Value::as_array_mut)
+    {
+        for entry in entries {
+            if let Some(uri) = entry.get("resource_uri").and_then(Value::as_str) {
+                *entry.get_mut("resource_uri").expect("resource_uri exists") =
+                    Value::String(uri.replace("vault://memory/", "vault://raw-memory/"));
+            }
+        }
+    }
+    if let Some(object) = data.as_object_mut() {
+        object.insert(
+            "representation".to_owned(),
+            Value::String("raw_explicit_memory".to_owned()),
+        );
+        object.insert(
+            "raw_ownership".to_owned(),
+            Value::String("explicit".to_owned()),
+        );
+        if tool == "list_raw_memories"
+            && let Some(items) = object.get_mut("memories").and_then(Value::as_array_mut)
+        {
+            for item in items {
+                if let Some(item) = item.as_object_mut() {
+                    item.insert(
+                        "representation".to_owned(),
+                        Value::String("raw_explicit_memory".to_owned()),
+                    );
+                    item.insert(
+                        "raw_ownership".to_owned(),
+                        Value::String("explicit".to_owned()),
+                    );
+                }
+            }
+        }
+        if !expose_sources {
+            object.remove("sources");
+            object.remove("source_bindings");
+            object.remove("directory_groups");
+            object.remove("generated_sections");
+            if let Some(entries) = object.get_mut("entries").and_then(Value::as_array_mut) {
+                for entry in entries {
+                    if let Some(entry) = entry.as_object_mut() {
+                        entry.remove("sources");
+                        entry.insert(
+                            "label".to_owned(),
+                            Value::String("raw explicit memory".to_owned()),
+                        );
+                    }
+                }
+            }
+            if let Some(items) = object.get_mut("memories").and_then(Value::as_array_mut) {
+                for item in items {
+                    if let Some(item) = item.as_object_mut() {
+                        item.remove("sources");
+                        item.remove("source_bindings");
+                    }
+                }
+            }
+            if let Some(memory) = object
+                .get_mut("explicit")
+                .and_then(Value::as_object_mut)
+                .and_then(|explicit| explicit.get_mut("memory"))
+                .and_then(Value::as_object_mut)
+            {
+                memory.remove("sources");
+                memory.remove("source_bindings");
+            }
+        }
+    }
+    data
 }
 
 fn bounded_limit(value: Option<u32>, default: u32) -> Result<u32, ToolErrorBody> {
@@ -3345,22 +3531,6 @@ fn note_retrieval_json(hit: &NoteRetrievalHit) -> Value {
     value
 }
 
-fn recall_json(result: mcp_vault_memory::RecallResult) -> Value {
-    let mut value = serde_json::to_value(result).unwrap_or_else(|_| json!({}));
-    if let Some(notes) = value.get_mut("related_notes").and_then(Value::as_array_mut) {
-        for note in notes {
-            let path = note
-                .get("path")
-                .and_then(Value::as_str)
-                .and_then(|path| VaultPath::parse(path).ok());
-            if let (Some(object), Some(path)) = (note.as_object_mut(), path) {
-                object.insert("resource_uri".to_owned(), json!(note_resource_uri(&path)));
-            }
-        }
-    }
-    value
-}
-
 async fn read_bounded(
     mut reader: ReadFile,
     max_bytes: u64,
@@ -3466,7 +3636,7 @@ mod tests {
 
     use super::{
         McpHandler, McpService, UpdateMemoryInput, bearer_token, mounted_slug,
-        oauth_metadata_router, router, stateful_router, vault_error,
+        oauth_metadata_router, raw_tool_data, router, stateful_router, vault_error,
     };
     use axum::{Router, body::Body, http::Request};
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -3475,13 +3645,15 @@ mod tests {
         AuthService, MasterKeyRing, OAuthIssuerInput, OAuthResourceServer, OriginPolicy,
         SecretString,
     };
-    use mcp_vault_core::{VaultCore, VaultError};
+    use mcp_vault_core::{VaultCore, VaultCoreRuntime, VaultError};
     use mcp_vault_domain::{
-        Actor, MemoryId, Revision, Scope, ScopeSet, VaultContext, VaultId, VaultPathPolicy,
-        VaultSlug,
+        Actor, MaintenanceGate, MaintenanceMode, MemoryId, Revision, Scope, ScopeSet, SourcePlane,
+        VaultContext, VaultId, VaultPath, VaultPathPolicy, VaultSlug, WritePrecondition,
     };
     use mcp_vault_indexer::IndexService;
-    use mcp_vault_memory::{MemoryOrigin, MemoryService, MemoryType, RememberInput};
+    use mcp_vault_memory::{
+        MemoryOrigin, MemoryService, MemoryType, RememberInput, SemanticMemoryService,
+    };
     use mcp_vault_state::{StateStore, VaultStatus};
     use mcp_vault_storage_fs::{StorageError, StorageOptions};
     use rand::rngs::OsRng;
@@ -3491,7 +3663,7 @@ mod tests {
         signature::{SignatureEncoding, Signer},
         traits::PublicKeyParts,
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use tempfile::tempdir;
     use tower::ServiceExt;
@@ -3509,7 +3681,7 @@ mod tests {
     }
 
     #[test]
-    fn update_memory_json_distinguishes_omitted_set_and_clear_fields() {
+    fn update_raw_memory_json_distinguishes_omitted_set_and_clear_fields() {
         let omitted: UpdateMemoryInput = serde_json::from_value(json!({
             "id": MemoryId::new().to_string(),
             "expected_revision": 1
@@ -3545,95 +3717,16 @@ mod tests {
     #[tokio::test]
     async fn default_recall_sources_read_directly_and_details_are_opt_in() {
         let (router, token, _root) = configured_memory_router().await;
-        let created = call_tool_json(&router, &token, 101, "create_note", json!({"path":"notes/amber.md","content":"# Amber\n\nAmber rollout requires approval."})).await;
-        assert_tool_ok(&created, "create_note");
-        let saved = call_tool_json(&router, &token, 102, "remember", json!({"content":"Amber rollout requires approval.","source_note":{"path":"notes/amber.md","revision":1}})).await;
-        assert_tool_ok(&saved, "remember");
-        let recalled = call_tool_json(
-            &router,
-            &token,
-            103,
-            "recall",
-            json!({"query":"Amber rollout approval","max_related_notes":0}),
-        )
-        .await;
-        assert_tool_ok(&recalled, "recall");
-        let data = &recalled["result"]["structuredContent"]["data"];
-        let item = &data["memories"][0];
-        assert_eq!(item["sources"][0]["path"], "notes/amber.md");
-        assert!(item.get("canonical_path").is_none());
-        assert!(data.get("retrieval_profile_hash").is_none());
-        let read = call_tool_json(
-            &router,
-            &token,
-            104,
-            "read_note",
-            json!({"path":item["sources"][0]["path"]}),
-        )
-        .await;
-        assert_tool_ok(&read, "read_note");
-        assert!(
-            read["result"]["structuredContent"]["data"]["content"]
-                .as_str()
-                .unwrap()
-                .contains("requires approval")
-        );
-        let full =
-            call_tool_json(&router, &token, 105, "get_memory", json!({"id":item["id"]})).await;
-        assert_tool_ok(&full, "get_memory");
-        assert_ne!(
-            full["result"]["structuredContent"]["data"]["canonical_path"],
-            item["sources"][0]["path"]
-        );
-        let hidden = call_tool_json(
-            &router,
-            &token,
-            106,
-            "recall",
-            json!({"query":"Amber rollout approval","include_sources":false,"max_related_notes":0}),
-        )
-        .await;
-        assert!(
-            hidden["result"]["structuredContent"]["data"]["memories"][0]["sources"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
-        let detailed = call_tool_json(
-            &router,
-            &token,
-            107,
-            "recall",
-            json!({"query":"Amber rollout approval","include_details":true,"max_related_notes":0}),
-        )
-        .await;
-        assert!(
-            detailed["result"]["structuredContent"]["data"]
-                .get("retrieval_profile_hash")
-                .is_some()
-        );
-        assert!(
-            serde_json::to_vec(data).unwrap().len()
-                < serde_json::to_vec(&detailed["result"]["structuredContent"]["data"])
-                    .unwrap()
-                    .len()
-        );
-        println!(
-            "recall payload bytes: compact={} detailed={}",
-            serde_json::to_vec(data).unwrap().len(),
-            serde_json::to_vec(&detailed["result"]["structuredContent"]["data"])
-                .unwrap()
-                .len()
-        );
-        let listed = call_tool_json(&router, &token, 108, "list_memories", json!({})).await;
-        assert_eq!(
-            listed["result"]["structuredContent"]["data"]["memories"][0]["sources"][0]["path"],
-            "notes/amber.md"
-        );
-        let text: serde_json::Value =
-            serde_json::from_str(recalled["result"]["content"][0]["text"].as_str().unwrap())
-                .unwrap();
-        assert_eq!(text, recalled["result"]["structuredContent"]);
+        let response = router
+            .oneshot(tool_request(
+                &token,
+                103,
+                "recall",
+                json!({"query":"retired"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -3700,7 +3793,7 @@ mod tests {
     #[test]
     fn tool_metadata_is_model_facing_selection_and_result_guidance() {
         let tools = McpHandler::default().tool_router.list_all();
-        assert_eq!(tools.len(), 18);
+        assert_eq!(tools.len(), 24);
 
         let mut titles = BTreeSet::new();
         for tool in &tools {
@@ -3768,11 +3861,30 @@ mod tests {
                 "{} has no input properties",
                 tool.name
             );
-            assert!(
-                properties.contains_key("include_details"),
-                "{} must support detailed output",
-                tool.name
-            );
+            if !tool.name.starts_with("semantic_")
+                && !matches!(
+                    tool.name.as_ref(),
+                    "remember"
+                        | "build_memory_pack"
+                        | "get_memory_card"
+                        | "list_memory_cards"
+                        | "get_memory_evidence"
+                        | "correct_memory"
+                        | "forget_memory"
+                        | "get_processing_status"
+                        | "get_raw_memory"
+                        | "list_raw_memories"
+                        | "get_raw_memory_overview"
+                        | "update_raw_memory"
+                        | "forget_raw_memory"
+                )
+            {
+                assert!(
+                    properties.contains_key("include_details"),
+                    "{} must support detailed output",
+                    tool.name
+                );
+            }
             for (property, schema) in properties {
                 assert!(
                     schema
@@ -3795,22 +3907,47 @@ mod tests {
         };
         assert!(description("search_notes").contains("`data.results`"));
         assert!(description("search_notes").contains("degradation_reasons"));
-        assert!(description("recall").contains("proactively before answering"));
-        assert!(description("recall").contains("`data.memories`"));
-        assert!(description("recall").contains("`data.related_notes`"));
-        assert!(description("recall").contains("natural language"));
-        assert!(description("recall").contains("sources[].path"));
-        assert!(description("recall").contains("only when a source is expected but was omitted"));
-        assert!(description("recall").contains("do not repeatedly fetch details"));
-        assert!(description("update_memory").contains("verify ownership=explicit"));
-        assert!(
-            description("update_memory").contains("Note-derived memories cannot be updated here")
-        );
-        assert!(!description("recall").contains("evaluated embedding profile"));
-        assert!(description("remember").contains("`data.memory`"));
-        assert!(description("remember").contains("immediately available"));
+        assert!(description("build_memory_pack").contains("semantic MemoryPack"));
+        assert!(description("build_memory_pack").contains("`data`"));
+        assert!(description("get_memory_card").contains("`data.card`"));
+        assert!(description("get_memory_evidence").contains("`data.evidence`"));
+        assert!(description("update_raw_memory").contains("raw explicit memory"));
+        assert!(description("update_raw_memory").contains("expected_revision"));
+        assert!(description("forget_raw_memory").contains("`idempotency_key` is required"));
+        assert!(description("forget_raw_memory").contains("same key"));
+        assert!(description("forget_raw_memory").contains("different input conflicts"));
+        assert!(!description("build_memory_pack").contains("implementation"));
+        assert!(description("remember").contains("`data.explicit.memory`"));
+        assert!(description("remember").contains("idempotency_key"));
+        assert!(description("remember").contains("read access"));
         assert!(description("edit_note").contains("First call read_note"));
         assert!(description("edit_note").contains("replace_heading_section"));
+    }
+
+    #[test]
+    fn raw_overview_shaping_redacts_source_navigation_for_memory_only_callers() {
+        let shaped = raw_tool_data(
+            "get_raw_memory_overview",
+            json!({
+                "entries": [{
+                    "resource_uri": "vault://memory/raw-1",
+                    "label": "notes/private.md#Heading",
+                    "sources": [{"path": "notes/private.md"}]
+                }],
+                "generated_sections": [{"label": "notes/private.md", "description": "private"}],
+                "directory_groups": [{"path": "notes", "returned_units": 1}]
+            }),
+            false,
+            false,
+        );
+        assert_eq!(
+            shaped["entries"][0]["resource_uri"],
+            "vault://raw-memory/raw-1"
+        );
+        assert_eq!(shaped["entries"][0]["label"], "raw explicit memory");
+        assert!(shaped["entries"][0].get("sources").is_none());
+        assert!(shaped.get("generated_sections").is_none());
+        assert!(shaped.get("directory_groups").is_none());
     }
 
     #[test]
@@ -3918,6 +4055,61 @@ mod tests {
         configured_router_with_scopes(scopes).await
     }
 
+    async fn configured_memory_router_with_memory_only_pair() -> (
+        axum::Router,
+        String,
+        axum::Router,
+        String,
+        tempfile::TempDir,
+    ) {
+        let root = tempdir().unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("work").unwrap(),
+            PathBuf::from(root.path()),
+            Revision::new(1),
+        )
+        .unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Work", VaultStatus::Active)
+            .await
+            .unwrap();
+        let auth = AuthService::new(
+            state.auth(),
+            MasterKeyRing::from_bytes(1, &[7_u8; 32]).unwrap(),
+        );
+        let full_scopes: ScopeSet = Scope::ALL.into_iter().collect();
+        let full_pat = auth
+            .issue_pat(&context, "full-agent", full_scopes, None)
+            .await
+            .unwrap();
+        let memory_only_scopes: ScopeSet = [Scope::MemoryRead].into_iter().collect();
+        let memory_only_pat = auth
+            .issue_pat(&context, "memory-only-agent", memory_only_scopes, None)
+            .await
+            .unwrap();
+        let service = McpService::new(
+            state,
+            auth,
+            root.path().join("history"),
+            StorageOptions::default(),
+            Default::default(),
+            vec!["localhost".to_owned()],
+            OriginPolicy::new(std::iter::empty::<&str>()).unwrap(),
+        );
+        (
+            mounted_service_router(service.clone()),
+            full_pat.token.expose_secret().to_owned(),
+            mounted_service_router(service),
+            memory_only_pat.token.expose_secret().to_owned(),
+            root,
+        )
+    }
+
     async fn configured_router_with_scopes(
         scopes: ScopeSet,
     ) -> (axum::Router, String, tempfile::TempDir) {
@@ -3980,7 +4172,7 @@ mod tests {
             .await
             .unwrap();
         let service = McpService::new(
-            state,
+            state.clone(),
             auth,
             root.path().join("history"),
             StorageOptions::default(),
@@ -3995,8 +4187,333 @@ mod tests {
         )
     }
 
-    async fn configured_indexed_router() -> (axum::Router, String, tempfile::TempDir) {
-        configured_indexed_router_with_scopes(full_scopes()).await
+    async fn configured_semantic_router() -> (
+        axum::Router,
+        String,
+        tempfile::TempDir,
+        mcp_vault_state::SemanticCardRecord,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) {
+        let full_scopes: ScopeSet = Scope::ALL.into_iter().collect();
+        let (
+            router,
+            token,
+            root,
+            card,
+            source_id,
+            source_revision_id,
+            evidence,
+            source_file_id,
+            source_file_revision,
+            _maintenance,
+        ) = configured_semantic_router_with_scopes(full_scopes).await;
+        (
+            router,
+            token,
+            root,
+            card,
+            source_id,
+            source_revision_id,
+            evidence,
+            source_file_id,
+            source_file_revision,
+        )
+    }
+
+    async fn configured_semantic_router_with_scopes(
+        scopes: ScopeSet,
+    ) -> (
+        axum::Router,
+        String,
+        tempfile::TempDir,
+        mcp_vault_state::SemanticCardRecord,
+        String,
+        String,
+        String,
+        String,
+        String,
+        MaintenanceGate,
+    ) {
+        let root = tempdir().unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("work").unwrap(),
+            PathBuf::from(root.path()),
+            Revision::new(1),
+        )
+        .unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Work", VaultStatus::Active)
+            .await
+            .unwrap();
+        state
+            .settings()
+            .set_vault(
+                &context,
+                "memory.units.policy",
+                &json!({"enabled":true,"request_timeout_seconds":300}),
+                WritePrecondition::Unconditional,
+                None,
+            )
+            .await
+            .unwrap();
+        let core = VaultCore::new(
+            state.clone(),
+            root.path().join("history"),
+            VaultPathPolicy::default(),
+            StorageOptions::default(),
+            Default::default(),
+        );
+        let path = VaultPath::parse("notes/semantic.md").unwrap();
+        core.create_bytes(
+            &context,
+            &path,
+            b"# Semantic\nThe semantic MCP path is sourced.\n",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+        let memory = SemanticMemoryService::new(state.clone());
+        let input = memory.prepare_source(&context, &core, &path).await.unwrap();
+        let body = input.blocks.last().unwrap();
+        let proposal = json!({"outcome":"success_nonempty","observations":[{"kind":"decision","statement":"The semantic MCP path is sourced.","scope":"project","assertion_status":"source_asserted","admission_reason":"http fixture","value_for_future_work":"retain","body_block_ids":[body.local_id.clone()]}],"cards":[{"title":"Semantic HTTP","kind":"decision","scope":"project","assertion_status":"source_asserted","observation_indices":[0]}]});
+        memory
+            .submit_proposal_json(&context, &core, &path, &proposal.to_string())
+            .await
+            .unwrap();
+        let card = state
+            .semantic_memory()
+            .list_cards(&context, 20)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let file = core.read(&context, &path).await.unwrap().file;
+        let source = state
+            .semantic_memory()
+            .get_source_by_file(&context, file.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let evidence = card.items[0].evidence_ref_ids[0].to_string();
+        let auth = AuthService::new(
+            state.auth(),
+            MasterKeyRing::from_bytes(1, &[13_u8; 32]).unwrap(),
+        );
+        let pat = auth
+            .issue_pat(&context, "semantic-http", scopes, None)
+            .await
+            .unwrap();
+        let token = pat.token.expose_secret().to_owned();
+        let maintenance = MaintenanceGate::new();
+        let core_runtime = VaultCoreRuntime::new(maintenance.clone());
+        let service = McpService::new(
+            state,
+            auth,
+            root.path().join("history"),
+            StorageOptions::default(),
+            core_runtime,
+            vec!["localhost".to_owned()],
+            OriginPolicy::new(std::iter::empty::<&str>()).unwrap(),
+        );
+        (
+            mounted_service_router(service),
+            token,
+            root,
+            card,
+            source.source_id.to_string(),
+            source.current_revision_id.unwrap().to_string(),
+            evidence,
+            file.id.to_string(),
+            file.current_revision.value().to_string(),
+            maintenance,
+        )
+    }
+
+    struct SemanticHttpFixture {
+        router: Router,
+        token: String,
+        _root: tempfile::TempDir,
+        slug: String,
+        card: mcp_vault_state::SemanticCardRecord,
+        source_id: String,
+        source_revision_id: String,
+        evidence_id: String,
+    }
+
+    async fn seed_semantic_vault(
+        state: &StateStore,
+        root: &tempfile::TempDir,
+        slug: &str,
+        name: &str,
+    ) -> (
+        VaultContext,
+        mcp_vault_state::SemanticCardRecord,
+        String,
+        String,
+        String,
+    ) {
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new(slug).unwrap(),
+            PathBuf::from(root.path()),
+            Revision::new(1),
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, name, VaultStatus::Active)
+            .await
+            .unwrap();
+        state
+            .settings()
+            .set_vault(
+                &context,
+                "memory.units.policy",
+                &json!({"enabled":true,"request_timeout_seconds":300}),
+                WritePrecondition::Unconditional,
+                None,
+            )
+            .await
+            .unwrap();
+        let core = VaultCore::new(
+            state.clone(),
+            root.path().join("history"),
+            VaultPathPolicy::default(),
+            StorageOptions::default(),
+            Default::default(),
+        );
+        let path = VaultPath::parse("notes/semantic.md").unwrap();
+        core.create_bytes(
+            &context,
+            &path,
+            format!("# Semantic {name}\nThe semantic MCP path is sourced.\n").as_bytes(),
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+        let memory = SemanticMemoryService::new(state.clone());
+        let input = memory.prepare_source(&context, &core, &path).await.unwrap();
+        let body = input.blocks.last().unwrap();
+        let proposal = json!({
+            "outcome":"success_nonempty",
+            "observations":[{"kind":"decision","statement":"The semantic MCP path is sourced.","scope":"project","assertion_status":"source_asserted","admission_reason":"dual-vault fixture","value_for_future_work":"retain","body_block_ids":[body.local_id.clone()]}],
+            "cards":[{"title":format!("Semantic HTTP {name}"),"kind":"decision","scope":"project","assertion_status":"source_asserted","observation_indices":[0]}]
+        });
+        memory
+            .submit_proposal_json(&context, &core, &path, &proposal.to_string())
+            .await
+            .unwrap();
+        let card = state
+            .semantic_memory()
+            .list_cards(&context, 20)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let file = core.read(&context, &path).await.unwrap().file;
+        let source = state
+            .semantic_memory()
+            .get_source_by_file(&context, file.id)
+            .await
+            .unwrap()
+            .unwrap();
+        (
+            context,
+            card.clone(),
+            source.source_id.to_string(),
+            source.current_revision_id.unwrap().to_string(),
+            card.items[0].evidence_ref_ids[0].to_string(),
+        )
+    }
+
+    async fn configured_semantic_dual_vault_routers() -> (SemanticHttpFixture, SemanticHttpFixture)
+    {
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let root_a = tempdir().unwrap();
+        let root_b = tempdir().unwrap();
+        let (context_a, card_a, source_a, revision_a, evidence_a) =
+            seed_semantic_vault(&state, &root_a, "alpha", "Alpha").await;
+        let (context_b, card_b, source_b, revision_b, evidence_b) =
+            seed_semantic_vault(&state, &root_b, "bravo", "Bravo").await;
+        let auth = AuthService::new(
+            state.auth(),
+            MasterKeyRing::from_bytes(1, &[17_u8; 32]).unwrap(),
+        );
+        let scopes: ScopeSet = Scope::ALL.into_iter().collect();
+        let pat_a = auth
+            .issue_pat(&context_a, "alpha-agent", scopes.clone(), None)
+            .await
+            .unwrap();
+        let pat_b = auth
+            .issue_pat(&context_b, "bravo-agent", scopes, None)
+            .await
+            .unwrap();
+        let service_a = McpService::new(
+            state.clone(),
+            auth.clone(),
+            root_a.path().join("history"),
+            StorageOptions::default(),
+            Default::default(),
+            vec!["localhost".to_owned()],
+            OriginPolicy::new(std::iter::empty::<&str>()).unwrap(),
+        );
+        let service_b = McpService::new(
+            state,
+            auth,
+            root_b.path().join("history"),
+            StorageOptions::default(),
+            Default::default(),
+            vec!["localhost".to_owned()],
+            OriginPolicy::new(std::iter::empty::<&str>()).unwrap(),
+        );
+        (
+            SemanticHttpFixture {
+                router: mounted_service_router(service_a),
+                token: pat_a.token.expose_secret().to_owned(),
+                _root: root_a,
+                slug: "alpha".to_owned(),
+                card: card_a,
+                source_id: source_a,
+                source_revision_id: revision_a,
+                evidence_id: evidence_a,
+            },
+            SemanticHttpFixture {
+                router: mounted_service_router(service_b),
+                token: pat_b.token.expose_secret().to_owned(),
+                _root: root_b,
+                slug: "bravo".to_owned(),
+                card: card_b,
+                source_id: source_b,
+                source_revision_id: revision_b,
+                evidence_id: evidence_b,
+            },
+        )
+    }
+
+    async fn configured_indexed_router() -> (
+        axum::Router,
+        String,
+        tempfile::TempDir,
+        StateStore,
+        VaultCore,
+        VaultContext,
+    ) {
+        configured_indexed_router_fixture_with_scopes(full_scopes()).await
     }
 
     async fn configured_indexed_memory_router() -> (axum::Router, String, tempfile::TempDir) {
@@ -4009,6 +4526,21 @@ mod tests {
     async fn configured_indexed_router_with_scopes(
         scopes: ScopeSet,
     ) -> (axum::Router, String, tempfile::TempDir) {
+        let (router, token, root, _, _, _) =
+            configured_indexed_router_fixture_with_scopes(scopes).await;
+        (router, token, root)
+    }
+
+    async fn configured_indexed_router_fixture_with_scopes(
+        scopes: ScopeSet,
+    ) -> (
+        axum::Router,
+        String,
+        tempfile::TempDir,
+        StateStore,
+        VaultCore,
+        VaultContext,
+    ) {
         let root = tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("notes")).unwrap();
         std::fs::write(
@@ -4052,7 +4584,7 @@ mod tests {
             .await
             .unwrap();
         let service = McpService::new(
-            state,
+            state.clone(),
             auth,
             root.path().join("history"),
             StorageOptions::default(),
@@ -4064,6 +4596,9 @@ mod tests {
             mounted_service_router(service),
             pat.token.expose_secret().to_owned(),
             root,
+            state,
+            core,
+            context,
         )
     }
 
@@ -4227,6 +4762,785 @@ mod tests {
                 r#"{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
             ))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn semantic_v1_tools_round_trip_through_real_http_harness() {
+        let (
+            router,
+            token,
+            _root,
+            card,
+            source_id,
+            source_revision_id,
+            evidence_id,
+            source_file_id,
+            source_file_revision,
+        ) = configured_semantic_router().await;
+        let tools = router
+            .clone()
+            .oneshot(list_tools_request(&token))
+            .await
+            .unwrap();
+        let tools: serde_json::Value =
+            serde_json::from_slice(&tools.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let names = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        for name in [
+            "remember",
+            "build_memory_pack",
+            "get_memory_card",
+            "list_memory_cards",
+            "get_memory_evidence",
+            "correct_memory",
+            "forget_memory",
+            "get_processing_status",
+        ] {
+            assert!(names.contains(&name), "missing {name}: {names:?}");
+        }
+        let explicit_tool = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "remember")
+            .unwrap();
+        assert_eq!(
+            explicit_tool["inputSchema"]["required"],
+            json!(["content", "idempotency_key"])
+        );
+        assert_eq!(explicit_tool["inputSchema"]["additionalProperties"], false);
+        let source_schema = &explicit_tool["inputSchema"]["$defs"]["SemanticExplicitSourceRequest"];
+        assert_eq!(
+            source_schema["required"],
+            json!(["path", "file_id", "revision"])
+        );
+        assert_eq!(source_schema["additionalProperties"], false);
+        let explicit = call_tool_json(
+            &router,
+            &token,
+            899,
+            "remember",
+            json!({"content":"An explicit v1 assertion.","idempotency_key":"semantic-explicit-v1"}),
+        )
+        .await;
+        assert_tool_ok(&explicit, "remember");
+        assert_eq!(
+            explicit["result"]["structuredContent"]["data"]["explicit"]["memory"]["ownership"],
+            "explicit"
+        );
+        assert_eq!(
+            explicit["result"]["structuredContent"]["data"]["explicit"]["memory"]["embedding_binding_present"],
+            false
+        );
+        let sourced_explicit = call_tool_json(
+            &router,
+            &token,
+            8991,
+            "remember",
+            json!({
+                "content":"An explicit v1 sourced assertion.",
+                "idempotency_key":"semantic-explicit-sourced-v1",
+                "sources":[{"path":"notes/semantic.md","file_id":source_file_id,"revision":source_file_revision.parse::<u64>().unwrap()}]
+            }),
+        )
+        .await;
+        assert_tool_ok(&sourced_explicit, "remember");
+        let listed = call_tool_json(
+            &router,
+            &token,
+            900,
+            "list_memory_cards",
+            json!({"limit":20}),
+        )
+        .await;
+        assert_tool_ok(&listed, "list_memory_cards");
+        assert_eq!(
+            listed["result"]["structuredContent"]["data"]["cards"][0]["card_id"],
+            card.id.to_string()
+        );
+        let got = call_tool_json(
+            &router,
+            &token,
+            901,
+            "get_memory_card",
+            json!({"card_id":card.id.to_string()}),
+        )
+        .await;
+        assert_tool_ok(&got, "get_memory_card");
+        let evidence = call_tool_json(
+            &router,
+            &token,
+            902,
+            "get_memory_evidence",
+            json!({"evidence_ref_id":evidence_id,"source_id":source_id,"source_revision_id":source_revision_id}),
+        )
+        .await;
+        assert_tool_ok(&evidence, "get_memory_evidence");
+        assert!(
+            evidence["result"]["structuredContent"]["data"]["evidence"]["body_spans"][0]["end_byte"]
+                .as_u64()
+                .unwrap() > 0
+        );
+        let pack = call_tool_json(
+            &router,
+            &token,
+            903,
+            "build_memory_pack",
+            json!({"task":"semantic MCP"}),
+        )
+        .await;
+        assert_tool_ok(&pack, "build_memory_pack");
+        let status = call_tool_json(
+            &router,
+            &token,
+            904,
+            "get_processing_status",
+            json!({"limit":20}),
+        )
+        .await;
+        assert_tool_ok(&status, "get_processing_status");
+        assert!(
+            status["result"]["structuredContent"]["data"]
+                .get("organization_jobs")
+                .is_some()
+        );
+        let unknown = call_tool_json(
+            &router,
+            &token,
+            905,
+            "build_memory_pack",
+            json!({"task":"x","unknown":true}),
+        )
+        .await;
+        assert!(unknown["result"]["isError"].as_bool().unwrap_or(false));
+        let unknown_explicit = call_tool_json(
+            &router,
+            &token,
+            907,
+            "remember",
+            json!({"content":"x","actor":"caller-controlled","idempotency_key":"unknown-explicit"}),
+        )
+        .await;
+        assert!(
+            unknown_explicit["result"]["isError"]
+                .as_bool()
+                .unwrap_or(false)
+        );
+        let missing_explicit_key = call_tool_json(
+            &router,
+            &token,
+            908,
+            "remember",
+            json!({"content":"missing key"}),
+        )
+        .await;
+        assert!(
+            missing_explicit_key["result"]["isError"]
+                .as_bool()
+                .unwrap_or(false)
+        );
+        let empty_explicit_key = call_tool_json(
+            &router,
+            &token,
+            909,
+            "remember",
+            json!({"content":"empty key","idempotency_key":"  "}),
+        )
+        .await;
+        assert!(
+            empty_explicit_key["result"]["isError"]
+                .as_bool()
+                .unwrap_or(false)
+        );
+        let cross = call_tool_json(
+            &router,
+            &token,
+            906,
+            "get_memory_card",
+            json!({"card_id":mcp_vault_domain::MemoryCardId::new().to_string()}),
+        )
+        .await;
+        assert!(cross["result"]["isError"].as_bool().unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn semantic_v1_http_scope_filtered_tools_match_call_permissions() {
+        let read_tools = [
+            "build_memory_pack",
+            "get_memory_card",
+            "list_memory_cards",
+            "get_memory_evidence",
+            "get_processing_status",
+        ];
+        let mutation_tools = ["correct_memory", "forget_raw_memory"];
+        let cases = [
+            (
+                ScopeSet::from_iter(Scope::ALL),
+                true,
+                true,
+                read_tools.as_slice(),
+                "full",
+            ),
+            (
+                ScopeSet::from_iter([Scope::MemoryRead]),
+                false,
+                false,
+                &[][..],
+                "memory-only",
+            ),
+            (
+                ScopeSet::from_iter([Scope::MemoryRead, Scope::VaultRead]),
+                true,
+                false,
+                read_tools.as_slice(),
+                "read-only",
+            ),
+            (
+                ScopeSet::from_iter([Scope::MemoryWrite]),
+                false,
+                false,
+                &[][..],
+                "write-only",
+            ),
+            (
+                ScopeSet::from_iter([Scope::MemoryManage]),
+                false,
+                true,
+                &[][..],
+                "manage-only",
+            ),
+        ];
+        for (scopes, can_read, can_manage, expected_reads, label) in cases {
+            let can_write = scopes.contains(Scope::MemoryWrite);
+            let (
+                router,
+                token,
+                _root,
+                card,
+                source_id,
+                _source_revision,
+                _evidence,
+                _source_file_id,
+                _source_file_revision,
+                _maintenance,
+            ) = configured_semantic_router_with_scopes(scopes).await;
+            let listed = router
+                .clone()
+                .oneshot(list_tools_request(&token))
+                .await
+                .unwrap();
+            let listed: serde_json::Value =
+                serde_json::from_slice(&listed.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            let names = listed["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            for name in expected_reads {
+                assert!(names.contains(name), "{label} missing {name}: {names:?}");
+            }
+            for name in read_tools {
+                assert_eq!(names.contains(&name), can_read, "{label}: {name}");
+            }
+            for name in mutation_tools {
+                assert_eq!(names.contains(&name), can_manage, "{label}: {name}");
+            }
+            assert_eq!(names.contains(&"remember"), can_write, "{label}: remember");
+
+            let card_call = call_tool_json(
+                &router,
+                &token,
+                920,
+                "get_memory_card",
+                json!({"card_id":card.id.to_string()}),
+            )
+            .await;
+            assert_eq!(
+                card_call["result"]["structuredContent"]["error"]["code"],
+                if can_read {
+                    Value::Null
+                } else {
+                    json!("permission_denied")
+                },
+                "{label}: {card_call}"
+            );
+            if can_read {
+                assert_tool_ok(&card_call, "get_memory_card");
+            }
+
+            let correction = call_tool_json(
+                &router,
+                &token,
+                921,
+                "correct_memory",
+                json!({
+                    "target_ref":format!("card:{}", card.id),
+                    "mutation":"correction",
+                    "payload":{"replace":"The semantic MCP path is sourced after review.","remove":"The semantic MCP path is sourced."},
+                    "expected_parent_revision":card.revision_number,
+                    "expected_rules_revision":0,
+                    "idempotency_key":format!("scope-{label}")
+                }),
+            )
+            .await;
+            assert_eq!(
+                correction["result"]["structuredContent"]["error"]["code"],
+                if can_manage {
+                    Value::Null
+                } else {
+                    json!("permission_denied")
+                },
+                "{label}: {correction}"
+            );
+            if can_manage {
+                assert_tool_ok(&correction, "correct_memory");
+            }
+            let explicit = call_tool_json(
+                &router,
+                &token,
+                922,
+                "remember",
+                json!({
+                    "content":"scope filtered explicit memory",
+                    "idempotency_key":format!("scope-explicit-{label}")
+                }),
+            )
+            .await;
+            assert_eq!(
+                explicit["result"]["structuredContent"]["error"]["code"],
+                if can_write {
+                    Value::Null
+                } else {
+                    json!("permission_denied")
+                },
+                "{label}: {explicit}"
+            );
+            if can_write {
+                assert_tool_ok(&explicit, "remember");
+                if !can_read {
+                    let source_denied = call_tool_json(
+                        &router,
+                        &token,
+                        923,
+                        "remember",
+                        json!({
+                            "content":"must not probe source",
+                            "idempotency_key":format!("scope-source-{label}"),
+                            "sources":[{"path":"notes/semantic.md","file_id":source_id,"revision":1}]
+                        }),
+                    )
+                    .await;
+                    assert_eq!(
+                        source_denied["result"]["structuredContent"]["error"]["code"],
+                        "permission_denied",
+                        "{label}: {source_denied}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn semantic_v1_http_mutations_are_revision_safe_idempotent_and_source_preserving() {
+        let (
+            router,
+            token,
+            _root,
+            card,
+            _source_id,
+            _revision,
+            _evidence,
+            _source_file_id,
+            _source_file_revision,
+            _maintenance,
+        ) = configured_semantic_router_with_scopes(ScopeSet::from_iter(Scope::ALL)).await;
+        let correction_args = json!({
+            "target_ref":format!("card:{}", card.id),
+            "mutation":"correction",
+            "payload":{"replace":"The semantic MCP path is sourced after review.","remove":"The semantic MCP path is sourced."},
+            "expected_parent_revision":card.revision_number,
+            "expected_rules_revision":0,
+            "idempotency_key":"http-correction-once"
+        });
+        let first = call_tool_json(
+            &router,
+            &token,
+            930,
+            "correct_memory",
+            correction_args.clone(),
+        )
+        .await;
+        assert_tool_ok(&first, "correct_memory");
+        let replay = call_tool_json(&router, &token, 931, "correct_memory", correction_args).await;
+        assert_tool_ok(&replay, "correct_memory");
+        assert_eq!(
+            first["result"]["structuredContent"]["data"]["id"],
+            replay["result"]["structuredContent"]["data"]["id"]
+        );
+
+        let stale_parent = call_tool_json(
+            &router,
+            &token,
+            932,
+            "correct_memory",
+            json!({
+                "target_ref":format!("card:{}", card.id),
+                "mutation":"correction",
+                "payload":{"replace":"The semantic MCP path is sourced after another review.","remove":"The semantic MCP path is sourced."},
+                "expected_parent_revision":card.revision_number + 1,
+                "expected_rules_revision":1,
+                "idempotency_key":"http-correction-stale-parent"
+            }),
+        )
+        .await;
+        assert_eq!(
+            stale_parent["result"]["structuredContent"]["error"]["code"],
+            "memory_conflict"
+        );
+        let stale_rules = call_tool_json(
+            &router,
+            &token,
+            933,
+            "correct_memory",
+            json!({
+                "target_ref":format!("card:{}", card.id),
+                "mutation":"correction",
+                "payload":{"replace":"The semantic MCP path is sourced after a stale rules read.","remove":"The semantic MCP path is sourced."},
+                "expected_parent_revision":card.revision_number,
+                "expected_rules_revision":0,
+                "idempotency_key":"http-correction-stale-rules"
+            }),
+        )
+        .await;
+        assert_eq!(
+            stale_rules["result"]["structuredContent"]["error"]["code"],
+            "memory_conflict"
+        );
+
+        let forgotten = call_tool_json(
+            &router,
+            &token,
+            934,
+            "forget_memory",
+            json!({
+                "target_ref":format!("card:{}", card.id),
+                "mutation":"forget_current",
+                "payload":{"reason":"http forget"},
+                "expected_parent_revision":card.revision_number,
+                "expected_rules_revision":1,
+                "idempotency_key":"http-forget-once"
+            }),
+        )
+        .await;
+        assert_tool_ok(&forgotten, "forget_memory");
+        let source = call_tool_json(
+            &router,
+            &token,
+            935,
+            "read_note",
+            json!({"path":"notes/semantic.md"}),
+        )
+        .await;
+        assert_tool_ok(&source, "read_note");
+        assert!(
+            source["result"]["structuredContent"]["data"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("semantic MCP path is sourced")
+        );
+        let hidden = call_tool_json(
+            &router,
+            &token,
+            936,
+            "get_memory_card",
+            json!({"card_id":card.id.to_string()}),
+        )
+        .await;
+        assert_eq!(
+            hidden["result"]["structuredContent"]["error"]["code"],
+            "not_found"
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_v1_http_read_only_maintenance_rejects_mutations_without_state_change() {
+        let (
+            router,
+            token,
+            _root,
+            card,
+            _source_id,
+            _revision,
+            _evidence,
+            _source_file_id,
+            _source_file_revision,
+            maintenance,
+        ) = configured_semantic_router_with_scopes(ScopeSet::from_iter(Scope::ALL)).await;
+        maintenance.set(MaintenanceMode::ReadOnly);
+        for (id, tool, mutation, key) in [
+            (940, "correct_memory", "correction", "maintenance-correct"),
+            (941, "forget_memory", "forget_current", "maintenance-forget"),
+        ] {
+            let body = call_tool_json(
+                &router,
+                &token,
+                id,
+                tool,
+                json!({
+                    "target_ref":format!("card:{}", card.id),
+                    "mutation":mutation,
+                    "payload":{"reason":"must not apply"},
+                    "expected_parent_revision":card.revision_number,
+                    "expected_rules_revision":0,
+                    "idempotency_key":key
+                }),
+            )
+            .await;
+            assert_eq!(
+                body["result"]["structuredContent"]["error"]["code"],
+                "maintenance"
+            );
+        }
+        let explicit = call_tool_json(
+            &router,
+            &token,
+            944,
+            "remember",
+            json!({"content":"must not save","idempotency_key":"maintenance-explicit"}),
+        )
+        .await;
+        assert_eq!(
+            explicit["result"]["structuredContent"]["error"]["code"],
+            "maintenance"
+        );
+        let read = call_tool_json(
+            &router,
+            &token,
+            942,
+            "read_note",
+            json!({"path":"notes/semantic.md"}),
+        )
+        .await;
+        assert_tool_ok(&read, "read_note");
+        let listed = call_tool_json(
+            &router,
+            &token,
+            943,
+            "list_memory_cards",
+            json!({"limit":20}),
+        )
+        .await;
+        assert_tool_ok(&listed, "list_memory_cards");
+        assert_eq!(
+            listed["result"]["structuredContent"]["data"]["cards"][0]["card_id"],
+            card.id.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_v1_http_schema_limits_and_no_answer_are_fail_closed() {
+        let (
+            router,
+            token,
+            _root,
+            _card,
+            _source_id,
+            _revision,
+            _evidence,
+            _source_file_id,
+            _source_file_revision,
+            _maintenance,
+        ) = configured_semantic_router_with_scopes(ScopeSet::from_iter(Scope::ALL)).await;
+        let tools = router
+            .clone()
+            .oneshot(list_tools_request(&token))
+            .await
+            .unwrap();
+        let tools: serde_json::Value =
+            serde_json::from_slice(&tools.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        for name in [
+            "list_memory_cards",
+            "get_processing_status",
+            "get_memory_evidence",
+        ] {
+            let tool = tools["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap();
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false, "{name}");
+        }
+        for name in ["list_memory_cards", "get_processing_status"] {
+            let limit = &tools["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap()["inputSchema"]["properties"]["limit"];
+            assert_eq!(limit["minimum"], 1, "{name} minimum");
+            assert_eq!(limit["maximum"], 200, "{name} maximum");
+        }
+        let card_tool = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "get_memory_card")
+            .unwrap();
+        assert_eq!(
+            card_tool["inputSchema"]["$defs"]["SemanticCardKind"]["enum"],
+            json!(["card", "composed_card"])
+        );
+        let overview_tool = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "get_raw_memory_overview")
+            .unwrap();
+        assert_eq!(
+            overview_tool["inputSchema"]["properties"]["limit"]["minimum"],
+            1
+        );
+        assert_eq!(
+            overview_tool["inputSchema"]["properties"]["limit"]["maximum"],
+            100
+        );
+        assert_eq!(
+            overview_tool["inputSchema"]["properties"]["max_tokens"]["minimum"],
+            256
+        );
+        assert_eq!(
+            overview_tool["inputSchema"]["properties"]["max_tokens"]["maximum"],
+            32000
+        );
+
+        for (id, name, arguments) in [
+            (950, "get_processing_status", json!({"limit":0})),
+            (951, "get_processing_status", json!({"limit":201})),
+            (952, "list_memory_cards", json!({"limit":201})),
+            (956, "get_raw_memory_overview", json!({"limit":101})),
+            (957, "get_raw_memory_overview", json!({"max_tokens":255})),
+        ] {
+            let body = call_tool_json(&router, &token, id, name, arguments).await;
+            assert_eq!(
+                body["result"]["structuredContent"]["error"]["code"], "invalid_argument",
+                "{name}: {body}"
+            );
+        }
+        let unknown = call_tool_json(
+            &router,
+            &token,
+            953,
+            "list_memory_cards",
+            json!({"include_details":true}),
+        )
+        .await;
+        assert!(unknown["result"]["isError"].as_bool().unwrap_or(false));
+        assert!(
+            unknown["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("unknown field")
+        );
+        let invalid_kind = call_tool_json(
+            &router,
+            &token,
+            955,
+            "get_memory_card",
+            json!({"card_id":_card.id.to_string(),"card_kind":"bogus"}),
+        )
+        .await;
+        assert_eq!(
+            invalid_kind["result"]["structuredContent"]["error"]["code"],
+            "invalid_argument"
+        );
+        let no_answer = call_tool_json(
+            &router,
+            &token,
+            954,
+            "build_memory_pack",
+            json!({"task":"violet submarine"}),
+        )
+        .await;
+        assert_tool_ok(&no_answer, "build_memory_pack");
+        assert!(
+            !no_answer["result"]["structuredContent"]["data"]["evidence_gaps"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_v1_http_foreign_vault_card_and_evidence_ids_are_not_visible() {
+        let (alpha, bravo) = configured_semantic_dual_vault_routers().await;
+        assert_ne!(alpha.card.id, bravo.card.id);
+        let foreign_card_call = call_tool_json_at(
+            &alpha.router,
+            &alpha.slug,
+            &alpha.token,
+            960,
+            "get_memory_card",
+            json!({"card_id":bravo.card.id.to_string()}),
+        )
+        .await;
+        assert_eq!(
+            foreign_card_call["result"]["structuredContent"]["error"]["code"],
+            "not_found"
+        );
+        let foreign_evidence_call = call_tool_json_at(
+            &alpha.router,
+            &alpha.slug,
+            &alpha.token,
+            961,
+            "get_memory_evidence",
+            json!({
+                "evidence_ref_id":bravo.evidence_id,
+                "source_id":bravo.source_id,
+                "source_revision_id":bravo.source_revision_id
+            }),
+        )
+        .await;
+        assert_eq!(
+            foreign_evidence_call["result"]["structuredContent"]["error"]["code"],
+            "not_found"
+        );
+        let reverse_card_call = call_tool_json_at(
+            &bravo.router,
+            &bravo.slug,
+            &bravo.token,
+            962,
+            "get_memory_card",
+            json!({"card_id":alpha.card.id.to_string()}),
+        )
+        .await;
+        assert_eq!(
+            reverse_card_call["result"]["structuredContent"]["error"]["code"],
+            "not_found"
+        );
+        let reverse_evidence_call = call_tool_json_at(
+            &bravo.router,
+            &bravo.slug,
+            &bravo.token,
+            963,
+            "get_memory_evidence",
+            json!({
+                "evidence_ref_id":alpha.evidence_id,
+                "source_id":alpha.source_id,
+                "source_revision_id":alpha.source_revision_id
+            }),
+        )
+        .await;
+        assert_eq!(
+            reverse_evidence_call["result"]["structuredContent"]["error"]["code"],
+            "not_found"
+        );
     }
 
     #[tokio::test]
@@ -4595,9 +5909,13 @@ mod tests {
                 "recent_changes",
                 "search_notes",
                 "read_note",
-                "recall",
-                "get_memory",
-                "list_memories",
+                "build_memory_pack",
+                "get_memory_card",
+                "list_memory_cards",
+                "get_memory_evidence",
+                "correct_memory",
+                "forget_memory",
+                "get_processing_status",
                 "create_note",
                 "edit_note",
                 "move_note",
@@ -4605,9 +5923,11 @@ mod tests {
                 "note_history",
                 "restore_note_revision",
                 "remember",
-                "update_memory",
-                "forget_memory",
-                "get_memory_overview",
+                "get_raw_memory",
+                "list_raw_memories",
+                "get_raw_memory_overview",
+                "update_raw_memory",
+                "forget_raw_memory",
             ]
         );
 
@@ -4635,12 +5955,8 @@ mod tests {
                 json!({"query": "OAuth", "mode": "lexical"}),
             ),
             (15, "read_note", json!({"path": "notes/oauth-created.md"})),
-            (
-                16,
-                "recall",
-                json!({"query": "OAuth", "max_results": 5, "max_tokens": 500}),
-            ),
-            (17, "list_memories", json!({})),
+            (16, "build_memory_pack", json!({"task": "OAuth"})),
+            (17, "list_raw_memories", json!({})),
         ] {
             let body = call_tool_json(&router, access_token, id, name, arguments).await;
             assert_tool_ok(&body, name);
@@ -4712,15 +6028,15 @@ mod tests {
         assert_tool_ok(&deleted, "delete_note");
         assert_eq!(mutation_revision(&deleted), 5);
 
-        let get_memory = call_tool_json(
+        let get_raw_memory = call_tool_json(
             &router,
             access_token,
             23,
-            "get_memory",
-            json!({"id": memory_id}),
+            "get_raw_memory",
+            json!({"memory_id": memory_id}),
         )
         .await;
-        assert_tool_ok(&get_memory, "get_memory");
+        assert_tool_ok(&get_raw_memory, "get_raw_memory");
 
         let remember = call_tool_json(
             &router,
@@ -4738,53 +6054,63 @@ mod tests {
         .await;
         assert_tool_ok(&remember, "remember");
         assert_eq!(
-            remember["result"]["structuredContent"]["data"]["outcome"],
+            remember["result"]["structuredContent"]["data"]["explicit"]["outcome"],
             "stored"
         );
 
-        let update_memory = call_tool_json(
+        let update_raw_memory = call_tool_json(
             &router,
             access_token,
             25,
-            "update_memory",
+            "update_raw_memory",
             json!({
-                "id": memory_id,
+                "memory_id": memory_id,
                 "expected_revision": 1,
-                "content": "OAuth memory operations remain available."
+                "patch": {"content": "OAuth memory operations remain available."}
             }),
         )
         .await;
-        assert_tool_ok(&update_memory, "update_memory");
+        assert_tool_ok(&update_raw_memory, "update_raw_memory");
         assert_eq!(
-            update_memory["result"]["structuredContent"]["data"]["revision"],
+            update_raw_memory["result"]["structuredContent"]["data"]["revision"],
             2
         );
 
-        let forget_memory = call_tool_json(
+        let forget_raw_memory = call_tool_json(
             &router,
             access_token,
             26,
-            "forget_memory",
-            json!({"id": memory_id, "expected_revision": 2}),
+            "forget_raw_memory",
+            json!({"memory_id": memory_id, "expected_revision": 2, "idempotency_key":"oauth-forget"}),
         )
         .await;
-        assert_tool_ok(&forget_memory, "forget_memory");
+        assert_tool_ok(&forget_raw_memory, "forget_raw_memory");
         assert_eq!(
-            forget_memory["result"]["structuredContent"]["data"]["deleted"],
+            forget_raw_memory["result"]["structuredContent"]["data"]["deleted"],
             true
         );
         assert_eq!(
-            forget_memory["result"]["structuredContent"]["data"]["ownership"],
+            forget_raw_memory["result"]["structuredContent"]["data"]["ownership"],
             "explicit"
         );
         assert_eq!(
-            forget_memory["result"]["structuredContent"]["data"]["source_extraction_paused"],
+            forget_raw_memory["result"]["structuredContent"]["data"]["source_extraction_paused"],
             false
         );
     }
 
     fn tool_request(
         token: &str,
+        id: u64,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Request<Body> {
+        tool_request_at(token, "work", id, name, arguments)
+    }
+
+    fn tool_request_at(
+        token: &str,
+        slug: &str,
         id: u64,
         name: &str,
         arguments: serde_json::Value,
@@ -4805,7 +6131,7 @@ mod tests {
         });
         Request::builder()
             .method("POST")
-            .uri("/mcp/v1/vaults/work")
+            .uri(format!("/mcp/v1/vaults/{slug}"))
             .header("host", "localhost")
             .header("authorization", format!("Bearer {token}"))
             .header("mcp-protocol-version", "2026-07-28")
@@ -4840,6 +6166,30 @@ mod tests {
         serde_json::from_slice(&body).unwrap()
     }
 
+    async fn call_tool_json_at(
+        router: &Router,
+        slug: &str,
+        token: &str,
+        id: u64,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        let response = router
+            .clone()
+            .oneshot(tool_request_at(token, slug, id, name, arguments))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "{name}: {}",
+            String::from_utf8_lossy(&body)
+        );
+        serde_json::from_slice(&body).unwrap()
+    }
+
     fn assert_tool_ok(body: &serde_json::Value, name: &str) {
         assert_eq!(body["result"]["isError"], false, "{name}: {body}");
         assert_eq!(
@@ -4855,9 +6205,13 @@ mod tests {
     }
 
     fn list_tools_request(token: &str) -> Request<Body> {
+        list_tools_request_at(token, "work")
+    }
+
+    fn list_tools_request_at(token: &str, slug: &str) -> Request<Body> {
         Request::builder()
             .method("POST")
-            .uri("/mcp/v1/vaults/work")
+            .uri(format!("/mcp/v1/vaults/{slug}"))
             .header("host", "localhost")
             .header("authorization", format!("Bearer {token}"))
             .header("mcp-protocol-version", "2026-07-28")
@@ -5138,7 +6492,7 @@ mod tests {
 
     #[tokio::test]
     async fn indexed_search_round_trips_through_public_mcp() {
-        let (router, token, _root) = configured_indexed_router().await;
+        let (router, token, _root, state, core, context) = configured_indexed_router().await;
         let moved = router
             .clone()
             .oneshot(tool_request(
@@ -5157,11 +6511,48 @@ mod tests {
         let moved: serde_json::Value = serde_json::from_slice(&moved).unwrap();
         assert_eq!(moved["result"]["isError"], false, "{moved}");
 
-        let response = router
+        let stale_response = router
             .clone()
             .oneshot(tool_request(
                 &token,
                 11,
+                "search_notes",
+                serde_json::json!({
+                    "query": "conflict",
+                    "mode": "lexical",
+                    "scope": {"tags": ["rust"]},
+                    "limit": 10
+                }),
+            ))
+            .await
+            .unwrap();
+        let stale_body = stale_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let stale_body: serde_json::Value = serde_json::from_slice(&stale_body).unwrap();
+        assert_eq!(stale_body["result"]["isError"], false, "{stale_body}");
+        assert_eq!(
+            stale_body["result"]["structuredContent"]["data"]["results"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0,
+            "a projection for the pre-move revision must not be treated as current"
+        );
+
+        IndexService::new(state)
+            .rebuild_vault(&core, &context)
+            .await
+            .unwrap();
+
+        let response = router
+            .clone()
+            .oneshot(tool_request(
+                &token,
+                12,
                 "search_notes",
                 serde_json::json!({
                     "query": "conflict",
@@ -5191,7 +6582,7 @@ mod tests {
         let read = router
             .oneshot(tool_request(
                 &token,
-                12,
+                13,
                 "read_note",
                 serde_json::json!({"path": "archive/search.md"}),
             ))
@@ -5219,26 +6610,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["result"]["isError"], false, "{body}");
-        let data = &body["result"]["structuredContent"]["data"];
-        assert!(data["memories"].as_array().unwrap().is_empty());
-        assert_eq!(data["related_notes"].as_array().unwrap().len(), 1);
-        assert_eq!(data["related_notes"][0]["path"], "notes/search.md");
-        assert_eq!(
-            data["related_notes"][0]["resource_uri"],
-            "vault://note/notes/search%2Emd"
-        );
-        assert_eq!(data["available_related_note_count"], 1);
-        assert_eq!(data["candidate_memory_count"], 0);
-        assert_eq!(data["relevant_memory_count"], 0);
-        assert!(
-            data["retrieval_profile_hash"]
-                .as_str()
-                .is_some_and(|hash| hash.starts_with("sha256:"))
-        );
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -5259,12 +6631,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["result"]["isError"], false, "{body}");
-        let data = &body["result"]["structuredContent"]["data"];
-        assert!(data["related_notes"].as_array().unwrap().is_empty());
-        assert_eq!(data["available_related_note_count"], 0);
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -5351,7 +6718,7 @@ mod tests {
                     "confidence": 0.99,
                     "tags": ["architecture"],
                     "entities": ["MCP Vault"],
-                    "idempotency_key": "mcp-memory-1", "include_details": true
+                    "idempotency_key": "mcp-memory-1"
                 }),
             ))
             .await
@@ -5361,51 +6728,61 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["result"]["isError"], false);
         assert_eq!(
-            body["result"]["structuredContent"]["data"]["outcome"],
+            body["result"]["structuredContent"]["data"]["raw_ownership"],
+            "explicit"
+        );
+        assert_eq!(
+            body["result"]["structuredContent"]["data"]["representation"],
+            "raw_explicit_memory"
+        );
+        assert_eq!(
+            body["result"]["structuredContent"]["data"]["explicit"]["outcome"],
             "stored"
         );
-        let memory_id = body["result"]["structuredContent"]["data"]["memory"]["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let memory_revision = body["result"]["structuredContent"]["data"]["memory"]["revision"]
-            .as_u64()
-            .unwrap();
-        let canonical_path =
-            body["result"]["structuredContent"]["data"]["memory"]["canonical_path"]
+        let memory_id =
+            body["result"]["structuredContent"]["data"]["explicit"]["memory"]["memory_id"]
                 .as_str()
                 .unwrap()
                 .to_owned();
-        let canonical_revision =
-            body["result"]["structuredContent"]["data"]["memory"]["canonical_revision"]
+        let memory_revision =
+            body["result"]["structuredContent"]["data"]["explicit"]["memory"]["revision"]
                 .as_u64()
                 .unwrap();
+        let canonical_path =
+            body["result"]["structuredContent"]["data"]["explicit"]["memory"]["canonical_path"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        let canonical_revision = body["result"]["structuredContent"]["data"]["explicit"]["memory"]
+            ["canonical_revision"]
+            .as_u64()
+            .unwrap();
         assert_eq!(
-            body["result"]["structuredContent"]["data"]["memory"]["importance"],
-            0.95
+            body["result"]["structuredContent"]["data"]["explicit"]["memory"]["content"],
+            "The memory subsystem keeps canonical Markdown."
         );
 
-        let recall = router
+        let raw = router
             .clone()
             .oneshot(tool_request(
                 &token,
                 22,
-                "recall",
-                serde_json::json!({"query": "canonical Markdown", "max_results": 5, "max_tokens": 500}),
+                "get_raw_memory",
+                serde_json::json!({"memory_id": memory_id}),
             ))
             .await
             .unwrap();
-        let body = recall.into_body().collect().await.unwrap().to_bytes();
+        let body = raw.into_body().collect().await.unwrap().to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["result"]["isError"], false);
         assert_eq!(
-            body["result"]["structuredContent"]["data"]["memories"][0]["id"],
+            body["result"]["structuredContent"]["data"]["memory_id"],
             memory_id.as_str()
         );
 
         let resource = router
             .clone()
-            .oneshot(resource_read_request(&token, "vault://memory/context"))
+            .oneshot(resource_read_request(&token, "vault://raw-memory/context"))
             .await
             .unwrap();
         assert_eq!(resource.status(), axum::http::StatusCode::OK);
@@ -5467,34 +6844,30 @@ mod tests {
             &router,
             &token,
             26,
-            "forget_memory",
+            "forget_raw_memory",
             serde_json::json!({
-                "id": memory_id,
-                "expected_revision": memory_revision
+                "memory_id": memory_id,
+                "expected_revision": memory_revision,
+                "idempotency_key": "forget-canonical-memory"
             }),
         )
         .await;
-        assert_tool_ok(&forgotten, "forget_memory");
+        assert_tool_ok(&forgotten, "forget_raw_memory");
         assert_eq!(
             forgotten["result"]["structuredContent"]["data"]["deleted"],
             true
         );
 
         for (id, tool, arguments) in [
-            (27, "get_memory", serde_json::json!({"id": memory_id})),
-            (28, "list_memories", serde_json::json!({})),
             (
-                29,
-                "recall",
-                serde_json::json!({
-                    "query": "canonical Markdown memory subsystem",
-                    "max_results": 5,
-                    "max_tokens": 500
-                }),
+                27,
+                "get_raw_memory",
+                serde_json::json!({"memory_id": memory_id}),
             ),
+            (28, "list_raw_memories", serde_json::json!({})),
         ] {
             let response = call_tool_json(&router, &token, id, tool, arguments).await;
-            if tool == "get_memory" {
+            if tool == "get_raw_memory" {
                 assert_eq!(response["result"]["isError"], true, "{response}");
             } else {
                 assert_eq!(response["result"]["isError"], false, "{response}");
@@ -5508,8 +6881,8 @@ mod tests {
         }
 
         for uri in [
-            "vault://memory/context".to_owned(),
-            format!("vault://memory/{memory_id}"),
+            "vault://raw-memory/context".to_owned(),
+            format!("vault://raw-memory/{memory_id}"),
         ] {
             let response = router
                 .clone()
@@ -5521,6 +6894,97 @@ mod tests {
             assert!(!body.to_string().contains(&memory_id), "{uri}: {body}");
         }
     }
+
+    #[tokio::test]
+    async fn raw_memory_overview_is_vault_read_scoped_over_real_http() {
+        let (full_router, full_token, memory_router, memory_token, _root) =
+            configured_memory_router_with_memory_only_pair().await;
+        let created = call_tool_json(
+            &full_router,
+            &full_token,
+            700,
+            "create_note",
+            json!({"path":"notes/private.md","content":"# Private\n"}),
+        )
+        .await;
+        assert_tool_ok(&created, "create_note");
+        let saved = call_tool_json(
+            &full_router,
+            &full_token,
+            701,
+            "remember",
+            json!({
+                "content":"Private raw assertion",
+                "idempotency_key":"raw-overview-http",
+                "sources":[{
+                    "path":"notes/private.md",
+                    "file_id":created["result"]["structuredContent"]["data"]["file"]["file_id"],
+                    "revision":created["result"]["structuredContent"]["data"]["file"]["revision"]
+                }]
+            }),
+        )
+        .await;
+        assert_tool_ok(&saved, "remember");
+
+        let full = call_tool_json(
+            &full_router,
+            &full_token,
+            702,
+            "get_raw_memory_overview",
+            json!({"source_path":"notes/private.md","path_prefix":"notes"}),
+        )
+        .await;
+        assert_tool_ok(&full, "get_raw_memory_overview");
+        let full_data = &full["result"]["structuredContent"]["data"];
+        assert_eq!(full_data["raw_ownership"], "explicit");
+        assert_eq!(full_data["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            full_data["entries"][0]["sources"][0]["path"],
+            "notes/private.md"
+        );
+        assert!(
+            full_data["entries"][0]["resource_uri"]
+                .as_str()
+                .unwrap()
+                .starts_with("vault://raw-memory/")
+        );
+        assert!(!full_data.to_string().contains("vault://memory/"));
+
+        let filtered = call_tool_json(
+            &memory_router,
+            &memory_token,
+            703,
+            "get_raw_memory_overview",
+            json!({
+                "source_path":"notes/does-not-exist.md",
+                "path_prefix":"notes/does-not-exist",
+                "topic_ids":["does-not-exist"]
+            }),
+        )
+        .await;
+        let unfiltered = call_tool_json(
+            &memory_router,
+            &memory_token,
+            704,
+            "get_raw_memory_overview",
+            json!({}),
+        )
+        .await;
+        assert_tool_ok(&filtered, "get_raw_memory_overview");
+        assert_tool_ok(&unfiltered, "get_raw_memory_overview");
+        let filtered_data = &filtered["result"]["structuredContent"]["data"];
+        let unfiltered_data = &unfiltered["result"]["structuredContent"]["data"];
+        assert_eq!(filtered_data["scope_count"], unfiltered_data["scope_count"]);
+        assert_eq!(
+            filtered_data["entries"].as_array().unwrap().len(),
+            unfiltered_data["entries"].as_array().unwrap().len()
+        );
+        assert!(!filtered_data.to_string().contains("notes/private.md"));
+        assert!(!filtered_data.to_string().contains("vault://memory/"));
+        assert!(!filtered_data.to_string().contains("generated_sections"));
+        assert_eq!(filtered_data["entries"][0]["label"], "raw explicit memory");
+    }
+
     #[tokio::test]
     async fn memory_cursor_survives_deletion_before_the_next_page() {
         let (router, token, _root) = configured_memory_router().await;
@@ -5530,39 +6994,53 @@ mod tests {
                 &token,
                 800 + index,
                 "remember",
-                json!({"content":format!("Cursor fixture unique assertion {index}.")}),
+                json!({"content":format!("Cursor fixture unique assertion {index}."),"idempotency_key":format!("cursor-fixture-{index}")}),
             )
             .await;
             assert_tool_ok(&saved, "remember");
         }
-        let all = call_tool_json(&router, &token, 810, "list_memories", json!({"limit":100})).await;
+        let all = call_tool_json(
+            &router,
+            &token,
+            810,
+            "list_raw_memories",
+            json!({"limit":100}),
+        )
+        .await;
         let all = &all["result"]["structuredContent"]["data"]["memories"];
-        let first = call_tool_json(&router, &token, 811, "list_memories", json!({"limit":2})).await;
+        let first = call_tool_json(
+            &router,
+            &token,
+            811,
+            "list_raw_memories",
+            json!({"limit":2}),
+        )
+        .await;
         let data = &first["result"]["structuredContent"]["data"];
-        let deleted=call_tool_json(&router,&token,812,"forget_memory",json!({"id":data["memories"][0]["id"],"expected_revision":data["memories"][0]["revision"]})).await;
-        assert_tool_ok(&deleted, "forget_memory");
+        let deleted=call_tool_json(&router,&token,812,"forget_raw_memory",json!({"memory_id":data["memories"][0]["memory_id"],"expected_revision":data["memories"][0]["revision"],"idempotency_key":"cursor-forget"})).await;
+        assert_tool_ok(&deleted, "forget_raw_memory");
         let next = call_tool_json(
             &router,
             &token,
             813,
-            "list_memories",
+            "list_raw_memories",
             json!({"limit":100,"cursor":data["next_cursor"]}),
         )
         .await;
-        assert_tool_ok(&next, "list_memories");
+        assert_tool_ok(&next, "list_raw_memories");
         let remaining = next["result"]["structuredContent"]["data"]["memories"]
             .as_array()
             .unwrap();
         assert_eq!(
             remaining
                 .iter()
-                .map(|m| m["id"].clone())
+                .map(|m| m["memory_id"].clone())
                 .collect::<Vec<_>>(),
             all.as_array()
                 .unwrap()
                 .iter()
                 .skip(2)
-                .map(|m| m["id"].clone())
+                .map(|m| m["memory_id"].clone())
                 .collect::<Vec<_>>()
         );
     }

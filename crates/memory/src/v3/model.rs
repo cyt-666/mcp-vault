@@ -442,6 +442,44 @@ pub struct ForgetResult {
     pub source_extraction_paused: bool,
 }
 
+/// Maximum number of current-memory items accepted by one coordinated delete.
+pub const MAX_FORGET_BATCH_ITEMS: usize = 100;
+
+/// One current-memory item and the revision observed by the caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ForgetBatchInput {
+    pub id: MemoryId,
+    pub expected_revision: Revision,
+}
+
+/// Per-item outcome of an Admin batch deletion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForgetBatchStatus {
+    Deleted,
+    Conflict,
+    Failed,
+}
+
+/// Content-free result for one submitted deletion.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ForgetBatchItemResult {
+    pub id: MemoryId,
+    pub status: ForgetBatchStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ownership: Option<MemoryOwnership>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_extraction_paused: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
+/// Per-request results in the same order as the submitted IDs.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ForgetBatchResult {
+    pub results: Vec<ForgetBatchItemResult>,
+}
+
 /// Compact provenance output.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct MemorySourceView {

@@ -1099,6 +1099,17 @@ impl FileStateRepository {
         .execute(&mut *transaction)
         .await?;
 
+        crate::semantic_memory::apply_file_mutation_qualification_tx(
+            &mut transaction,
+            &vault_id,
+            &file_id,
+            &input.path,
+            input.operation.as_str(),
+            input.content_hash.as_deref(),
+            now,
+        )
+        .await?;
+
         let audit_id = mcp_vault_domain::EventId::new();
         sqlx::query(
             "INSERT INTO audit_log

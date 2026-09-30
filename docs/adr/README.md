@@ -2,7 +2,7 @@
 
 Accepted ADRs are binding unless superseded by a later ADR.
 
-The current sequence includes ADR-0032. ADR-0013 keeps ADR-0007 durable memories
+The current sequence includes ADR-0043. ADR-0013 keeps ADR-0007 durable memories
 canonical and provenanced while allowing `recall` to return separately typed,
 rebuildable ordinary-note cues. ADR-0014 replaced model self-score/routine
 review defaults with exact evidence and autonomous promotion. ADR-0015 retains
@@ -89,7 +89,37 @@ See [ADR-0028](0028-model-guided-chunks-and-diagnostic-evaluation.md).
   retaining incremental scheduling and canonical source contributions.
 
 - [ADR-0033: Source-preserving memory units](0033-source-preserving-memory-units.md)
-  supersedes generated automatic bodies, formal consolidation and legacy conversion with complete source units, separate navigation and an exclusive offline discard.
+  records the historical v3 source-unit contract. Its conflicting automatic-body and no-cross-source decisions, plus the old predecessor-memory discard authorization, are superseded by ADR-0035 for the new semantic-memory plan.
 - [ADR-0034: Replayed create witness recovery](0034-replayed-create-witness-recovery.md)
   adds a transactionally verified `superseded` terminal state for a replayed
   create whose canonical result was later claimed by another File ID.
+- [ADR-0035: Semantic memory cards and task packs](0035-semantic-memory-cards-and-task-packs.md)
+  makes source-level semantic extraction, evidence-backed memory cards and
+  task packs the new target. It requires a separate namespace and staged,
+  explicitly authorized cutover; it does not authorize legacy-memory cleanup.
+- [ADR-0043: Strict MiMo function output for all M6 stages](0043-strict-mimo-function-output-for-all-m6-stages.md)
+  scopes strict non-streaming function output to the four versioned M6 stages
+  and defines the relation-stage empty-string sentinel mapping.
+- [ADR-0044: Bounded A80 extraction and isolated evaluation](0044-bounded-a80-extraction-and-isolated-evaluation.md)
+  limits M6 source proposals to 80-block indexed batches, atomically publishes
+  only fully validated source sets, and isolates item failures under a
+  monotonic budget and same-root recovery fence.
+- [ADR-0036: Two-stage semantic extraction and card composition](0036-semantic-memory-two-stage-composition.md)
+  separates observation and composition contracts and preserves terminal cleanup.
+- [ADR-0037: Provider structured streaming generation](0037-provider-streaming-structured-generation.md)
+  defines bounded streaming generation and structured-output validation.
+- [ADR-0038: Independent agent review for M6](0038-independent-agent-review-for-m6.md)
+  permits independent agent review in place of manual M6 scoring while retaining
+  all gates and explicitly distinguishing `agent_reviewed` from `human_reviewed`.
+- [ADR-0039: Source-revision-bound model block IDs](0039-source-revision-bound-model-block-ids.md)
+  binds transient evidence IDs to a Vault source revision and rejects namespace
+  collisions without changing persistent evidence spans.
+- [ADR-0040: Revision-bound indexed observation evidence](0040-revision-bound-indexed-observation-evidence.md)
+  sends one revision namespace plus source-local integer block indices, then
+  resolves them back to prepared block IDs before existing evidence fences.
+- [ADR-0041: Canonical assertion-status tokens in observation prompts](0041-canonical-assertion-status-prompt-tokens.md)
+  keeps the v6 status enum strict and repeats its exact vocabulary and meanings
+  in the v10 prompt; invalid model values still fail closed.
+- [ADR-0042: Strict MiMo function output for M6 observations](0042-strict-mimo-function-output-for-m6-observations.md)
+  uses an evaluation-only strict function schema and validated SSE argument
+  aggregation while retaining the semantic and source evidence fences.

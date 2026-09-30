@@ -913,7 +913,9 @@ impl IndexRepository {
                ON file_state.vault_id = n.vault_id
               AND file_state.id = n.file_id
               AND file_state.deleted_at IS NULL
-             WHERE n.vault_id = ? AND n.file_id = ?",
+             WHERE n.vault_id = ? AND n.file_id = ?
+               AND n.revision = file_state.current_revision
+               AND n.analyzed_content_hash = file_state.content_hash",
         )
         .bind(context.id().to_string())
         .bind(file_id.to_string())
@@ -956,6 +958,8 @@ impl IndexRepository {
                ON file_state.vault_id = n.vault_id
               AND file_state.id = n.file_id
               AND file_state.deleted_at IS NULL
+              AND n.revision = file_state.current_revision
+              AND n.analyzed_content_hash = file_state.content_hash
              WHERE note_fts.vault_id = ",
         );
         query.push_bind(&vault_id);

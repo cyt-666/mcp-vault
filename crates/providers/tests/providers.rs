@@ -41,33 +41,27 @@ async fn fake_chat(Json(request): Json<Value>) -> Response {
     {
         return StatusCode::UNPROCESSABLE_ENTITY.into_response();
     }
-    Json(json!({
-        "id": "fake-response",
-        "model": "fake-chat",
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": "{\"answer\":\"ok\"}"
-            }
-        }],
-        "usage": {"total_tokens": 3}
-    }))
-    .into_response()
+    let body = concat!(
+        "data: {\"id\":\"fake-response\",\"model\":\"fake-chat\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"{\\\"answer\\\":\\\"ok\\\"}\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(Body::from(body))
+        .unwrap()
 }
 
 async fn capture_vendor_chat(
     State(captured): State<Arc<Mutex<Vec<Value>>>>,
     Json(request): Json<Value>,
-) -> Json<Value> {
+) -> Response {
     captured.lock().unwrap().push(request);
-    Json(json!({
-        "id": "fake-mimo-response",
-        "model": "mimo-v2.5",
-        "choices": [{
-            "finish_reason": "stop",
-            "message": {"role": "assistant", "content": "{\"answer\":\"ok\"}"}
-        }]
-    }))
+    Response::builder().header(header::CONTENT_TYPE, "text/event-stream").body(Body::from(concat!(
+        "data: {\"id\":\"fake-mimo-response\",\"model\":\"mimo-v2.5\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"{\\\"answer\\\":\\\"ok\\\"}\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    ))).unwrap()
 }
 
 async fn fake_embeddings(Json(request): Json<Value>) -> Json<Value> {
@@ -92,6 +86,14 @@ async fn fake_embeddings(Json(request): Json<Value>) -> Json<Value> {
         "data": data,
         "usage": {"prompt_tokens": count, "total_tokens": count}
     }))
+}
+
+async fn counted_embeddings(
+    State(calls): State<Arc<AtomicUsize>>,
+    Json(request): Json<Value>,
+) -> Json<Value> {
+    calls.fetch_add(1, Ordering::SeqCst);
+    fake_embeddings(Json(request)).await
 }
 
 async fn fake_models() -> Json<serde_json::Value> {
@@ -389,6 +391,77 @@ async fn context(state: &StateStore, slug: &str, root: PathBuf) -> VaultContext 
 }
 
 #[tokio::test]
+async fn embedding_model_without_declared_capability_is_rejected_before_http() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/v1/embeddings", post(counted_embeddings))
+        .with_state(calls.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let directory = tempdir().unwrap();
+    let state = StateStore::connect_and_migrate("sqlite::memory:")
+        .await
+        .unwrap();
+    let work = context(&state, "legacy-embedding", directory.path().join("vault")).await;
+    let auth = AuthService::new(
+        state.auth(),
+        MasterKeyRing::from_bytes(1, &[43_u8; 32]).unwrap(),
+    );
+    let service = ProviderService::new(state, auth);
+    service
+        .set_provider_mode(&work, ProviderMode::LocalOnly, None)
+        .await
+        .unwrap();
+    let provider = service
+        .create_provider(ProviderInput {
+            name: "local capability guard".into(),
+            kind: ProviderKind::EmbeddingHttp,
+            base_url: Url::parse(&format!("http://{address}/v1/")).unwrap(),
+            settings: ProviderSettings::default(),
+            enabled: true,
+            secret: None,
+        })
+        .await
+        .unwrap();
+    let model = service
+        .register_model(ModelInput {
+            provider_id: provider.id,
+            external_model_id: "declares-no-embeddings".into(),
+            capabilities: ModelCapabilities {
+                embeddings: false,
+                ..Default::default()
+            },
+            settings: ModelSettings::default(),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+
+    let error = service
+        .embed(
+            &work,
+            model.id,
+            &EmbeddingRequest {
+                model: model.external_model_id,
+                inputs: vec!["test input".into()],
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ProviderError::ModelCapabilityMismatch {
+            capability: "embeddings"
+        }
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    server.abort();
+}
+
+#[tokio::test]
 async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
     let (address, server) = fake_server().await;
     let directory = tempdir().unwrap();
@@ -425,14 +498,20 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
     assert!(!format!("{secret:?}").contains("fake-secret"));
 
     let discovered = service.test_provider(&work, provider.id).await.unwrap();
-    let chat = discovered
+    let mut chat = discovered
         .iter()
         .find(|model| model.external_model_id == "fake-chat")
-        .unwrap();
-    let embedding = discovered
+        .unwrap()
+        .clone();
+    chat.capabilities = json!({"structured_output": true});
+    let chat = state.providers().update_model(&chat).await.unwrap();
+    let mut embedding = discovered
         .iter()
         .find(|model| model.external_model_id == "fake-embed")
-        .unwrap();
+        .unwrap()
+        .clone();
+    embedding.capabilities = json!({"embeddings": true});
+    let embedding = state.providers().update_model(&embedding).await.unwrap();
     service
         .bind_model(Some(&work), "note_summary", chat.id, json!({}), None)
         .await
@@ -446,6 +525,9 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
                 system: "Return the requested object.".to_owned(),
                 user: "untrusted note text".to_owned(),
                 schema_name: "answer".to_owned(),
+                strict_function_schema: None,
+                defer_local_schema_validation: false,
+                strict_function_call: false,
                 schema: json!({
                     "type": "object",
                     "properties": {"answer": {"type": "string"}},
@@ -471,6 +553,9 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
                 system: "Return the requested object.".to_owned(),
                 user: "untrusted note text".to_owned(),
                 schema_name: "wrong".to_owned(),
+                strict_function_schema: None,
+                defer_local_schema_validation: false,
+                strict_function_call: false,
                 schema: json!({
                     "type": "object",
                     "properties": {"answer": {"type": "integer"}},
@@ -822,14 +907,20 @@ async fn provider_deletion_is_revision_checked_and_cleans_only_dependent_state()
     );
     assert_eq!(state.auth().count_encrypted_secrets().await.unwrap(), 1);
     let models = service.test_provider(&work, provider.id).await.unwrap();
-    let chat = models
+    let mut chat = models
         .iter()
         .find(|model| model.external_model_id == "fake-chat")
-        .unwrap();
-    let embedding = models
+        .unwrap()
+        .clone();
+    chat.capabilities = json!({"structured_output": true});
+    let chat = state.providers().update_model(&chat).await.unwrap();
+    let mut embedding = models
         .iter()
         .find(|model| model.external_model_id == "fake-embed")
-        .unwrap();
+        .unwrap()
+        .clone();
+    embedding.capabilities = json!({"embeddings": true, "dimension": 3});
+    let embedding = state.providers().update_model(&embedding).await.unwrap();
     service
         .bind_model(None, "note_summary", chat.id, json!({}), None)
         .await
@@ -1059,6 +1150,9 @@ async fn provider_service_sends_first_class_vendor_structured_generation_contrac
                     system: "Return an answer.".to_owned(),
                     user: "untrusted input".to_owned(),
                     schema_name: "answer".to_owned(),
+                    strict_function_schema: None,
+                    defer_local_schema_validation: false,
+                    strict_function_call: false,
                     schema: json!({
                         "type": "object",
                         "properties": {"answer": {"type": "string"}},
@@ -1437,6 +1531,9 @@ async fn generation_budget_blocks_retries_and_cloned_service_dispatch() {
         system: "local test".into(),
         user: "local test".into(),
         schema_name: "answer".into(),
+        strict_function_schema: None,
+        defer_local_schema_validation: false,
+        strict_function_call: false,
         schema: json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}),
         allow_additional_output_properties: false,
         missing_required_string_fallbacks: Vec::new(),
@@ -1444,15 +1541,22 @@ async fn generation_budget_blocks_retries_and_cloned_service_dispatch() {
         temperature: None,
         timeout: None,
     };
-    for caller in [service.clone(), service] {
+    for (index, caller) in [service.clone(), service].into_iter().enumerate() {
         let error = caller
             .generate_structured(&work, model.id, &request)
             .await
             .unwrap_err();
-        assert!(matches!(
-            error,
-            ProviderError::InvalidConfiguration("test_budget_exhausted")
-        ));
+        if index == 0 {
+            assert!(matches!(
+                error,
+                ProviderError::HttpStatus { status: 503, .. }
+            ));
+        } else {
+            assert!(matches!(
+                error,
+                ProviderError::InvalidConfiguration("test_budget_exhausted")
+            ));
+        }
     }
     assert_eq!(
         attempts.load(Ordering::SeqCst),

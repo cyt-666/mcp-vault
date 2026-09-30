@@ -166,9 +166,21 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
     let data_root = resolve_runtime_path(&config.data_dir)?;
     let history_root = data_root.join("history");
     let backup_root = resolve_runtime_path(&config.backup_root)?;
-    recover_registered_vaults(&state, &history_root, &core_runtime).await?;
+    let semantic_memory_service = mcp_vault_memory::SemanticMemoryService::new(state.clone());
+    let semantic_organization_service =
+        mcp_vault_memory::semantic::organize::SemanticOrganizationService::new(state.clone());
+    recover_registered_vaults(
+        &state,
+        &history_root,
+        &core_runtime,
+        &semantic_memory_service,
+        &semantic_organization_service,
+    )
+    .await?;
 
-    run_initial_scans(&state, &history_root, &core_runtime).await?;
+    if config.workers_enabled {
+        run_initial_scans(&state, &history_root, &core_runtime).await?;
+    }
 
     let auth_service = mcp_vault_auth::AuthService::new(state.auth(), auth_keys);
     let provider_service =
@@ -177,20 +189,25 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         state.clone(),
         provider_service.clone(),
     );
-    for vault in state.vaults().list().await? {
-        let context = vault.context()?;
-        if vault.status == mcp_vault_state::VaultStatus::Active
-            && !state
-                .memory_units()
-                .initialization_required(&context)
-                .await?
-        {
-            let core = core_for_vault(&state, &history_root, &vault, &core_runtime)?;
-            let report = memory_service
-                .rebuild(&context, &core)
-                .await
-                .map_err(|error| ServerError::MemoryInitialization(error.diagnostic_code()))?;
-            tracing::info!(vault_id=%context.id(),projected=report.projected,quarantined=report.quarantined,"current memory projections rebuilt");
+    // Semantic-memory workers are intentionally independent from the legacy
+    // v3 MemoryService pipeline. Their extraction handler remains a safe
+    // provider-free terminal until the separately authorized Provider slice.
+    if config.workers_enabled {
+        for vault in state.vaults().list().await? {
+            let context = vault.context()?;
+            if vault.status == mcp_vault_state::VaultStatus::Active
+                && !state
+                    .memory_units()
+                    .initialization_required(&context)
+                    .await?
+            {
+                let core = core_for_vault(&state, &history_root, &vault, &core_runtime)?;
+                let report = memory_service
+                    .rebuild(&context, &core)
+                    .await
+                    .map_err(|error| ServerError::MemoryInitialization(error.diagnostic_code()))?;
+                tracing::info!(vault_id=%context.id(),projected=report.projected,quarantined=report.quarantined,"current memory projections rebuilt");
+            }
         }
     }
 
@@ -198,21 +215,25 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         state.clone(),
         provider_service.clone(),
     );
-    for vault in state.vaults().list().await? {
-        if state.vaults().availability(&vault).await? != mcp_vault_state::VaultAvailability::Ready {
-            continue;
-        }
-        let context = vault.context()?;
-        if index_service
-            .schedule_note_embeddings(&context)
-            .await
-            .is_err()
-        {
-            warn!(
-                vault_id = %context.id(),
-                error_code = "note_embedding_schedule_failed",
-                "optional startup note embedding scheduling failed"
-            );
+    if config.workers_enabled {
+        for vault in state.vaults().list().await? {
+            if state.vaults().availability(&vault).await?
+                != mcp_vault_state::VaultAvailability::Ready
+            {
+                continue;
+            }
+            let context = vault.context()?;
+            if index_service
+                .schedule_note_embeddings(&context)
+                .await
+                .is_err()
+            {
+                warn!(
+                    vault_id = %context.id(),
+                    error_code = "note_embedding_schedule_failed",
+                    "optional startup note embedding scheduling failed"
+                );
+            }
         }
     }
     let webdav_service = mcp_vault_webdav::WebDavService::new(
@@ -290,133 +311,123 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
             source,
         })?;
 
-    let supervisor = workers::WorkerSupervisor::new(
-        state.clone(),
-        workers::outbox_to_job_handler(state.clone(), memory_service.clone()),
-        workers::WorkerConfig::default(),
-    )
-    .map_err(|failure| ServerError::Workers(failure.code))?
-    .with_maintenance_gate(maintenance.clone());
-    supervisor
-        .register_job_handler("outbox.event", workers::outbox_event_job_handler())
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
-            "backup.create",
-            workers::backup_create_job_handler(backup_service.clone(), metrics.clone()),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
-            "backup.verify",
-            workers::backup_verify_job_handler(backup_service.clone(), metrics.clone()),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
-            "backup.restore",
-            workers::backup_restore_job_handler(state.clone(), backup_service, metrics.clone()),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
-            "vault.initialize",
-            workers::vault_initialize_job_handler(
-                state.clone(),
-                history_root.clone(),
-                core_runtime.clone(),
-                memory_service.clone(),
-            ),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
-            "vault.reconcile",
-            workers::vault_reconcile_job_handler(
-                state.clone(),
-                history_root.clone(),
-                core_runtime.clone(),
-            ),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
-            "index.rebuild",
-            workers::index_rebuild_job_handler(
-                state.clone(),
-                history_root.clone(),
-                core_runtime.clone(),
-                index_service.clone(),
-            ),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
-            "memory.extract",
-            workers::memory_extract_job_handler(
-                state.clone(),
-                history_root.clone(),
-                core_runtime.clone(),
-                memory_service.clone(),
-            ),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
-            "memory.source_resume",
-            workers::memory_source_resume_job_handler(
-                state.clone(),
-                history_root.clone(),
-                core_runtime.clone(),
-                memory_service.clone(),
-            ),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
-            "memory.source_reconcile",
-            workers::memory_source_reconcile_job_handler(
-                state.clone(),
-                history_root.clone(),
-                core_runtime.clone(),
-                memory_service.clone(),
-            ),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
-            "embedding.rebuild",
-            workers::embedding_job_handler(state.clone(), index_service, memory_service.clone()),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    supervisor
-        .register_job_handler(
-            "memory.overview",
-            workers::memory_overview_job_handler(state.clone(), memory_service.clone()),
-        )
-        .map_err(|failure| ServerError::Workers(failure.code))?;
-    admit_memory_maintenance(&state, &memory_service).await?;
     // Allow recovery and scans for unrelated ready Vaults to complete before
     // preserving Offline for an interrupted cleanup Vault.
     if initialization_offline {
         maintenance.set(mcp_vault_domain::MaintenanceMode::Offline);
     }
-    let worker_shutdown = workers::Cancellation::default();
-    let worker_task = tokio::spawn({
-        let supervisor = supervisor.clone();
-        let shutdown = worker_shutdown.clone();
-        async move { supervisor.run(shutdown).await }
-    });
-    supervisor.wait_until_running().await;
-
-    let reconciliation_shutdown = workers::Cancellation::default();
-    let reconciliation_task = tokio::spawn(run_reconciliation_loop(
+    let worker_state = state.clone();
+    let worker_memory = memory_service.clone();
+    let worker_backup = backup_service.clone();
+    let worker_metrics = metrics.clone();
+    let worker_history = history_root.clone();
+    let worker_core = core_runtime.clone();
+    let worker_index = index_service.clone();
+    let worker_semantic_memory = semantic_memory_service.clone();
+    let worker_maintenance = maintenance.clone();
+    let background_tasks = start_background_tasks(
+        config.workers_enabled,
         state.clone(),
-        memory_service.clone(),
         config.reconciliation_interval,
         maintenance.clone(),
-        reconciliation_shutdown.clone(),
-    ));
+        move || {
+            let supervisor = workers::WorkerSupervisor::new(
+                worker_state.clone(),
+                workers::outbox_to_job_handler(worker_state.clone(), worker_memory.clone()),
+                workers::WorkerConfig::default(),
+            )
+            .map_err(|failure| ServerError::Workers(failure.code))?
+            .with_maintenance_gate(worker_maintenance.clone());
+            supervisor
+                .register_job_handler("outbox.event", workers::outbox_event_job_handler())
+                .map_err(|failure| ServerError::Workers(failure.code))?;
+            supervisor
+                .register_job_handler(
+                    "backup.create",
+                    workers::backup_create_job_handler(
+                        worker_backup.clone(),
+                        worker_metrics.clone(),
+                    ),
+                )
+                .map_err(|failure| ServerError::Workers(failure.code))?;
+            supervisor
+                .register_job_handler(
+                    "backup.verify",
+                    workers::backup_verify_job_handler(
+                        worker_backup.clone(),
+                        worker_metrics.clone(),
+                    ),
+                )
+                .map_err(|failure| ServerError::Workers(failure.code))?;
+            supervisor
+                .register_job_handler(
+                    "backup.restore",
+                    workers::backup_restore_job_handler(
+                        worker_state.clone(),
+                        worker_backup.clone(),
+                        worker_metrics.clone(),
+                    ),
+                )
+                .map_err(|failure| ServerError::Workers(failure.code))?;
+            supervisor
+                .register_job_handler(
+                    "vault.initialize",
+                    workers::vault_initialize_job_handler(
+                        worker_state.clone(),
+                        worker_history.clone(),
+                        worker_core.clone(),
+                        worker_memory.clone(),
+                    ),
+                )
+                .map_err(|failure| ServerError::Workers(failure.code))?;
+            supervisor
+                .register_job_handler(
+                    "vault.reconcile",
+                    workers::vault_reconcile_job_handler(
+                        worker_state.clone(),
+                        worker_history.clone(),
+                        worker_core.clone(),
+                    ),
+                )
+                .map_err(|failure| ServerError::Workers(failure.code))?;
+            supervisor
+                .register_job_handler(
+                    "index.rebuild",
+                    workers::index_rebuild_job_handler(
+                        worker_state.clone(),
+                        worker_history.clone(),
+                        worker_core.clone(),
+                        worker_index.clone(),
+                    ),
+                )
+                .map_err(|failure| ServerError::Workers(failure.code))?;
+            supervisor
+                .register_job_handler(
+                    "semantic.source_reconcile",
+                    workers::semantic_source_reconcile_job_handler(
+                        worker_state.clone(),
+                        worker_history,
+                        worker_core,
+                        worker_semantic_memory,
+                    ),
+                )
+                .map_err(|failure| ServerError::Workers(failure.code))?;
+            supervisor
+                .register_job_handler(
+                    "semantic.extract",
+                    workers::semantic_extract_job_handler(worker_state.clone()),
+                )
+                .map_err(|failure| ServerError::Workers(failure.code))?;
+            supervisor
+                .register_job_handler(
+                    "embedding.rebuild",
+                    workers::embedding_job_handler(worker_state, worker_index, worker_memory),
+                )
+                .map_err(|failure| ServerError::Workers(failure.code))?;
+            Ok(supervisor)
+        },
+    )
+    .await?;
 
     readiness.mark_ready();
     info!(
@@ -424,6 +435,7 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
         admin_bind = %config.admin_bind,
         data_dir = %config.data_dir.display(),
         database_migration_version = integrity.migration_version,
+        workers_enabled = config.workers_enabled,
         shutdown_timeout_seconds = config.shutdown_timeout.as_secs(),
         reconciliation_interval_seconds = config.reconciliation_interval.as_secs(),
         "mcp vault listeners ready"
@@ -431,14 +443,16 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
 
     let shutdown = workers::Cancellation::default();
     let signal_shutdown = shutdown.clone();
-    let signal_worker_shutdown = worker_shutdown.clone();
-    let signal_reconciliation_shutdown = reconciliation_shutdown.clone();
+    let signal_background_shutdown = background_tasks
+        .as_ref()
+        .map(|tasks| tasks.shutdown.clone());
     let signal_readiness = readiness.clone();
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         signal_readiness.mark_not_ready();
-        signal_worker_shutdown.cancel();
-        signal_reconciliation_shutdown.cancel();
+        if let Some(shutdown) = signal_background_shutdown {
+            shutdown.cancel();
+        }
         signal_shutdown.cancel();
     });
 
@@ -472,27 +486,72 @@ pub async fn run(config: AppConfig) -> Result<(), ServerError> {
 
     let serve_result = tokio::try_join!(data_server, control_server);
     admin_state_shutdown.shutdown_initialization().await;
-    worker_shutdown.cancel();
-    reconciliation_shutdown.cancel();
-
-    let mut worker_task = worker_task;
-    let mut reconciliation_task = reconciliation_task;
-    if timeout(config.shutdown_timeout, async {
-        let _ = tokio::join!(&mut worker_task, &mut reconciliation_task);
-    })
-    .await
-    .is_err()
-    {
-        warn!("background workers did not stop within the shutdown timeout");
-        worker_task.abort();
-        reconciliation_task.abort();
-        let _ = worker_task.await;
-        let _ = reconciliation_task.await;
+    if let Some(tasks) = background_tasks {
+        stop_background_tasks(tasks, config.shutdown_timeout).await;
     }
 
     serve_result?;
 
     Ok(())
+}
+
+struct BackgroundTasks {
+    shutdown: workers::Cancellation,
+    worker_task: tokio::task::JoinHandle<()>,
+    reconciliation_task: tokio::task::JoinHandle<()>,
+}
+
+async fn start_background_tasks<F>(
+    enabled: bool,
+    state: mcp_vault_state::StateStore,
+    reconciliation_interval: std::time::Duration,
+    maintenance: MaintenanceGate,
+    initialize_supervisor: F,
+) -> Result<Option<BackgroundTasks>, ServerError>
+where
+    F: FnOnce() -> Result<workers::WorkerSupervisor, ServerError>,
+{
+    if !enabled {
+        return Ok(None);
+    }
+
+    let supervisor = initialize_supervisor()?;
+    let shutdown = workers::Cancellation::default();
+    let worker_task = tokio::spawn({
+        let supervisor = supervisor.clone();
+        let shutdown = shutdown.clone();
+        async move { supervisor.run(shutdown).await }
+    });
+    supervisor.wait_until_running().await;
+
+    let reconciliation_task = tokio::spawn(run_reconciliation_loop(
+        state,
+        reconciliation_interval,
+        maintenance,
+        shutdown.clone(),
+    ));
+
+    Ok(Some(BackgroundTasks {
+        shutdown,
+        worker_task,
+        reconciliation_task,
+    }))
+}
+
+async fn stop_background_tasks(mut tasks: BackgroundTasks, shutdown_timeout: std::time::Duration) {
+    tasks.shutdown.cancel();
+    if timeout(shutdown_timeout, async {
+        let _ = tokio::join!(&mut tasks.worker_task, &mut tasks.reconciliation_task);
+    })
+    .await
+    .is_err()
+    {
+        warn!("background workers did not stop within the shutdown timeout");
+        tasks.worker_task.abort();
+        tasks.reconciliation_task.abort();
+        let _ = tasks.worker_task.await;
+        let _ = tasks.reconciliation_task.await;
+    }
 }
 
 fn core_for_vault(
@@ -517,6 +576,8 @@ async fn recover_registered_vaults(
     state: &mcp_vault_state::StateStore,
     history_root: &Path,
     core_runtime: &mcp_vault_core::VaultCoreRuntime,
+    semantic_memory: &mcp_vault_memory::SemanticMemoryService,
+    semantic_organization: &mcp_vault_memory::semantic::organize::SemanticOrganizationService,
 ) -> Result<(), ServerError> {
     let permit = core_runtime.maintenance_recovery_permit();
     for vault in state.vaults().list().await? {
@@ -527,6 +588,25 @@ async fn recover_registered_vaults(
                 continue;
             }
         };
+        if let Err(error) = semantic_memory
+            .preflight_all_semantic_recovery(&context)
+            .await
+        {
+            state
+                .vaults()
+                .set_status(&context, mcp_vault_state::VaultStatus::Error)
+                .await?;
+            warn!(
+                vault_id = %context.id(),
+                error_code = error.code(),
+                "semantic publication recovery preflight requires operator review"
+            );
+            continue;
+        }
+        // The legacy v3 initialization gate is intentionally checked only
+        // after the semantic barrier. Pending v3 initialization may defer
+        // generic Core recovery, but it must not let a stale semantic journal
+        // bypass this preflight on startup.
         if state
             .memory_units()
             .initialization_required(&context)
@@ -559,6 +639,35 @@ async fn recover_registered_vaults(
                         finalized = report.finalized,
                         superseded = report.superseded,
                         "recovered Vault journal operations"
+                    );
+                }
+                if let Err(error) = semantic_memory
+                    .recover_pending_publications_after_core(&context, &recovery_core)
+                    .await
+                {
+                    state
+                        .vaults()
+                        .set_status(&context, mcp_vault_state::VaultStatus::Error)
+                        .await?;
+                    warn!(
+                        vault_id = %context.id(),
+                        error_code = error.code(),
+                        "semantic publication recovery requires operator review"
+                    );
+                    continue;
+                }
+                if let Err(error) = semantic_organization
+                    .recover_pending_organizations_after_core(&context, &recovery_core)
+                    .await
+                {
+                    state
+                        .vaults()
+                        .set_status(&context, mcp_vault_state::VaultStatus::Error)
+                        .await?;
+                    warn!(
+                        vault_id = %context.id(),
+                        error_code = error.code(),
+                        "semantic organization recovery requires operator review"
                     );
                 }
             }
@@ -801,7 +910,6 @@ pub async fn reconcile_vault_once(
 
 async fn run_reconciliation_loop(
     state: mcp_vault_state::StateStore,
-    memory: mcp_vault_memory::MemoryService,
     interval: std::time::Duration,
     maintenance: MaintenanceGate,
     shutdown: workers::Cancellation,
@@ -846,9 +954,6 @@ async fn run_reconciliation_loop(
                             continue;
                         }
                     };
-                    if memory.ensure_memory_jobs_scheduled(&context).await.is_err() {
-                        warn!(vault_id=%context.id(),error_code="memory_overview_admission_failed","memory overview admission will retry");
-                    }
                     match state.jobs().find_active_by_type(&context, "vault.reconcile").await {
                         Ok(None) => {
                             let dedup = format!(
@@ -1005,28 +1110,6 @@ pub fn routers_for_test(readiness: health::Readiness) -> (Router, Router) {
     (data_router(readiness), control_router())
 }
 
-async fn admit_memory_maintenance(
-    state: &mcp_vault_state::StateStore,
-    memory_service: &mcp_vault_memory::MemoryService,
-) -> Result<(), ServerError> {
-    for vault in state.vaults().list().await? {
-        if state.vaults().availability(&vault).await? != mcp_vault_state::VaultAvailability::Ready {
-            continue;
-        }
-        let context = vault
-            .context()
-            .map_err(|_| ServerError::Workers("memory_context_invalid"))?;
-        if memory_service
-            .ensure_memory_jobs_scheduled(&context)
-            .await
-            .is_err()
-        {
-            tracing::warn!(vault_id=%context.id(), "memory_overview_admission_failed");
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1059,13 +1142,105 @@ mod tests {
         );
     }
 
-    use std::path::{Path, PathBuf};
-
+    use super::{ServerError, start_background_tasks, stop_background_tasks};
     use crate::workers;
     use axum::{body::Body, http::Request};
-    use mcp_vault_domain::{CredentialId, Revision, SecretId, VaultContext, VaultId, VaultSlug};
-    use mcp_vault_state::VaultStatus;
+    use mcp_vault_backup::{BackupConfig, BackupLimits, BackupService};
+    use mcp_vault_core::{CommitPhase, FailureInjector, VaultCore, VaultCoreRuntime};
+    use mcp_vault_domain::{
+        Actor, CredentialId, MaintenanceGate, MaintenanceMode, Revision, SecretId, SourcePlane,
+        VaultContext, VaultId, VaultPath, VaultPathPolicy, VaultSlug, WritePrecondition,
+    };
+    use mcp_vault_memory::SemanticMemoryService;
+    use mcp_vault_state::{StateStore, VaultStatus};
+    use mcp_vault_storage_fs::StorageOptions;
+    use std::path::{Path, PathBuf};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
+    use tokio::time::{sleep, timeout};
     use tower::ServiceExt;
+
+    struct FailOnce {
+        phase: CommitPhase,
+        fired: AtomicBool,
+    }
+
+    impl FailureInjector for FailOnce {
+        fn fail(&self, phase: CommitPhase) -> Result<(), &'static str> {
+            if phase == self.phase && !self.fired.swap(true, Ordering::SeqCst) {
+                Err("startup semantic recovery fixture fault")
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    async fn seed_pending_semantic_publication(
+        state: &StateStore,
+        context: &VaultContext,
+        history_root: &Path,
+        invalidate: bool,
+    ) -> VaultCore {
+        state
+            .settings()
+            .set_vault(
+                context,
+                "memory.units.policy",
+                &serde_json::json!({"enabled":true,"request_timeout_seconds":300}),
+                WritePrecondition::Unconditional,
+                None,
+            )
+            .await
+            .unwrap();
+        let core = VaultCore::new(
+            state.clone(),
+            history_root.to_owned(),
+            VaultPathPolicy::default(),
+            StorageOptions::default(),
+            VaultCoreRuntime::default(),
+        );
+        let path = VaultPath::parse("notes/startup.md").unwrap();
+        core.create_bytes(
+            context,
+            &path,
+            b"# Startup\nKeep only the current source.\n",
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap();
+        let service = SemanticMemoryService::new(state.clone());
+        let input = service.prepare_source(context, &core, &path).await.unwrap();
+        let body = input.blocks.last().unwrap();
+        let proposal = serde_json::json!({
+            "outcome":"success_nonempty",
+            "observations":[{"kind":"decision","statement":"Keep only the current source.","scope":"project","assertion_status":"source_asserted","admission_reason":"startup recovery","value_for_future_work":"preserve source","body_block_ids":[body.local_id.clone()]}],
+            "cards":[{"title":"Startup source","kind":"decision","scope":"project","assertion_status":"source_asserted","observation_indices":[0]}]
+        });
+        let failing_core = core.clone().with_failure_injector(Arc::new(FailOnce {
+            phase: CommitPhase::RenameCommitted,
+            fired: AtomicBool::new(false),
+        }));
+        assert!(
+            service
+                .submit_proposal_json(context, &failing_core, &path, &proposal.to_string())
+                .await
+                .is_err()
+        );
+        if invalidate {
+            let file = core.read(context, &path).await.unwrap().file;
+            state
+                .semantic_memory()
+                .invalidate_source(context, file.id, "source_changed", None)
+                .await
+                .unwrap();
+        }
+        core
+    }
 
     use super::{
         config::AppConfig, load_master_key_ring, mark_interrupted_memory_initializations,
@@ -1149,6 +1324,104 @@ mod tests {
     #[test]
     fn default_configuration_validates_without_filesystem_access() {
         assert!(AppConfig::default().validate().is_ok());
+    }
+
+    #[tokio::test]
+    async fn worker_flag_gates_supervisor_initialization_and_job_consumption() {
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        state
+            .jobs()
+            .enqueue_global(
+                "worker-gate.test",
+                "worker-gate:test-job",
+                &serde_json::json!({}),
+                0,
+                3,
+                0,
+            )
+            .await
+            .unwrap();
+        let initialized = Arc::new(AtomicBool::new(false));
+        let initialize_flag = initialized.clone();
+        let disabled_state = state.clone();
+        let disabled = start_background_tasks(
+            false,
+            state.clone(),
+            Duration::from_secs(3600),
+            MaintenanceGate::new(),
+            move || {
+                initialize_flag.store(true, Ordering::SeqCst);
+                let supervisor = workers::WorkerSupervisor::new(
+                    disabled_state.clone(),
+                    Arc::new(|_| Box::pin(async { Ok(()) })),
+                    workers::WorkerConfig::default(),
+                )
+                .map_err(|failure| ServerError::Workers(failure.code))?;
+                Ok(supervisor)
+            },
+        )
+        .await
+        .unwrap();
+        assert!(disabled.is_none());
+        assert!(!initialized.load(Ordering::SeqCst));
+        assert_eq!(state.jobs().pending_count().await.unwrap(), 1);
+
+        let default_config = AppConfig::default();
+        assert!(default_config.workers_enabled);
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let calls = handler_calls.clone();
+        let enabled_state = state.clone();
+        let enabled_initialized = initialized.clone();
+        let tasks = start_background_tasks(
+            default_config.workers_enabled,
+            state.clone(),
+            Duration::from_secs(3600),
+            MaintenanceGate::new(),
+            move || {
+                enabled_initialized.store(true, Ordering::SeqCst);
+                let supervisor = workers::WorkerSupervisor::new(
+                    enabled_state.clone(),
+                    Arc::new(|_| Box::pin(async { Ok(()) })),
+                    workers::WorkerConfig {
+                        poll_interval: Duration::from_millis(5),
+                        lease_duration: Duration::from_millis(100),
+                        ..workers::WorkerConfig::default()
+                    },
+                )
+                .map_err(|failure| ServerError::Workers(failure.code))?;
+                supervisor
+                    .register_job_handler(
+                        "worker-gate.test",
+                        Arc::new(move |_, _| {
+                            let calls = calls.clone();
+                            Box::pin(async move {
+                                calls.fetch_add(1, Ordering::SeqCst);
+                                workers::JobOutcome::Complete
+                            })
+                        }),
+                    )
+                    .map_err(|failure| ServerError::Workers(failure.code))?;
+                Ok(supervisor)
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if state.jobs().pending_count().await.unwrap() == 0 {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(initialized.load(Ordering::SeqCst));
+        assert_eq!(handler_calls.load(Ordering::SeqCst), 1);
+        stop_background_tasks(tasks, Duration::from_secs(1)).await;
     }
 
     #[test]
@@ -1481,6 +1754,8 @@ mod tests {
             &state,
             &root.path().join("history"),
             &mcp_vault_core::VaultCoreRuntime::default(),
+            &mcp_vault_memory::SemanticMemoryService::new(state.clone()),
+            &mcp_vault_memory::semantic::organize::SemanticOrganizationService::new(state.clone()),
         )
         .await
         .unwrap();
@@ -1505,5 +1780,202 @@ mod tests {
                 .status,
             VaultStatus::Disabled
         );
+    }
+
+    #[tokio::test]
+    async fn startup_semantic_preflight_blocks_stale_core_recovery_but_recovers_other_vaults() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("startup-semantic.sqlite3");
+        let database_url = format!("sqlite://{}", database.display());
+        let state = StateStore::connect_and_migrate(&database_url)
+            .await
+            .unwrap();
+        let stale = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("startup-stale-semantic").unwrap(),
+            root.path().join("stale"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        let ready = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("startup-ready-semantic").unwrap(),
+            root.path().join("ready"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&stale, "Startup stale", VaultStatus::Active)
+            .await
+            .unwrap();
+        state
+            .vaults()
+            .insert(&ready, "Startup ready", VaultStatus::Active)
+            .await
+            .unwrap();
+        let stale_core =
+            seed_pending_semantic_publication(&state, &stale, &root.path().join("history"), true)
+                .await;
+        let ready_core =
+            seed_pending_semantic_publication(&state, &ready, &root.path().join("history"), false)
+                .await;
+
+        recover_registered_vaults(
+            &state,
+            &root.path().join("history"),
+            &VaultCoreRuntime::default(),
+            &SemanticMemoryService::new(state.clone()),
+            &mcp_vault_memory::semantic::organize::SemanticOrganizationService::new(state.clone()),
+        )
+        .await
+        .unwrap();
+
+        // Reopen a file-backed StateStore to model a real second process
+        // startup. The barrier must come from durable rows, not this pool.
+        drop(stale_core);
+        drop(ready_core);
+        state.close().await;
+        let reopened = StateStore::connect_and_migrate(&database_url)
+            .await
+            .unwrap();
+
+        // A blocked semantic snapshot still owns an unproven Core journal.
+        // Re-running startup recovery must keep the barrier in place rather
+        // than letting the generic Core pass finalize the RenameCommitted
+        // operation on the second boot.
+        recover_registered_vaults(
+            &reopened,
+            &root.path().join("history"),
+            &VaultCoreRuntime::default(),
+            &SemanticMemoryService::new(reopened.clone()),
+            &mcp_vault_memory::semantic::organize::SemanticOrganizationService::new(
+                reopened.clone(),
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            reopened
+                .vaults()
+                .find_by_id(stale.id())
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            VaultStatus::Error
+        );
+        assert_eq!(
+            reopened
+                .vaults()
+                .find_by_id(ready.id())
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            VaultStatus::Active
+        );
+        assert_eq!(
+            reopened
+                .files()
+                .list_incomplete(&stale)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            reopened
+                .semantic_memory()
+                .list_cards(&stale, 20)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !reopened
+                .files()
+                .list_active_entries(&stale)
+                .await
+                .unwrap()
+                .iter()
+                .any(|file| file.path.as_str().starts_with("_mcp-vault/")),
+            "stale semantic recovery must not publish a managed card file"
+        );
+        assert!(
+            reopened
+                .files()
+                .list_incomplete(&ready)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            SemanticMemoryService::new(reopened.clone())
+                .list_cards(
+                    &ready,
+                    &VaultCore::new(
+                        reopened.clone(),
+                        root.path().join("history"),
+                        VaultPathPolicy::default(),
+                        StorageOptions::default(),
+                        VaultCoreRuntime::default(),
+                    ),
+                    20,
+                )
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_maintenance_recovery_preflights_stale_semantic_journal() {
+        let root = tempfile::tempdir().unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("backup-semantic-barrier").unwrap(),
+            root.path().join("backup-barrier"),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "Backup semantic barrier", VaultStatus::Active)
+            .await
+            .unwrap();
+        let core =
+            seed_pending_semantic_publication(&state, &context, &root.path().join("history"), true)
+                .await;
+        let gate = MaintenanceGate::new();
+        gate.set(MaintenanceMode::Offline);
+        let readiness = Arc::new(AtomicBool::new(false));
+        let service = BackupService::new(
+            state.clone(),
+            BackupConfig {
+                backup_root: root.path().join("backups"),
+                history_root: root.path().join("history"),
+                storage_options: StorageOptions::default(),
+                limits: BackupLimits::default(),
+                service_version: "test".to_owned(),
+                key_version_ids: vec![1],
+                maintenance: gate.clone(),
+                core_runtime: VaultCoreRuntime::new(gate.clone()),
+                readiness: readiness.clone(),
+            },
+        );
+        assert!(service.recover_maintenance().await.is_err());
+        assert_eq!(gate.mode(), MaintenanceMode::Offline);
+        assert!(!readiness.load(Ordering::Acquire));
+        assert_eq!(
+            state.files().list_incomplete(&context).await.unwrap().len(),
+            1
+        );
+        drop(core);
     }
 }
