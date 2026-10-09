@@ -2380,7 +2380,10 @@ cargo run -p mcp-vault-eval --offline --locked --bin init-m6-cloud-provider -- \
 - [x] 一次执行连接短暂断开后先核实状态：环境已恢复、无评测进程、未创建新run、新增带认证请求0；未重复启动。
 - [x] 原runner只把鉴权/配置错误作为全局失败，连接/DNS/TLS映射可被当作局部失败而继续预约。启动前补齐共享基础故障分类，含请求/连接/响应超时或中断、流超时及HTTP服务错误；模型schema局部恢复规则保持不变。41项runner回归通过，其中新增14错误码×3阶段的42条合成路径，断言首次错误后无额外调用/预约/attempt记录。独立只读复核通过。
 - [x] 无凭据预检：使用现有平台CA完成一次TLS握手；无凭据、无origin应用HTTP请求。保留证书/主机名验证，未改持久信任或网络设置；此结果不冒充真实模型调用成功。
-- [ ] 新schema/native-roots CLI构建、fresh prepare及离线preflight。
-- [ ] 唯一恢复轮运行、逐项独立盲评及原门槛裁定；旧run保持原样。
+- [x] 新schema/native-roots CLI构建 exit 0；补充停止保护已提交并推送 `a0f4c51334935a570d23cc7c4dc7135a49838ffe`，远端SHA一致。Eval all-targets Clippy、fmt/diff通过；冻结candidate及pre-run gold记录validator通过，原字节/pins不变。
+- [ ] fresh prepare被现有预算准入拒绝，未封存或执行：完整协议计算上界160，高于授权136。31 observation batches +90 answers +6 relations为主流程127；另计23个source-arm再生成额度、6个relation retry额度、4个answer retry额度，共160。不能以主流程127冒充完整最坏上界，也不能静默把配置抬至160或放宽准入。
+- [ ] 唯一恢复轮尚未启动；新增带认证请求0、成功响应0、无评分输出，M6仍not_evaluated。需父任务协调决定：另加24次恢复轮额度（与旧24预占合计184），或明确修改并验证再生成/准入策略以保留136硬上限；当前授权不作这两项推断。旧run保持原样。
+
+新私有根 `/workspace/scratch/m6-cloud-e5a47d6-20261009/run-02` 保留未封存的离线准备状态；没有live-config、seal、claim、attempt ledger或Provider输出。一次先于创建空0700根的prepare检查因路径不存在退出，此时未访问Provider State；创建同一新根后离线prepare在预算检查退出。两次均不是live runner启动，未发送Provider请求，未创建下一轮。详细安全状态及计数保存在 `validation/recovery-blocked-status.json`，失败原文在 `validation/recovery-prepare-stderr.log`。现有预算136未被消耗；旧run真实用量/费用未知，不将合计费用写为零。
 
 本节离线证据为同一scratch根 `validation/recovery-fail-fast-tests.log`、`recovery-fail-fast-clippy.log`、`recovery-network-preflight.log`。全部特性仍受既有官方ort-sys CDN403阻塞，不改写为通过；代码/合成测试不代替M6质量验收。
