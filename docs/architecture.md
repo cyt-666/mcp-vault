@@ -588,7 +588,7 @@ trusted as proof of correctness.
 
 An adapter may use an SDK only when its network execution remains behind
 `ProviderTransport`. It may not instantiate an independent HTTP client that
-would evade URL resolution policy, redirect denial, response-size limits,
+would evade URL validation, redirect denial, response-size limits,
 shared concurrency, redaction, or post-success no-replay behavior.
 
 Operation-specific deadlines may override a Provider default without creating
@@ -596,6 +596,11 @@ a second transport boundary. A structured generation is not replay-safe after
 the provider has returned a successful HTTP status: timeout, truncation, or
 failure while reading that response body is terminal until explicit operator
 retry because billable work may already have completed.
+
+Provider destinations are chosen by the installation administrator (ADR-0045).
+The Vault call switch is disabled/enabled; transport uses ordinary direct or
+environment-proxy routing without pre-resolving or filtering destination IPs.
+TLS validation, redirect denial and request bounds remain mandatory.
 
 Provider adapters cannot write files or SQL projections directly.
 

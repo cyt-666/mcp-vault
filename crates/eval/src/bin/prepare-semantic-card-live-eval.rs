@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
     let isolated_auth = AuthService::new(baseline.state.auth(), isolated_keys);
     let provider_service = ProviderService::new(baseline.state.clone(), isolated_auth);
     provider_service
-        .set_provider_mode(&baseline.context, ProviderMode::RemoteAllowed, None)
+        .set_provider_mode(&baseline.context, ProviderMode::Enabled, None)
         .await?;
 
     let timeout_seconds = draft
@@ -623,7 +623,7 @@ async fn open_arm(draft: &DraftConfig, directory: &str, slug: &str) -> Result<Ar
     let integrity = state.integrity_check().await?;
     if !integrity.integrity_ok
         || integrity.foreign_key_violations != 0
-        || integrity.migration_version != 43
+        || integrity.migration_version != 44
     {
         return Err("new M6 State database is not healthy current-schema state".into());
     }

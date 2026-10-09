@@ -185,7 +185,7 @@ MUST NOT reinterpret an empty, renamed, or ambiguous object as a successful
 zero-result response.
 
 Provider libraries or SDKs MAY help serialize a protocol, but they MUST NOT
-bypass the project-owned endpoint validation, SSRF policy, bounded body,
+bypass the project-owned URL validation, Provider call switch, bounded body,
 timeout, concurrency, redaction, or cost-safe retry boundary.
 
 Provider failure MUST NOT block WebDAV, normal Vault writes, lexical search, or explicit memory access.

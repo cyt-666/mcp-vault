@@ -31,7 +31,7 @@
 
 ## 4) Reliability and Failure Behavior
 
-- Provider calls are subject to timeouts, body/request bounds, bounded concurrency, redirect/SSRF checks, redaction and cost-safe retry boundaries (docs/provider-compatibility.md:11-16; docs/architecture.md:554-589).
+- Provider calls are subject to timeouts, body/request bounds, bounded concurrency, URL validation, redirect denial, redaction and cost-safe retry boundaries. The installation administrator owns endpoint network access (docs/provider-compatibility.md; docs/architecture.md).
 - Provider failure must not block normal Vault writes, lexical search or explicit memory access (docs/product-requirements.md:183).
 - Durable jobs/outbox are stored in State and are Vault-scoped (docs/architecture.md:423-474; docs/data-model.md:511-629).
 - [TODO] Live endpoint reachability and current account/model configuration were not tested for this mapping task.

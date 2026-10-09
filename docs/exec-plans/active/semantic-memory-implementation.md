@@ -2358,3 +2358,16 @@ cargo run -p mcp-vault-eval --offline --locked --bin init-m6-cloud-provider -- \
 ```
 
 父目录须已存在且无符号链接，最终目录必须不存在。普通 shell 先加载 `/home/agent/.cargo/env`，Cargo缓存需使用该任务实际可写且已备好的目录。命令输出的 `source_database_path`、`source_master_key_path`、`source_vault_slug` 直接用于现有 prepare草稿；另填冻结来源/任务、全新run根、`external_request_budget=160`、`generation_token_limit=32768`、`provider_timeout_seconds=600`。初始化不等于 prepare或付费run授权；三步不自动串联。旧补丁文件不包含后续修复/初始化入口，迁移需以当前HEAD为基线单独提取本轮路径及新增文件，在云端独立工作树核验应用；不直接覆盖Mac既有改动，不携带环境设置两文件、State/密钥/评测输出或构建缓存。
+
+### 2026-10-09 08:09 UTC 指定提交的 Cloud 单轮验收：DNS 阻塞，已停止
+
+- 远端 `fix/m6-cloud-evaluation` 已 fetch，完整提交核验为 `e5a47d643583ec1111e2cb46b126866b33b498d8`，相对 `1861dfd37b611ac7703c3c14021a58c9d014de63` 恰为25文件。使用 detached HEAD，未移动 main、未 push/PR/部署。此环境最初工作区干净，没有交接中旧环境的两份未提交设置改动，`scripts/setup-dev.sh` 不存在；没有重建或覆盖它们。
+- `MIMO_API_KEY` 只作存在性布尔检查，结果 true；未输出值、片段、长度或哈希，未访问 Mac。复用 Rust/Cargo1.94、Node24.19、pnpm11.19，未重装。默认 workspace 685项、后续定向回归及代码审查沿用上述已验证证据，不冒充本环境重跑。
+- 三个入口构建成功；使用显式初始化入口创建私有安全占位配置，随后准备唯一新根 `/workspace/scratch/m6-cloud-e5a47d6-20261009/run-01`。初始化和 prepare 均零 Provider 请求。冻结 candidate/review/pre-run记录三个hash不变，两个 validator PASS；旧 `generate_holdout_review.py --check` 因固定历史HEAD断言失败，未重生成或修改已冻结证据包。
+- 离线 preflight PASS：30来源、60任务、30 holdout/90 answers，三臂来源字节匹配、每份State30文件、生成表为空、完整性/外键检查通过、权限和seal通过。主要调用31 observation batches +90 answers +6 relations=127；23个source-arm再生成余量及10个未实现调用余量后上界160。官方MiMo/mimo-v2.6-flash，输出上限32768、并发1、transport retries0，配置均冻结。
+- TLS握手诊断（无凭据、无应用HTTP请求）证明当前WebPKI-only为UnknownIssuer，增加环境已有CA后成功。以现有Cargo特性重建：`cargo build --offline --locked -p mcp-vault-eval -p mcp-vault-providers --features reqwest/rustls-tls-native-roots --bins`。`CARGO_HOME` 与 `CARGO_TARGET_DIR` 分别指向同一scratch根下 `cargo-home` 和 `target`，`CARGO_BUILD_JOBS=3`。只选择已有合法信任功能，未改网络权限、系统证书文件、TLS验证或产品源码。必须同时选中providers包；只选eval的reqwest为dev依赖，不足以改变runner。
+- 依本轮父任务转述的明确数据/费用授权，仅调用一次完整runner，2026-10-09T08:07:52.713137Z启动。观察到连续 `provider_dns_failed` 后主动SIGTERM停止，08:08:49Z退出143；没有自动第二轮或恢复。系统解析官方域名返回 `EAI_AGAIN (-3): Temporary failure in name resolution`。`validated_socket` 在构建授权header和transport budget reserve之前调用本地DNS；代理TLS握手可达不代表此本地DNS前置条件可用，不绕过SSRF/DNS检查。
+- 保留原始checkpoint/attempts/usage，不伪造终态：attempt ledger24条started，23条完成item failure全部DNS失败，已测transport attempts=0；最后1条在中断时未完成，结果/用量未知，仍保守消耗预占。checkpoint仍记录running/23，因此外层停止状态另存 `validation/final-status.json`，整体延迟为partial。23个完成调用耗时合计55156ms、最大5014ms；没有观测到成功响应，observations/cards/answers均0，completed_tasks=0。
+- M6仍 `not_evaluated`、`human_review=false`。无可评分输出，独立盲评未开始；保留30题/90答案分母，不给质量分。输入/输出tokens与真实费用无可用返回，标unknown，不填零或把24预占称为24次收费HTTP请求。全部特性门禁仍沿用既有ort-sys官方CDN403阻塞记录，未重复触发下载。
+
+本环境证据位于 `/workspace/scratch/m6-cloud-e5a47d6-20261009/validation/`：`build.log`、`build-native-roots.log`、`tls-preflight.log`、`provider-init.json`、`prepare.json`、`offline-preflight.json`、两个validator输出及 `final-status.json`。私有run/provider-config目录含State及安装密钥，不提交或整体分享。阻塞解除需要在既有安全策略下使官方域名的本地DNS验证可用；本记录不授权更改网络权限、绕过验证或另开付费轮次。

@@ -39,7 +39,7 @@ Evidence: crates/server/src/main.rs:5-53; crates/server/src/lib.rs:150-220; crat
 | Application service | MemoryService and IndexService | Keep business operations independent of MCP/Admin adapters (crates/memory/src/v3/service.rs:108-140; docs/architecture.md:299-318) |
 | Vault-scoped repository | StateStore::memory_units and UnitRepository methods | Enforce context and query predicates around SQLite state (crates/state/src/pool.rs:228-240; crates/state/src/units.rs:345-367,538-575) |
 | Persistent worker/job | memory.extract handler and state jobs | Resume bounded work after cancellation or restart (crates/server/src/workers.rs:1636-1665; docs/data-model.md:543-595) |
-| Provider adapter + shared transport | crates/providers | Apply common SSRF, timeout, size, concurrency and redaction controls (docs/provider-compatibility.md:11-16) |
+| Provider adapter + shared transport | crates/providers | Apply common URL validation, redirect denial, timeout, size, concurrency and redaction controls; the administrator owns endpoint network access (docs/provider-compatibility.md) |
 
 ## 5) Known Architectural Risks
 

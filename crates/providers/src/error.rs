@@ -105,7 +105,7 @@ pub enum ProviderError {
     /// The live evaluation's frozen provider identity no longer matches state.
     #[error("provider runtime configuration drifted")]
     RuntimeConfigurationDrift,
-    /// SSRF or endpoint policy rejected the target.
+    /// URL validation or redirect policy rejected the target.
     #[error("provider endpoint is not permitted")]
     EndpointDenied,
     /// A request could not be sent safely.

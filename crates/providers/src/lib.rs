@@ -28,7 +28,7 @@ pub use fastembed::FastEmbedAdapter;
 pub use policy::{
     DEFAULT_REASONING_GENERATION_TOKENS, ModelCapabilities, ModelSettings,
     OpenAiCompatibilityPreset, OpenAiStructuredOutputMode, OpenAiThinkingMode,
-    OpenAiTokenLimitField, ProviderKind, ProviderMode, ProviderSettings, endpoint_ip_allowed,
+    OpenAiTokenLimitField, ProviderKind, ProviderMode, ProviderSettings,
 };
 pub use service::{
     EMBEDDING_PROJECTION_VERSION, EmbeddingInput, EmbeddingService, EmbeddingSourceResolver,

@@ -1,6 +1,6 @@
 //! Typed provider configuration and privacy/transport policy.
 
-use std::{collections::BTreeMap, net::IpAddr, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -92,17 +92,17 @@ impl TryFrom<&str> for ProviderKind {
     }
 }
 
-/// Per-Vault provider privacy mode.
+/// Per-Vault Provider call switch. The administrator owns endpoint selection.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderMode {
     /// Do not send content to any provider.
     #[default]
+    #[serde(alias = "local_only")]
     Disabled,
-    /// Permit only loopback/private local endpoints.
-    LocalOnly,
-    /// Permit public HTTPS providers and explicit safe policy exceptions.
-    RemoteAllowed,
+    /// Permit calls to the administrator-configured Provider endpoints.
+    #[serde(alias = "remote_allowed")]
+    Enabled,
 }
 
 /// Typed provider transport settings.
@@ -127,7 +127,8 @@ pub struct ProviderSettings {
     pub max_request_bytes: usize,
     /// Maximum response body.
     pub max_response_bytes: usize,
-    /// Permit explicitly configured private HTTPS endpoints in remote mode.
+    /// Legacy serialized field, accepted for compatibility and ignored.
+    /// Endpoint network access is owned by the installation administrator.
     pub allow_private_networks: bool,
     /// Additional non-secret provider headers.
     pub headers: BTreeMap<String, String>,
@@ -564,43 +565,27 @@ impl ModelCapabilities {
     }
 }
 
-/// Validate an IP address against local/provider endpoint policy.
-pub fn endpoint_ip_allowed(ip: IpAddr, mode: ProviderMode, allow_private_networks: bool) -> bool {
-    let link_local = match ip {
-        IpAddr::V4(value) => value.is_link_local(),
-        IpAddr::V6(value) => value.is_unicast_link_local(),
-    };
-    if ip.is_unspecified() || ip.is_multicast() || link_local {
-        return false;
-    }
-    if is_metadata_address(ip) {
-        return false;
-    }
-    let private = is_private_address(ip) || ip.is_loopback();
-    match mode {
-        ProviderMode::Disabled => false,
-        ProviderMode::LocalOnly => private,
-        ProviderMode::RemoteAllowed => !private || allow_private_networks,
-    }
-}
+#[cfg(test)]
+mod provider_switch_tests {
+    use super::*;
 
-fn is_private_address(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => {
-            ip.is_private() || ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1])
+    #[test]
+    fn legacy_modes_decode_without_retaining_local_only_or_silently_enabling_it() {
+        for value in ["disabled", "local_only"] {
+            let mode: ProviderMode = serde_json::from_value(serde_json::json!(value)).unwrap();
+            assert_eq!(mode, ProviderMode::Disabled);
+            assert_eq!(serde_json::to_value(mode).unwrap(), "disabled");
         }
-        IpAddr::V6(ip) => {
-            let first = ip.segments()[0];
-            (first & 0xfe00) == 0xfc00
+        for value in ["enabled", "remote_allowed"] {
+            let mode: ProviderMode = serde_json::from_value(serde_json::json!(value)).unwrap();
+            assert_eq!(mode, ProviderMode::Enabled);
+            assert_eq!(serde_json::to_value(mode).unwrap(), "enabled");
         }
-    }
-}
-
-fn is_metadata_address(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => {
-            ip.octets() == [169, 254, 169, 254] || ip.octets() == [100, 100, 100, 200]
+        assert_eq!(ProviderMode::default(), ProviderMode::Disabled);
+        assert!(serde_json::from_value::<ProviderMode>(serde_json::json!("unknown")).is_err());
+        for legacy in [false, true] {
+            ProviderSettings::from_json(&serde_json::json!({"allow_private_networks": legacy}))
+                .unwrap();
         }
-        IpAddr::V6(ip) => ip == "fd00:ec2::254".parse().unwrap_or(ip),
     }
 }

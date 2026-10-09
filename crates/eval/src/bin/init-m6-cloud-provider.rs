@@ -102,7 +102,7 @@ async fn initialize(root: PathBuf) -> Result<()> {
     let auth = AuthService::new(state.auth(), keys);
     let providers = ProviderService::new(state, auth);
     providers
-        .set_provider_mode(&context, ProviderMode::RemoteAllowed, None)
+        .set_provider_mode(&context, ProviderMode::Enabled, None)
         .await?;
     let provider = providers
         .create_provider(ProviderInput {

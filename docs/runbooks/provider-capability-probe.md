@@ -31,7 +31,7 @@
   "artifact_root": "/absolute/canonical/path/probe-run/artifacts",
   "master_key_path": "/absolute/canonical/path/probe-run/keys/master-key",
   "vault_slug": "m6-probe",
-  "provider_mode": "remote_allowed",
+  "provider_mode": "enabled",
   "generation": {
     "name": "m6-probe-generation",
     "kind": "deepseek",
@@ -88,7 +88,7 @@ Generation 探针请求固定使用 256 个 token 的上限，并在支持兼容
 
 source State 的当前完整 Provider 查询依赖较新的 schema。为读取这一安装级 Provider secret reference，允许只读使用最高为 migration 11、且包含 `providers.id`/`secret_id` 与 Auth secret 元数据列的 source State；不执行 source migration 或写入。reference 不存在/无 secret 与 schema 不兼容分别报告为 `source_provider_reference_unavailable` 和 `source_provider_schema_incompatible`，checkpoint 不包含 secret 或数据库细节。这个窄例外不适用于 M6：M6 evaluator、探针目标 State 及其他正常 State 操作仍要求当前 schema。
 
-`provider_mode` 必须明确选择 `local_only` 或 `remote_allowed`。公共远程 endpoint 使用 HTTPS；本地 endpoint 受 Provider Transport 的 SSRF/private-network policy 限制。探针不会修改 Provider headers，也不接受 URL 内嵌 secret。
+执行探针时，`provider_mode` 必须明确选择 `enabled`；`disabled` 会在发送前拒绝调用。旧值 `local_only` 读取为 `disabled`，`remote_allowed` 读取为 `enabled`。安装管理员负责配置目标地址，Provider Transport 使用普通直连或环境代理，不预解析或限制目标 IP。HTTPS 保持证书验证，显式配置的 HTTP 不提供 TLS 保护；所有重定向均被拒绝。探针不会修改 Provider headers，也不接受 URL 内嵌 secret。
 
 ## 执行
 

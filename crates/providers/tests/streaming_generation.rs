@@ -337,7 +337,7 @@ async fn provider_fixture_kind(
     );
     let service = ProviderService::new(state.clone(), auth);
     service
-        .set_provider_mode(context, ProviderMode::LocalOnly, None)
+        .set_provider_mode(context, ProviderMode::Enabled, None)
         .await
         .unwrap();
     let provider = service

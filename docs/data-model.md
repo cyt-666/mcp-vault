@@ -137,6 +137,13 @@ CREATE TABLE vault_settings (
 
 Settings are typed in Rust. JSON storage does not permit unvalidated arbitrary values.
 
+`provider.mode` stores the per-Vault Provider call switch as `disabled` or `enabled`.
+Migration 0044 converts legacy `local_only` to `disabled` and `remote_allowed` to
+`enabled`, increments only changed setting revisions, and clears their updater
+identity because the migration performs the change. It also normalizes historical
+system-setting rows. Missing configuration remains disabled; an administrator may
+explicitly enable calls after migration. See ADR-0045.
+
 ### 4.2 Encrypted secrets
 
 ```sql

@@ -839,7 +839,7 @@ mod tests {
         let report = store.integrity_check().await.unwrap();
         assert!(report.integrity_ok);
         assert_eq!(report.foreign_key_violations, 0);
-        assert_eq!(report.migration_version, 43);
+        assert_eq!(report.migration_version, 44);
         assert!(store.foreign_keys_enabled().await.unwrap());
     }
 
@@ -961,7 +961,7 @@ mod tests {
         }
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 43);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 44);
     }
 
     #[tokio::test]
@@ -1003,7 +1003,7 @@ mod tests {
         assert!(jwks.is_none());
         assert_eq!(enabled, 0);
         assert!(store.has_table("installation_key_checks").await.unwrap());
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 43);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 44);
     }
 
     #[tokio::test]
@@ -1054,7 +1054,7 @@ mod tests {
         assert_eq!(store.integrity_check().await.unwrap().migration_version, 10);
 
         store.migrate().await.unwrap();
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 43);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 44);
     }
 
     #[tokio::test]
@@ -1210,7 +1210,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(pipeline_column, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 43);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 44);
     }
 
     #[tokio::test]
@@ -1272,7 +1272,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(retained, 1);
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 43);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 44);
     }
 
     #[tokio::test]
@@ -1357,7 +1357,7 @@ mod tests {
         .unwrap();
         assert_eq!(reason.as_deref(), Some("source_unavailable"));
         assert_eq!(changed_at, Some(20));
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 43);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 44);
     }
 
     #[tokio::test]
@@ -1495,7 +1495,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(fts_row, (String::new(), "keep canonical memory".to_owned()));
-        assert_eq!(store.integrity_check().await.unwrap().migration_version, 43);
+        assert_eq!(store.integrity_check().await.unwrap().migration_version, 44);
     }
 
     #[tokio::test]

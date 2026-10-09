@@ -2,7 +2,7 @@
 
 Accepted ADRs are binding unless superseded by a later ADR.
 
-The current sequence includes ADR-0043. ADR-0013 keeps ADR-0007 durable memories
+The current sequence includes ADR-0045. ADR-0013 keeps ADR-0007 durable memories
 canonical and provenanced while allowing `recall` to return separately typed,
 rebuildable ordinary-note cues. ADR-0014 replaced model self-score/routine
 review defaults with exact evidence and autonomous promotion. ADR-0015 retains
@@ -123,3 +123,7 @@ See [ADR-0028](0028-model-guided-chunks-and-diagnostic-evaluation.md).
 - [ADR-0042: Strict MiMo function output for M6 observations](0042-strict-mimo-function-output-for-m6-observations.md)
   uses an evaluation-only strict function schema and validated SSE argument
   aggregation while retaining the semantic and source evidence fences.
+
+- [ADR-0045: Administrator-owned Provider network access](0045-admin-owned-provider-network-access.md)
+  removes target DNS/IP checks and LocalOnly, retaining the Provider call switch
+  and a safe one-time legacy migration.

@@ -553,18 +553,23 @@ Provider types:
 
 Provider adapters must remain project-owned abstractions even when several types share HTTP shapes.
 
-The page also sets the current Vault's explicit `disabled`, `local_only`, or
-`remote_allowed` privacy mode with optimistic revision handling. All Admin,
+The page also sets the current Vault's `disabled`/`enabled` Provider call switch
+with optimistic revision handling. The administrator owns the configured target,
+including an internal model endpoint. There is no LocalOnly option or private-IP
+checkbox. Migration 0044 changes old `local_only` to `disabled` (enable it manually
+when appropriate) and old `remote_allowed` to `enabled`; obsolete
+`allow_private_networks` input is readable but ignored. All Admin,
 MCP, memory, and worker calls share one process `ProviderService`, so a
 provider's maximum concurrency is enforced across planes rather than per HTTP
 request.
 
 ### 11.2 URL policy
 
-- Public providers require HTTPS.
-- HTTP is permitted only for loopback or explicitly allowed private endpoints.
-- Redirects are disabled by default or restricted to same-origin HTTPS.
-- The UI warns before allowing link-local, Docker socket, metadata-service, or untrusted private destinations.
+- The installation administrator chooses the HTTP/HTTPS target, including internal services.
+- HTTPS verifies certificates; explicitly choosing HTTP provides no TLS protection.
+- Every redirect is rejected and Provider credentials are never forwarded through one.
+- The application does not pre-resolve DNS, restrict destination IP ranges, or pin sockets.
+- Normal direct/environment-proxy routing applies; deployment networking owns destination access.
 - Provider tests use the configured timeout and sanitized errors.
 
 ### 11.3 Model discovery and registration
@@ -627,7 +632,8 @@ check the Vault-specific override and then the global default.
 Each configured service also exposes “编辑 AI 服务” and “删除 AI 服务”. Editing
 supports display name, first-class service type, Base URL, enabled state,
 request/connect timeout, retry count, process-wide Provider concurrency,
-organization identifier, and the explicit private-network switch. The API-key
+and organization identifier. The obsolete private-network field is accepted only
+for configuration compatibility and has no effect. The API-key
 replacement field is always empty on load: leaving it empty preserves the
 stored ciphertext, while entering a value rotates the secret and removes the
 superseded Provider-owned ciphertext. The form submits the displayed revision

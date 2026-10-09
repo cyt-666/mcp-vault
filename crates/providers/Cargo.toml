@@ -32,7 +32,9 @@ optional = true
 [dev-dependencies]
 axum = { workspace = true }
 http-body-util = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tempfile = { workspace = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [lints]
 workspace = true

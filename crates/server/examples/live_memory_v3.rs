@@ -170,7 +170,7 @@ async fn clone_model(
 /// This mode intentionally clones only `memory_extraction`. It is a real-model
 /// selection check, not public-protocol or retrieval acceptance evidence.
 async fn run_authorized_selection_only(args: &[String]) -> Result<()> {
-    run_authorized_selection_only_with_mode(args, ProviderMode::RemoteAllowed).await
+    run_authorized_selection_only_with_mode(args, ProviderMode::Enabled).await
 }
 
 async fn run_authorized_selection_only_with_mode(
@@ -602,7 +602,7 @@ async fn main() -> Result<()> {
         .await?
     };
     providers
-        .set_provider_mode(&context, ProviderMode::RemoteAllowed, None)
+        .set_provider_mode(&context, ProviderMode::Enabled, None)
         .await?;
     let memory = MemoryService::with_provider_service(state.clone(), providers);
     memory
@@ -1101,7 +1101,7 @@ mod tests {
             run_root.display().to_string(),
         ];
         let selection_result =
-            run_authorized_selection_only_with_mode(&args, ProviderMode::LocalOnly).await;
+            run_authorized_selection_only_with_mode(&args, ProviderMode::Enabled).await;
         assert!(
             selection_result.is_ok(),
             "selection-only failed: {:?}; calls={}; schemas={:?}",

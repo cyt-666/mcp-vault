@@ -640,6 +640,32 @@ describe('Admin 管理界面', () => {
     await act(async () => root.unmount());
   });
 
+  it('AI 调用只有总开关，旧仅本地值保持关闭且需明确启用', async () => {
+    const request = vi.spyOn(adminApi, 'request').mockResolvedValue({ mode: 'enabled', revision: 3 });
+    const onRefresh = vi.fn();
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(async () => root.render(<ManagementPage page="providers" data={{
+      provider_mode: { mode: 'local_only', revision: 2 },
+      providers: [], models: [], bindings: [],
+    }} onRefresh={onRefresh} />));
+    const select = Array.from(container.querySelectorAll('label'))
+      .find((label) => label.textContent?.startsWith('AI 调用'))?.querySelector('select') as HTMLSelectElement;
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(['disabled', 'enabled']);
+    expect(select.value).toBe('disabled');
+    expect(request).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('管理员配置的服务地址决定调用目标');
+    await act(async () => {
+      select.value = 'enabled';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    const save = Array.from(container.querySelectorAll('button')).find((button) => button.textContent === '保存开关')!;
+    await act(async () => save.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(request).toHaveBeenCalledWith('/providers/mode', { method: 'PUT', body: { mode: 'enabled', expected_revision: 2 } });
+    expect(onRefresh).toHaveBeenCalledOnce();
+    await act(async () => root.unmount());
+  });
+
   it('AI 服务页面展示模型登记和自动记忆角色绑定', async () => {
     const container = document.createElement('div');
     const root = createRoot(container);
@@ -648,7 +674,7 @@ describe('Admin 管理界面', () => {
         <ManagementPage
           page="providers"
           data={{
-            provider_mode: { mode: 'local_only', revision: 1 },
+            provider_mode: { mode: 'disabled', revision: 1 },
             providers: [{
               id: 'provider-1',
               name: '小米 MiMo',
@@ -721,7 +747,7 @@ describe('Admin 管理界面', () => {
       <ManagementPage
         page="providers"
         data={{
-          provider_mode: { mode: 'remote_allowed', revision: 1 },
+          provider_mode: { mode: 'enabled', revision: 1 },
           providers: [{ id: 'provider-1', name: '小米 MiMo', provider_type: 'xiaomi_mimo', base_url: 'https://api.xiaomimimo.com/v1/' }],
           models: [{ id: 'model-flash', provider_id: 'provider-1', external_model_id: 'mimo-v2.6-flash', capabilities: { structured_output: false }, settings: {} }],
           bindings: [{ role: 'memory_extraction', model_id: 'model-old', vault_id: 'vault-1', revision: 1 }],
@@ -760,7 +786,7 @@ describe('Admin 管理界面', () => {
         <ManagementPage
           page="providers"
           data={{
-            provider_mode: { mode: 'remote_allowed', revision: 1 },
+            provider_mode: { mode: 'enabled', revision: 1 },
             providers: [{
               id: 'provider-1',
               name: '待删除服务',
@@ -816,7 +842,7 @@ describe('Admin 管理界面', () => {
         <ManagementPage
           page="providers"
           data={{
-            provider_mode: { mode: 'remote_allowed', revision: 1 },
+            provider_mode: { mode: 'enabled', revision: 1 },
             providers: [{
               id: 'provider-edit',
               name: '待编辑服务',
@@ -848,6 +874,7 @@ describe('Admin 管理界面', () => {
     );
 
     const form = container.querySelector('form[aria-label="编辑 待编辑服务"]') as HTMLFormElement;
+    expect(form.querySelector('input[name="provider-private-networks"]')).toBeNull();
     const name = form.querySelector('input[name="provider-name"]') as HTMLInputElement;
     const timeout = form.querySelector('input[name="provider-timeout"]') as HTMLInputElement;
     const concurrency = form.querySelector('input[name="provider-concurrency"]') as HTMLInputElement;

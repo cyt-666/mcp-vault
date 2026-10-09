@@ -161,7 +161,7 @@ async fn identical_prepared_inputs_reuse_values_without_reusing_object_identity(
     );
     let service = ProviderService::new(state.clone(), auth);
     service
-        .set_provider_mode(&work, ProviderMode::LocalOnly, None)
+        .set_provider_mode(&work, ProviderMode::Enabled, None)
         .await
         .unwrap();
     let provider = service
@@ -266,7 +266,7 @@ async fn identical_prepared_inputs_reuse_values_without_reusing_object_identity(
     );
     let other = context(&state, "same-input-other", directory.path().join("other")).await;
     service
-        .set_provider_mode(&other, ProviderMode::LocalOnly, None)
+        .set_provider_mode(&other, ProviderMode::Enabled, None)
         .await
         .unwrap();
     embeddings
@@ -412,7 +412,7 @@ async fn embedding_model_without_declared_capability_is_rejected_before_http() {
     );
     let service = ProviderService::new(state, auth);
     service
-        .set_provider_mode(&work, ProviderMode::LocalOnly, None)
+        .set_provider_mode(&work, ProviderMode::Enabled, None)
         .await
         .unwrap();
     let provider = service
@@ -476,7 +476,7 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
     );
     let service = ProviderService::new(state.clone(), auth.clone());
     service
-        .set_provider_mode(&work, ProviderMode::LocalOnly, None)
+        .set_provider_mode(&work, ProviderMode::Enabled, None)
         .await
         .unwrap();
     let provider = service
@@ -705,7 +705,7 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
     assert_eq!(coverage.dimensions, vec![3]);
 
     service
-        .set_provider_mode(&other, ProviderMode::LocalOnly, None)
+        .set_provider_mode(&other, ProviderMode::Enabled, None)
         .await
         .unwrap();
     embeddings
@@ -856,7 +856,7 @@ async fn provider_deletion_is_revision_checked_and_cleans_only_dependent_state()
     let service = ProviderService::new(state.clone(), auth);
     for context in [&work, &other] {
         service
-            .set_provider_mode(context, ProviderMode::LocalOnly, None)
+            .set_provider_mode(context, ProviderMode::Enabled, None)
             .await
             .unwrap();
     }
@@ -1107,7 +1107,7 @@ async fn provider_service_sends_first_class_vendor_structured_generation_contrac
     );
     let service = ProviderService::new(state, auth);
     service
-        .set_provider_mode(&work, ProviderMode::LocalOnly, None)
+        .set_provider_mode(&work, ProviderMode::Enabled, None)
         .await
         .unwrap();
     let cases = [
@@ -1220,7 +1220,7 @@ async fn provider_service_reuses_one_concurrency_gate_across_calls_and_clones() 
     );
     let service = ProviderService::new(state, auth);
     service
-        .set_provider_mode(&work, ProviderMode::LocalOnly, None)
+        .set_provider_mode(&work, ProviderMode::Enabled, None)
         .await
         .unwrap();
     let provider = service
@@ -1283,7 +1283,7 @@ async fn transport_enforces_retry_auth_timeout_and_redirect_contracts() {
         .request_json(
             Method::POST,
             &endpoint("/retry"),
-            ProviderMode::LocalOnly,
+            ProviderMode::Enabled,
             &json!({}),
             RequestOptions::new(AuthStyle::Bearer, Some(&secret)),
         )
@@ -1296,7 +1296,7 @@ async fn transport_enforces_retry_auth_timeout_and_redirect_contracts() {
         .request_json(
             Method::POST,
             &endpoint("/unauthorized"),
-            ProviderMode::LocalOnly,
+            ProviderMode::Enabled,
             &json!({}),
             RequestOptions::new(AuthStyle::Bearer, Some(&secret)),
         )
@@ -1314,7 +1314,7 @@ async fn transport_enforces_retry_auth_timeout_and_redirect_contracts() {
         .request_json(
             Method::POST,
             &endpoint("/invalid-content"),
-            ProviderMode::LocalOnly,
+            ProviderMode::Enabled,
             &json!({}),
             RequestOptions::new(AuthStyle::None, None)
                 .with_timeout(Some(Duration::from_millis(250))),
@@ -1334,7 +1334,7 @@ async fn transport_enforces_retry_auth_timeout_and_redirect_contracts() {
         .request_json(
             Method::POST,
             &endpoint("/invalid-json"),
-            ProviderMode::LocalOnly,
+            ProviderMode::Enabled,
             &json!({}),
             RequestOptions::new(AuthStyle::None, None),
         )
@@ -1346,7 +1346,7 @@ async fn transport_enforces_retry_auth_timeout_and_redirect_contracts() {
         .request_json(
             Method::POST,
             &endpoint("/redirect"),
-            ProviderMode::LocalOnly,
+            ProviderMode::Enabled,
             &json!({}),
             RequestOptions::new(AuthStyle::None, None),
         )
@@ -1365,7 +1365,7 @@ async fn transport_enforces_retry_auth_timeout_and_redirect_contracts() {
         .request_json(
             Method::POST,
             &endpoint("/slow"),
-            ProviderMode::LocalOnly,
+            ProviderMode::Enabled,
             &json!({}),
             RequestOptions::new(AuthStyle::None, None),
         )
@@ -1391,7 +1391,7 @@ async fn transport_enforces_retry_auth_timeout_and_redirect_contracts() {
         .request_json(
             Method::POST,
             &endpoint("/delayed-body"),
-            ProviderMode::LocalOnly,
+            ProviderMode::Enabled,
             &json!({}),
             RequestOptions::new(AuthStyle::None, None),
         )
@@ -1414,7 +1414,7 @@ async fn transport_enforces_retry_auth_timeout_and_redirect_contracts() {
         .request_json(
             Method::POST,
             &endpoint("/delayed-body"),
-            ProviderMode::LocalOnly,
+            ProviderMode::Enabled,
             &json!({}),
             RequestOptions::new(AuthStyle::None, None)
                 .with_timeout(Some(Duration::from_millis(250))),
@@ -1428,7 +1428,7 @@ async fn transport_enforces_retry_auth_timeout_and_redirect_contracts() {
         .request_json(
             Method::POST,
             &endpoint("/interrupted-body"),
-            ProviderMode::LocalOnly,
+            ProviderMode::Enabled,
             &json!({}),
             RequestOptions::new(AuthStyle::None, None)
                 .with_timeout(Some(Duration::from_millis(250))),
@@ -1499,7 +1499,7 @@ async fn generation_budget_blocks_retries_and_cloned_service_dispatch() {
     let service = ProviderService::new(state, auth)
         .with_generation_budget(Arc::new(OneAttempt(AtomicUsize::new(0))));
     service
-        .set_provider_mode(&work, ProviderMode::LocalOnly, None)
+        .set_provider_mode(&work, ProviderMode::Enabled, None)
         .await
         .unwrap();
     let provider = service
@@ -1571,20 +1571,29 @@ async fn generation_budget_blocks_retries_and_cloned_service_dispatch() {
 }
 
 #[tokio::test]
-async fn provider_policy_rejects_remote_http_and_unsafe_endpoints() {
-    let settings = ProviderSettings::default();
+async fn provider_endpoint_validation_is_syntactic_and_preserves_the_configured_host() {
     let public_http = Url::parse("http://8.8.8.8/v1/").unwrap();
-    assert!(
-        validate_endpoint(&public_http, ProviderMode::RemoteAllowed, &settings)
-            .await
-            .is_err()
-    );
-    let metadata = Url::parse("http://169.254.169.254/v1/").unwrap();
-    assert!(
-        validate_endpoint(&metadata, ProviderMode::LocalOnly, &settings)
-            .await
-            .is_err()
-    );
+    // Validation performs no DNS lookup or network access, including these IPs.
+    for endpoint in [
+        "https://provider-without-local-dns.invalid/v1/",
+        "http://8.8.8.8/v1/",
+        "http://127.0.0.1/v1/",
+        "http://10.1.2.3:11434/v1/",
+        "http://169.254.169.254/v1/",
+        "http://[::ffff:127.0.0.1]/v1/",
+    ] {
+        assert!(validate_endpoint(&Url::parse(endpoint).unwrap()).is_ok());
+    }
+    for endpoint in [
+        "file:///etc/passwd",
+        "ftp://provider.invalid/v1/",
+        "https://user:password@provider.invalid/v1/",
+        "https://provider.invalid/v1/?key=secret",
+        "https://provider.invalid/v1/#fragment",
+        "https://provider.invalid:0/v1/",
+    ] {
+        assert!(validate_endpoint(&Url::parse(endpoint).unwrap()).is_err());
+    }
     assert_eq!(
         endpoint_url(&Url::parse("http://127.0.0.1/v1/").unwrap(), "embeddings")
             .unwrap()

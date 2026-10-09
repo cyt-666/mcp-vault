@@ -428,7 +428,7 @@ async fn main() -> Result<()> {
         ProviderService::new(state.clone(), auth).with_generation_budget(budget.clone());
     let model = clone_model(&source, &source_auth, &source_context, &providers, &context).await?;
     providers
-        .set_provider_mode(&context, ProviderMode::RemoteAllowed, None)
+        .set_provider_mode(&context, ProviderMode::Enabled, None)
         .await?;
 
     let mut raw: BTreeMap<String, Vec<Value>> = BTreeMap::new();

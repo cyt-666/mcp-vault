@@ -43,7 +43,7 @@ pub async fn prepare(
         .unwrap();
     });
     providers
-        .set_provider_mode(context, ProviderMode::LocalOnly, None)
+        .set_provider_mode(context, ProviderMode::Enabled, None)
         .await?;
     let provider = providers
         .create_provider(ProviderInput {

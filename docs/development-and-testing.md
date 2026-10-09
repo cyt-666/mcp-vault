@@ -268,7 +268,7 @@ Test application services with real temporary filesystem + SQLite:
 - public MCP lexical search with two-Vault authorization isolation;
 - provider failure;
 - provider adapter contracts use local fake HTTP servers only;
-- SSRF/redirect/privacy/retry/concurrency and response-schema failures;
+- Provider URL validation, redirect denial, call-switch/privacy/retry/concurrency and response-schema failures;
 - embedding dimension/model/Vault partition and re-embedding job references;
 - deterministic bounded note chunks, missing/stale vector scheduling, semantic
   paraphrase retrieval, lexical fallback, and two-Vault note-cue isolation;
@@ -528,7 +528,7 @@ Follow `security.md`, including:
 - secret logs/API;
 - OAuth claims/resource indicators;
 - cross-Vault;
-- provider SSRF;
+- provider URL validation and redirect denial;
 - prompt injection;
 - archive restore;
 - clean-host restore, pre-restore rollback, low-disk rejection, and backup

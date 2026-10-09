@@ -472,7 +472,7 @@ async fn semantic_namespace_migrates_and_is_vault_scoped() {
         .unwrap();
     let report = state.integrity_check().await.unwrap();
     assert!(report.integrity_ok);
-    assert_eq!(report.migration_version, 43);
+    assert_eq!(report.migration_version, 44);
     assert!(
         state
             .semantic_memory()

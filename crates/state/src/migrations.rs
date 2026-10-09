@@ -116,6 +116,70 @@ async fn schema(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn provider_switch_upgrade_disables_legacy_local_only_once_and_preserves_other_settings()
+    {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let mut prior = Migrator::DEFAULT;
+        prior.migrations = std::borrow::Cow::Owned(
+            MIGRATOR
+                .iter()
+                .filter(|migration| migration.version < 44)
+                .cloned()
+                .collect(),
+        );
+        prior.run(&pool).await.unwrap();
+        for (index, value) in ["local_only", "remote_allowed", "disabled", "enabled"]
+            .iter()
+            .enumerate()
+        {
+            let id = format!("provider-switch-{index}");
+            sqlx::query("INSERT INTO vaults (id,slug,name,content_root,status,created_at,updated_at) VALUES (?,?,?,?, 'active',1,1)")
+                .bind(&id).bind(&id).bind(&id).bind(format!("/synthetic/{id}"))
+                .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO vault_settings (vault_id,key,value_json,revision,updated_at) VALUES (?,'provider.mode',?,7,1)")
+                .bind(&id).bind(serde_json::to_string(value).unwrap()).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO vault_settings (vault_id,key,value_json,revision,updated_at) VALUES (?,'memory.extraction',?,9,1)")
+                .bind(&id).bind("{\"exclude\":[\"private/**\"]}").execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO system_settings (key,value_json,revision,updated_at) VALUES ('provider.mode','\"local_only\"',4,1)")
+            .execute(&pool).await.unwrap();
+        run(&pool).await.unwrap();
+        let values: Vec<(String,i64)> = sqlx::query_as("SELECT value_json,revision FROM vault_settings WHERE key='provider.mode' ORDER BY vault_id")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(
+            values,
+            vec![
+                ("\"disabled\"".into(), 8),
+                ("\"enabled\"".into(), 8),
+                ("\"disabled\"".into(), 7),
+                ("\"enabled\"".into(), 7)
+            ]
+        );
+        let other: Vec<(String,i64,i64)> = sqlx::query_as("SELECT value_json,revision,updated_at FROM vault_settings WHERE key='memory.extraction'")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(
+            other,
+            vec![("{\"exclude\":[\"private/**\"]}".into(), 9, 1); 4]
+        );
+        let global: (String, i64) = sqlx::query_as(
+            "SELECT value_json,revision FROM system_settings WHERE key='provider.mode'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(global, ("\"disabled\"".into(), 5));
+        run(&pool).await.unwrap();
+        let after_restart: Vec<(String,i64)> = sqlx::query_as("SELECT value_json,revision FROM vault_settings WHERE key='provider.mode' ORDER BY vault_id")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(after_restart, values);
+    }
+
     async fn legacy_store() -> sqlx::SqlitePool {
         let store = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)

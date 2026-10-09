@@ -41,7 +41,7 @@ impl ProviderAdapter for FastEmbedAdapter {
         _secret: Option<&SecretString>,
         request: &EmbeddingRequest,
     ) -> Result<EmbeddingResult, ProviderError> {
-        if mode != ProviderMode::LocalOnly {
+        if mode != ProviderMode::Enabled {
             return Err(ProviderError::PrivacyDenied);
         }
         let inputs = request.inputs.clone();

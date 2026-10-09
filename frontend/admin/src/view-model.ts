@@ -246,8 +246,6 @@ const statusLabels: Record<string, string> = {
   verified: '已验证',
   pending: '等待中',
   disabled_provider: '已禁用',
-  local_only: '仅本地服务',
-  remote_allowed: '允许远程 HTTPS',
 };
 
 const memoryTypeLabels: Record<string, string> = {

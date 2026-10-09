@@ -5123,7 +5123,7 @@ mod tests {
         );
         let providers = ProviderService::new(state.clone(), auth);
         providers
-            .set_provider_mode(&context, ProviderMode::LocalOnly, None)
+            .set_provider_mode(&context, ProviderMode::Enabled, None)
             .await
             .unwrap();
         let provider = providers

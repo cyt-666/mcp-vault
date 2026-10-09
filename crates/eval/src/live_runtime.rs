@@ -260,7 +260,7 @@ pub async fn build_live_runtime(
     let integrity = state.integrity_check().await?;
     if !integrity.integrity_ok
         || integrity.foreign_key_violations != 0
-        || integrity.migration_version != 43
+        || integrity.migration_version != 44
     {
         return Err("isolated state DB is not a healthy current-schema database".into());
     }
@@ -364,7 +364,7 @@ async fn open_arm_runtime(run_root: &str, config: &SemanticArmRoot) -> Result<Ar
     let integrity = state.integrity_check().await?;
     if !integrity.integrity_ok
         || integrity.foreign_key_violations != 0
-        || integrity.migration_version != 43
+        || integrity.migration_version != 44
     {
         return Err("isolated semantic arm DB is not healthy current-schema state".into());
     }

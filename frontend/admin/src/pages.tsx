@@ -1148,12 +1148,13 @@ function ModelBindingControl({ role, models, binding, notify, onRefresh }: { rol
 }
 
 function ProviderModeForm({ data, notify, onRefresh }: { data: JsonObject; notify: Notify; onRefresh: () => void }) {
-  const [mode, setMode] = useState(stringValue(data.mode, 'disabled'));
+  const normalizeMode = (value: unknown) => value === 'enabled' || value === 'remote_allowed' ? 'enabled' : 'disabled';
+  const [mode, setMode] = useState(normalizeMode(data.mode));
   const [revision, setRevision] = useState<number | null>(typeof data.revision === 'number' ? data.revision : null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    setMode(stringValue(data.mode, 'disabled'));
+    setMode(normalizeMode(data.mode));
     setRevision(typeof data.revision === 'number' ? data.revision : null);
   }, [data.mode, data.revision]);
 
@@ -1162,7 +1163,7 @@ function ProviderModeForm({ data, notify, onRefresh }: { data: JsonObject; notif
     try {
       const result = await adminApi.request<{ revision: number }>('/providers/mode', { method: 'PUT', body: { mode, expected_revision: revision ?? undefined } });
       setRevision(result.revision);
-      notify('AI 数据发送策略已保存。');
+      notify('AI 调用开关已保存。');
       onRefresh();
     } catch (error: unknown) {
       notify(formatRequestError(error), 'danger');
@@ -1172,14 +1173,14 @@ function ProviderModeForm({ data, notify, onRefresh }: { data: JsonObject; notif
   return (
     <div className="inline-form">
       <label>
-        当前策略
+        AI 调用
         <select value={mode} onChange={(event) => setMode(event.target.value)}>
           <option value="disabled">禁用 AI 调用</option>
-          <option value="local_only">仅允许本地地址</option>
-          <option value="remote_allowed">允许远程 HTTPS</option>
+          <option value="enabled">允许调用已配置的 AI 服务</option>
         </select>
       </label>
-      <button className="secondary-button" disabled={busy} type="button" onClick={() => void save()}>{busy ? '正在保存…' : '保存策略'}</button>
+      <button className="secondary-button" disabled={busy} type="button" onClick={() => void save()}>{busy ? '正在保存…' : '保存开关'}</button>
+      <small>管理员配置的服务地址决定调用目标，可使用内网服务。启用后，符合来源范围设置的内容会发送到这些地址。</small>
     </div>
   );
 }
@@ -1223,7 +1224,6 @@ function EditProviderForm({ provider, notify, onRefresh }: { provider: JsonObjec
   const [connectTimeoutSeconds, setConnectTimeoutSeconds] = useState(numberValue(providerSettings.connect_timeout_ms, 5_000) / 1_000);
   const [maxRetries, setMaxRetries] = useState(numberValue(providerSettings.max_retries, 2));
   const [maxConcurrency, setMaxConcurrency] = useState(numberValue(providerSettings.max_concurrency, 4));
-  const [allowPrivateNetworks, setAllowPrivateNetworks] = useState(booleanValue(providerSettings.allow_private_networks));
   const [organization, setOrganization] = useState(stringValue(providerSettings.organization, ''));
   const [busy, setBusy] = useState(false);
 
@@ -1240,7 +1240,6 @@ function EditProviderForm({ provider, notify, onRefresh }: { provider: JsonObjec
     setConnectTimeoutSeconds(numberValue(settings.connect_timeout_ms, 5_000) / 1_000);
     setMaxRetries(numberValue(settings.max_retries, 2));
     setMaxConcurrency(numberValue(settings.max_concurrency, 4));
-    setAllowPrivateNetworks(booleanValue(settings.allow_private_networks));
     setOrganization(stringValue(settings.organization, ''));
   }, [provider]);
 
@@ -1278,7 +1277,6 @@ function EditProviderForm({ provider, notify, onRefresh }: { provider: JsonObjec
             connect_timeout_ms: Math.round(connectTimeoutSeconds * 1_000),
             max_retries: maxRetries,
             max_concurrency: maxConcurrency,
-            allow_private_networks: allowPrivateNetworks,
             organization: organization || null,
           },
         },
@@ -1308,7 +1306,6 @@ function EditProviderForm({ provider, notify, onRefresh }: { provider: JsonObjec
           <label>瞬时错误重试次数<input max="8" min="0" name="provider-retries" required step="1" type="number" value={maxRetries} onChange={(event) => setMaxRetries(Number(event.target.value))} /></label>
           <label>最大并发请求<input max="64" min="1" name="provider-concurrency" required step="1" type="number" value={maxConcurrency} onChange={(event) => setMaxConcurrency(Number(event.target.value))} /></label>
           <label>组织/项目标识（可选）<input name="provider-organization" value={organization} onChange={(event) => setOrganization(event.target.value)} /></label>
-          <label className="checkbox-field"><input checked={allowPrivateNetworks} name="provider-private-networks" type="checkbox" onChange={(event) => setAllowPrivateNetworks(event.target.checked)} />远程模式下允许显式配置的私有网络地址</label>
         </div>
       </details>
       <small>替换密钥留空时不会读取、覆盖或清除现有密钥。修改服务类型后请重新检查已登记模型是否仍兼容。</small>

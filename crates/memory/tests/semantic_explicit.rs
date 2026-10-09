@@ -387,7 +387,7 @@ async fn legacy_memory_embedding_binding_without_capability_is_blocked_and_prese
         ),
     );
     providers
-        .set_provider_mode(&context, ProviderMode::LocalOnly, None)
+        .set_provider_mode(&context, ProviderMode::Enabled, None)
         .await
         .unwrap();
     let provider = providers

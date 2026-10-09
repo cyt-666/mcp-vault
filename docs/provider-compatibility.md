@@ -10,10 +10,12 @@ request field has the same semantics.
 
 Provider-specific code translates a typed model configuration into a wire
 request. Every request still passes through the shared `ProviderTransport` for
-DNS resolution, SSRF policy, redirect denial, encrypted-secret injection,
+URL validation, redirect denial, encrypted-secret injection,
 bounded concurrency, request/response size limits, deadlines, redaction, and
 cost-safe retry behavior. A preset is not allowed to construct its own HTTP
-client.
+client. Administrator-configured destinations use normal direct or environment
+proxy routing, with no application target-DNS or IP-range checks (ADR-0045).
+HTTPS still verifies certificates; explicit HTTP has no TLS protection.
 
 The Admin `provider_type` values are:
 

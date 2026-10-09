@@ -1359,8 +1359,12 @@ The embedded console keeps an issued WebDAV password or MCP PAT only in
 volatile component state until the operator hides it; it never persists the
 secret in browser storage.
 
-Provider mode is Vault-scoped and uses `disabled`, `local_only`, or
-`remote_allowed`; responses include the optimistic setting revision. OAuth
+The Provider call switch is Vault-scoped and uses `disabled` or `enabled`;
+responses include the optimistic setting revision. Legacy `local_only` input is
+accepted as `disabled`, and `remote_allowed` as `enabled`; output is always
+canonical. Migration 0044 performs this conversion once for stored settings,
+incrementing changed revisions. Enabling sends eligible content to the
+administrator-configured target; there is no private-network toggle. OAuth
 grant list/create/revoke operations always derive the current `VaultContext`
 from Admin state and never accept a caller-selected `vault_id`. Issuer responses
 report cache presence/timestamp but never return the stored JWKS body.

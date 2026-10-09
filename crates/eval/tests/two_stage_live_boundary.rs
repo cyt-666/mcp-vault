@@ -686,7 +686,7 @@ async fn provider_fixture_with_settings(
     );
     let service = ProviderService::new(fixture.state.clone(), auth);
     service
-        .set_provider_mode(&fixture.context, ProviderMode::LocalOnly, None)
+        .set_provider_mode(&fixture.context, ProviderMode::Enabled, None)
         .await
         .unwrap();
     let settings = ProviderSettings {
@@ -1871,7 +1871,7 @@ async fn provider_service_sse_structured_json_failure_is_redacted_and_aborted() 
     );
     let service = ProviderService::new(b.state.clone(), auth);
     service
-        .set_provider_mode(&b.context, ProviderMode::LocalOnly, None)
+        .set_provider_mode(&b.context, ProviderMode::Enabled, None)
         .await
         .unwrap();
     let provider = service
@@ -2084,7 +2084,7 @@ async fn production_two_stage_live_boundary_publishes_cards() {
     );
     let service = ProviderService::new(b.state.clone(), auth);
     service
-        .set_provider_mode(&b.context, ProviderMode::LocalOnly, None)
+        .set_provider_mode(&b.context, ProviderMode::Enabled, None)
         .await
         .unwrap();
     let provider = service
@@ -2278,7 +2278,7 @@ async fn a80_fake_provider_batches_then_publishes_one_card_per_claim() {
     );
     let provider = ProviderService::new(b.state.clone(), auth);
     provider
-        .set_provider_mode(&b.context, ProviderMode::LocalOnly, None)
+        .set_provider_mode(&b.context, ProviderMode::Enabled, None)
         .await
         .unwrap();
     let configured = provider

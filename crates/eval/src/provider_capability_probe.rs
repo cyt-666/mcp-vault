@@ -52,7 +52,7 @@ use zeroize::Zeroizing;
 /// broader semantic-card live-evaluation schema.
 pub const PROVIDER_CAPABILITY_PROBE_SCHEMA: &str = "provider-capability-probe-v2";
 /// The highest migration shipped by this checkout.
-pub const CURRENT_STATE_MIGRATION: i64 = 43;
+pub const CURRENT_STATE_MIGRATION: i64 = 44;
 /// Fixed input used by both probe stages.  It contains no Vault or user text.
 pub const SYNTHETIC_PROBE_INPUT: &str = "mcp-vault provider capability probe synthetic input v1";
 const PREPARED_SEAL_SCHEMA: &str = "provider-capability-probe-prepared-v1";
@@ -1768,7 +1768,7 @@ mod tests {
             artifact_root: root.join("artifacts").display().to_string(),
             master_key_path: root.join("keys/master").display().to_string(),
             vault_slug: "probe".to_owned(),
-            provider_mode: ProviderMode::LocalOnly,
+            provider_mode: ProviderMode::Enabled,
             generation: provider("generation", "synthetic-generation", false),
             embedding: provider("embedding", "synthetic-embedding", true),
             embedding_expected_dimension: ExpectedEmbeddingDimension::Known { dimension: 3 },

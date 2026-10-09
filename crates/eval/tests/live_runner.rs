@@ -307,7 +307,7 @@ fn config(root: &Path) -> (LiveEvaluationConfig, String) {
                 model_enabled: true,
                 capabilities: mcp_vault_providers::ModelCapabilities::default(),
                 model_settings: mcp_vault_providers::ModelSettings::default(),
-                mode: mcp_vault_providers::ProviderMode::RemoteAllowed,
+                mode: mcp_vault_providers::ProviderMode::Enabled,
                 mode_revision: Some(1),
             }),
             provider_templates: ["observation", "relation", "answer"]
@@ -377,7 +377,7 @@ async fn runtime_rejects_configuration_drift_after_preparation_before_network() 
             ),
         );
         service
-            .set_provider_mode(&context, ProviderMode::LocalOnly, None)
+            .set_provider_mode(&context, ProviderMode::Enabled, None)
             .await
             .unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1864,7 +1864,7 @@ async fn live_transport_budget_stops_transient_http_retries_at_the_attempt_limit
         .request_json(
             reqwest::Method::POST,
             &endpoint,
-            mcp_vault_providers::ProviderMode::LocalOnly,
+            mcp_vault_providers::ProviderMode::Enabled,
             &json!({"local_fixture":true}),
             mcp_vault_providers::RequestOptions::new(mcp_vault_providers::AuthStyle::None, None),
         )

@@ -1381,6 +1381,7 @@ fn adapter_for(kind: ProviderKind) -> Box<dyn ProviderAdapter> {
 
 fn validate_provider_url(url: &Url) -> Result<(), ProviderError> {
     if url.host_str().is_none()
+        || url.port_or_known_default().is_none_or(|port| port == 0)
         || url.username() != ""
         || url.password().is_some()
         || url.query().is_some()

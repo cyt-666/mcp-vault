@@ -1,11 +1,6 @@
-//! SSRF-safe bounded HTTP transport for provider adapters.
+//! Bounded HTTP transport for administrator-configured Provider endpoints.
 
-use std::{
-    future::Future,
-    net::{IpAddr, SocketAddr},
-    sync::Arc,
-    time::Duration,
-};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use futures_util::StreamExt;
 use mcp_vault_auth::SecretString;
@@ -16,7 +11,6 @@ use reqwest::{
 };
 use serde_json::Value;
 use tokio::{
-    net::lookup_host,
     sync::Semaphore,
     time::{Instant, sleep, timeout_at},
 };
@@ -24,7 +18,6 @@ use url::Url;
 
 use crate::{
     ProviderError, ProviderMode, ProviderSettings,
-    policy::endpoint_ip_allowed,
     sse::{SseDecoder, SseEvent},
 };
 
@@ -226,7 +219,7 @@ impl ProviderTransport {
             return Err(ProviderError::PrivacyDenied);
         }
 
-        let (host, socket) = validated_socket(endpoint, mode, &self.settings).await?;
+        validate_endpoint(endpoint)?;
         let _permit = self
             .concurrency
             .acquire()
@@ -241,7 +234,7 @@ impl ProviderTransport {
         let total_timeout = options
             .timeout
             .unwrap_or_else(|| Duration::from_millis(self.settings.stream_total_timeout_ms));
-        let client = self.build_client(&host, socket, total_timeout)?;
+        let client = self.build_client(total_timeout)?;
         let request = self.authenticated_request(
             client
                 .request(method, endpoint.clone())
@@ -408,7 +401,7 @@ impl ProviderTransport {
         if mode == ProviderMode::Disabled {
             return Err(ProviderError::PrivacyDenied);
         }
-        let (host, socket) = validated_socket(endpoint, mode, &self.settings).await?;
+        validate_endpoint(endpoint)?;
         let _permit = self
             .concurrency
             .acquire()
@@ -417,7 +410,7 @@ impl ProviderTransport {
                 code: "provider_concurrency_closed",
                 retryable: true,
             })?;
-        let client = self.build_client(&host, socket, self.settings.timeout())?;
+        let client = self.build_client(self.settings.timeout())?;
         let mut request =
             self.authenticated_request(client.request(method, endpoint.clone()), body, options)?;
         if let Some(timeout) = options.timeout {
@@ -477,17 +470,11 @@ impl ProviderTransport {
         Ok(JsonResponse { status, body })
     }
 
-    fn build_client(
-        &self,
-        host: &str,
-        socket: SocketAddr,
-        timeout: Duration,
-    ) -> Result<Client, ProviderError> {
+    fn build_client(&self, timeout: Duration) -> Result<Client, ProviderError> {
         Client::builder()
             .redirect(Policy::none())
             .connect_timeout(self.settings.connect_timeout())
             .timeout(timeout)
-            .resolve(host, socket)
             .build()
             .map_err(|_| ProviderError::Transport {
                 code: "provider_client_build_failed",
@@ -641,66 +628,27 @@ pub fn endpoint_url(base: &Url, suffix: &str) -> Result<Url, ProviderError> {
     Ok(url)
 }
 
-async fn validated_socket(
-    endpoint: &Url,
-    mode: ProviderMode,
-    settings: &ProviderSettings,
-) -> Result<(String, SocketAddr), ProviderError> {
-    if endpoint.username() != ""
+/// Return whether an HTTP status should be retried.
+pub const fn retryable_status(status: u16) -> bool {
+    status == 408 || status == 429 || status >= 500
+}
+
+/// Validate an administrator-configured HTTP endpoint without resolving DNS.
+/// reqwest handles direct or environment-proxy routing and TLS verification.
+pub fn validate_endpoint(endpoint: &Url) -> Result<(), ProviderError> {
+    if !matches!(endpoint.scheme(), "http" | "https")
+        || endpoint.host_str().is_none()
+        || endpoint
+            .port_or_known_default()
+            .is_none_or(|port| port == 0)
+        || !endpoint.username().is_empty()
         || endpoint.password().is_some()
         || endpoint.query().is_some()
         || endpoint.fragment().is_some()
     {
         return Err(ProviderError::EndpointDenied);
     }
-    let scheme = endpoint.scheme();
-    if scheme != "http" && scheme != "https" {
-        return Err(ProviderError::EndpointDenied);
-    }
-    let host = endpoint
-        .host_str()
-        .ok_or(ProviderError::EndpointDenied)?
-        .to_owned();
-    let port = endpoint
-        .port_or_known_default()
-        .ok_or(ProviderError::EndpointDenied)?;
-    if scheme == "http" && mode == ProviderMode::RemoteAllowed {
-        return Err(ProviderError::EndpointDenied);
-    }
-    let addresses = lookup_host((host.as_str(), port))
-        .await
-        .map_err(|_| ProviderError::Transport {
-            code: "provider_dns_failed",
-            retryable: true,
-        })?
-        .collect::<Vec<_>>();
-    if addresses.is_empty()
-        || addresses.iter().any(|address| {
-            !endpoint_ip_allowed(address.ip(), mode, settings.allow_private_networks)
-        })
-    {
-        return Err(ProviderError::EndpointDenied);
-    }
-    let socket = addresses[0];
-    if socket.ip().is_unspecified() {
-        return Err(ProviderError::EndpointDenied);
-    }
-    Ok((host, socket))
-}
-
-/// Return whether an HTTP status should be retried.
-pub const fn retryable_status(status: u16) -> bool {
-    status == 408 || status == 429 || status >= 500
-}
-
-/// Expose the endpoint validation seam to tests and Admin diagnostics without
-/// exposing DNS or local absolute paths in errors.
-pub async fn validate_endpoint(
-    endpoint: &Url,
-    mode: ProviderMode,
-    settings: &ProviderSettings,
-) -> Result<IpAddr, ProviderError> {
-    Ok(validated_socket(endpoint, mode, settings).await?.1.ip())
+    Ok(())
 }
 
 #[cfg(test)]
@@ -761,7 +709,7 @@ mod budget_tests {
             .request_json(
                 Method::POST,
                 &endpoint,
-                ProviderMode::LocalOnly,
+                ProviderMode::Enabled,
                 &serde_json::json!({"x":1}),
                 RequestOptions::new(AuthStyle::None, None),
             )
@@ -811,7 +759,7 @@ mod budget_tests {
             .request_json_once(
                 Method::POST,
                 &endpoint,
-                ProviderMode::LocalOnly,
+                ProviderMode::Enabled,
                 &serde_json::json!({"x":1}),
                 RequestOptions::new(AuthStyle::None, None),
             )
@@ -897,7 +845,7 @@ mod sse_tests {
             .request_sse(
                 Method::POST,
                 &Url::parse(&format!("http://{address}/stream")).unwrap(),
-                ProviderMode::LocalOnly,
+                ProviderMode::Enabled,
                 &serde_json::json!({"stream": true}),
                 RequestOptions::new(AuthStyle::None, None),
                 move |event| {
@@ -939,7 +887,7 @@ mod sse_tests {
             .request_sse(
                 Method::POST,
                 &Url::parse(&format!("http://{address}/stream")).unwrap(),
-                ProviderMode::LocalOnly,
+                ProviderMode::Enabled,
                 &serde_json::json!({}),
                 RequestOptions::new(AuthStyle::None, None),
                 |_| async { Ok(SseEventAction::Progress) },
@@ -971,7 +919,7 @@ mod sse_tests {
             .request_sse(
                 Method::POST,
                 &Url::parse(&format!("http://{address}/stream")).unwrap(),
-                ProviderMode::LocalOnly,
+                ProviderMode::Enabled,
                 &serde_json::json!({}),
                 RequestOptions::new(AuthStyle::None, None),
                 |_| async {
@@ -1003,7 +951,7 @@ mod sse_tests {
             .request_sse(
                 Method::POST,
                 &Url::parse(&format!("http://{address}/stream")).unwrap(),
-                ProviderMode::LocalOnly,
+                ProviderMode::Enabled,
                 &serde_json::json!({}),
                 RequestOptions::new(AuthStyle::None, None),
                 |_| async {
@@ -1035,7 +983,7 @@ mod sse_tests {
             .request_sse(
                 Method::POST,
                 &Url::parse(&format!("http://{address}/stream")).unwrap(),
-                ProviderMode::LocalOnly,
+                ProviderMode::Enabled,
                 &serde_json::json!({}),
                 RequestOptions::new(AuthStyle::None, None),
                 |_| async { Ok(SseEventAction::Terminal) },
@@ -1047,7 +995,7 @@ mod sse_tests {
             .request_sse(
                 Method::POST,
                 &Url::parse(&format!("http://{address}/stream")).unwrap(),
-                ProviderMode::LocalOnly,
+                ProviderMode::Enabled,
                 &serde_json::json!({}),
                 RequestOptions::new(AuthStyle::None, None),
                 |_| async {

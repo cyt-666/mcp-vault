@@ -7397,7 +7397,7 @@ mod tests {
         let context = vault.context().unwrap();
         state
             .providers()
-            .set_provider_mode(&context, ProviderMode::LocalOnly, None)
+            .set_provider_mode(&context, ProviderMode::Enabled, None)
             .await
             .unwrap();
         let provider = state
@@ -7644,7 +7644,7 @@ mod tests {
         let context = vault.context().unwrap();
         state
             .providers()
-            .set_provider_mode(&context, ProviderMode::LocalOnly, None)
+            .set_provider_mode(&context, ProviderMode::Enabled, None)
             .await
             .unwrap();
         let provider = state
@@ -7736,7 +7736,7 @@ mod tests {
         let context = vault.context().unwrap();
         state
             .providers()
-            .set_provider_mode(&context, ProviderMode::LocalOnly, None)
+            .set_provider_mode(&context, ProviderMode::Enabled, None)
             .await
             .unwrap();
         let provider = state
@@ -7949,7 +7949,7 @@ mod tests {
         let context = vault.context().unwrap();
         state
             .providers()
-            .set_provider_mode(&context, ProviderMode::LocalOnly, None)
+            .set_provider_mode(&context, ProviderMode::Enabled, None)
             .await
             .unwrap();
         let provider = state
@@ -9051,6 +9051,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_mutations_require_admin_session_csrf_and_origin() {
+        let (router, _root, _maintenance, cookie, csrf) = authenticated_fixture().await;
+        let body = json!({
+            "name":"synthetic", "provider_type":"openai_compatible",
+            "base_url":"https://provider.invalid/v1/", "enabled":true
+        });
+        for (method, path) in [
+            ("POST", "/providers"),
+            ("PATCH", "/providers/00000000-0000-0000-0000-000000000000"),
+        ] {
+            let (status, _) = json_response(
+                router
+                    .clone()
+                    .oneshot(request(method, path, body.clone(), None, None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            let (status, rejected) = json_response(
+                router
+                    .clone()
+                    .oneshot(request(method, path, body.clone(), Some(&cookie), None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(rejected["error"]["code"], "csrf_rejected");
+            let mut wrong_origin = request(method, path, body.clone(), Some(&cookie), Some(&csrf));
+            wrong_origin
+                .headers_mut()
+                .insert("origin", "https://untrusted.invalid".parse().unwrap());
+            let (status, rejected) =
+                json_response(router.clone().oneshot(wrong_origin).await.unwrap()).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(rejected["error"]["code"], "origin_rejected");
+        }
+    }
+
+    #[tokio::test]
     async fn provider_mode_and_oauth_grants_are_manageable_and_vault_scoped() {
         let (router, _root, _maintenance, cookie, csrf) = authenticated_fixture().await;
 
@@ -9088,8 +9129,9 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(mode["data"]["revision"], 1);
+        assert_eq!(mode["data"]["mode"], "enabled");
 
-        let (status, _) = json_response(
+        let (status, legacy_disabled) = json_response(
             router
                 .clone()
                 .oneshot(request(
@@ -9104,6 +9146,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(legacy_disabled["data"]["mode"], "disabled");
         let (status, stale) = json_response(
             router
                 .clone()
@@ -9453,7 +9496,7 @@ mod tests {
                 .oneshot(request(
                     "PUT",
                     "/providers/mode",
-                    json!({"mode": "local_only"}),
+                    json!({"mode": "enabled"}),
                     Some(&cookie),
                     Some(&csrf),
                 ))
