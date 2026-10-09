@@ -2371,3 +2371,16 @@ cargo run -p mcp-vault-eval --offline --locked --bin init-m6-cloud-provider -- \
 - M6仍 `not_evaluated`、`human_review=false`。无可评分输出，独立盲评未开始；保留30题/90答案分母，不给质量分。输入/输出tokens与真实费用无可用返回，标unknown，不填零或把24预占称为24次收费HTTP请求。全部特性门禁仍沿用既有ort-sys官方CDN403阻塞记录，未重复触发下载。
 
 本环境证据位于 `/workspace/scratch/m6-cloud-e5a47d6-20261009/validation/`：`build.log`、`build-native-roots.log`、`tls-preflight.log`、`provider-init.json`、`prepare.json`、`offline-preflight.json`、两个validator输出及 `final-status.json`。私有run/provider-config目录含State及安装密钥，不提交或整体分享。阻塞解除需要在既有安全策略下使官方域名的本地DNS验证可用；本记录不授权更改网络权限、绕过验证或另开付费轮次。
+
+### 2026-10-09 Cloud 恢复轮：明确授权与首次基础错误停止保护
+
+父任务转述用户授权 `Sentinel_d853e715783c81919be0ce313c1a9d1c`：允许把已验证的51文件改动推送原 `fix/m6-cloud-evaluation` 分支，并仅启动一个全新M6 run。原总预算160扣除旧run保守预占24，恢复轮硬上限136（包括任何带认证探测），官方MiMo `mimo-v2.6-flash`、每次输出32768、并发1、transport retries=0。只发送必要ADR/query；gold和评分资料不得进入Provider请求。基础网络/鉴权/证书错误首次即停，不自动追加下一轮。
+
+- [x] 51文件与已验证补丁逐字节一致；仅代码、测试、文档、迁移及公开合成TLS fixture，无真实State/Auth、缓存或原始运行数据。已提交并推送 `a1c1a83b97d2bb02623f1e0c48daf476d380d399`，远端SHA一致；未强推或修改main、PR、部署。
+- [x] 一次执行连接短暂断开后先核实状态：环境已恢复、无评测进程、未创建新run、新增带认证请求0；未重复启动。
+- [x] 原runner只把鉴权/配置错误作为全局失败，连接/DNS/TLS映射可被当作局部失败而继续预约。启动前补齐共享基础故障分类，含请求/连接/响应超时或中断、流超时及HTTP服务错误；模型schema局部恢复规则保持不变。41项runner回归通过，其中新增14错误码×3阶段的42条合成路径，断言首次错误后无额外调用/预约/attempt记录。独立只读复核通过。
+- [x] 无凭据预检：使用现有平台CA完成一次TLS握手；无凭据、无origin应用HTTP请求。保留证书/主机名验证，未改持久信任或网络设置；此结果不冒充真实模型调用成功。
+- [ ] 新schema/native-roots CLI构建、fresh prepare及离线preflight。
+- [ ] 唯一恢复轮运行、逐项独立盲评及原门槛裁定；旧run保持原样。
+
+本节离线证据为同一scratch根 `validation/recovery-fail-fast-tests.log`、`recovery-fail-fast-clippy.log`、`recovery-network-preflight.log`。全部特性仍受既有官方ort-sys CDN403阻塞，不改写为通过；代码/合成测试不代替M6质量验收。

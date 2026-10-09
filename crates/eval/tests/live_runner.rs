@@ -1046,6 +1046,60 @@ async fn a80_auth_failure_stops_the_run_after_one_provider_call() {
 }
 
 #[tokio::test]
+async fn a80_infrastructure_failures_stop_before_the_next_reserved_request() {
+    for code in [
+        "provider_client_build_failed",
+        "provider_concurrency_closed",
+        "provider_dns_failed",
+        "provider_connect_failed",
+        "provider_request_failed",
+        "provider_timeout",
+        "provider_response_timeout",
+        "provider_response_incomplete",
+        "provider_stream_first_event_timeout",
+        "provider_stream_idle_timeout",
+        "provider_stream_total_timeout",
+        "provider_rate_limited",
+        "provider_server_error",
+        "provider_http_error",
+    ] {
+        // Exercise observation, relation and answer boundaries, not only the
+        // classifier: no later item may reserve another request after failure.
+        for fail_at in [1, 3, 4] {
+            let temp = tempfile::tempdir().unwrap();
+            let (mut config, content) = config(temp.path());
+            config.semantic_protocol = "m1-a80-v1".into();
+            config.manifest.sources[0].logical_block_count = 2;
+            config.provider_templates = semantic_a80_provider_templates("answer-model-v1", 30);
+            for comparison in &mut config.run_config.comparisons {
+                comparison.prompt_id = "semantic-cards-tracked-adr-m6-v14".into();
+                comparison.schema_id = "semantic-cards-m6-json-v10".into();
+            }
+            let provider = GlobalErrorProvider {
+                calls: AtomicU32::new(0),
+                fail_at,
+                code,
+            };
+            let semantic = FakeSemantic {
+                prepare_count: AtomicUsize::new(0),
+                submit_count: AtomicUsize::new(0),
+            };
+            let result = run_live_evaluation(&config, &Verifier { content }, &provider, &semantic)
+                .await
+                .unwrap();
+            assert_eq!(provider.calls.load(Ordering::SeqCst), fail_at, "{code}");
+            assert_eq!(result.provider_requests, fail_at, "{code}");
+            assert_eq!(result.status, LiveRunStatus::Failed);
+            assert_eq!(result.first_error_code.as_deref(), Some(code));
+            let attempts =
+                std::fs::read_to_string(Path::new(&config.artifact_root).join("attempts.jsonl"))
+                    .unwrap();
+            assert_eq!(attempts.lines().count(), fail_at as usize, "{code}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn a80_recovers_one_local_schema_failure_and_records_each_budgeted_request() {
     let temp = tempfile::tempdir().unwrap();
     let (mut config, content) = config(temp.path());

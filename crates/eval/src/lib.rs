@@ -3659,6 +3659,22 @@ fn is_a80_global_provider_failure(code: &str) -> bool {
             | "request_budget_exhausted"
             | "provider_state_error"
             | "provider_url_invalid"
+            // Infrastructure failures are run-wide. Continuing to later items
+            // would consume authorized reservations without a working service.
+            | "provider_client_build_failed"
+            | "provider_concurrency_closed"
+            | "provider_dns_failed"
+            | "provider_connect_failed"
+            | "provider_request_failed"
+            | "provider_timeout"
+            | "provider_response_timeout"
+            | "provider_response_incomplete"
+            | "provider_stream_first_event_timeout"
+            | "provider_stream_idle_timeout"
+            | "provider_stream_total_timeout"
+            | "provider_rate_limited"
+            | "provider_server_error"
+            | "provider_http_error"
     )
 }
 
