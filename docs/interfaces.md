@@ -1298,7 +1298,12 @@ response text, or secrets.
 
 Provider-backed jobs may report the stable redacted codes
 `provider_response_content_type_invalid`, `provider_response_json_invalid`,
-`provider_final_content_missing`, `provider_structured_json_invalid`,
+`provider_final_content_missing`, `provider_response_choices_missing`,
+`provider_response_choices_invalid`, `provider_response_message_missing`,
+`provider_response_message_content_missing`,
+`provider_response_message_content_invalid`,
+`provider_response_finish_reason_invalid`, `provider_response_incomplete`,
+`provider_structured_json_invalid`,
 `provider_output_truncated`, `provider_output_filtered`, or
 `provider_output_repetition_truncated`. `provider_schema_invalid` additionally
 reports one of `type_mismatch`, `enum_mismatch`,

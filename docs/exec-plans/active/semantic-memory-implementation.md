@@ -2288,3 +2288,73 @@ A80 attempt ledger先写`reserved`及`batch_index`，再reserve State；成功�
 为避免 `cargo clean` 删除失败证据，完整失败 root 已复制到 `.private-eval-checkpoints/2026-09-30-m6-a80-failed`。原 root 保持不变；副本目录为 0700，208 个文件均为 0600，逐文件 SHA-256 比对无差异；`.gitignore` 以 `/.private-eval-checkpoints/` 忽略备份。副本只用于只读取证，禁止恢复为 run 或修改 sealed 数据。Sealed manifest hash=`19e35fef44b31c36226840cabe2d8f95a4536e01334d8085acefe3cc575a33dd`；candidate、review package、agent-review pins 见交接记录。
 
 已选择整体 197 路径 WIP checkpoint；路径和分组记在 `/private/tmp/mcp-vault-wip-commit-paths-2026-09-30.json`，清单 SHA-256=`15593f10b5c57a8b8551efea21e46bdada2089cddc96e737d3da84405ecb2a07`。暂停前基线 HEAD=`e046ceb59393db9a4977ba55899eba301ad28005`，不是 WIP checkpoint 的提交号。实际保存提交的 HEAD 与提交记录以本文件最终所在的 HEAD 和 `git log` 为准。没有 push、部署或 M7。
+
+### 2026-10-09 A80 v14/v10 非流式 JSON-object 修复（实现中）
+
+补丁来源容器的历史状态（不代表下方新容器复核结果）：恢复后重新核对实际 checkout，工作树位于 `/workspace/mcp-vault`，当前本地分支名为 `work`，HEAD 为交接指定的 `1861dfd37b611ac7703c3c14021a58c9d014de63`，工作树干净。该容器未继承 `rustc/cargo/rustfmt/clippy`；Node `v24.19.0` 和 pnpm `11.19.0` 可用，Rust 相关门禁尚未运行。未调用真实 Provider、未读取或修改封存评测工件。
+
+根因核对为实现缺陷，不是 A80 低复杂度 claims/schema 契约需要放宽：`semantic_a80_provider_templates` 已使用 v14/v10，但 `ProviderServiceAppBoundary::generate_inner` 只用旧 v12/v8 常量选择 strict-function。A80 因而落入普通 JSON-object SSE aggregator；这与 A80 要求的普通 `choices[].message.content` 非流式响应不一致。将 A80 伪装为 strict-function 会违反 ADR-0044 及本计划已冻结的 wire 边界，因此不采用该替代方案，也不修改本地 schema 验证来掩盖 Provider 响应问题。
+
+当前纵切改动：
+
+- `StructuredGenerationRequest` 增加独立的 `non_stream_json_object` typed 语义；它与 `strict_function_call` 互斥，旧 strict-function wire 保持原路径。
+- Eval 仅对 Xiaomi MiMo 的 A80 v14/v10 observation、relation、answer 设置该语义。Provider 强制 `response_format={"type":"json_object"}`、`stream=false`，不发送 `tools`/`tool_choice`，通过 `request_json_once` 读取单一 `choices[].message.content`，随后复用既有 envelope repair、JSON/schema 校验和本地规范化。
+- 新路径的 Auto thinking 确定性关闭；显式 enabled/disabled 仍按模型设置发送；MiMo token preset 仍使用 `max_completion_tokens`。旧 strict-function 的既有 thinking/tool 合同不改。
+- 为 choices/message/content 形状增加静态安全错误子码，并以边界测试确认私有响应标记不进入诊断；不保存响应正文、headers 或凭据。Provider 错误码清单同步更新到 `docs/interfaces.md`。
+- `crates/eval/tests/two_stage_live_boundary.rs` 的 A80 fake 已改为真实 `application/json` 非流式 Chat Completion 响应，断言完整请求形状，并覆盖两批 observation→两张确定性卡片及 relation/answer 三个 A80 阶段。
+
+补丁来源容器的前端历史验证：使用临时 pnpm store 执行 frozen-lockfile 安装，`frontend/admin` 的 lint、test（41 passed，10 skipped）和 build 均通过。Rust 1.94.0 工具链恢复或由主环境提供后，仍需运行适用 rustfmt、Provider/Eval/Memory 定向测试、Clippy 与项目检查；当前容器因缺少 `rustc/cargo/rustfmt/clippy` 无法运行这些检查。此修复不授权新的真实 M6 run；M6 质量结论仍为 `not_evaluated`，M7 不在范围内。
+
+### 2026-10-09 06:17 UTC 新环境补丁恢复与 M6 工程复核（默认门禁通过；全部特性外部阻塞）
+
+当前 checkout 为分支 `work`、HEAD `1861dfd37b611ac7703c3c14021a58c9d014de63`。本节只记录本次新容器证据；上文补丁来源环境及更早环境的通过结果不作为本次验证结果。
+
+- [x] 保全环境设置已有的 `docs/development-and-testing.md` 与 `scripts/setup-dev.sh` 原字节及 SHA256。原哈希分别为 `cfc82046f5f1c178080ee1e42391a38cb4a0f1b77aa8e682c6ac908e8de05489`、`9a6afd6c4098565091fb5f1f525177905ec2812ac9e6506d52b6dbe05b93a16a`；补丁与这两个路径无交集，应用前后哈希一致。
+- [x] 原补丁经 Library 原生文本读取及唯一获准的末尾 LF 恢复后为 35369 字节，SHA256 `92d729937bc5a2d4740c23e964c998c7ff7b15c4243b9fccf2a1200262cdebf3` 与原始文件完全相符；基线及 `git apply --check` 均通过，14 文件补丁只应用一次。
+- [x] 新环境工具链实测：rustc/cargo 1.94.0、rustfmt 1.8.0-stable、clippy 0.1.94、Node v24.19.0、pnpm 11.19.0。普通 shell 先加载 `/home/agent/.cargo/env`；未重装工具链。
+- [x] `source_diagnostic.rs` 的隔离目录改为 canonicalized `std::env::temp_dir()`，保留所有原断言及私有目录要求，避免 Linux 不存在 `/private/tmp` 和平台临时目录符号链接问题。
+- [x] 新容器 `cargo fmt --all --check` / `git diff --check` 通过；完成状态修复后再次通过。
+- [x] 新容器默认特性 `cargo test --workspace --locked` exit 0：685 passed、0 failed、0 ignored；含 Provider unit 45、service 11、streaming 8、audit 1，Eval boundary 16（含 A80 三阶段/两批卡片/恢复及旧 strict-function），Memory semantic 43 与 source diagnostic 3。
+- [ ] 新容器全部特性 workspace tests：`cargo test --workspace --all-features --locked` 在 `ort-sys 2.0.0-rc.13` 构建阶段退出 101，测试尚未执行。既定 `cdn.pyke.io` 预编译包下载明确返回 `CONNECT proxy failed: proxy server responded 403/403`；仅尝试本次标准构建一次，未换二进制来源、未改网络设置。
+- [ ] 新容器全部特性 workspace Clippy：受同一 ort-sys 构建先决条件阻塞，未再次触发相同 CDN 下载，保持 pending；不得把下面的默认特性 Clippy 通过视为全部特性通过。
+- [x] 新容器 `cargo clippy --workspace --all-targets --offline --locked -- -D warnings` exit 0（同一工作区 Cargo 缓存）。
+- [x] 新容器 frontend lint / test / build 全部 exit 0；Vitest 为 41 passed、10 skipped（既有 skip 保留，未增加跳过）。
+- [x] 独立静态审查发现并修复一个 P1：合法 JSON 搭配截断/过滤/缺失或异常 finish reason 曾被新非流式路径接受。现在解析前要求 stop，并拒绝未完成状态、非零/非法 choice index 和意外工具调用；保留显式 thinking 与旧 strict-function，补充合法 JSON 下的拒绝和脱敏回归。独立复核确认 P1 已解决且未发现新增实质缺陷；动态结果另计。
+
+本轮仅进行代码及本地 fake 工程验证，不读取或修改封存工件、不调用付费 Provider、不读取或新增 API keys、不 push/PR/部署、不扩展 M7。M6 真实模型质量保持 `not_evaluated`。
+
+验证环境记录：默认 `cargo test --workspace --offline --locked` 因新容器缺少 serde registry 缓存退出 101。去掉 offline 后可访问 crates.io，但默认 `/home/agent/.cargo/registry` 为只读，缓存创建以 `Read-only file system (os error 30)` 失败。已将本次命令的 `CARGO_HOME` 指向工作区 scratch 独立目录；继续使用原 Rust 1.94.0，未运行 rustup 安装、未改 shell 配置或设置脚本。`CARGO_BUILD_JOBS=3 cargo test --workspace --locked` 已在该缓存下完成，exit 0，计数见上方新容器结果。本轮结果仅证明本地工程门禁，不代替真实 M6 模型质量验收。
+
+复核结束时间：2026-10-09 06:38:40 UTC。最终保全核对确认两份环境设置文件与原备份逐字节一致，Cargo.lock 未变，代码保留在未提交工作树。默认 workspace / Clippy、fmt、diff、前端与独立代码复核完成；剩余全部特性测试及 Clippy 需既定 ort-sys 下载通路恢复后再执行。既有封存工件、真实 Provider、API keys、M7、push/PR/部署均未涉及。
+
+本次本地验证日志位于工作区 scratch 的 `m6-recovery-20261009.k65s1i4v/validation/`：`workspace-default-writable-cache.log`、`clippy-default.log`、`workspace-all-features.log`、`frontend-lint.log`、`frontend-test.log`、`frontend-build.log`。复现 Rust 检查需先加载 `/home/agent/.cargo/env`，将 `CARGO_HOME` 指向该 recovery 目录的 `cargo-home`；全部特性另将 `XDG_CACHE_HOME` 指向其 `xdg-cache`。这些均为命令级环境变量，不修改用户设置文件。
+
+### 2026-10-09 M6 端到端验收收敛（离线修复；真实运行待本轮明确授权）
+
+目标是实施计划 §12.4 全部门槛通过，补丁、fake 通过和单次 smoke 均不是退出条件。已有冻结30个 ADR、60 tasks/30 holdout 的数据方案继续沿用，不重造 gold、不读取真实密钥、不新建真实 run。冻结输入已获准只读核验，云端三份 candidate/review 工件与 handoff pins 一致，原来源 commit 与当前 HEAD/工作树30份 ADR 的 blob、SHA256及行数全部匹配。父线程转述 Mac 只读配置为官方 `https://api.xiaomimimo.com/v1/`、`mimo-v2.6-flash`；用户已选择后续编译和评测全程云端，不迁移 Mac 凭据。完整 runner 已存在，暂不新增可选 smoke 或评分系统；运行后必须由独立评审者盲评，producer/implementer 不自评。
+
+- [x] 复核硬门槛：支持精度≥95%、限定保留≥95%、覆盖≥90%；关键条件和无答案困难负例无已知关键失败；重复专项优于B且不损伤限定；C任务点估计不低于A/B较好者，按类别/分母报告；权限、删除、失效、预算、恢复用例全部通过。任何 critical/high 未决错误、泄露、复活、证据不足或 item failure 均不允许验收。
+- [x] 为完整 runner 的成功和失败 Provider calls 增加按 arm/stage 的实际耗时；旧恢复 reservation 未测量时保留 partial，明示不覆盖检索/组包/评审，不伪造完整延迟。
+- [x] 修正旧 `pending_manual_review`/human-only 报告为 ADR-0038 独立盲评 pending，始终保持 `human_review=false`、`m6_acceptance=not_evaluated`；未自动判定语义质量。
+- [x] 旧两阶段 diagnostic 遇到 A80 在打开 State/Auth 前拒绝，避免误用 composition。
+- [x] A80 preflight 和 prepare 显式限制完整运行≤160 requests；新准备草稿要求明确 `generation_token_limit`，在隔离模型中冻结，并报告有效单次上限与最大生成 token 数。输出预算不冒充输入或金额上限，原模型配置不变。
+- [x] 本轮新增行为定向测试及 Eval 回归均 exit 0：prepare binary 1、live_runner 38、source_diagnostic 4、Provider/Memory HTTP boundary 16、Eval unit 61、app_boundary 4、synthetic fixture 4、shadow 1，合计129通过、0失败。`cargo clippy -p mcp-vault-eval --all-targets --offline --locked -- -D warnings`、fmt check 和 diff check 均通过。日志为 recovery scratch validation 下的 `m6-acceptance-targeted.log`、`m6-acceptance-regression.log`、`m6-acceptance-clippy.log`。没有重跑无关前端或默认 workspace 685项基线。
+- [x] 关闭独立审查 P1：runtime 启动完整比较并保留封存 snapshot；本地合成 State 测试覆盖输出限额32768→131072、capabilities及 endpoint 漂移，均在网络连接前拒绝。关闭 P2：发送前失败且 transport attempts=0 的调用保留实际耗时，A80预留预算与旧协议实际 attempts 分开核算；旧未测量恢复仍为 partial。独立只读复核确认两项关闭且未发现新增实质问题。
+- [x] 复核修复后针对性 Rust 回归118项通过（live_runner40、Eval unit61、prepare1、HTTP boundary16），14项候选/gold validator Python 测试通过。candidate validator 允许无关代码 HEAD 推进，仍严格检查冻结 commit blob/hash/行数以及当前 HEAD/工作树来源原字节。实际 pre-run review 结构校验通过，`gold_reviewed`、`human_review=false`、30 holdout、0 post-run blind scores；不把结构通过当作本轮语义质量评审。日志为 `m6-review-fixes.log` 和 `m6-review-regression.log`。
+- [ ] 全部特性工程门禁仍受既有 ONNX 标准下载403阻断；没有环境变化时不重复下载。
+- [ ] 在本轮明确授权后，仅一个 fresh full M6（冻结 A/B/C、30 holdout/90 answers，所有 attempts 合计≤160，显式出站输出 token 上限）；之后独立盲评、逐项证据判分及如实成本/延迟报告。旧失败根不可重用，不自动追加付费重跑。
+
+最短路径是关闭新增离线回归与环境门禁 → 配置仅在云端可用的认证及核对非秘密参数 → 取得一次性数据/费用授权并准备新隔离根 → 全量真实评测 → 独立盲评与全部阈值裁定。冻结来源共114516 UTF-8字节，B/C observation来源计入重复为126304字节，holdout查询2907字节；这些不含提示/schema/JSON framing/生成pack，不是模型输入 token 总上界，不能把 `160×32768` 的输出预算当总价。已有685项默认 workspace通过及此前代码审查继续作为基线证据，不为本轮少量 Eval 变更重造整个验收系统。M7、部署、push 和旧数据清理不在范围内。
+
+云端认证已完成代码/官方文档核验，并依父线程明确指示新增显式 `init-m6-cloud-provider` 入口及离线测试；实际配置尚未执行。用户已反馈在 Codex Personal vault 保存 `MIMO_API_KEY` Network secret，但当前任务仅作布尔检测，结果为不存在，未输出值、片段、长度或哈希。这不证明填写失败；环境必须请求该 key，并允许 `api.xiaomimimo.com` HTTPS:443目标，声明/发布更新后需新任务继承，当前工具未暴露环境声明可供核对。占位符经 `ProviderInput.secret` → State/Auth 加密 → prepare隔离复制 → transport `Authorization: Bearer <placeholder>` 原样传递，程序不需要真实token作本地签名。入口要求显式 flag及全新私有绝对根，固定官方endpoint/model，显式 `structured_output=true`、32768、600s、重试0及并发1；输出 prepare所需非秘密路径，拒绝覆盖既有根，不请求Provider。当前 reqwest0.12.28实际启用 WebPKI roots、保留环境代理，未启用 native roots或显式环境CA加载；代理TLS与替换仍待在获准新任务中验证，不声明认证成功。未创建真实 Provider/持久凭据、未读取 Personal vault值、未改网络或TLS设置。
+
+新增入口离线验证：`cargo test -p mcp-vault-eval --offline --locked --test cloud_provider_init` 4通过，覆盖缺失授权/变量、空值与换行的安全拒绝，既有根和符号链接父目录保护，SQLite URI元字符拒绝，以及合成占位符 State/Auth 加密及原字节恢复、角色绑定、权限和再次初始化不改写。独立审查发现主密钥权限依赖umask，已显式设为0600；全部入口测试在子进程umask022下通过，独立复核确认关闭且没有新增实质问题。测试只注入合成占位符，结果在 `m6-cloud-init.log`；Eval all-targets Clippy及新增入口定向Clippy均通过，见 `m6-review-clippy.log`、`m6-cloud-init-clippy.log`，fmt/diff check通过。不重复已完成的118项回归或685项默认基线。
+
+待配置授权及新任务继承后，初始化命令为（此处仅文档，未执行）：
+
+```bash
+cargo run -p mcp-vault-eval --offline --locked --bin init-m6-cloud-provider -- \
+  --initialize-authorized-m6-provider /workspace/scratch/m6-cloud-provider-config-NEW
+```
+
+父目录须已存在且无符号链接，最终目录必须不存在。普通 shell 先加载 `/home/agent/.cargo/env`，Cargo缓存需使用该任务实际可写且已备好的目录。命令输出的 `source_database_path`、`source_master_key_path`、`source_vault_slug` 直接用于现有 prepare草稿；另填冻结来源/任务、全新run根、`external_request_budget=160`、`generation_token_limit=32768`、`provider_timeout_seconds=600`。初始化不等于 prepare或付费run授权；三步不自动串联。旧补丁文件不包含后续修复/初始化入口，迁移需以当前HEAD为基线单独提取本轮路径及新增文件，在云端独立工作树核验应用；不直接覆盖Mac既有改动，不携带环境设置两文件、State/密钥/评测输出或构建缓存。

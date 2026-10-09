@@ -528,6 +528,7 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
                 strict_function_schema: None,
                 defer_local_schema_validation: false,
                 strict_function_call: false,
+                non_stream_json_object: false,
                 schema: json!({
                     "type": "object",
                     "properties": {"answer": {"type": "string"}},
@@ -556,6 +557,7 @@ async fn provider_service_uses_encrypted_secrets_and_vault_model_bindings() {
                 strict_function_schema: None,
                 defer_local_schema_validation: false,
                 strict_function_call: false,
+                non_stream_json_object: false,
                 schema: json!({
                     "type": "object",
                     "properties": {"answer": {"type": "integer"}},
@@ -1153,6 +1155,7 @@ async fn provider_service_sends_first_class_vendor_structured_generation_contrac
                     strict_function_schema: None,
                     defer_local_schema_validation: false,
                     strict_function_call: false,
+                    non_stream_json_object: false,
                     schema: json!({
                         "type": "object",
                         "properties": {"answer": {"type": "string"}},
@@ -1534,6 +1537,7 @@ async fn generation_budget_blocks_retries_and_cloned_service_dispatch() {
         strict_function_schema: None,
         defer_local_schema_validation: false,
         strict_function_call: false,
+        non_stream_json_object: false,
         schema: json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}),
         allow_additional_output_properties: false,
         missing_required_string_fallbacks: Vec::new(),

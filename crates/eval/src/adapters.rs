@@ -40,8 +40,9 @@ use tokio::sync::Mutex;
 
 use crate::{
     AuthoritativeSourceSnapshot, EvalError, EvalSource, EvalTask, EvaluationManifest,
-    EvaluationRunConfig, LiveProviderError, LiveProviderOutput, LiveProviderRequest, M6_PROMPT_ID,
-    M6_SCHEMA_ID, ProviderAppBoundary, SemanticMemoryAppBoundary, SourceSnapshotVerifier,
+    EvaluationRunConfig, LiveProviderError, LiveProviderOutput, LiveProviderRequest,
+    M6_A80_PROMPT_ID, M6_A80_SCHEMA_ID, M6_PROMPT_ID, M6_SCHEMA_ID, ProviderAppBoundary,
+    SemanticMemoryAppBoundary, SourceSnapshotVerifier,
 };
 
 /// Shared strict limit attached to ProviderTransport. Retries consume the
@@ -227,13 +228,21 @@ impl ProviderServiceAppBoundary {
         } else {
             template.schema.clone()
         };
-        let m6_stage = request.prompt_id == M6_PROMPT_ID
+        let m6_strict_function_stage = request.prompt_id == M6_PROMPT_ID
             && request.schema_id == M6_SCHEMA_ID
             && matches!(
                 request.stage.as_str(),
                 "observation" | "composition" | "relation" | "answer"
             );
-        let strict_function_call = self.runtime_snapshot.provider_type == "xiaomi_mimo" && m6_stage;
+        let a80_non_stream_json_object = self.runtime_snapshot.provider_type == "xiaomi_mimo"
+            && request.prompt_id == M6_A80_PROMPT_ID
+            && request.schema_id == M6_A80_SCHEMA_ID
+            && matches!(
+                request.stage.as_str(),
+                "observation" | "relation" | "answer"
+            );
+        let strict_function_call =
+            self.runtime_snapshot.provider_type == "xiaomi_mimo" && m6_strict_function_stage;
         let strict_function_schema = if strict_function_call && request.stage == "relation" {
             Some(
                 strict_relation_wire_schema(&schema).map_err(|code| LiveProviderError {
@@ -268,6 +277,7 @@ impl ProviderServiceAppBoundary {
                     defer_local_schema_validation: strict_function_call
                         && request.stage == "relation",
                     strict_function_call,
+                    non_stream_json_object: a80_non_stream_json_object,
                     allow_additional_output_properties: false,
                     missing_required_string_fallbacks: Vec::new(),
                     max_output_tokens: template.max_output_tokens,

@@ -18,9 +18,23 @@ def git(*args: str) -> str:
     return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
 
 
+def verify_source_fences(source: dict, source_commit: str) -> None:
+    path = source["path"]
+    assert path.startswith("docs/adr/") and path.endswith(".md")
+    assert ".." not in Path(path).parts
+    content = subprocess.check_output(["git", "show", f"{source_commit}:{path}"], cwd=ROOT)
+    assert git("rev-parse", f"{source_commit}:{path}") == source["git_blob_oid"]
+    assert hashlib.sha256(content).hexdigest() == source["content_sha256"]
+    assert len(content.decode("utf-8").splitlines()) == source["line_count"]
+    # Code can advance after the source freeze; both the committed input used
+    # by prepare and the visible source must still match the original bytes.
+    assert subprocess.check_output(["git", "show", f"HEAD:{path}"], cwd=ROOT) == content
+    assert (ROOT / path).read_bytes() == content
+
+
 def main() -> None:
     candidate = json.loads((HERE / "candidate.json").read_text(encoding="utf-8"))
-    assert git("rev-parse", "HEAD") == EXPECTED_COMMIT == candidate["repository_commit"]
+    assert candidate["repository_commit"] == EXPECTED_COMMIT
 
     sources = {source["logical_id"]: source for source in candidate["sources"]}
     assert len(sources) == 30
@@ -29,15 +43,7 @@ def main() -> None:
     assert sum(source["split"] == "holdout" for source in sources.values()) == 15
 
     for source in sources.values():
-        path = source["path"]
-        assert path.startswith("docs/adr/") and path.endswith(".md")
-        content = subprocess.check_output(
-            ["git", "show", f"{candidate['repository_commit']}:{path}"], cwd=ROOT
-        )
-        blob_oid = git("rev-parse", f"{candidate['repository_commit']}:{path}")
-        assert blob_oid == source["git_blob_oid"]
-        assert hashlib.sha256(content).hexdigest() == source["content_sha256"]
-        assert len(content.decode("utf-8").splitlines()) == source["line_count"]
+        verify_source_fences(source, candidate["repository_commit"])
 
     tasks = candidate["tasks"]
     assert len(tasks) == 60 and len({task["id"] for task in tasks}) == 60
@@ -116,6 +122,7 @@ def main() -> None:
                 ),
                 "no_answer_candidates": sum(task["expected_no_answer"] for task in tasks),
                 "source_blob_and_sha256_fences": "verified",
+                "current_head_and_worktree_source_bytes": "verified",
                 "split_id_b_and_evidence_constraints": "verified",
                 "provider_run_material": "absent",
             },

@@ -333,6 +333,138 @@ fn config(root: &Path) -> (LiveEvaluationConfig, String) {
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn runtime_rejects_configuration_drift_after_preparation_before_network() {
+    use mcp_vault_auth::{AuthService, MasterKeyRing};
+    use mcp_vault_domain::{Revision, VaultContext, VaultId, VaultSlug};
+    use mcp_vault_eval::{LiveCliConfig, build_live_runtime, write_live_preparation_seal};
+    use mcp_vault_providers::{
+        ModelCapabilities, ModelInput, ModelSettings, ProviderInput, ProviderKind, ProviderMode,
+        ProviderService, ProviderSettings,
+    };
+    use mcp_vault_state::{StateStore, VaultStatus};
+    use std::os::unix::fs::PermissionsExt;
+
+    for drift in ["token_limit", "capabilities", "endpoint"] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut cfg, _) = config(temp.path());
+        let key_path = temp.path().join("secrets/master.key");
+        prepare_live_private_directories(&cfg, &key_path).unwrap();
+        std::fs::write(&key_path, [7_u8; 32]).unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let db = Path::new(&cfg.state_root).join("state.sqlite3");
+        let state = StateStore::connect_and_migrate(&format!("sqlite://{}", db.display()))
+            .await
+            .unwrap();
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let context = VaultContext::new(
+            VaultId::new(),
+            VaultSlug::new("live-a").unwrap(),
+            cfg.source_root.clone().into(),
+            Revision::ZERO,
+        )
+        .unwrap();
+        state
+            .vaults()
+            .insert(&context, "fixture", VaultStatus::Active)
+            .await
+            .unwrap();
+        let service = ProviderService::new(
+            state.clone(),
+            AuthService::new(
+                state.auth(),
+                MasterKeyRing::from_bytes(1, &[7; 32]).unwrap(),
+            ),
+        );
+        service
+            .set_provider_mode(&context, ProviderMode::LocalOnly, None)
+            .await
+            .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut provider = service
+            .create_provider(ProviderInput {
+                name: "sealed-runtime-fixture".into(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url: url::Url::parse(&format!(
+                    "http://{}/v1/",
+                    listener.local_addr().unwrap()
+                ))
+                .unwrap(),
+                settings: ProviderSettings {
+                    max_retries: 0,
+                    ..Default::default()
+                },
+                enabled: true,
+                secret: None,
+            })
+            .await
+            .unwrap();
+        let mut model = service
+            .register_model(ModelInput {
+                provider_id: provider.id,
+                external_model_id: "answer-model-v1".into(),
+                capabilities: ModelCapabilities {
+                    structured_output: true,
+                    ..Default::default()
+                },
+                settings: ModelSettings {
+                    generation_token_limit: Some(32_768),
+                    ..Default::default()
+                },
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        cfg.isolated_vault_id = context.id().to_string();
+        cfg.manifest.sources[0].vault_id = cfg.isolated_vault_id.clone();
+        cfg.provider_model_id = Some(model.id.to_string());
+        cfg.provider_runtime_snapshot =
+            Some(service.runtime_snapshot(&context, model.id).await.unwrap());
+        cfg.isolated_master_key_path = Some(key_path.display().to_string());
+        validate_live_evaluation_config(&cfg).unwrap();
+        write_live_preparation_seal(&cfg, &key_path).unwrap();
+
+        match drift {
+            "token_limit" => {
+                model.settings["generation_token_limit"] = json!(131_072);
+                state.providers().update_model(&model).await.unwrap();
+            }
+            "capabilities" => {
+                model.capabilities["structured_output"] = json!(false);
+                state.providers().update_model(&model).await.unwrap();
+            }
+            "endpoint" => {
+                provider.base_url.push_str("changed/");
+                state.providers().update_provider(&provider).await.unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let cli = LiveCliConfig {
+            model_id: model.id.to_string(),
+            templates: cfg.provider_templates.clone(),
+            evaluation: cfg,
+            vault_slug: "live-a".into(),
+            master_key_path: key_path.display().to_string(),
+        };
+        let error = match build_live_runtime(cli, None).await {
+            Ok(_) => panic!("{drift} must invalidate the sealed preparation"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "Provider runtime differs from the sealed preparation",
+            "{drift}"
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "{drift} must be rejected before connecting"
+        );
+    }
+}
+
+#[cfg(unix)]
 #[test]
 fn live_preparation_creates_private_roots_and_rejects_broad_modes_or_symlinks() {
     use std::os::unix::fs::{PermissionsExt, symlink};
@@ -691,6 +823,27 @@ async fn two_stage_protocol_dispatches_observation_then_composition() {
         result.provider_requests
     );
     assert!(semantic.submit_count.load(Ordering::SeqCst) >= 4);
+    let usage: Value =
+        serde_json::from_slice(&std::fs::read(temp.path().join("artifacts/usage.json")).unwrap())
+            .unwrap();
+    assert_eq!(usage["latency"]["status"], "known");
+    for arm in ["B", "C"] {
+        for stage in ["observation", "composition", "answer"] {
+            assert_eq!(
+                usage["by_arm"][arm]["by_stage_latency"][stage]["generation_calls"],
+                1
+            );
+        }
+    }
+    assert_eq!(
+        usage["by_arm"]["C"]["by_stage_latency"]["relation"]["generation_calls"],
+        1
+    );
+    let report = std::fs::read_to_string(temp.path().join("artifacts/report.md")).unwrap();
+    assert!(report.contains("independent_agent_blind_review"));
+    assert!(report.contains("\"human_review\": false"));
+    assert!(report.contains("\"m6_acceptance\": \"not_evaluated\""));
+    assert!(!report.contains("pending_manual_review"));
     let compositions =
         std::fs::read_to_string(temp.path().join("artifacts/observations.jsonl")).unwrap();
     assert!(compositions.contains("composition"));
@@ -815,6 +968,16 @@ async fn a80_answer_failure_stays_in_denominator_and_later_tasks_continue() {
         Some("evaluation_items_failed")
     );
     assert_eq!(result.completed_tasks, 2);
+    let usage: Value = serde_json::from_slice(
+        &std::fs::read(Path::new(&config.artifact_root).join("usage.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(usage["latency"]["status"], "known");
+    assert_eq!(usage["latency"]["measured"]["transport_attempts"], 10);
+    assert_eq!(
+        usage["by_arm"]["A"]["by_stage_latency"]["answer"]["generation_calls"], 2,
+        "failed answers must retain their measured call and original denominator"
+    );
     let answers: Vec<Value> =
         std::fs::read_to_string(Path::new(&config.artifact_root).join("answers.jsonl"))
             .unwrap()
@@ -830,6 +993,27 @@ async fn a80_answer_failure_stays_in_denominator_and_later_tasks_continue() {
     let report =
         std::fs::read_to_string(Path::new(&config.artifact_root).join("report.md")).unwrap();
     assert!(report.contains("not_evaluated"));
+}
+
+#[test]
+fn a80_preflight_rejects_budget_above_the_full_run_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut cfg, _) = config(temp.path());
+    cfg.semantic_protocol = "m1-a80-v1".into();
+    cfg.manifest.sources[0].logical_block_count = 2;
+    cfg.provider_templates = semantic_a80_provider_templates("answer-model-v1", 30);
+    for arm in &mut cfg.run_config.comparisons {
+        arm.prompt_id = "semantic-cards-tracked-adr-m6-v14".into();
+        arm.schema_id = "semantic-cards-m6-json-v10".into();
+        arm.budget.external_request_budget = 161;
+    }
+    assert_eq!(
+        validate_live_evaluation_config(&cfg).unwrap_err(),
+        mcp_vault_eval::EvalError::LiveBlocked(
+            "A80 request budget exceeds the 160-request run limit"
+        )
+    );
+    assert!(!Path::new(&cfg.artifact_root).exists());
 }
 
 #[tokio::test]
@@ -970,6 +1154,11 @@ async fn a80_resume_reuses_card_and_consumes_existing_attempt_budget() {
     assert_eq!(result.provider_requests, 6);
     assert_eq!(result.completed_tasks, 1);
     assert_eq!(semantic.prepare_count.load(Ordering::SeqCst), 1);
+    let usage: Value =
+        serde_json::from_slice(&std::fs::read(artifacts.join("usage.json")).unwrap()).unwrap();
+    assert_eq!(usage["latency"]["status"], "partial");
+    assert_eq!(usage["latency"]["measured"]["transport_attempts"], 5);
+    assert_eq!(usage["latency"]["reserved_requests"], 6);
 }
 
 #[cfg(unix)]
@@ -1273,6 +1462,89 @@ impl ProviderAppBoundary for FakeProvider {
     }
 }
 
+struct DelayedProvider(FakeProvider);
+
+#[async_trait]
+impl ProviderAppBoundary for DelayedProvider {
+    async fn generate(
+        &self,
+        request: LiveProviderRequest,
+    ) -> Result<LiveProviderOutput, LiveProviderError> {
+        tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+        self.0.generate(request).await
+    }
+}
+
+struct LocalFailureProvider;
+
+#[async_trait]
+impl ProviderAppBoundary for LocalFailureProvider {
+    async fn generate(
+        &self,
+        _request: LiveProviderRequest,
+    ) -> Result<LiveProviderOutput, LiveProviderError> {
+        tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+        Err(LiveProviderError {
+            code: "provider_endpoint_denied".into(),
+            ..Default::default()
+        })
+    }
+
+    fn transport_attempt_count(&self) -> Option<u32> {
+        Some(0)
+    }
+}
+
+#[tokio::test]
+async fn generation_failure_before_http_keeps_latency_without_transport_usage() {
+    for a80 in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut cfg, content) = config(temp.path());
+        if a80 {
+            cfg.semantic_protocol = "m1-a80-v1".into();
+            cfg.manifest.sources[0].logical_block_count = 2;
+            cfg.provider_templates = semantic_a80_provider_templates("answer-model-v1", 30);
+            for comparison in &mut cfg.run_config.comparisons {
+                comparison.prompt_id = "semantic-cards-tracked-adr-m6-v14".into();
+                comparison.schema_id = "semantic-cards-m6-json-v10".into();
+            }
+        }
+        let semantic = FakeSemantic {
+            prepare_count: AtomicUsize::new(0),
+            submit_count: AtomicUsize::new(0),
+        };
+        let result = run_live_evaluation(
+            &cfg,
+            &Verifier { content },
+            &LocalFailureProvider,
+            &semantic,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.status, LiveRunStatus::Failed);
+        assert_eq!(result.provider_requests, u32::from(a80));
+        let usage: Value = serde_json::from_slice(
+            &std::fs::read(temp.path().join("artifacts/usage.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(usage["latency"]["status"], "known");
+        assert_eq!(usage["latency"]["measured"]["generation_calls"], 1);
+        assert_eq!(usage["latency"]["measured"]["transport_attempts"], 0);
+        assert_eq!(
+            usage["latency"]["measured"]["accounted_requests"],
+            u32::from(a80)
+        );
+        assert!(usage["latency"]["measured"]["total_ms"].as_u64().unwrap() >= 3);
+        assert!(
+            usage["by_arm"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|stats| stats["request_count"] == 0)
+        );
+    }
+}
+
 struct InspectingProvider {
     requests: Mutex<Vec<LiveProviderRequest>>,
 }
@@ -1334,10 +1606,10 @@ impl ProviderAppBoundary for InspectingProvider {
 async fn live_runner_persists_complete_redacted_artifacts_and_separate_usage() {
     let temp = tempfile::tempdir().unwrap();
     let (config, content) = config(temp.path());
-    let provider = FakeProvider {
+    let provider = DelayedProvider(FakeProvider {
         calls: AtomicU32::new(0),
         fail_at: None,
-    };
+    });
     let semantic = FakeSemantic {
         prepare_count: AtomicUsize::new(0),
         submit_count: AtomicUsize::new(0),
@@ -1347,9 +1619,19 @@ async fn live_runner_persists_complete_redacted_artifacts_and_separate_usage() {
         .unwrap();
     assert_eq!(result.status, LiveRunStatus::Completed);
     assert_eq!(
-        provider.calls.load(Ordering::SeqCst),
+        provider.0.calls.load(Ordering::SeqCst),
         result.provider_requests
     );
+    let usage: Value =
+        serde_json::from_slice(&std::fs::read(temp.path().join("artifacts/usage.json")).unwrap())
+            .unwrap();
+    assert_eq!(usage["latency"]["status"], "known");
+    assert_eq!(
+        usage["latency"]["measured"]["generation_calls"],
+        result.provider_requests
+    );
+    assert!(usage["latency"]["measured"]["total_ms"].as_u64().unwrap() >= 3);
+    assert!(usage["latency"]["measured"]["max_ms"].as_u64().unwrap() >= 3);
     assert_eq!(semantic.submit_count.load(Ordering::SeqCst), 2);
     for name in [
         "manifest.json",

@@ -742,6 +742,12 @@ report.md              结果、失败、局限、是否满足各层门禁
 
 运行后评分记录采用匿名 `blind_output_id`，不得在评审输入中包含 A/B/C 标识或 arm 映射；映射需单独受限保存，在评分锁定后才揭示。裁决记录保存初审、分歧、来源证据和最终 agent adjudication。若模型/评审者无法判定，记 `insufficient_evidence`；critical/high 错误、权限/删除/失效泄露或恢复违规不得由多数票豁免。可选的人类复核另标 `human_review=true`，不可与独立智能体记录合并伪装。
 
+全量 runner 完成调用后仍输出 `pending_independent_review`、`human_review=false` 和 `quality_claim=not_evaluated`；这不替代独立盲评。`usage.json` 的 `by_arm.*.by_stage_latency` 记录各阶段 Provider application call 的次数、transport attempts、累计和最大毫秒数，包含传输和本地响应验证，不包含检索、组包及评审。发送前失败的调用也保留耗时，不虚增 HTTP 用量；`accounted_requests` 单独记录测量所覆盖的 runner 预算单位（A80 为调用前预留，旧协议为实际 attempts）。恢复时旧 reservation 没有测量证据则汇总标为 `partial`，不得以零耗时补齐。
+
+新的 `prepare-semantic-card-live-eval` 草稿必须显式给出 `generation_token_limit`，只写入新隔离模型配置并纳入 runtime fingerprint，不修改原绑定模型。准备摘要报告经过模型能力约束的有效值及 `request_budget × effective_limit` 最大生成 token 数；它不是输入 token 或金额上限。启动时必须比较当前 runtime 与准备时封存的完整 snapshot，配置漂移在建立 Provider 连接前拒绝，不得以当前值覆盖封存值。A80 全量请求配置不得超过160，且必须覆盖 manifest 计算上界，包含所有三臂及预留 regeneration。旧两阶段 diagnostic 对 A80 配置在打开 State/Auth 前拒绝，完整 M6 无需以该诊断为前置步骤。
+
+云端可在明确获准配置后运行 `init-m6-cloud-provider --initialize-authorized-m6-provider NEW_ABSOLUTE_ROOT`。它只消费环境声明的 `MIMO_API_KEY` Network secret 占位符，在全新私有目录中用 State/Auth 加密保存，并绑定官方 MiMo `mimo-v2.6-flash`（structured output、32768生成上限、600s timeout、重试0、并发1）到 `memory_extraction`。输出只包含 prepare 所需的配置路径和非秘密参数；不输出变量值、不覆盖既有根、不做模型发现或认证请求，`authentication_status=not_tested`。配置执行和真实评测费用授权分别取得，保存 Personal vault 值本身不授权运行。
+
 未经授权的真实资料不得出现在公开仓库 fixtures 中。离线录制文件的来源和生成配置应可追踪；脱敏后改变含义的样本不能冒充原始真实样本。
 
 ---

@@ -59,6 +59,11 @@ pub struct StructuredGenerationRequest {
     /// Evaluation-only request to use one strict function schema instead of
     /// JSON-object prompting. Ordinary Provider calls leave this false.
     pub strict_function_call: bool,
+    /// Evaluation-only request to use a non-streaming JSON-object Chat
+    /// Completion response. This is deliberately independent from the
+    /// strict-function path above: the response is read from
+    /// `choices[].message.content`, with no tools or tool choice.
+    pub non_stream_json_object: bool,
     /// Accept extra top-level response properties locally; wire schema stays strict.
     pub allow_additional_output_properties: bool,
     /// Caller-authorized missing-string repairs applied before full validation.
@@ -366,6 +371,24 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
             }
             return validate_strict_function_result(&completed, request);
         }
+        if request.non_stream_json_object {
+            body["stream"] = Value::Bool(false);
+            let response = transport
+                .request_json_once(
+                    reqwest::Method::POST,
+                    &endpoint,
+                    mode,
+                    &body,
+                    RequestOptions::new(AuthStyle::Bearer, options.secret)
+                        .with_timeout(request.timeout),
+                )
+                .await?;
+            return structured_result_from_json_object_response(
+                &response.body,
+                request,
+                allow_envelope_repair,
+            );
+        }
         body["stream"] = Value::Bool(true);
         let mut aggregator = StreamResponseAggregator::new();
         let mut completed = None;
@@ -588,6 +611,94 @@ fn structured_result_for_request(
         allow_envelope_repair,
         &request.missing_required_string_fallbacks,
     )
+}
+
+fn structured_result_from_json_object_response(
+    body: &Value,
+    request: &StructuredGenerationRequest,
+    allow_envelope_repair: bool,
+) -> Result<StructuredGenerationResult, ProviderError> {
+    let choices =
+        body.get("choices")
+            .and_then(Value::as_array)
+            .ok_or(ProviderError::InvalidResponse(
+                "provider response choices are missing",
+            ))?;
+    if choices.len() != 1 {
+        return Err(ProviderError::InvalidResponse(
+            "provider response choices are invalid",
+        ));
+    }
+    if choices[0]
+        .get("index")
+        .is_some_and(|index| index.as_u64() != Some(0))
+    {
+        return Err(ProviderError::InvalidResponse(
+            "provider response choices are invalid",
+        ));
+    }
+    let message = choices[0].get("message").and_then(Value::as_object).ok_or(
+        ProviderError::InvalidResponse("provider response message is missing"),
+    )?;
+    let content = message
+        .get("content")
+        .ok_or(ProviderError::InvalidResponse(
+            "provider response message content is missing",
+        ))?;
+    match content {
+        Value::String(text) if !text.trim().is_empty() => {}
+        Value::String(_) | Value::Null => {
+            return Err(ProviderError::InvalidResponse(
+                "provider response message content is missing",
+            ));
+        }
+        _ => {
+            return Err(ProviderError::InvalidResponse(
+                "provider response message content is not a string",
+            ));
+        }
+    }
+    if choices[0].get("finish_reason").and_then(Value::as_str) != Some("stop") {
+        return Err(response_contract_error(
+            body,
+            "provider response finish reason is invalid",
+        ));
+    }
+    if body.get("status").and_then(Value::as_str) == Some("incomplete")
+        || body
+            .get("incomplete_details")
+            .is_some_and(|details| !details.is_null())
+    {
+        return Err(response_contract_error(
+            body,
+            "provider response was incomplete",
+        ));
+    }
+    if message
+        .get("tool_calls")
+        .is_some_and(|calls| !calls.is_null() && !calls.as_array().is_some_and(Vec::is_empty))
+        || message
+            .get("function_call")
+            .is_some_and(|call| !call.is_null())
+    {
+        return Err(ProviderError::InvalidResponse(
+            "unexpected provider tool call",
+        ));
+    }
+    let mut normalized = json!({
+        "choices": [{"message": {"content": content.clone()}}]
+    });
+    for key in ["index", "finish_reason"] {
+        if let Some(value) = choices[0].get(key) {
+            normalized["choices"][0][key] = value.clone();
+        }
+    }
+    for key in ["model", "usage", "status", "incomplete_details"] {
+        if let Some(value) = body.get(key) {
+            normalized[key] = value.clone();
+        }
+    }
+    structured_result_for_request(&normalized, request, allow_envelope_repair)
 }
 
 fn validate_strict_function_result(
@@ -887,7 +998,16 @@ fn openai_chat_body(
             "strict evaluation function output requires MiMo",
         ));
     }
-    let output_mode = model_settings.openai_structured_output_mode.resolve(preset);
+    if request.strict_function_call && request.non_stream_json_object {
+        return Err(ProviderError::InvalidConfiguration(
+            "strict function and non-stream JSON-object modes are mutually exclusive",
+        ));
+    }
+    let output_mode = if request.non_stream_json_object {
+        OpenAiStructuredOutputMode::JsonObject
+    } else {
+        model_settings.openai_structured_output_mode.resolve(preset)
+    };
     let token_field = model_settings.openai_token_limit_field.resolve(preset);
     let prompt_constrained = matches!(
         output_mode,
@@ -961,11 +1081,12 @@ fn openai_chat_body(
         }
     }
 
-    let thinking_mode = if request.strict_function_call {
-        // MiMo documents tool calls as unstable/incomplete with thinking
-        // enabled. This override is deliberately scoped to the explicit M6
-        // strict-function request flag; ordinary provider calls retain their
-        // configured preset behavior.
+    let thinking_mode = if request.strict_function_call
+        || (request.non_stream_json_object
+            && model_settings.openai_thinking_mode == OpenAiThinkingMode::Auto)
+    {
+        // Strict MiMo tool calls always disable thinking. A80 JSON-object
+        // requests disable only Auto, preserving explicit model settings.
         OpenAiThinkingMode::Disabled
     } else {
         match (preset, model_settings.openai_thinking_mode) {
@@ -1523,7 +1644,8 @@ fn schema_validation_error(issue: &'static str, path: &str) -> ProviderError {
 mod tests {
     use super::{
         MissingRequiredStringFallback, StructuredGenerationRequest, extract_text, openai_chat_body,
-        structured_result, structured_result_with_envelope_repair, structured_result_with_repairs,
+        structured_result, structured_result_from_json_object_response,
+        structured_result_with_envelope_repair, structured_result_with_repairs,
         validate_json_schema, validate_strict_function_result,
     };
     use crate::{
@@ -1581,6 +1703,7 @@ mod tests {
             strict_function_schema: None,
             defer_local_schema_validation: false,
             strict_function_call: false,
+            non_stream_json_object: false,
             schema: json!({
                 "type": "object",
                 "properties": {"memories": {"type": "array", "items": {"type": "object"}}},
@@ -1796,6 +1919,207 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn non_stream_json_object_forces_json_mode_and_only_disables_auto_thinking() {
+        let mut request = generation_request("mimo-v2.6-flash");
+        request.non_stream_json_object = true;
+        let body = openai_chat_body(
+            &request,
+            &ModelSettings::default(),
+            ProviderKind::XiaomiMimo,
+            Some("api.xiaomimimo.com"),
+            32_768,
+        )
+        .unwrap();
+        assert_eq!(body["response_format"], json!({"type":"json_object"}));
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+        assert_eq!(body["max_completion_tokens"], 32_768);
+        assert_eq!(body["thinking"], json!({"type":"disabled"}));
+
+        let enabled = openai_chat_body(
+            &request,
+            &ModelSettings {
+                openai_thinking_mode: OpenAiThinkingMode::Enabled,
+                ..ModelSettings::default()
+            },
+            ProviderKind::XiaomiMimo,
+            Some("api.xiaomimimo.com"),
+            32_768,
+        )
+        .unwrap();
+        assert_eq!(enabled["thinking"], json!({"type":"enabled"}));
+
+        let disabled = openai_chat_body(
+            &request,
+            &ModelSettings {
+                openai_thinking_mode: OpenAiThinkingMode::Disabled,
+                ..ModelSettings::default()
+            },
+            ProviderKind::XiaomiMimo,
+            Some("api.xiaomimimo.com"),
+            32_768,
+        )
+        .unwrap();
+        assert_eq!(disabled["thinking"], json!({"type":"disabled"}));
+    }
+
+    #[test]
+    fn non_stream_json_object_response_uses_message_content_and_safe_error_codes() {
+        let mut request = generation_request("mimo-v2.6-flash");
+        request.non_stream_json_object = true;
+        let valid = json!({
+            "model":"mimo-v2.6-flash",
+            "choices":[{"message":{"content":"{\"memories\":[]}"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":1,"completion_tokens":1}
+        });
+        let mut valid_with_other_content = valid.clone();
+        valid_with_other_content["output_text"] = json!("{\"memories\":\"wrong\"}");
+        let result =
+            structured_result_from_json_object_response(&valid_with_other_content, &request, true)
+                .unwrap();
+        assert_eq!(result.value, json!({"memories":[]}));
+        assert_eq!(
+            result.usage,
+            Some(json!({"prompt_tokens":1,"completion_tokens":1}))
+        );
+
+        let private_marker = "PRIVATE_JSON_OBJECT_RESPONSE-4f3a";
+        let invalid_cases = [
+            (
+                json!({"private_headers":private_marker}),
+                "provider_response_choices_missing",
+            ),
+            (json!({"choices":[]}), "provider_response_choices_invalid"),
+            (json!({"choices":[{}]}), "provider_response_message_missing"),
+            (
+                json!({"choices":[{"message":{}}]}),
+                "provider_response_message_content_missing",
+            ),
+            (
+                json!({"choices":[{"message":{"content":private_marker},"finish_reason":"stop"}]}),
+                "provider_structured_json_invalid",
+            ),
+            (
+                json!({"choices":[{"message":{"content":123}}]}),
+                "provider_response_message_content_invalid",
+            ),
+        ];
+        for (body, expected_code) in invalid_cases {
+            let error =
+                structured_result_from_json_object_response(&body, &request, true).unwrap_err();
+            assert_eq!(error.code(), expected_code);
+            assert!(!format!("{error:?}").contains(private_marker));
+        }
+    }
+
+    #[test]
+    fn non_stream_json_object_rejects_incomplete_or_tool_responses_with_valid_json() {
+        let mut request = generation_request("mimo-v2.6-flash");
+        request.non_stream_json_object = true;
+        let private_marker = "PRIVATE_INCOMPLETE_RESPONSE-451b";
+        let valid = json!({
+            "private_context":private_marker,
+            "choices":[{"index":0,"message":{"content":"{\"memories\":[]}"},"finish_reason":"stop"}]
+        });
+        structured_result_from_json_object_response(&valid, &request, true).unwrap();
+        for (reason, expected_code) in [
+            (json!("length"), "provider_output_truncated"),
+            (json!("content_filter"), "provider_output_filtered"),
+            (
+                json!("repetition_truncation"),
+                "provider_output_repetition_truncated",
+            ),
+            (
+                json!("tool_calls"),
+                "provider_response_finish_reason_invalid",
+            ),
+            (
+                json!(private_marker),
+                "provider_response_finish_reason_invalid",
+            ),
+            (Value::Null, "provider_response_finish_reason_invalid"),
+            (json!(12), "provider_response_finish_reason_invalid"),
+        ] {
+            let mut body = valid.clone();
+            body["choices"][0]["finish_reason"] = reason;
+            let error =
+                structured_result_from_json_object_response(&body, &request, true).unwrap_err();
+            assert_eq!(error.code(), expected_code);
+            assert!(!format!("{error:?}").contains(private_marker));
+        }
+        let mut missing_finish = valid.clone();
+        missing_finish["choices"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("finish_reason");
+        assert_eq!(
+            structured_result_from_json_object_response(&missing_finish, &request, true)
+                .unwrap_err()
+                .code(),
+            "provider_response_finish_reason_invalid"
+        );
+        for (pointer, value, expected_code) in [
+            (
+                "/choices/0/index",
+                json!(1),
+                "provider_response_choices_invalid",
+            ),
+            (
+                "/choices/0/index",
+                json!(-1),
+                "provider_response_choices_invalid",
+            ),
+            (
+                "/choices/0/index",
+                json!("0"),
+                "provider_response_choices_invalid",
+            ),
+        ] {
+            let mut body = valid.clone();
+            *body.pointer_mut(pointer).unwrap() = value;
+            assert_eq!(
+                structured_result_from_json_object_response(&body, &request, true)
+                    .unwrap_err()
+                    .code(),
+                expected_code
+            );
+        }
+        for (field, value, expected_code) in [
+            (
+                "status",
+                json!("incomplete"),
+                "provider_response_incomplete",
+            ),
+            (
+                "incomplete_details",
+                json!({"reason":"max_output_tokens"}),
+                "provider_output_truncated",
+            ),
+        ] {
+            let mut body = valid.clone();
+            body[field] = value;
+            assert_eq!(
+                structured_result_from_json_object_response(&body, &request, true)
+                    .unwrap_err()
+                    .code(),
+                expected_code
+            );
+        }
+        for (field, value) in [
+            ("tool_calls", json!([{"function":{"name":private_marker}}])),
+            ("tool_calls", json!(private_marker)),
+            ("function_call", json!({"name":private_marker})),
+        ] {
+            let mut body = valid.clone();
+            body["choices"][0]["message"][field] = value;
+            let error =
+                structured_result_from_json_object_response(&body, &request, true).unwrap_err();
+            assert_eq!(error.code(), "provider_response_invalid");
+            assert!(!format!("{error:?}").contains(private_marker));
+        }
     }
 
     #[test]

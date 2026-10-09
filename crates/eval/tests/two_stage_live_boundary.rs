@@ -413,34 +413,54 @@ async fn a80_fake_chat(
     Json(request): Json<Value>,
 ) -> axum::response::Response {
     state.calls.fetch_add(1, Ordering::SeqCst);
-    assert_eq!(request["response_format"]["type"], "json_object");
+    assert_eq!(request["model"], "externalmodel");
+    assert_eq!(request["response_format"], json!({"type":"json_object"}));
+    assert_eq!(request["stream"], false);
+    // MiMo's reasoning preset floors small stage requests at its documented
+    // default; the A80 path must preserve that token-field/preset behavior.
+    assert_eq!(request["max_completion_tokens"], 32_768);
+    assert_eq!(request["thinking"], json!({"type":"disabled"}));
+    assert!(request.get("tools").is_none());
+    assert!(request.get("tool_choice").is_none());
     let messages = request["messages"].as_array().unwrap();
-    let input: Value =
-        serde_json::from_str(messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
-    let blocks = input["blocks"].as_array().unwrap();
-    assert!(!blocks.is_empty() && blocks.len() <= 80);
-    let selected = blocks.get(1).unwrap_or(&blocks[0]);
-    let output = json!({
-        "claims":[{
-            "statement":selected["text"],
-            "evidence_indices":[selected["evidence_index"]],
-            "kind":"decision"
-        }]
-    });
-    let chunk = json!({
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[1]["role"], "user");
+    let system = messages[0]["content"].as_str().unwrap();
+    let schema: Value = serde_json::from_str(system.split_once("exactly:\n").unwrap().1).unwrap();
+    let input: Value = serde_json::from_str(messages[1]["content"].as_str().unwrap()).unwrap();
+    let output = if schema["properties"].get("claims").is_some() {
+        let blocks = input["blocks"].as_array().unwrap();
+        assert!(!blocks.is_empty() && blocks.len() <= 80);
+        let selected = blocks.get(1).unwrap_or(&blocks[0]);
+        json!({
+            "claims":[{
+                "statement":selected["text"],
+                "evidence_indices":[selected["evidence_index"]],
+                "kind":"decision"
+            }]
+        })
+    } else if schema["properties"].get("actions").is_some() {
+        json!({
+            "actions":[{"action":"no_change","candidate_ids":["candidate-1"]}]
+        })
+    } else if schema["properties"].get("answer").is_some() {
+        json!({
+            "answer":"A80 fixture answer",
+            "answerability":"answerable",
+            "status":"supported",
+            "evidence_ids":[]
+        })
+    } else {
+        panic!("unexpected A80 schema")
+    };
+    Json(json!({
         "id":"a80-fixture",
         "model":"externalmodel",
-        "choices":[{"index":0,"delta":{"content":output.to_string()}}]
-    });
-    let stop = json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
-    axum::response::Response::builder()
-        .header("content-type", "text/event-stream")
-        .body(axum::body::Body::from(format!(
-            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
-            chunk, stop
-        )))
-        .unwrap()
-        .into_response()
+        "choices":[{"index":0,"message":{"role":"assistant","content":output.to_string()},"finish_reason":"stop"}],
+        "usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}
+    }))
+    .into_response()
 }
 
 struct Fixture {
@@ -2359,6 +2379,45 @@ async fn a80_fake_provider_batches_then_publishes_one_card_per_claim() {
     assert_eq!(finalized["observation_count"], 2);
     assert_eq!(finalized["card_count"], 2);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let published_projection = semantic
+        .current_card_projection_for_arm(ComparisonArm::B, &source)
+        .await
+        .unwrap();
+
+    let relation = provider_boundary
+        .generate(LiveProviderRequest {
+            sequence: 3,
+            stage: "relation".into(),
+            arm: ComparisonArm::B,
+            source_id: None,
+            task_id: Some("relation-a80".into()),
+            model_id: "externalmodel".into(),
+            prompt_id: templates[1].prompt_id.clone(),
+            schema_id: templates[1].schema_id.clone(),
+            index_profile_id: templates[1].index_profile_id.clone(),
+            input: json!({"candidates":[{"candidate_id":"candidate-1"}]}),
+        })
+        .await
+        .unwrap();
+    assert_eq!(relation.output["actions"][0]["action"], "no_change");
+
+    let answer = provider_boundary
+        .generate(LiveProviderRequest {
+            sequence: 4,
+            stage: "answer".into(),
+            arm: ComparisonArm::B,
+            source_id: None,
+            task_id: Some("answer-a80".into()),
+            model_id: "externalmodel".into(),
+            prompt_id: templates[2].prompt_id.clone(),
+            schema_id: templates[2].schema_id.clone(),
+            index_profile_id: templates[2].index_profile_id.clone(),
+            input: json!({"task":"fixture question","memory_pack":[]}),
+        })
+        .await
+        .unwrap();
+    assert_eq!(answer.output["answer"], "A80 fixture answer");
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
     // Recreate the Eval adapter after durable publication but before the
     // runner writes its card artifact. It must restore the published cards
     // from the same validated extraction without calling the Provider again.
@@ -2398,7 +2457,8 @@ async fn a80_fake_provider_batches_then_publishes_one_card_per_claim() {
         .await
         .unwrap();
     assert_eq!(projection["card_count"], 2);
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(projection, published_projection);
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
     let _ = provider_boundary;
     server.abort();
 }

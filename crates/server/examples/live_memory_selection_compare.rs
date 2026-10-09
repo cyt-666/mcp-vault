@@ -465,6 +465,7 @@ async fn main() -> Result<()> {
             strict_function_schema: None,
             defer_local_schema_validation: false,
             strict_function_call: false,
+            non_stream_json_object: false,
             schema: batch["schema"].clone(),
             allow_additional_output_properties: false,
             missing_required_string_fallbacks: Vec::new(),

@@ -289,7 +289,9 @@ pub async fn build_live_runtime(
         .ok_or("registered Provider model is missing")?;
     let provider_runtime: ProviderRuntimeSnapshot =
         providers.runtime_snapshot(&context, model_id).await?;
-    evaluation.provider_runtime_snapshot = Some(provider_runtime.clone());
+    if evaluation.provider_runtime_snapshot.as_ref() != Some(&provider_runtime) {
+        return Err("Provider runtime differs from the sealed preparation".into());
+    }
     let budget_limit = request_budget_limit.unwrap_or(
         evaluation.run_config.comparisons[0]
             .budget

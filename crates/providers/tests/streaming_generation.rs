@@ -376,6 +376,7 @@ fn request_for_model(timeout: Option<Duration>, model: &str) -> StructuredGenera
         strict_function_schema: None,
         defer_local_schema_validation: false,
         strict_function_call: false,
+        non_stream_json_object: false,
         schema: json!({"type":"object","additionalProperties":false,"required":["answer"],"properties":{"answer":{"type":"string"}}}),
         allow_additional_output_properties: false,
         missing_required_string_fallbacks: Vec::new(),

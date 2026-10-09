@@ -26,7 +26,7 @@ use tempfile::TempDir;
 fn isolated_tempdir() -> TempDir {
     tempfile::Builder::new()
         .prefix("mcp-vault-diagnostic-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::env::temp_dir().canonicalize().unwrap())
         .unwrap()
 }
 
@@ -486,6 +486,29 @@ async fn diagnostic_provider_and_fence_failures_stop_without_retry() {
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     assert_eq!(semantic.prepared.load(Ordering::SeqCst), 0);
     assert_eq!(result.status, "diagnostic_failed");
+}
+
+#[test]
+fn legacy_diagnostic_rejects_a80_before_opening_or_creating_runtime_paths() {
+    let root = isolated_tempdir();
+    let mut cfg = config(root.path());
+    cfg.semantic_protocol = "m1-a80-v1".into();
+    let err = validate_live_semantic_diagnostic_config(
+        &cfg,
+        &DiagnosticSelection {
+            arm: ComparisonArm::B,
+            source_id: "S00".into(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        err,
+        EvalError::LiveConfig(
+            "legacy two-stage diagnostic does not support A80; use the authorized full evaluation"
+        )
+    );
+    assert!(!Path::new(&cfg.artifact_root).exists());
+    assert!(!Path::new(&cfg.state_root).exists());
 }
 
 #[test]

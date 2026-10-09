@@ -47,6 +47,8 @@ use thiserror::Error;
 const MANIFEST_SCHEMA: &str = "semantic-memory-eval-manifest-v1";
 const RUN_SCHEMA: &str = "semantic-memory-eval-run-config-v1";
 const ARTIFACT_SCHEMA: &str = "semantic-memory-eval-artifact-v1";
+/// ADR-0044 bounds one complete A/B/C A80 run, including regeneration attempts.
+pub const M6_A80_REQUEST_LIMIT: u32 = 160;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum EvalError {
@@ -1884,11 +1886,35 @@ struct LiveUsageStats {
     output_tokens: Option<u64>,
     cost_minor: Option<u64>,
     cost_unknown: bool,
+    /// Older checkpoints have no timing evidence; missing measurements must
+    /// remain unknown rather than being reconstructed as zero-duration calls.
+    #[serde(default)]
+    by_stage_latency: BTreeMap<String, LiveStageLatency>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LiveStageLatency {
+    generation_calls: u32,
+    transport_attempts: u32,
+    /// Runner budget units covered by measured calls. A80 reserves one unit
+    /// before generation, even when generation fails before HTTP dispatch.
+    #[serde(default)]
+    accounted_requests: u32,
+    total_ms: u64,
+    max_ms: u64,
+}
+
+struct LiveCallTiming {
+    stage: String,
+    elapsed_ms: u64,
+    accounted_requests: u32,
 }
 
 struct LiveProviderCall {
     output: LiveProviderOutput,
     attempts: u32,
+    timing: LiveCallTiming,
 }
 
 struct LiveProviderCallError {
@@ -1898,6 +1924,7 @@ struct LiveProviderCallError {
     schema_path: Option<String>,
     structured_json_diagnostic: Option<StructuredJsonDiagnostic>,
     protocol_issue: Option<StrictFunctionCallIssue>,
+    timing: Option<LiveCallTiming>,
 }
 
 fn persist_schema_diagnostic(
@@ -2363,6 +2390,16 @@ fn validate_live_config(config: &LiveEvaluationConfig) -> Result<(String, String
         reject_secret_fields(arm)?;
     }
     let first = &run_config.comparisons[0];
+    if config.semantic_protocol == "m1-a80-v1"
+        && run_config
+            .comparisons
+            .iter()
+            .any(|arm| arm.budget.external_request_budget > M6_A80_REQUEST_LIMIT)
+    {
+        return Err(EvalError::LiveBlocked(
+            "A80 request budget exceeds the 160-request run limit",
+        ));
+    }
     let computed_upper_bound = computed_semantic_request_upper_bound(config);
     if matches!(
         config.semantic_protocol.as_str(),
@@ -3053,8 +3090,9 @@ fn record_arm_usage(
     usage: Option<&serde_json::Value>,
     cost: Option<u64>,
     attempts: u32,
+    timing: Option<&LiveCallTiming>,
 ) {
-    if attempts == 0 {
+    if attempts == 0 && timing.is_none() {
         return;
     }
     let stats = usage_by_arm
@@ -3065,8 +3103,61 @@ fn record_arm_usage(
             output_tokens: None,
             cost_minor: None,
             cost_unknown: false,
+            by_stage_latency: BTreeMap::new(),
         });
-    update_usage_stats(stats, usage, cost, attempts);
+    if attempts > 0 {
+        update_usage_stats(stats, usage, cost, attempts);
+    }
+    if let Some(timing) = timing {
+        let stage = stats
+            .by_stage_latency
+            .entry(timing.stage.clone())
+            .or_default();
+        stage.generation_calls = stage.generation_calls.saturating_add(1);
+        stage.transport_attempts = stage.transport_attempts.saturating_add(attempts);
+        stage.accounted_requests = stage
+            .accounted_requests
+            .saturating_add(timing.accounted_requests);
+        stage.total_ms = stage.total_ms.saturating_add(timing.elapsed_ms);
+        stage.max_ms = stage.max_ms.max(timing.elapsed_ms);
+    }
+}
+
+fn live_latency_summary(
+    usage_by_arm: &BTreeMap<String, LiveUsageStats>,
+    reserved_requests: u32,
+) -> serde_json::Value {
+    let mut total = LiveStageLatency::default();
+    for stage in usage_by_arm
+        .values()
+        .flat_map(|stats| stats.by_stage_latency.values())
+    {
+        total.generation_calls = total
+            .generation_calls
+            .saturating_add(stage.generation_calls);
+        total.transport_attempts = total
+            .transport_attempts
+            .saturating_add(stage.transport_attempts);
+        total.accounted_requests = total
+            .accounted_requests
+            .saturating_add(stage.accounted_requests);
+        total.total_ms = total.total_ms.saturating_add(stage.total_ms);
+        total.max_ms = total.max_ms.max(stage.max_ms);
+    }
+    serde_json::json!({
+        "status": if reserved_requests == 0 && total.generation_calls == 0 {
+            "unavailable"
+        } else if total.accounted_requests == reserved_requests {
+            "known"
+        } else {
+            "partial"
+        },
+        "scope": "provider_generation_calls_including_transport_and_local_validation",
+        "excludes": ["retrieval", "pack_construction", "independent_review"],
+        "measured": total,
+        "reserved_requests": reserved_requests,
+        "note": "Reservations without a completed measured call remain unmeasured; elapsed time is not a billing estimate.",
+    })
 }
 
 fn write_live_json(path: &Path, value: &impl Serialize) -> Result<(), EvalError> {
@@ -3214,6 +3305,7 @@ fn persist_live_progress(
             "cost_status": if cost_unknown { "unknown" } else if cost_available { "known" } else { "unavailable" },
             "completed_tasks": completed_tasks,
             "by_arm": usage_by_arm,
+            "latency": live_latency_summary(usage_by_arm, provider_requests),
             "status": "running",
         }),
     )
@@ -3464,6 +3556,7 @@ async fn call_live_provider<P: ProviderAppBoundary>(
             .map_err(|error| LiveProviderCallError {
                 code: error.code,
                 attempts: 0,
+                timing: None,
                 schema_issue: error.schema_issue,
                 schema_path: error.schema_path,
                 structured_json_diagnostic: error.structured_json_diagnostic,
@@ -3475,6 +3568,7 @@ async fn call_live_provider<P: ProviderAppBoundary>(
             LiveProviderCallError {
                 code: "request_budget_exhausted".into(),
                 attempts: 0,
+                timing: None,
                 schema_issue: None,
                 schema_path: None,
                 structured_json_diagnostic: None,
@@ -3489,6 +3583,7 @@ async fn call_live_provider<P: ProviderAppBoundary>(
         ComparisonArm::C => 2,
     }];
     let attempts_before = provider.transport_attempt_count();
+    let started = std::time::Instant::now();
     let output = provider
         .generate(LiveProviderRequest {
             sequence: *sequence,
@@ -3503,18 +3598,29 @@ async fn call_live_provider<P: ProviderAppBoundary>(
             input,
         })
         .await;
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let attempts = match (attempts_before, provider.transport_attempt_count()) {
         (Some(before), Some(after)) => after.saturating_sub(before),
         _ => 1,
+    };
+    let timing = LiveCallTiming {
+        stage: stage.to_owned(),
+        elapsed_ms,
+        accounted_requests: if budget_reserved { 1 } else { attempts },
     };
     if !budget_reserved {
         *provider_requests = provider_requests.saturating_add(attempts);
     }
     match output {
-        Ok(output) => Ok(LiveProviderCall { output, attempts }),
+        Ok(output) => Ok(LiveProviderCall {
+            output,
+            attempts,
+            timing,
+        }),
         Err(error) => Err(LiveProviderCallError {
             code: error.code,
             attempts,
+            timing: Some(timing),
             schema_issue: error.schema_issue,
             schema_path: error.schema_path,
             structured_json_diagnostic: error.structured_json_diagnostic,
@@ -4172,6 +4278,7 @@ where
                                     None,
                                     None,
                                     error.attempts,
+                                    error.timing.as_ref(),
                                 );
                                 persist_schema_diagnostic(
                                     root,
@@ -4286,6 +4393,7 @@ where
                             result.output.usage.as_ref(),
                             result.output.cost_minor,
                             result.attempts,
+                            Some(&result.timing),
                         );
                         observations.push(LiveArtifactRecord {
                             sequence,
@@ -4597,7 +4705,14 @@ where
                     // a running extraction. End that exact prepared operation
                     // before recording the original first error.
                     let _ = semantic.abort_semantic_for_arm(arm.clone(), source).await;
-                    record_arm_usage(&mut usage_by_arm, &arm, None, None, error.attempts);
+                    record_arm_usage(
+                        &mut usage_by_arm,
+                        &arm,
+                        None,
+                        None,
+                        error.attempts,
+                        error.timing.as_ref(),
+                    );
                     persist_schema_diagnostic(
                         root,
                         sequence,
@@ -4633,6 +4748,7 @@ where
                 usage.as_ref(),
                 result.output.cost_minor,
                 result.attempts,
+                Some(&result.timing),
             );
             observations.push(LiveArtifactRecord {
                 sequence,
@@ -4762,7 +4878,14 @@ where
                     Ok(result) => result,
                     Err(error) => {
                         let _ = semantic.abort_semantic_for_arm(arm.clone(), source).await;
-                        record_arm_usage(&mut usage_by_arm, &arm, None, None, error.attempts);
+                        record_arm_usage(
+                            &mut usage_by_arm,
+                            &arm,
+                            None,
+                            None,
+                            error.attempts,
+                            error.timing.as_ref(),
+                        );
                         persist_schema_diagnostic(
                             root,
                             sequence,
@@ -4786,6 +4909,7 @@ where
                     composition.output.usage.as_ref(),
                     composition.output.cost_minor,
                     composition.attempts,
+                    Some(&composition.timing),
                 );
                 observations.push(LiveArtifactRecord {
                     sequence,
@@ -5120,6 +5244,7 @@ where
                                     None,
                                     None,
                                     error.attempts,
+                                    error.timing.as_ref(),
                                 );
                                 persist_schema_diagnostic(
                                     root,
@@ -5202,6 +5327,7 @@ where
                                 relation_usage.as_ref(),
                                 relation.output.cost_minor,
                                 relation.attempts,
+                                Some(&relation.timing),
                             );
                             relations.push(LiveArtifactRecord {
                                 sequence,
@@ -5526,6 +5652,7 @@ where
                             None,
                             None,
                             error.attempts,
+                            error.timing.as_ref(),
                         );
                         persist_schema_diagnostic(
                             root,
@@ -5608,6 +5735,7 @@ where
                         relation_usage.as_ref(),
                         relation.output.cost_minor,
                         relation.attempts,
+                        Some(&relation.timing),
                     );
                     relations.push(LiveArtifactRecord {
                         sequence,
@@ -6182,7 +6310,14 @@ where
                 {
                     Ok(result) => result,
                     Err(error) => {
-                        record_arm_usage(&mut usage_by_arm, &arm, None, None, error.attempts);
+                        record_arm_usage(
+                            &mut usage_by_arm,
+                            &arm,
+                            None,
+                            None,
+                            error.attempts,
+                            error.timing.as_ref(),
+                        );
                         persist_schema_diagnostic(
                             root,
                             sequence,
@@ -6261,6 +6396,7 @@ where
                     usage.as_ref(),
                     result.output.cost_minor,
                     result.attempts,
+                    Some(&result.timing),
                 );
                 answers.push(LiveArtifactRecord {
                     sequence,
@@ -6376,7 +6512,9 @@ where
         )?;
         review.push(serde_json::json!({"status":"pending","failure_code":error.code}));
     } else {
-        review.push(serde_json::json!({"status":"pending","reason":"manual_review_required"}));
+        review.push(
+            serde_json::json!({"status":"pending","reason":"independent_blind_review_required"}),
+        );
     }
     let status = if first_error.is_some() {
         LiveRunStatus::Failed
@@ -6448,15 +6586,16 @@ where
         "cost_budget_minor": config.run_config.cost_budget_minor,
         "unbounded_cost_authorized": config.unbounded_cost_authorized,
         "by_arm": usage_by_arm,
-        "status": if first_error.is_some() { "failed" } else { "pending_manual_review" },
+        "latency": live_latency_summary(&usage_by_arm, provider_requests),
+        "status": if first_error.is_some() { "failed" } else { "pending_independent_review" },
     });
     let metrics = serde_json::json!({
-        "focus_coverage": "pending_manual_review",
-        "support_precision": "pending_manual_review",
-        "condition_retention": "pending_manual_review",
-        "redundancy": "pending_manual_review",
-        "no_answer": "pending_manual_review",
-        "task_result": "pending_manual_review",
+        "focus_coverage": "pending_independent_review",
+        "support_precision": "pending_independent_review",
+        "condition_retention": "pending_independent_review",
+        "redundancy": "pending_independent_review",
+        "no_answer": "pending_independent_review",
+        "task_result": "pending_independent_review",
     });
     let schema_diagnostics = root
         .join("schema-diagnostics.jsonl")
@@ -6478,9 +6617,14 @@ where
         "run_config_hash": run_config_hash,
         "status": if first_error.is_some() { "failed" } else { "completed_pending_review" },
         "quality_claim": "not_evaluated",
+        "m6_acceptance": "not_evaluated",
+        "review_method": "independent_agent_blind_review",
+        "review_status": "pending",
+        "human_review": false,
+        "latency": live_latency_summary(&usage_by_arm, provider_requests),
         "engineering_status": if first_error.is_some() { "failed" } else { "pending" },
-        "semantic_status": "pending_manual_review",
-        "task_status": "pending_manual_review",
+        "semantic_status": "pending_independent_review",
+        "task_status": "pending_independent_review",
         "cost_status": "reported_only",
         "by_arm": {"A": metrics.clone(), "B": metrics.clone(), "C": metrics},
         "task_results": {
@@ -6488,12 +6632,12 @@ where
             "requested_tasks": task_ids.len(),
             "answers_recorded": answers.len(),
             "packs_recorded": packs.len(),
-            "focus_coverage": "pending_manual_review",
-            "support_precision": "pending_manual_review",
-            "condition_retention": "pending_manual_review",
-            "redundancy": "pending_manual_review",
-            "no_answer": "pending_manual_review",
-            "task_result": "pending_manual_review"
+            "focus_coverage": "pending_independent_review",
+            "support_precision": "pending_independent_review",
+            "condition_retention": "pending_independent_review",
+            "redundancy": "pending_independent_review",
+            "no_answer": "pending_independent_review",
+            "task_result": "pending_independent_review"
         },
         "first_error": first_error.clone(),
         "schema_diagnostics": schema_diagnostics,
@@ -6501,7 +6645,7 @@ where
         "task_count": task_ids.len(),
     });
     let report = format!(
-        "# Semantic-card M6 live evaluation\n\nStatus: `{}`\n\nQuality claim: `not_evaluated`\n\nThe following machine-readable summary is provisional and requires independent human review:\n\n```json\n{}\n```\n",
+        "# Semantic-card M6 live evaluation\n\nStatus: `{}`\n\nQuality claim: `not_evaluated`\n\nThe following machine-readable summary is provisional and requires independent agent blind review (human_review=false); no acceptance decision has been made:\n\n```json\n{}\n```\n",
         if first_error.is_some() {
             "failed"
         } else {

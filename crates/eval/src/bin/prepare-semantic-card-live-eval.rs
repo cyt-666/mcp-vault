@@ -14,9 +14,9 @@ use mcp_vault_domain::{
 use mcp_vault_eval::{
     Budget, ComparisonArm, ComparisonConfig, EvalMode, EvalSource, EvalTask, EvaluationManifest,
     EvaluationRunConfig, ExpectedRelation, LIVE_RUN_SCHEMA, LiveEvaluationConfig, M6_A80_PROMPT_ID,
-    M6_A80_SCHEMA_ID, ProviderStageTemplate, SemanticArmRoot, SemanticArmRoots, TaskSourceFence,
-    TaskSplit, prepare_live_private_directories, semantic_a80_provider_templates,
-    validate_live_evaluation_config, write_live_preparation_seal,
+    M6_A80_REQUEST_LIMIT, M6_A80_SCHEMA_ID, ProviderStageTemplate, SemanticArmRoot,
+    SemanticArmRoots, TaskSourceFence, TaskSplit, prepare_live_private_directories,
+    semantic_a80_provider_templates, validate_live_evaluation_config, write_live_preparation_seal,
 };
 use mcp_vault_indexer::IndexService;
 use mcp_vault_memory::SemanticMemoryService;
@@ -63,6 +63,8 @@ struct DraftConfig {
     tasks: Vec<TaskDraft>,
     b_source_ids: Vec<String>,
     external_request_budget: u32,
+    /// Explicit operator-approved bound; never inherit a service-side default.
+    generation_token_limit: u32,
     #[serde(default)]
     provider_timeout_seconds: Option<u64>,
 }
@@ -180,10 +182,21 @@ async fn main() -> Result<()> {
             provider_id: isolated_provider.id,
             external_model_id: provider.external_model_id.clone(),
             capabilities: provider.capabilities.clone(),
-            settings: provider.model_settings.clone(),
+            settings: bounded_model_settings(
+                &provider.model_settings,
+                draft.generation_token_limit,
+            )?,
             enabled: true,
         })
         .await?;
+    let effective_generation_token_limit =
+        bounded_model_settings(&provider.model_settings, draft.generation_token_limit)?
+            .effective_generation_token_limit(
+                provider.provider_kind,
+                provider.base_url.host_str(),
+                &provider.capabilities,
+                2_048,
+            );
     let provider_snapshot = provider_service
         .runtime_snapshot(&baseline.context, isolated_model.id)
         .await?;
@@ -372,6 +385,9 @@ async fn main() -> Result<()> {
         "external_model_id": provider.external_model_id,
         "provider_retries": 0,
         "external_request_budget": draft.external_request_budget,
+        "generation_token_limit": effective_generation_token_limit,
+        "maximum_generated_tokens": u64::from(draft.external_request_budget) * u64::from(effective_generation_token_limit),
+        "max_request_bytes": provider.settings.max_request_bytes,
         "currency_budget": "unbounded_by_user_authorization",
         "embedding_role_used": false,
         "retrieval_profile": "index-frozen-v1 lexical",
@@ -396,6 +412,9 @@ async fn main() -> Result<()> {
             "provider_type": provider.source_provider_type,
             "external_model_id": provider.external_model_id,
             "external_request_budget": draft.external_request_budget,
+            "generation_token_limit": effective_generation_token_limit,
+            "maximum_generated_tokens": u64::from(draft.external_request_budget) * u64::from(effective_generation_token_limit),
+            "max_request_bytes": provider.settings.max_request_bytes,
             "retries": 0,
             "real_provider_requests_started": 0,
         }))?
@@ -414,6 +433,10 @@ struct CliConfig {
 }
 
 fn validate_draft(config: &DraftConfig) -> Result<()> {
+    if config.external_request_budget > M6_A80_REQUEST_LIMIT {
+        return Err("M6 A80 request budget exceeds the 160-request run limit".into());
+    }
+    bounded_model_settings(&ModelSettings::default(), config.generation_token_limit)?;
     if !config.run_root.is_absolute()
         || !config.repository_root.is_absolute()
         || !config.source_database_path.is_absolute()
@@ -539,6 +562,15 @@ fn validate_draft(config: &DraftConfig) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn bounded_model_settings(settings: &ModelSettings, limit: u32) -> Result<ModelSettings> {
+    if limit == 0 || limit > 1_048_576 {
+        return Err("M6 generation_token_limit must be explicitly set within 1..=1048576".into());
+    }
+    let mut bounded = settings.clone();
+    bounded.generation_token_limit = Some(limit);
+    Ok(bounded)
 }
 
 fn validate_private_run_root(path: &Path) -> Result<()> {
@@ -975,5 +1007,32 @@ fn write_private_json(path: &Path, value: &impl serde::Serialize) -> Result<()> 
     {
         let _ = (path, bytes);
         Err("M6 private files cannot be written on this platform".into())
+    }
+}
+
+#[cfg(test)]
+mod generation_budget_tests {
+    use super::*;
+
+    #[test]
+    fn isolated_output_bound_overrides_inherited_limit_without_mutating_source_settings() {
+        let original = ModelSettings {
+            generation_token_limit: Some(131_072),
+            ..ModelSettings::default()
+        };
+        let bounded = bounded_model_settings(&original, 32_768).unwrap();
+        assert_eq!(original.generation_token_limit, Some(131_072));
+        assert_eq!(bounded.generation_token_limit, Some(32_768));
+        assert_eq!(
+            bounded.effective_generation_token_limit(
+                ProviderKind::XiaomiMimo,
+                Some("api.xiaomimimo.com"),
+                &ModelCapabilities::default(),
+                2_048,
+            ),
+            32_768
+        );
+        assert!(bounded_model_settings(&original, 0).is_err());
+        assert!(bounded_model_settings(&original, 1_048_577).is_err());
     }
 }

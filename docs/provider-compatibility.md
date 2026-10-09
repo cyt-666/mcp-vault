@@ -211,3 +211,14 @@ the projection/profile version remains unchanged, preserving valid vector values
 ## Generation streaming
 
 Generation adapters consume bounded SSE streams and return only after the provider-specific terminal event/finish reason and the existing structured JSON/schema validator succeed. The seven OpenAI-compatible Chat presets use Chat SSE; OpenAI Responses and Anthropic Messages use their native event contracts. Embedding and local FastEmbed adapters remain non-streaming. First-event and chunk-idle defaults are 120 seconds; streaming total is bounded at 600 seconds for the eval profile, while an explicit per-call timeout remains authoritative. Missing usage is reported as unknown.
+
+The isolated M6 A80 MiMo v14/v10 evaluation path is an explicit exception to
+the ordinary streaming contract. Its typed request mode sends
+`response_format={"type":"json_object"}` with `stream=false`, omits tools and
+tool choice, and validates the JSON string in
+`choices[].message.content` through the same local schema and normalization
+boundary. A completed response requires `finish_reason="stop"`; truncated,
+filtered, incomplete, unexpected-tool, and nonzero-choice responses are rejected
+even when their content is valid JSON. A80 disables only automatic thinking;
+an explicit thinking setting remains effective. This exception is evaluation-only and does not change
+ordinary production or legacy structured-generation behavior.

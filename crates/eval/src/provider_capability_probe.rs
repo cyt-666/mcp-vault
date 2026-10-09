@@ -382,6 +382,7 @@ impl CapabilityProbeProvider for ProviderServiceCapabilityBoundary {
                     strict_function_schema: None,
                     defer_local_schema_validation: false,
                     strict_function_call: false,
+                    non_stream_json_object: false,
                     schema: generation_probe_schema(),
                     allow_additional_output_properties: false,
                     missing_required_string_fallbacks: Vec::new(),

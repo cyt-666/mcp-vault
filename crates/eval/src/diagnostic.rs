@@ -81,6 +81,11 @@ pub fn validate_live_semantic_diagnostic_config(
     config: &crate::LiveEvaluationConfig,
     selection: &DiagnosticSelection,
 ) -> Result<(String, String), EvalError> {
+    if config.semantic_protocol == "m1-a80-v1" {
+        return Err(EvalError::LiveConfig(
+            "legacy two-stage diagnostic does not support A80; use the authorized full evaluation",
+        ));
+    }
     let hashes = validate_live_evaluation_config(config)?;
     validate_selection(config, selection)?;
     let root = Path::new(&config.artifact_root);

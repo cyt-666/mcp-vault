@@ -210,6 +210,24 @@ impl ProviderError {
             Self::InvalidResponse("provider final content is missing") => {
                 "provider_final_content_missing"
             }
+            Self::InvalidResponse("provider response choices are missing") => {
+                "provider_response_choices_missing"
+            }
+            Self::InvalidResponse("provider response choices are invalid") => {
+                "provider_response_choices_invalid"
+            }
+            Self::InvalidResponse("provider response message is missing") => {
+                "provider_response_message_missing"
+            }
+            Self::InvalidResponse("provider response message content is missing") => {
+                "provider_response_message_content_missing"
+            }
+            Self::InvalidResponse("provider response message content is not a string") => {
+                "provider_response_message_content_invalid"
+            }
+            Self::InvalidResponse("provider response finish reason is invalid") => {
+                "provider_response_finish_reason_invalid"
+            }
             Self::InvalidResponse("structured output is not JSON") => {
                 "provider_structured_json_invalid"
             }
