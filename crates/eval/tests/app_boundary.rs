@@ -528,6 +528,38 @@ async fn ordinary_lexical_adapter_fails_closed_on_a_stale_index_projection() {
     assert_eq!(current["coverage"]["complete"], true);
     assert_eq!(current["coverage"]["eligible_count"], 1);
 
+    // Natural questions are not strict conjunctions of every question word.
+    // The versioned profile uses the existing lexical recall admission policy.
+    lexical_task.query = "What is the rollback condition?".into();
+    for (profile, expected_hits) in [
+        ("index-frozen-v1", 0),
+        (mcp_vault_eval::M6_A80_INDEX_PROFILE_ID, 1),
+    ] {
+        let result = adapter
+            .ordinary_retrieve_with_profile(
+                &lexical_task,
+                std::slice::from_ref(&lexical_source),
+                &budget(),
+                profile,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["sources"].as_array().unwrap().len(), expected_hits);
+        assert!(result["degradation_reasons"].as_array().unwrap().is_empty());
+    }
+    lexical_task.query = "What is the unrelated unicorn deadline?".into();
+    let unrelated = adapter
+        .ordinary_retrieve_with_profile(
+            &lexical_task,
+            std::slice::from_ref(&lexical_source),
+            &budget(),
+            mcp_vault_eval::M6_A80_INDEX_PROFILE_ID,
+        )
+        .await
+        .unwrap();
+    assert!(unrelated["sources"].as_array().unwrap().is_empty());
+    lexical_task.query = "oldneedle".into();
+
     let replacement_body = b"# Rollback\n\nThe rollback condition is newneedle.\n";
     let replaced = baseline
         .core

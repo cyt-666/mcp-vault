@@ -3,8 +3,9 @@ use serde_json::json;
 
 pub const M6_PROMPT_ID: &str = "semantic-cards-tracked-adr-m6-v12";
 pub const M6_SCHEMA_ID: &str = "semantic-cards-m6-json-v8";
-pub const M6_A80_PROMPT_ID: &str = "semantic-cards-tracked-adr-m6-v14";
-pub const M6_A80_SCHEMA_ID: &str = "semantic-cards-m6-json-v10";
+pub const M6_A80_PROMPT_ID: &str = "semantic-cards-tracked-adr-m6-v15";
+pub const M6_A80_SCHEMA_ID: &str = "semantic-cards-m6-json-v11";
+pub const M6_A80_INDEX_PROFILE_ID: &str = "index-lexical-recall-v2";
 
 pub fn semantic_live_provider_templates(
     model_id: &str,
@@ -135,6 +136,7 @@ pub fn semantic_a80_provider_templates(
         .expect("base M6 template set includes observation");
     observation.schema_name = "semantic_memory_a80_claims".to_owned();
     observation.system = "从当前输入的单份来源中提取可独立支持、对未来工作有用的完整陈述。只返回JSON对象，顶层只含claims。每条claim只含完整statement和非空evidence_indices；索引是输入显示的全源1-based整数，必须指向本批blocks，不能猜测。statement应保留否定、条件、例外、顺序和时间限定。kind、scope、assertion_status、source_time_scope是可选提示字段，只有来源明确支持时才填写；不能因缺少这些字段删改statement。无可提取内容时claims为空数组。禁止额外字段、解释或来源外推。来源标识、版本与批次由服务端当前调用上下文绑定，不需要在回答中回填。".to_owned();
+    observation.system.push_str("source_time_scope只允许status、value、evidence_indices三个字段；来源明确给出时间时status为source_stated，value保留原文时间限定，evidence_indices指向本批支持该时间的blocks；不明时省略整个source_time_scope，或使用status=unknown、value为空字符串、evidence_indices为空数组。");
     observation.schema = json!({
         "type":"object","additionalProperties":false,
         "required":["claims"],
@@ -148,7 +150,14 @@ pub fn semantic_a80_provider_templates(
                     "kind":{"type":"string"},
                     "scope":{"type":"string"},
                     "assertion_status":{"type":"string"},
-                    "source_time_scope":{"type":"object"}
+                    "source_time_scope":{
+                        "type":"object","additionalProperties":false,
+                        "properties":{
+                            "status":{"type":"string"},
+                            "value":{"type":"string"},
+                            "evidence_indices":{"type":"array","items":{"type":"integer"}}
+                        }
+                    }
                 }
             }}
         }
@@ -156,6 +165,7 @@ pub fn semantic_a80_provider_templates(
     for template in &mut templates {
         template.prompt_id = M6_A80_PROMPT_ID.to_owned();
         template.schema_id = M6_A80_SCHEMA_ID.to_owned();
+        template.index_profile_id = M6_A80_INDEX_PROFILE_ID.to_owned();
     }
     templates
 }

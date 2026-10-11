@@ -41,8 +41,8 @@ use tokio::sync::Mutex;
 use crate::{
     AuthoritativeSourceSnapshot, EvalError, EvalSource, EvalTask, EvaluationManifest,
     EvaluationRunConfig, LiveProviderError, LiveProviderOutput, LiveProviderRequest,
-    M6_A80_PROMPT_ID, M6_A80_SCHEMA_ID, M6_PROMPT_ID, M6_SCHEMA_ID, ProviderAppBoundary,
-    SemanticMemoryAppBoundary, SourceSnapshotVerifier,
+    M6_A80_INDEX_PROFILE_ID, M6_A80_PROMPT_ID, M6_A80_SCHEMA_ID, M6_PROMPT_ID, M6_SCHEMA_ID,
+    ProviderAppBoundary, SemanticMemoryAppBoundary, SourceSnapshotVerifier,
 };
 
 /// Shared strict limit attached to ProviderTransport. Retries consume the
@@ -235,8 +235,9 @@ impl ProviderServiceAppBoundary {
                 "observation" | "composition" | "relation" | "answer"
             );
         let a80_non_stream_json_object = self.runtime_snapshot.provider_type == "xiaomi_mimo"
-            && request.prompt_id == M6_A80_PROMPT_ID
-            && request.schema_id == M6_A80_SCHEMA_ID
+            && ((request.prompt_id == M6_A80_PROMPT_ID && request.schema_id == M6_A80_SCHEMA_ID)
+                || (request.prompt_id == "semantic-cards-tracked-adr-m6-v14"
+                    && request.schema_id == "semantic-cards-m6-json-v10"))
             && matches!(
                 request.stage.as_str(),
                 "observation" | "relation" | "answer"
@@ -1056,6 +1057,13 @@ fn resolve_a80_observation_schema(schema: &Value, input: &Value) -> Result<Value
     let mut resolved = schema.clone();
     resolved["properties"]["claims"]["items"]["properties"]["evidence_indices"]["items"]["enum"] =
         json!(indexes.clone());
+    // Historical v10 schemas deliberately remain unchanged. New schemas also
+    // bind time evidence to the current batch, using the same global indices.
+    if let Some(items) = resolved.pointer_mut(
+        "/properties/claims/items/properties/source_time_scope/properties/evidence_indices/items",
+    ) {
+        items["enum"] = json!(indexes.clone());
+    }
     let batch_index = input
         .get("batch_index")
         .and_then(Value::as_u64)
@@ -1214,7 +1222,7 @@ impl SemanticMemoryAppBoundary for SemanticMemoryServiceAppBoundary {
         budget: &crate::Budget,
         index_profile_id: &str,
     ) -> Result<Value, String> {
-        if index_profile_id != "index-frozen-v1" {
+        if !["index-frozen-v1", M6_A80_INDEX_PROFILE_ID].contains(&index_profile_id) {
             return Err("ordinary_index_profile_unavailable".to_owned());
         }
         let index = IndexService::new(self.state.clone());
@@ -1251,18 +1259,33 @@ impl SemanticMemoryAppBoundary for SemanticMemoryServiceAppBoundary {
                 source_path: Some(source.path.clone()),
                 ..NoteRetrievalScope::default()
             };
-            let result = match index
-                .retrieve_notes(
-                    &self.context,
-                    &task.query,
-                    NoteRetrievalMode::Lexical,
-                    &scope,
-                    budget.max_entries.min(100),
-                    0,
-                    false,
-                )
-                .await
-            {
+            let retrieval = if index_profile_id == M6_A80_INDEX_PROFILE_ID {
+                // The existing recall policy uses relaxed lexical candidates
+                // plus query relevance admission. None disables semantic hits;
+                // this IndexService has no Provider and cannot generate.
+                index
+                    .retrieve_notes_for_recall_scoped(
+                        &self.context,
+                        &task.query,
+                        None,
+                        budget.max_entries.min(100),
+                        &scope,
+                    )
+                    .await
+            } else {
+                index
+                    .retrieve_notes(
+                        &self.context,
+                        &task.query,
+                        NoteRetrievalMode::Lexical,
+                        &scope,
+                        budget.max_entries.min(100),
+                        0,
+                        false,
+                    )
+                    .await
+            };
+            let result = match retrieval {
                 Ok(result) => result,
                 Err(_) => {
                     degradation_reasons.insert("ordinary_index_unavailable".to_owned());
@@ -3065,6 +3088,25 @@ mod tests {
             resolved["properties"]["claims"]["items"]["properties"]["evidence_indices"]["items"]["enum"],
             json!([81, 82, 83, 84, 85])
         );
+        let validate =
+            |value: &Value| mcp_vault_providers::validate_structured_value(value, &resolved);
+        let mut claim = json!({"claims":[{
+            "statement":"Retain the source-stated time.","evidence_indices":[81],
+            "source_time_scope":{"status":"source_stated","value":"before cutover","evidence_indices":[82]}
+        }]});
+        validate(&claim).unwrap();
+        claim["claims"][0]["source_time_scope"]["evidence_indices"] = json!([1]);
+        assert!(validate(&claim).is_err());
+        claim["claims"][0]["source_time_scope"] = json!({"status":"unknown","value":"","evidence_indices":[],"synthetic_extra":"invalid"});
+        assert!(validate(&claim).is_err());
+        claim["claims"][0]["source_time_scope"] =
+            json!({"status":"future_state","value":"later","evidence_indices":[]});
+        validate(&claim).unwrap(); // Advisory values still normalize to unknown.
+        claim["claims"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("source_time_scope");
+        validate(&claim).unwrap();
         let mut mismatched = input;
         mismatched["batch_index"] = json!(0);
         assert!(resolve_observation_schema(&template.schema, &mismatched).is_err());

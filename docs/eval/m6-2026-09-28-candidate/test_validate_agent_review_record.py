@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 import unittest
@@ -11,6 +12,61 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import validate_agent_review_record as validator  # noqa: E402
+
+
+class CompletedTaskResultValidationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        candidate = json.loads((HERE / "candidate.json").read_text(encoding="utf-8"))
+        source = next(source for source in candidate["sources"] if source["split"] == "holdout")
+        self.sources = {source["logical_id"]: source}
+        self.result = {
+            "critical_constraints": "met",
+            "state": "not_met",
+            "next_step": "met",
+            "forbidden_inference": "met",
+            "evidence": [{
+                "source_id": source["logical_id"],
+                "path": source["path"],
+                "line_start": 1,
+                "line_end": source["line_count"],
+                "git_blob_oid": source["git_blob_oid"],
+                "content_sha256": source["content_sha256"],
+            }],
+        }
+
+    def test_schema_required_evidence_is_accepted_with_terminal_dimensions(self) -> None:
+        schema = json.loads((HERE / "post-run-agent-review.schema.json").read_text(encoding="utf-8"))
+        expected = schema["$defs"]["blindScore"]["properties"]["task_result"]["required"]
+        self.assertEqual(set(self.result), set(expected))
+        validator.validate_completed_task_result(self.result, self.sources)
+
+    def test_incomplete_or_unknown_dimensions_cannot_be_marked_complete(self) -> None:
+        for change in ("missing_evidence", "extra_dimension", "unresolved"):
+            with self.subTest(change=change):
+                result = copy.deepcopy(self.result)
+                if change == "missing_evidence":
+                    del result["evidence"]
+                elif change == "extra_dimension":
+                    result["extra"] = "met"
+                else:
+                    result["state"] = "insufficient_evidence"
+                with self.assertRaises(SystemExit):
+                    validator.validate_completed_task_result(result, self.sources)
+
+    def test_nested_task_evidence_is_validated(self) -> None:
+        for change in ("not_array", "not_record", "wrong_hash", "invalid_lines"):
+            with self.subTest(change=change):
+                result = copy.deepcopy(self.result)
+                if change == "not_array":
+                    result["evidence"] = {}
+                elif change == "not_record":
+                    result["evidence"] = ["not evidence"]
+                elif change == "wrong_hash":
+                    result["evidence"][0]["content_sha256"] = "0" * 64
+                else:
+                    result["evidence"][0]["line_start"] = 0
+                with self.assertRaises(SystemExit):
+                    validator.validate_completed_task_result(result, self.sources)
 
 
 class GoldFreezeValidationTests(unittest.TestCase):

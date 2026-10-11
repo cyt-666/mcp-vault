@@ -13,10 +13,11 @@ use mcp_vault_domain::{
 };
 use mcp_vault_eval::{
     Budget, ComparisonArm, ComparisonConfig, EvalMode, EvalSource, EvalTask, EvaluationManifest,
-    EvaluationRunConfig, ExpectedRelation, LIVE_RUN_SCHEMA, LiveEvaluationConfig, M6_A80_PROMPT_ID,
-    M6_A80_REQUEST_LIMIT, M6_A80_SCHEMA_ID, ProviderStageTemplate, SemanticArmRoot,
-    SemanticArmRoots, TaskSourceFence, TaskSplit, prepare_live_private_directories,
-    semantic_a80_provider_templates, validate_live_evaluation_config, write_live_preparation_seal,
+    EvaluationRunConfig, ExpectedRelation, LIVE_RUN_SCHEMA, LiveEvaluationConfig,
+    M6_A80_INDEX_PROFILE_ID, M6_A80_PROMPT_ID, M6_A80_REQUEST_LIMIT, M6_A80_SCHEMA_ID,
+    ProviderStageTemplate, SemanticArmRoot, SemanticArmRoots, TaskSourceFence, TaskSplit,
+    prepare_live_private_directories, semantic_a80_provider_templates,
+    validate_live_evaluation_config, write_live_preparation_seal,
 };
 use mcp_vault_indexer::IndexService;
 use mcp_vault_memory::SemanticMemoryService;
@@ -314,7 +315,7 @@ async fn main() -> Result<()> {
         source_ids: arm_source_ids,
         task_ids: holdout_task_ids.clone(),
         budget: budget.clone(),
-        index_profile_id: "index-frozen-v1".to_owned(),
+        index_profile_id: M6_A80_INDEX_PROFILE_ID.to_owned(),
         prompt_id: M6_A80_PROMPT_ID.to_owned(),
         schema_id: M6_A80_SCHEMA_ID.to_owned(),
         answer_model_id: provider.external_model_id.clone(),
@@ -390,7 +391,7 @@ async fn main() -> Result<()> {
         "max_request_bytes": provider.settings.max_request_bytes,
         "currency_budget": "unbounded_by_user_authorization",
         "embedding_role_used": false,
-        "retrieval_profile": "index-frozen-v1 lexical",
+        "retrieval_profile": M6_A80_INDEX_PROFILE_ID,
         "source_allowlist": evaluation.manifest.sources.iter().map(|source| json!({"id":source.logical_id,"path":source.path,"sha256":source.content_hash})).collect::<Vec<_>>(),
         "provider_source_vault_slug": provider.source_vault_slug,
         "expected_call_count_upper_bound": draft.external_request_budget,

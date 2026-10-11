@@ -168,6 +168,19 @@ def reject_arm_labels(value: object) -> None:
             reject_arm_labels(nested)
 
 
+def validate_completed_task_result(result: dict, sources: dict[str, dict]) -> None:
+    dimension_names = {"critical_constraints", "state", "next_step", "forbidden_inference"}
+    if not isinstance(result, dict) or set(result) != dimension_names | {"evidence"}:
+        fail("completed task result must contain four dimensions and evidence")
+    if any(result[key] not in {"met", "not_met"} for key in dimension_names):
+        fail("unresolved task dimension cannot be marked complete")
+    evidence_items = result["evidence"]
+    if not isinstance(evidence_items, list) or any(not isinstance(item, dict) for item in evidence_items):
+        fail("task result evidence must be an array of evidence records")
+    for evidence in evidence_items:
+        check_evidence(evidence, sources)
+
+
 def validate_schema_shape(schema: dict) -> None:
     definitions = schema.get("$defs", {})
 
@@ -275,12 +288,7 @@ def main() -> None:
                 fail("qualifier item IDs do not match frozen gold")
             if score.get("no_answer", {}).get("applicable") is not task["expected_no_answer"]:
                 fail("no-answer scoring scope differs from frozen gold")
-            dimensions = score.get("task_result", {})
-            dimension_names = {"critical_constraints", "state", "next_step", "forbidden_inference"}
-            if set(dimensions) != dimension_names or any(
-                dimensions.get(key) not in {"met", "not_met"} for key in dimension_names
-            ):
-                fail("unresolved task dimension cannot be marked complete")
+            validate_completed_task_result(score.get("task_result", {}), sources)
             for evidence in score.get("evidence", []):
                 check_evidence(evidence, sources)
             for claim in score.get("fact_claims", []):

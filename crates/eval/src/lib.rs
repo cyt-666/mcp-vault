@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 mod adapters;
 mod diagnostic;
 mod live_runtime;
+mod material;
 mod private_fs;
 mod provider_capability_probe;
 mod templates;
@@ -39,7 +40,7 @@ pub use live_runtime::{
 };
 pub use provider_capability_probe::*;
 pub use templates::{
-    M6_A80_PROMPT_ID, M6_A80_SCHEMA_ID, M6_PROMPT_ID, M6_SCHEMA_ID,
+    M6_A80_INDEX_PROFILE_ID, M6_A80_PROMPT_ID, M6_A80_SCHEMA_ID, M6_PROMPT_ID, M6_SCHEMA_ID,
     semantic_a80_provider_templates, semantic_live_provider_templates,
 };
 use thiserror::Error;
@@ -2851,6 +2852,7 @@ fn is_sensitive_artifact_key(normalized: &str) -> bool {
 fn project_provider_output(stage: &str, value: &serde_json::Value) -> serde_json::Value {
     let allowed = match stage {
         "observation" => [
+            "claims",
             "outcome",
             "observations",
             "cards",
@@ -2996,7 +2998,10 @@ fn card_artifact_projection(value: &serde_json::Value, source: &EvalSource) -> s
     projected
 }
 
-fn project_pack_projection(value: &serde_json::Value) -> Result<serde_json::Value, EvalError> {
+fn project_pack_projection(
+    value: &serde_json::Value,
+    budget: &Budget,
+) -> Result<serde_json::Value, EvalError> {
     // Deserialize the application boundary response into the production
     // MemoryPack type first. This prevents arbitrary adapter JSON from
     // expanding the persisted Provider material contract.
@@ -3017,16 +3022,18 @@ fn project_pack_projection(value: &serde_json::Value) -> Result<serde_json::Valu
     }
     let pack = serde_json::from_value::<MemoryPack>(value.clone())
         .map_err(|_| EvalError::LiveConfig("memory pack contract is invalid"))?;
-    let mut projected = serde_json::to_value(pack)
+    let mut projected = serde_json::to_value(&pack)
         .map_err(|_| EvalError::LiveConfig("memory pack projection failed"))?;
-    // MemoryPack itself contains semantic assertions/qualifiers and source
-    // bindings, not source note bodies. Its fields are the explicit allowlist.
+    // The evaluation extension retains only evidence resolved through the
+    // authorized application boundary and bound to the typed pack entries.
+    material::retain_pack_excerpts(value, &pack, &mut projected)?;
     let hash =
         canonical_hash(&projected).map_err(|_| EvalError::LiveConfig("memory pack hash failed"))?;
     let object = projected
         .as_object_mut()
         .ok_or(EvalError::LiveConfig("memory pack projection failed"))?;
     object.insert("pack_hash".to_owned(), serde_json::json!(hash));
+    material::check_pack_budget(&projected, budget)?;
     Ok(projected)
 }
 
@@ -5510,7 +5517,10 @@ where
                         )
                         .await
                     {
-                        Ok(pack) => match project_pack_projection(&pack) {
+                        Ok(pack) => match project_pack_projection(
+                            &pack,
+                            &config.run_config.comparisons[0].budget,
+                        ) {
                             Ok(pack) => pack,
                             Err(error) => {
                                 if config.semantic_protocol == "m1-a80-v1" {
@@ -6076,6 +6086,17 @@ where
                         });
                         break 'tasks;
                     }
+                    let input = match material::project_ordinary_input(&input, &selected_sources) {
+                        Ok(input) => input,
+                        Err(_) => {
+                            first_error = Some(LiveFailureRecord {
+                                sequence,
+                                stage: "ordinary_retrieval".into(),
+                                code: "ordinary_retrieval_material_invalid".into(),
+                            });
+                            break 'tasks;
+                        }
+                    };
                     review.push(ordinary_retrieval_review_record(task, &input));
                     if let Some(code) = ordinary_retrieval_failure(task, &selected_sources, &input)
                     {
@@ -6111,6 +6132,10 @@ where
                         });
                         break 'tasks;
                     }
+                    review.push(material::ordinary_input_record(&input)?);
+                    // Persist the exact allowlisted input before dispatch. A
+                    // failed or interrupted call must still be reproducible.
+                    write_live_jsonl(&root.join("review.jsonl"), &review)?;
                     (input, None)
                 } else {
                     let (pack, hash) = if arm == ComparisonArm::C {
@@ -6128,7 +6153,10 @@ where
                             )
                             .await
                         {
-                            Ok(pack) => match project_pack_projection(&pack) {
+                            Ok(pack) => match project_pack_projection(
+                                &pack,
+                                &config.run_config.comparisons[arm_index].budget,
+                            ) {
                                 Ok(pack) => pack,
                                 Err(error) => {
                                     if config.semantic_protocol == "m1-a80-v1" {
@@ -7224,8 +7252,14 @@ mod tests {
                 "diagnostics":[],"estimated_tokens":20
             })
         };
-        let first = project_pack_projection(&make_pack("preserve rollback")).unwrap();
-        let second = project_pack_projection(&make_pack("different assertion")).unwrap();
+        let budget = Budget {
+            max_entries: 10,
+            max_bytes: 16_384,
+            max_tokens: 4_096,
+            external_request_budget: 0,
+        };
+        let first = project_pack_projection(&make_pack("preserve rollback"), &budget).unwrap();
+        let second = project_pack_projection(&make_pack("different assertion"), &budget).unwrap();
         assert_ne!(first["pack_hash"], second["pack_hash"]);
         assert_eq!(first["current_context"].as_array().unwrap().len(), 1);
         assert_eq!(first["current_context"][0]["conditions"][0], "approved");
@@ -7244,7 +7278,65 @@ mod tests {
         ] {
             assert!(first.get(key).is_some(), "missing typed pack section {key}");
         }
-        assert!(project_pack_projection(&serde_json::json!({})).is_err());
+        assert!(project_pack_projection(&serde_json::json!({}), &budget).is_err());
+        let mut input = make_pack("preserve rollback");
+        input["current_context"][0]["evidence_excerpts"] = serde_json::json!([{
+            "evidence_ref_id":"evidence-1", "source_id":"s", "source_revision_id":"r",
+            "source_path":"notes/a.md", "spans":[{
+                "role":"body", "start_byte":10, "end_byte":18,
+                "text":"rollback", "content_hash":format!("{:x}", Sha256::digest(b"rollback"))
+            }]
+        }]);
+        let retained = project_pack_projection(&input, &budget).unwrap();
+        assert_eq!(
+            retained["current_context"][0]["evidence_excerpts"],
+            input["current_context"][0]["evidence_excerpts"]
+        );
+        assert_ne!(retained["pack_hash"], first["pack_hash"]);
+        for (pointer, value) in [
+            ("/evidence_ref_id", serde_json::json!("unbound")),
+            ("/source_revision_id", serde_json::json!("stale")),
+            ("/source_path", serde_json::json!("other.md")),
+            ("/spans/0/end_byte", serde_json::json!(17)),
+            ("/spans/0/text", serde_json::json!("tampered")),
+            ("/spans/0/role", serde_json::json!("prompt")),
+        ] {
+            let mut invalid = input.clone();
+            *invalid["current_context"][0]["evidence_excerpts"][0]
+                .pointer_mut(pointer)
+                .unwrap() = value;
+            assert!(
+                project_pack_projection(&invalid, &budget).is_err(),
+                "{pointer}"
+            );
+        }
+        let mut constrained = budget.clone();
+        constrained.max_bytes = serde_json::to_vec(&retained).unwrap().len() as u32 - 1;
+        assert!(project_pack_projection(&input, &constrained).is_err());
+        constrained = budget.clone();
+        constrained.max_tokens = 1;
+        assert!(project_pack_projection(&input, &constrained).is_err());
+    }
+
+    #[test]
+    fn a80_artifact_preserves_claim_diagnostics_and_redacts_sensitive_keys() {
+        let output = serde_json::json!({"claims":[{
+            "statement":"Retain the temporal qualification.", "evidence_indices":[2],
+            "source_time_scope":{"status":"source_stated","value":"before cutover",
+                "evidence_indices":[2],"unexpected_field":"diagnostic shape"},
+            "authorization":"synthetic secret", "headers":{"x":"synthetic header"}
+        }],"request_headers":{"x":"synthetic secret"}});
+        let projected = project_provider_output("observation", &output);
+        assert_eq!(
+            projected["claims"][0]["statement"],
+            output["claims"][0]["statement"]
+        );
+        assert_eq!(
+            projected["claims"][0]["source_time_scope"],
+            output["claims"][0]["source_time_scope"]
+        );
+        assert!(!projected.to_string().contains("synthetic secret"));
+        assert!(!projected.to_string().contains("synthetic header"));
     }
 
     fn shadow_config(temp: &tempfile::TempDir) -> (ShadowBuildConfig, ShadowCatchupState) {

@@ -2387,3 +2387,45 @@ cargo run -p mcp-vault-eval --offline --locked --bin init-m6-cloud-provider -- \
 新私有根 `/workspace/scratch/m6-cloud-e5a47d6-20261009/run-02` 保留未封存的离线准备状态；没有live-config、seal、claim、attempt ledger或Provider输出。一次先于创建空0700根的prepare检查因路径不存在退出，此时未访问Provider State；创建同一新根后离线prepare在预算检查退出。两次均不是live runner启动，未发送Provider请求，未创建下一轮。详细安全状态及计数保存在 `validation/recovery-blocked-status.json`，失败原文在 `validation/recovery-prepare-stderr.log`。现有预算136未被消耗；旧run真实用量/费用未知，不将合计费用写为零。
 
 本节离线证据为同一scratch根 `validation/recovery-fail-fast-tests.log`、`recovery-fail-fast-clippy.log`、`recovery-network-preflight.log`。全部特性仍受既有官方ort-sys CDN403阻塞，不改写为通过；代码/合成测试不代替M6质量验收。
+
+### 2026-10-09 Cloud 唯一恢复轮完成：M6 未通过
+
+本节取代上一节的“136额度阻塞、未启动”当前状态，保留旧记录作为时间线。父任务转述新的明确授权 `Sentinel_3e82b57823808191a41c821b39046100`：恢复轮最多160次，旧轮24次保守预占不返还，累计上限184；单次输出32768、并发1、transport retries=0，不自动下一轮。旧未封存136草稿移入独立准备归档，仍使用从未启动的同一 `run-02` 身份重新准备；没有重用旧付费根或修改冻结gold。
+
+- [x] 在提交 `7fae5fd39574efec28dff5388d8f04918ef0ea45` 上封存并通过离线准入：30来源、60任务、30 holdout/90答案、State44、完整性与权限通过；冻结三份证据hash和30份来源字节不变。无凭据TLS检查通过。
+- [x] 仅启动一次：09:47:35.429839–10:12:14.700400 UTC，墙钟1479.270561秒。PID70819正常退出0，但结果与checkpoint均为 `failed`，首个汇总错误 `evaluation_items_failed`；进程退出0不能当验收成功。
+- [x] 完成30/30题、90/90答案，预约与已测transport calls均131：observation40、relation1、answer90。旧24保守预占加本轮131共155/184；未使用额度不授权新轮。没有基础网络、鉴权或TLS失败，没有传输重试；协议内来源再生成计入上述40和总预算。
+- [x] 来源提交14/23份（B5/8、C9/15）；9份以 `semantic_flat_claim_unknown_field` 拒绝。另有 `T-S23-1` 的关系动作以 `semantic_organization_scope_not_different` 拒绝。10个item failures保留，未删除任务或降低分母。模型自报答案 supported 为A0/B5/C11，insufficient为A30/B25/C19；自报状态不是独立正确率。
+- [x] 本轮返回输入296558、输出68908 tokens；A11426/2398、B121475/26811、C163657/39699。Provider调用耗时合计1409644ms、最大97425ms；此范围不含检索、组包和独立评审。费用字段unknown，旧轮用量与账单unknown；不填零、不把输出授权上界冒充总费用。
+- [x] 独立代码审计确认评测证据缺陷：A只持久化coverage/reasons/events，没有发送payload/hash；B/C adapter添加的 `evidence_excerpts` 在 `project_pack_projection` 反序列化为不含该字段的 `MemoryPack` 时被删除，再被用于实际请求。60份pack、463条目全部无正文excerpt；引用ID和语义断言仍在。删除前计入的estimated_tokens仍保留，不能当实际输入用量。
+- [x] A的原运行30条coverage全部零命中且无索引降级；独立只读重建两次完全一致，9张普通索引表摘要不变、30来源hash相符。路径使用Lexical模式，将完整问句逐词AND；索引完整不代表问题能召回。重建只是参考，不冒充发送时完整payload。该弱基线及证据缺陷限制本轮相对收益结论。
+- [x] 运行结束后修正审核器自身的schema矛盾：`task_result`须有四个terminal维度与嵌套evidence；旧实现仅接受四维。新增验证同时核对嵌套来源hash/行界，不放宽gold、分母或质量门槛。17项Python测试通过，独立增量代码审查通过；没有改变已运行的二进制、配置或输出。
+- [x] 独立盲评已锁定，2026-10-11合并既有引用勘误并通过记录校验；简要结果见下节。固定 `human_review=false`，保留来源缺项及全部90答案；历史范围丢失、引用缺限定和无依据推断仍是失败证据。
+- [ ] M6验收未通过。全部特性工程门禁还受既有ort-sys官方CDN403阻塞，默认workspace702测试和前端42通过/10既有skip不替代全部特性门禁。
+
+本轮原始证据保持不变，位置 `/workspace/scratch/m6-cloud-e5a47d6-20261009/run-02/artifacts/`；安全汇总为 `validation/recovery-outcome-summary.json`，终态为 `validation/recovery-live-finished.json`。独立输入审计与只读重建在 `validation/ordinary-reconstruction-20261009T101131Z/`；匿名盲评与锁分文件在 `review-blind/`，私有映射不交给评审员。`observations.jsonl` 的batch输出投影为空对象，盲评所用规范observation由成功集合的只读State查询导出；不据空投影虚构模型未返回内容。
+
+父任务最新指示将“报告提交”限定为用户可读报告，禁止未经额外批准新增Git推送或PR。本节和审核器修复仅保留在云工作区，不推送、不部署；不会因剩余29次累计额度自动调用Provider。后续最小修复顺序是先补齐安全的实际输入留存和正文投影契约，再用独立合成fixture验证问句检索、格式严格拒绝及关系作用域，最后处理历史范围、完整证据和无答案表达；冻结holdout已见，不能用本轮样本迭代后仍称未见验收。
+
+
+### 2026-10-11 原云工作区离线修复与回放
+
+父任务转述用户“继续吧，今天有重置”，只恢复 Codex 工作额度，不扩大 MiMo 授权。沿用 HEAD `7fae5fd39574efec28dff5388d8f04918ef0ea45` 及原工作区；没有新建环境、付费调用、推送、PR或部署，没有读取或变更持久凭据。恢复后确认无遗留评测进程，原运行产物 hash 在修复后仍全部一致。
+
+- [x] 修复 A80 时间字段契约：新 prompt v15/schema v11 明确嵌套字段白名单，并把时间 evidence indices 限定到当前批次；非法 advisory 枚举仍按既有规则回退，不降低核心或证据检查。保留历史 v14/v10 MiMo wire 行为。新的私有 observation 产物保留脱敏 claims，避免再次丢掉本地拒绝诊断。
+- [x] 修复实际输入留存：A 在派发前持久化白名单输入与 hash，命中须绑定冻结来源；B/C 使用评测专用类型保留授权 evidence excerpts，并核对引用、来源修订、路径、span 长度及内容 hash。最终 pack 含正文与 hash 后检查字节和 token 预算，生产 MemoryPack DTO 不变。
+- [x] 新 `index-lexical-recall-v2` 复用现有 relaxed lexical retrieval 与 relevance admission，不初始化 Provider、不启用语义命中；旧 `index-frozen-v1` 保持原语义。自然问句、无关查询、来源修订、实际派发 payload/留存一致性和正文保留均有离线回归覆盖。
+- [x] 126项定向 Rust 测试通过：Eval lib62、应用边界4、live runner42、本地HTTP假Provider16、A80 normalizer2。Eval all-targets Clippy `-D warnings`、fmt及diff检查通过。既有17项Python测试不重复运行；合并后的盲评记录重新通过 validator。全部特性门禁仍受既有 ort-sys 官方 CDN403 阻塞，未无变化重试；不重跑无关前端。
+- [x] 使用原30个冻结查询和原基线 State 作一次只读诊断回放：新配置26题有命中、共31条来源，旧配置30题均零命中；9张普通索引表摘要不变，Provider未初始化、调用0。没有选择 gold 作为输入、没有模型重答；该回放不是原请求复现、答案质量测量或未见 holdout。
+- [x] 合并此前11份锁定评审/补充记录，含 task-group-3 的引用类型勘误；保持90答案、118份产物及全部冻结分母，`human_review=false`、`record_status=insufficient_evidence`、`m6_acceptance=not_passed`。最后锁分时间2026-10-09T10:30:47.882879Z，协调者在2026-10-11T00:43:46.319179Z开始映射汇总；独立评审员未取得映射。
+
+| 原运行指标 | A | B | C |
+|---|---:|---:|---:|
+| 完整限定保留 | 3/49 | 13/49 | 16/49 |
+| 完整可用信息覆盖 | 0/23 | 5/23 | 6/23 |
+| 无答案题明确缺口且无虚构当前结论 | 6/7 | 6/7 | 7/7 |
+| 四维任务结果 met / 总维度 | 66/120（另1项证据不足） | 76/120 | 76/120 |
+
+原 observation/card 的来源领域事实支持率为 B289/379、C486/677；两层复用事实，不视为独立样本。覆盖、限定、关键约束和关系覆盖0/6均不足；A零命中与B/C原文投影缺失又限制相对收益解释，不据分数宣称M2改进或验收通过。9次未知字段拒绝的原始 claims 已丢失，不能断言它们全由同一个嵌套字段触发；旧A实际输入也无法精确恢复。当前离线修复不追溯改变原运行质量结论，不自动第二轮。真正模型质量、关系作用域及历史状态保留仍待后续工作，新的真实验证须另获明确授权。
+
+证据仍在同一 scratch 根：`validation/oct11-offline-fix-summary.json`、`validation/oct11-eval-*.log`、`validation/oct11-a80-normalizer.log`、`validation/oct11-offline-replay/validation-summary.json`、`validation/recovery-post-run-agent-review.json`、`validation/recovery-quality-summary.json`。改动仅留在工作树，完整补丁为 `validation/oct11-offline-fixes.patch`。

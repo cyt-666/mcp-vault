@@ -62,6 +62,10 @@ extraction_profile_id, supersession_candidate_refs[]?
 
 同一 claim 的所有批次验证后才原子发布；validated batch 可在完全匹配的私有 root 中恢复复用，started/in-flight 请求计入单调预算且不得重放。M6 runner 继续其它独立来源、arm 和任务时，只隔离记录内容/item 错误；来源、权限、Provider 身份、预算或全局配置 fence 漂移仍终止。失败项继续占质量评估分母，任何 item failure 均使整次质量声明为 `not_evaluated`。Legacy complete-proposal API 及普通生产 Provider 路径不使用 A80 adapter。
 
+新准备的 M6 A80 配置使用 prompt v15/schema v11：可选 `source_time_scope` 只允许 `status`、`value`、`evidence_indices`，时间证据索引同样绑定当前批次；advisory 枚举的 unknown 回退不变。A 组的 `index-lexical-recall-v2` 复用普通笔记的 relaxed lexical candidates 与现有 relevance admission，禁用 semantic hits，不初始化 Provider；历史 `index-frozen-v1` 保持完整问句 AND 行为，不重新解释旧封存配置。
+
+私有评测产物保留脱敏后的原始 A80 `claims`，包括通过 Provider schema 后被 Memory 拒绝的响应。A 组发送前将白名单化的实际输入与 SHA-256 写入 `review.jsonl` 的 `ordinary_answer_input` 记录；来源命中必须匹配冻结 source/file/path/revision。B/C 的评测专用 `evidence_excerpts` 不扩展生产 MemoryPack DTO：通过授权证据读取获得的片段须匹配条目的 EvidenceRef、来源修订与路径，并校验 span 字节长度、内容 hash；最终包含片段及 pack hash 的序列化数据必须满足字节与 token 预算。这些材料属于明确授权的私有评测输入，不进入默认应用日志。缺失的历史原始响应不能由新投影反推，离线重建不能冒充原请求或新的质量验收。
+
 ## MemoryCard 与 CardRevision
 
 `MemoryCard` 是围绕一个可使用的问题、决定、经验、流程或状态组织的稳定身份。`CardRevision` 保存面向未来工作的语义整理，不以原文标题或章节树划分卡片。

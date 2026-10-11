@@ -3898,6 +3898,14 @@ mod a80_flat_observation_tests {
         assert!(
             parse_a80_observation_response(&unknown_field.to_string(), &blocks(), 0, 2).is_err()
         );
+        let nested_unknown = json!({"claims":[{
+            "statement":"Keep the qualification.","evidence_indices":[1],
+            "source_time_scope":{"status":"unknown","value":"","evidence_indices":[],
+                "synthetic_extra":"unsupported key"}
+        }]});
+        let error = parse_a80_observation_response(&nested_unknown.to_string(), &blocks(), 0, 2)
+            .unwrap_err();
+        assert_eq!(error.code(), "semantic_flat_claim_unknown_field");
     }
 
     #[test]

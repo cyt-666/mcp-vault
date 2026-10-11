@@ -646,6 +646,13 @@ impl SemanticMemoryAppBoundary for FakeSemantic {
             "retrieval_strategy": "ordinary_note_v1",
             "task_id": task.id,
             "source_ids": sources.iter().map(|source| source.logical_id.clone()).collect::<Vec<_>>(),
+            "sources": sources.iter().take(eligible_count as usize).map(|source| json!({
+                "source_id":source.logical_id,"file_id":source.file_id,"path":source.path,
+                "file_revision":source.file_revision,"title":"Rollback","snippet":"rollback approved",
+                "matched_section":null,"score":1.0,"authorization":"synthetic credential"
+            })).collect::<Vec<_>>(),
+            "entry_count":eligible_count,"token_count":32,
+            "headers":{"x":"synthetic credential"},
             "coverage": {
                 "expected_source_ids": source_ids.clone(),
                 "current_indexed_source_ids": source_ids,
@@ -780,6 +787,14 @@ impl SemanticMemoryAppBoundary for FakeSemantic {
                     "source_path":path,
                 })).collect::<Vec<_>>(),
                 "evidence_refs":["evidence-1"],
+                "evidence_excerpts":[{
+                    "evidence_ref_id":"evidence-1",
+                    "source_id":"00000000-0000-0000-0000-000000000001",
+                    "source_revision_id":"00000000-0000-0000-0000-000000000002",
+                    "source_path":source_paths[0],
+                    "spans":[{"role":"body","start_byte":0,"end_byte":17,
+                        "text":"rollback approved","content_hash":hash(b"rollback approved")}]
+                }],
                 "note_body":"must never reach Provider"
             }],
             "relevant_experiences":[],
@@ -857,8 +872,9 @@ async fn a80_relation_provider_failure_isolated_and_c_answers_still_run() {
     config.manifest.sources[0].logical_block_count = 2;
     config.provider_templates = semantic_a80_provider_templates("answer-model-v1", 30);
     for comparison in &mut config.run_config.comparisons {
-        comparison.prompt_id = "semantic-cards-tracked-adr-m6-v14".into();
-        comparison.schema_id = "semantic-cards-m6-json-v10".into();
+        comparison.prompt_id = mcp_vault_eval::M6_A80_PROMPT_ID.into();
+        comparison.schema_id = mcp_vault_eval::M6_A80_SCHEMA_ID.into();
+        comparison.index_profile_id = mcp_vault_eval::M6_A80_INDEX_PROFILE_ID.into();
     }
     let provider = FakeProvider {
         calls: AtomicU32::new(0),
@@ -902,8 +918,9 @@ async fn a80_shared_request_budget_failure_stops_before_later_tasks() {
     }
     config.provider_templates = semantic_a80_provider_templates("answer-model-v1", 30);
     for comparison in &mut config.run_config.comparisons {
-        comparison.prompt_id = "semantic-cards-tracked-adr-m6-v14".into();
-        comparison.schema_id = "semantic-cards-m6-json-v10".into();
+        comparison.prompt_id = mcp_vault_eval::M6_A80_PROMPT_ID.into();
+        comparison.schema_id = mcp_vault_eval::M6_A80_SCHEMA_ID.into();
+        comparison.index_profile_id = mcp_vault_eval::M6_A80_INDEX_PROFILE_ID.into();
     }
     let provider = GlobalErrorProvider {
         calls: AtomicU32::new(0),
@@ -943,8 +960,9 @@ async fn a80_answer_failure_stays_in_denominator_and_later_tasks_continue() {
     config.task_budget = 2;
     config.provider_templates = semantic_a80_provider_templates("answer-model-v1", 30);
     for comparison in &mut config.run_config.comparisons {
-        comparison.prompt_id = "semantic-cards-tracked-adr-m6-v14".into();
-        comparison.schema_id = "semantic-cards-m6-json-v10".into();
+        comparison.prompt_id = mcp_vault_eval::M6_A80_PROMPT_ID.into();
+        comparison.schema_id = mcp_vault_eval::M6_A80_SCHEMA_ID.into();
+        comparison.index_profile_id = mcp_vault_eval::M6_A80_INDEX_PROFILE_ID.into();
         comparison.task_ids.push("Q02".into());
     }
     let provider = FakeProvider {
@@ -1003,8 +1021,9 @@ fn a80_preflight_rejects_budget_above_the_full_run_limit() {
     cfg.manifest.sources[0].logical_block_count = 2;
     cfg.provider_templates = semantic_a80_provider_templates("answer-model-v1", 30);
     for arm in &mut cfg.run_config.comparisons {
-        arm.prompt_id = "semantic-cards-tracked-adr-m6-v14".into();
-        arm.schema_id = "semantic-cards-m6-json-v10".into();
+        arm.prompt_id = mcp_vault_eval::M6_A80_PROMPT_ID.into();
+        arm.schema_id = mcp_vault_eval::M6_A80_SCHEMA_ID.into();
+        arm.index_profile_id = mcp_vault_eval::M6_A80_INDEX_PROFILE_ID.into();
         arm.budget.external_request_budget = 161;
     }
     assert_eq!(
@@ -1024,8 +1043,9 @@ async fn a80_auth_failure_stops_the_run_after_one_provider_call() {
     config.manifest.sources[0].logical_block_count = 2;
     config.provider_templates = semantic_a80_provider_templates("answer-model-v1", 30);
     for comparison in &mut config.run_config.comparisons {
-        comparison.prompt_id = "semantic-cards-tracked-adr-m6-v14".into();
-        comparison.schema_id = "semantic-cards-m6-json-v10".into();
+        comparison.prompt_id = mcp_vault_eval::M6_A80_PROMPT_ID.into();
+        comparison.schema_id = mcp_vault_eval::M6_A80_SCHEMA_ID.into();
+        comparison.index_profile_id = mcp_vault_eval::M6_A80_INDEX_PROFILE_ID.into();
     }
     let provider = AuthFailureProvider {
         calls: AtomicU32::new(0),
@@ -1072,8 +1092,9 @@ async fn a80_infrastructure_failures_stop_before_the_next_reserved_request() {
             config.manifest.sources[0].logical_block_count = 2;
             config.provider_templates = semantic_a80_provider_templates("answer-model-v1", 30);
             for comparison in &mut config.run_config.comparisons {
-                comparison.prompt_id = "semantic-cards-tracked-adr-m6-v14".into();
-                comparison.schema_id = "semantic-cards-m6-json-v10".into();
+                comparison.prompt_id = mcp_vault_eval::M6_A80_PROMPT_ID.into();
+                comparison.schema_id = mcp_vault_eval::M6_A80_SCHEMA_ID.into();
+                comparison.index_profile_id = mcp_vault_eval::M6_A80_INDEX_PROFILE_ID.into();
             }
             let provider = GlobalErrorProvider {
                 calls: AtomicU32::new(0),
@@ -1107,8 +1128,9 @@ async fn a80_recovers_one_local_schema_failure_and_records_each_budgeted_request
     config.manifest.sources[0].logical_block_count = 2;
     config.provider_templates = semantic_a80_provider_templates("answer-model-v1", 30);
     for comparison in &mut config.run_config.comparisons {
-        comparison.prompt_id = "semantic-cards-tracked-adr-m6-v14".into();
-        comparison.schema_id = "semantic-cards-m6-json-v10".into();
+        comparison.prompt_id = mcp_vault_eval::M6_A80_PROMPT_ID.into();
+        comparison.schema_id = mcp_vault_eval::M6_A80_SCHEMA_ID.into();
+        comparison.index_profile_id = mcp_vault_eval::M6_A80_INDEX_PROFILE_ID.into();
     }
     let provider = OneSchemaFailureProvider {
         calls: AtomicU32::new(0),
@@ -1135,6 +1157,16 @@ async fn a80_recovers_one_local_schema_failure_and_records_each_budgeted_request
     assert_eq!(observation_attempts, 3);
     assert!(attempts.contains("\"source_id\":\"S01\""));
     assert_eq!(result.status, LiveRunStatus::Completed);
+    let observations =
+        std::fs::read_to_string(Path::new(&config.artifact_root).join("observations.jsonl"))
+            .unwrap();
+    let batch = observations
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|record| record["stage"] == "observation_batch")
+        .unwrap();
+    assert_eq!(batch["output"]["claims"][0]["statement"], "retain rollback");
+    assert_eq!(batch["output"]["claims"][0]["evidence_indices"], json!([1]));
 }
 
 #[cfg(unix)]
@@ -1148,8 +1180,9 @@ async fn a80_resume_reuses_card_and_consumes_existing_attempt_budget() {
     config.manifest.sources[0].logical_block_count = 2;
     config.provider_templates = semantic_a80_provider_templates("answer-model-v1", 30);
     for comparison in &mut config.run_config.comparisons {
-        comparison.prompt_id = "semantic-cards-tracked-adr-m6-v14".into();
-        comparison.schema_id = "semantic-cards-m6-json-v10".into();
+        comparison.prompt_id = mcp_vault_eval::M6_A80_PROMPT_ID.into();
+        comparison.schema_id = mcp_vault_eval::M6_A80_SCHEMA_ID.into();
+        comparison.index_profile_id = mcp_vault_eval::M6_A80_INDEX_PROFILE_ID.into();
     }
     let key = Path::new(&config.run_root).join("keys/master-key");
     config.isolated_master_key_path = Some(key.display().to_string());
@@ -1226,8 +1259,9 @@ async fn a80_reserved_attempt_with_ready_batch_is_charged_and_never_replayed() {
     config.manifest.sources[0].logical_block_count = 2;
     config.provider_templates = semantic_a80_provider_templates("answer-model-v1", 30);
     for comparison in &mut config.run_config.comparisons {
-        comparison.prompt_id = "semantic-cards-tracked-adr-m6-v14".into();
-        comparison.schema_id = "semantic-cards-m6-json-v10".into();
+        comparison.prompt_id = mcp_vault_eval::M6_A80_PROMPT_ID.into();
+        comparison.schema_id = mcp_vault_eval::M6_A80_SCHEMA_ID.into();
+        comparison.index_profile_id = mcp_vault_eval::M6_A80_INDEX_PROFILE_ID.into();
     }
     let key = Path::new(&config.run_root).join("keys/master-key");
     config.isolated_master_key_path = Some(key.display().to_string());
@@ -1559,8 +1593,9 @@ async fn generation_failure_before_http_keeps_latency_without_transport_usage() 
             cfg.manifest.sources[0].logical_block_count = 2;
             cfg.provider_templates = semantic_a80_provider_templates("answer-model-v1", 30);
             for comparison in &mut cfg.run_config.comparisons {
-                comparison.prompt_id = "semantic-cards-tracked-adr-m6-v14".into();
-                comparison.schema_id = "semantic-cards-m6-json-v10".into();
+                comparison.prompt_id = mcp_vault_eval::M6_A80_PROMPT_ID.into();
+                comparison.schema_id = mcp_vault_eval::M6_A80_SCHEMA_ID.into();
+                comparison.index_profile_id = mcp_vault_eval::M6_A80_INDEX_PROFILE_ID.into();
             }
         }
         let semantic = FakeSemantic {
@@ -1601,6 +1636,65 @@ async fn generation_failure_before_http_keeps_latency_without_transport_usage() 
 
 struct InspectingProvider {
     requests: Mutex<Vec<LiveProviderRequest>>,
+}
+
+struct PersistedInputProvider {
+    artifacts: std::path::PathBuf,
+    inner: InspectingProvider,
+}
+
+#[async_trait]
+impl ProviderAppBoundary for PersistedInputProvider {
+    async fn generate(
+        &self,
+        request: LiveProviderRequest,
+    ) -> Result<LiveProviderOutput, LiveProviderError> {
+        if request.stage == "answer" && request.arm == ComparisonArm::A {
+            let review = std::fs::read_to_string(self.artifacts.join("review.jsonl")).unwrap();
+            let record = review
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .find(|record| record["kind"] == "ordinary_answer_input")
+                .unwrap();
+            assert_eq!(record["input"], request.input);
+            assert_eq!(
+                record["input_hash"],
+                hash(&serde_json::to_vec(&request.input).unwrap())
+            );
+            assert_eq!(request.input["sources"][0]["snippet"], "rollback approved");
+            assert!(!request.input.to_string().contains("synthetic credential"));
+        }
+        self.inner.generate(request).await
+    }
+}
+
+#[tokio::test]
+async fn ordinary_input_is_persisted_exactly_before_provider_dispatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, content) = config(temp.path());
+    let provider = PersistedInputProvider {
+        artifacts: Path::new(&config.artifact_root).to_owned(),
+        inner: InspectingProvider {
+            requests: Mutex::new(Vec::new()),
+        },
+    };
+    let semantic = FakeSemantic {
+        prepare_count: AtomicUsize::new(0),
+        submit_count: AtomicUsize::new(0),
+    };
+    let result = run_live_evaluation(&config, &Verifier { content }, &provider, &semantic)
+        .await
+        .unwrap();
+    assert_eq!(result.status, LiveRunStatus::Completed);
+    assert!(
+        provider
+            .inner
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.stage == "answer" && request.arm == ComparisonArm::A)
+    );
 }
 
 struct ConfigDriftingProvider {
@@ -2019,6 +2113,10 @@ async fn relation_and_answer_receive_the_same_nonempty_typed_safe_pack() {
         "evidence-1"
     );
     assert_eq!(safe_pack["related_sources"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        safe_pack["current_context"][0]["evidence_excerpts"][0]["spans"][0]["text"],
+        "rollback approved"
+    );
     assert!(!safe_pack.to_string().contains("note_body"));
     assert_eq!(relation.input["pack_hash"], c_answer.input["pack_hash"]);
     assert_eq!(relation.input["pack"], c_answer.input["pack"]);
