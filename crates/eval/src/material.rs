@@ -128,7 +128,7 @@ struct OrdinarySource {
     file_revision: u64,
     title: Option<String>,
     snippet: String,
-    matched_section: Option<String>,
+    matched_section: Option<Vec<String>>,
     score: f64,
 }
 

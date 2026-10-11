@@ -649,7 +649,7 @@ impl SemanticMemoryAppBoundary for FakeSemantic {
             "sources": sources.iter().take(eligible_count as usize).map(|source| json!({
                 "source_id":source.logical_id,"file_id":source.file_id,"path":source.path,
                 "file_revision":source.file_revision,"title":"Rollback","snippet":"rollback approved",
-                "matched_section":null,"score":1.0,"authorization":"synthetic credential"
+                "matched_section":["Rollback","Conditions"],"score":1.0,"authorization":"synthetic credential"
             })).collect::<Vec<_>>(),
             "entry_count":eligible_count,"token_count":32,
             "headers":{"x":"synthetic credential"},
@@ -1662,6 +1662,10 @@ impl ProviderAppBoundary for PersistedInputProvider {
                 hash(&serde_json::to_vec(&request.input).unwrap())
             );
             assert_eq!(request.input["sources"][0]["snippet"], "rollback approved");
+            assert_eq!(
+                request.input["sources"][0]["matched_section"],
+                json!(["Rollback", "Conditions"])
+            );
             assert!(!request.input.to_string().contains("synthetic credential"));
         }
         self.inner.generate(request).await
