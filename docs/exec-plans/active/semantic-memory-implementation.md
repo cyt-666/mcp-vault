@@ -2470,3 +2470,20 @@ cargo run -p mcp-vault-eval --offline --locked --bin init-m6-cloud-provider -- \
 保存的43条原始claims在独立新State中发布43条Observation/43张卡，statement与78块输入逐项不变；status_unknown由43降至0，全部为source_asserted，kind_unknown19、scope_unspecified43、time_scope_unknown42保持原值（另1条source_stated时间）。兼容映射没有修复模型原先逐条历史范围表达不足的问题，也没有把unknown变为current。原run-02的9份产物hash、五次烟测的14份JSON产物hash均保持不变。
 
 证据：同一scratch根下 `validation/offline-next-20261011/retrieval-replay.json`、`saved-response-replay.json`、`immutability-check.json`及各测试/Clippy日志；完整未提交补丁为该目录 `offline-fixes.patch`。无当前工程阻塞。新prompt的提炼质量、A端实际回答质量仍未验证，M6仍未通过；覆盖本次三项端到端表现的最小后续真实验证为4次（新prompt的S18提炼一次，A/S18一次，A/S29两题各一次），须另行明确授权，本次不启动，也不追加整轮。
+
+### 2026-10-11 已授权推送与四次真实验证完成
+
+用户授权 `Sentinel_a816c25b5bd08191a25fe77908995dd8`：推送上述11文件修复，并以相关来源/生成材料/问题作最多4次官方MiMo验证；输出每次32768，上限输出费用约¥0.27、输入另计，不发gold/审查，不自动重试或追加整轮。补丁hash先核对一致，再提交并普通推送 `c08c55c880feed4901c5a14a3ba5ec57c98cb2ba` 至原 `fix/m6-cloud-evaluation`，远端SHA一致。未强推、改main、PR或部署，未提交State/秘密/原始运行证据。环境密钥仅报告存在性true。
+
+独立诊断根 `smoke-20261011-four` 在调用前冻结计划与实际输入。四项为S18完整78块A80提炼，以及A组T-S18-1、T-S29-1、T-S29-2回答；只发送ADR-0022/0033及对应问题，未发送评分资料。输入9738、6413、7772、7714字节，沿用16条/64000字节/4096估算token材料预算。预检认证请求0；随后01:54:31–01:55:29 UTC恰好4次调用完成，并发1、transport retries0、再生成0、认证探测0，无基础设施失败。每次意图、输入hash、原始结构化JSON、用量与耗时都已保存；原State只读，新提炼仅写独立根。
+
+| 验证项 | 对照实际输入的结果 |
+|---|---|
+| S18新prompt提炼 | 24条claim/24张卡发布，24条均规范source_asserted；kind/scope/status回退均0，23条时间unknown，只有文档元数据claim保留原日期。**历史限定仍失败**：第1条记载superseded，但第4/7/13等旧操作规则仍用无历史范围的现在时。不能把枚举通过视为语义通过。 |
+| A / T-S18-1 | 核心问题通过：明确superseded设计、stale/source_unavailable、退出普通召回、保留历史、不自动删除与受限恢复。额外Phase2句没有重述“与dirty sources相关”的限定，不能据此宣称所有额外表述的完整限定均通过。 |
+| A / T-S29-1 | 自动记忆准入/排除边界、混合来源逐单元、时间/版本/范围、不猜当前有效性、顺序/例外/验证步骤均有原文支持；**语言指令失败**，英文问题用中文回答。 |
+| A / T-S29-2 | 正确要求memory:read和vault:read，并保留明确记忆自身权限边界；**语言指令失败**，英文问题用中文回答。 |
+
+输入9765、输出2099 tokens；Provider耗时合计58373ms，整数时间戳墙钟58秒。实际金额未返回；按授权单价口径仅输出估算约¥0.004198，输入另计。所有回答引用均属于实际输入；原run-02的9份产物hash、此前烟测和离线证据的24份JSON hash不变。
+
+本次为协调者对照实际来源的定向诊断，没有独立盲评或正式M6重跑，M6仍未通过。剩余工作是可靠保留每条旧规则的历史范围及按查询语言回答；本授权4次已全部用完，不自动修改后再发、不追加整轮。证据为该独立根 `artifacts/plan.json`、`attempts.json`、`result-1.json`至`result-4.json`、`fresh-cards.json`、`targeted-review.json`和`summary.json`。执行记录不包含源正文或模型原始输出。
