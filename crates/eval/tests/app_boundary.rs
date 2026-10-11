@@ -230,6 +230,29 @@ async fn production_adapter_maps_real_ids_and_keeps_b_c_state_and_cards_disjoint
     assert_eq!(c_pack["current_context"].as_array().unwrap().len(), 1);
     let b_entry = &b_pack["current_context"][0];
     let c_entry = &c_pack["current_context"][0];
+    for entry in [b_entry, c_entry] {
+        let refs = entry["evidence_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        let excerpts = entry["evidence_excerpts"].as_array().unwrap();
+        assert!(
+            entry["evidence_refs"].as_array().unwrap().len() > refs.len(),
+            "fixture exercises shared support references"
+        );
+        assert_eq!(
+            excerpts.len(),
+            refs.len(),
+            "shared references must not duplicate source text"
+        );
+        assert!(
+            excerpts
+                .iter()
+                .all(|excerpt| !excerpt["spans"].as_array().unwrap().is_empty())
+        );
+    }
     assert!(
         b_entry["core_assertions"][0]
             .as_str()

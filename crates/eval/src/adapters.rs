@@ -1112,13 +1112,15 @@ async fn add_m6_evidence_excerpts(
             return Err("memory_pack_entry_shape_invalid".to_owned());
         };
         for entry in entries {
+            // Several assertions can share one EvidenceRef. Resolve its full
+            // evidence once without changing the entry's support references.
             let evidence_ids = entry
                 .get("evidence_refs")
                 .and_then(Value::as_array)
                 .ok_or_else(|| "memory_pack_evidence_refs_missing".to_owned())?
                 .iter()
                 .map(|value| value.as_str().map(str::to_owned))
-                .collect::<Option<Vec<_>>>()
+                .collect::<Option<BTreeSet<_>>>()
                 .ok_or_else(|| "memory_pack_evidence_refs_invalid".to_owned())?;
             let source_references = entry
                 .get("source_references")
