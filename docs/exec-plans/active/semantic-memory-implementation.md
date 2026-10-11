@@ -2429,3 +2429,24 @@ cargo run -p mcp-vault-eval --offline --locked --bin init-m6-cloud-provider -- \
 原 observation/card 的来源领域事实支持率为 B289/379、C486/677；两层复用事实，不视为独立样本。覆盖、限定、关键约束和关系覆盖0/6均不足；A零命中与B/C原文投影缺失又限制相对收益解释，不据分数宣称M2改进或验收通过。9次未知字段拒绝的原始 claims 已丢失，不能断言它们全由同一个嵌套字段触发；旧A实际输入也无法精确恢复。当前离线修复不追溯改变原运行质量结论，不自动第二轮。真正模型质量、关系作用域及历史状态保留仍待后续工作，新的真实验证须另获明确授权。
 
 证据仍在同一 scratch 根：`validation/oct11-offline-fix-summary.json`、`validation/oct11-eval-*.log`、`validation/oct11-a80-normalizer.log`、`validation/oct11-offline-replay/validation-summary.json`、`validation/recovery-post-run-agent-review.json`、`validation/recovery-quality-summary.json`。改动仅留在工作树，完整补丁为 `validation/oct11-offline-fixes.patch`。
+
+
+### 2026-10-11 已授权五次真实烟测完成
+
+用户授权 `Sentinel_a9d3d4b7faac8191bbee6d9b607d41d9`：推送已验证修复至原分支，并仅以 ADR-0022/0023、已有相关生成材料和问题作最多5次官方 MiMo 烟测；不外发 gold/评审，不自动重试或追加整轮。12文件改动已推送 `14e0a39`。离线准入又发现两个真实产物兼容问题：标题路径实际为字符串数组，修正并回归后推送 `0ef3745`；同一卡片共享 EvidenceRef 导致正文重复附加，改为每引用读取一次完整证据，生产应用边界回归后推送 `21a0a7b`。两次定向测试与增量 Eval all-targets Clippy 均通过。三次普通推送均核对远端 SHA；没有强推、main 变更、PR或部署。
+
+烟测在代码 `21a0a7b7e6592b5f7461530ee5ff69f9c0234ff4` 上，于01:12:42–01:13:51 UTC完成，全部5次带认证调用有预写意图、输入 hash、输出和用量记录；并发1、零传输重试、零自动再生成、单次输出上限32768，没有额外探测调用。输入仅含已批准的两份 ADR 及相关生成材料，B/C各16条，最大序列化输入38756字节。诊断按已批准64000字节/16条材料上限采用16000估算token预算，不冒充原整轮4096估算token的比较配置。
+
+| 项目 | 本次结果 |
+|---|---|
+| S18完整78块A80提炼 | 结构、证据映射与隔离发布通过；43条claim/43张卡，原始claims已保存。不是完整语义质量验收。 |
+| T-S18-1 / A | 输入留存及Provider链路通过，任务覆盖未通过：命中来源但snippet缺少关键后半句，模型正确拒绝猜测。 |
+| T-S18-1 / B | 对照原文的定向检查通过：stale、source_unavailable、退出普通召回、保留历史及受限恢复。 |
+| T-S18-1 / C | 同上，保留历史规则与恢复限制。 |
+| T-S19-2 / B | 无答案检查通过：没有虚构上线后评测结果或把缺失归因于预算。 |
+
+本轮输入53273、输出2577 tokens，Provider耗时合计67545ms，墙钟69秒；实际金额未返回。按此前授权单价口径，仅输出估算约¥0.005154，输入另计，不能写成总账单。全部回答引用属于各自实际输入；旧运行9份原始产物hash未变，旧State连接全程只读，新提炼只写独立诊断根。旧24+恢复轮131+烟测5合计160次保守预算占用，未使用额度不授权追加请求。
+
+下一步优先解决A完整证据传递；仍保留此前S29两个有答案题的召回缺口。此次43/43条assertion_status因模型使用非规范值回退unknown，42/43条时间范围unknown，需改进规范枚举提示与历史状态/时间限定保留，不能因结构验收通过即宣布语义通过。本次仅协调者对照来源作定向检查，不是独立盲评；M6仍未通过，不启动新整轮。
+
+私有证据：同一scratch根 `smoke-20261011-five/artifacts/summary.json`、`plan.json`、`attempts.json`、`result-1.json`至`result-5.json`。诊断入口与构建日志也在该独立根；秘密、State、原始输入输出均未加入Git。
