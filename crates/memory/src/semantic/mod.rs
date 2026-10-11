@@ -3511,10 +3511,18 @@ fn parse_a80_observation_response(
         if scope_unspecified {
             counts.scope_unspecified = counts.scope_unspecified.saturating_add(1);
         }
-        let (assertion_status, status_unknown) = advisory_enum::<SemanticAssertionStatus>(
-            claim.get("assertion_status"),
-            SemanticAssertionStatus::Unknown,
-        );
+        // A80's exact legacy hint "stated" means only that the source asserts
+        // the claim. It says nothing about adoption, verification or whether a
+        // historical rule is current. Do not broaden this to guessed states.
+        let (assertion_status, status_unknown) =
+            if claim.get("assertion_status").and_then(Value::as_str) == Some("stated") {
+                (SemanticAssertionStatus::SourceAsserted, false)
+            } else {
+                advisory_enum::<SemanticAssertionStatus>(
+                    claim.get("assertion_status"),
+                    SemanticAssertionStatus::Unknown,
+                )
+            };
         if status_unknown {
             counts.status_unknown = counts.status_unknown.saturating_add(1);
         }
@@ -3932,5 +3940,37 @@ mod a80_flat_observation_tests {
         assert_eq!(counts.scope_unspecified, 1);
         assert_eq!(counts.status_unknown, 1);
         assert_eq!(counts.time_scope_unknown, 1);
+    }
+
+    #[test]
+    fn legacy_stated_hint_means_source_asserted_without_inventing_current_state() {
+        for (hint, expected, unknown) in [
+            ("stated", SemanticAssertionStatus::SourceAsserted, 0),
+            (
+                "source_asserted",
+                SemanticAssertionStatus::SourceAsserted,
+                0,
+            ),
+            ("current", SemanticAssertionStatus::Unknown, 1),
+            ("stated_current", SemanticAssertionStatus::Unknown, 1),
+            ("Stated", SemanticAssertionStatus::Unknown, 1),
+        ] {
+            let statement = "The superseded design required approval before deployment.";
+            let input = json!({"claims":[{"statement":statement,"evidence_indices":[1],
+                "assertion_status":hint}]});
+            let (claims, counts) =
+                parse_a80_observation_response(&input.to_string(), &blocks(), 0, 2).unwrap();
+            assert_eq!(claims[0].statement, statement);
+            assert_eq!(claims[0].assertion_status, expected);
+            assert_eq!(claims[0].scope, SemanticScope::Unspecified);
+            assert_eq!(
+                claims[0].source_time_scope.as_ref().unwrap().status,
+                SemanticTimeScopeStatus::Unknown
+            );
+            assert_eq!(claims[0].body_block_ids, ["b000001-aaaa"]);
+            assert_eq!(counts.status_unknown, unknown);
+            assert_eq!(counts.scope_unspecified, 1);
+            assert_eq!(counts.time_scope_unknown, 1);
+        }
     }
 }

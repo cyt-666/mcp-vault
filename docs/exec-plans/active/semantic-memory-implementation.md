@@ -2450,3 +2450,23 @@ cargo run -p mcp-vault-eval --offline --locked --bin init-m6-cloud-provider -- \
 下一步优先解决A完整证据传递；仍保留此前S29两个有答案题的召回缺口。此次43/43条assertion_status因模型使用非规范值回退unknown，42/43条时间范围unknown，需改进规范枚举提示与历史状态/时间限定保留，不能因结构验收通过即宣布语义通过。本次仅协调者对照来源作定向检查，不是独立盲评；M6仍未通过，不启动新整轮。
 
 私有证据：同一scratch根 `smoke-20261011-five/artifacts/summary.json`、`plan.json`、`attempts.json`、`result-1.json`至`result-5.json`。诊断入口与构建日志也在该独立根；秘密、State、原始输入输出均未加入Git。
+
+### 2026-10-11 三项后续离线修复完成，未推送
+
+用户明确授权 `Sentinel_c630b41eed208191a9df671fbf9d9137`，仅离线修复与回放，不新发付费请求、不自动推送。基线为 `e6312a2195d385c47d3b8aab1ec92d7c510e2e9f`；原 run-02 与五次烟测证据保持不变。
+
+- [x] 根因已从原始输入/响应与只读 State 定位：A 将固定280字符导航片段当作证据；43条状态均为非规范 `stated`；S29候选已由FTS找到，但准入缺少FTS已索引的文件名，全文替代snippet也不能补齐词项。
+- [x] Eval v3通过 Core读取已命中且绑定冻结修订/hash的完整文档；同一序列化预算不够时只保留完整章节及前言，不能切断句子或条件。历史v1/v2检索语义保留，最终计数字段也纳入预算。
+- [x] A80仅将精确 `stated` 兼容为 `source_asserted`，不推定采纳、验证或当前有效；prompt v16提示规范枚举与逐条历史限定，其他非法/缺失提示仍回退unknown。历史v14/v10、v15/v11 MiMo传输保持原行为。
+- [x] 生产IndexService准入补充文件名（不含父目录/扩展名），原阈值、Vault隔离、来源资格不变；保存旧评测准入profile。
+- [x] 原始43条响应离线重放、三个相关查询的完整材料回放及定向安全/预算/版本回归完成；未新增Provider调用、初始化或凭据读取，未提交/推送。
+
+新诊断只写 `validation/offline-next-20261011`，所有命令不加载Provider凭据。回滚仅撤销本次未提交代码/文档改动，无迁移、历史产物改写或凭据变更。
+
+验证结果：145项定向测试通过（Eval lib63、应用边界6、runner42、本地假Provider16、Indexer15、A80 normalizer3）；三个改动crate的all-targets Clippy `-D warnings`、fmt与diff检查通过。首次章节测试暴露索引的章节提示只是局部标题，因此最终实现从规范Markdown解析并按原查询选择完整章节，不使用索引纯文本坐标。全部特性门禁仍沿用ort-sys官方CDN403阻塞记录，未重复下载；没有重复无关前端或整套盲评。
+
+只读回放保持原16条/64000字节/**4096估算token**预算：T-S18-1为6413字节/1604估算token，完整原文含之前遗漏的stale、source_unavailable、退出普通召回与保留历史条款；T-S29-1和T-S29-2分别7772字节/1943、7714字节/1929，各由旧v2零命中变成一份完整原文，没有预算降级。三份材料逐span与Core读取的规范字节核对通过；这些是新离线输入，不冒充旧请求或新模型答案。
+
+保存的43条原始claims在独立新State中发布43条Observation/43张卡，statement与78块输入逐项不变；status_unknown由43降至0，全部为source_asserted，kind_unknown19、scope_unspecified43、time_scope_unknown42保持原值（另1条source_stated时间）。兼容映射没有修复模型原先逐条历史范围表达不足的问题，也没有把unknown变为current。原run-02的9份产物hash、五次烟测的14份JSON产物hash均保持不变。
+
+证据：同一scratch根下 `validation/offline-next-20261011/retrieval-replay.json`、`saved-response-replay.json`、`immutability-check.json`及各测试/Clippy日志；完整未提交补丁为该目录 `offline-fixes.patch`。无当前工程阻塞。新prompt的提炼质量、A端实际回答质量仍未验证，M6仍未通过；覆盖本次三项端到端表现的最小后续真实验证为4次（新prompt的S18提炼一次，A/S18一次，A/S29两题各一次），须另行明确授权，本次不启动，也不追加整轮。

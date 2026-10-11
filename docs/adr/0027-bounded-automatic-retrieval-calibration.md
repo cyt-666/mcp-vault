@@ -35,6 +35,12 @@ All retrieval channels apply current/request eligibility, then relevance admissi
 then object-level ranking and a shared serialized-output budget. Related-note
 candidates cannot bypass recall relevance gates. Search retains its own contract.
 
+Lexical note admission includes the already indexed filename stem alongside the
+snippet, title and tags. Parent directories and file extensions are excluded;
+thresholds and current/Vault eligibility are unchanged. This is navigation
+evidence, never support for a factual answer. Historical evaluation profiles can
+explicitly retain snippet/title/tag-only admission without changing their seals.
+
 ## Consequences
 
 Upgrades may issue a small bounded number of embedding requests using already

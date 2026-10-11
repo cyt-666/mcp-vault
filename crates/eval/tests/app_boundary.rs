@@ -556,6 +556,7 @@ async fn ordinary_lexical_adapter_fails_closed_on_a_stale_index_projection() {
     lexical_task.query = "What is the rollback condition?".into();
     for (profile, expected_hits) in [
         ("index-frozen-v1", 0),
+        ("index-lexical-recall-v2", 1),
         (mcp_vault_eval::M6_A80_INDEX_PROFILE_ID, 1),
     ] {
         let result = adapter
@@ -625,6 +626,200 @@ async fn ordinary_lexical_adapter_fails_closed_on_a_stale_index_projection() {
             .iter()
             .any(|event| event == "lexical_no_match")
     );
+}
+
+#[tokio::test]
+async fn ordinary_complete_evidence_is_canonical_and_bound_to_frozen_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let baseline = fixture(temp.path(), "baseline").await;
+    let b = fixture(temp.path(), "arm-b").await;
+    let c = fixture(temp.path(), "arm-c").await;
+    let body = format!(
+        "# Rollback\n\nStatus: historical design.\n\nThe rollback policy {} No automatic deletion is permitted; 历史证据保留。\n",
+        "requires review of the complete source. ".repeat(18)
+    );
+    let path = VaultPath::parse("notes/policy.md").unwrap();
+    let file = baseline
+        .core
+        .create_bytes(
+            &baseline.context,
+            &path,
+            body.as_bytes(),
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap()
+        .file;
+    IndexService::new(baseline.state.clone())
+        .rebuild_vault(&baseline.core, &baseline.context)
+        .await
+        .unwrap();
+    let mut source = source("S-policy", path.as_str(), &body);
+    source.vault_id = baseline.context.id().to_string();
+    source.file_id = file.id.to_string();
+    source.file_revision = file.current_revision.value();
+    let adapter = SemanticMemoryServiceAppBoundary::new_isolated(
+        baseline.state.clone(),
+        baseline.context.clone(),
+        baseline.state_db_path.clone(),
+        baseline.history_root.clone(),
+        runtime(&b),
+        runtime(&c),
+    )
+    .unwrap();
+    let mut task = task();
+    task.query = "What is the rollback policy?".into();
+    let current = adapter
+        .ordinary_retrieve_with_profile(
+            &task,
+            &[source.clone()],
+            &budget(),
+            mcp_vault_eval::M6_A80_INDEX_PROFILE_ID,
+        )
+        .await
+        .unwrap();
+    let evidence = &current["sources"][0]["evidence"];
+    assert_eq!(evidence["kind"], "complete_document");
+    assert_eq!(evidence["spans"][0]["text"], body);
+    assert_eq!(evidence["spans"][0]["end_byte"], body.len());
+    assert_eq!(evidence["source_content_hash"], source.content_hash);
+    assert_eq!(
+        current["token_count"].as_u64().unwrap(),
+        serde_json::to_vec(&current).unwrap().len().div_ceil(4) as u64
+    );
+    let legacy = adapter
+        .ordinary_retrieve_with_profile(
+            &task,
+            &[source.clone()],
+            &budget(),
+            "index-lexical-recall-v2",
+        )
+        .await
+        .unwrap();
+    assert!(legacy["sources"][0].get("evidence").is_none());
+    assert!(
+        !legacy["sources"][0]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("No automatic deletion")
+    );
+    let mut wrong_hash = source.clone();
+    wrong_hash.content_hash = "0".repeat(64);
+    assert_eq!(
+        adapter
+            .ordinary_retrieve_with_profile(
+                &task,
+                &[wrong_hash],
+                &budget(),
+                mcp_vault_eval::M6_A80_INDEX_PROFILE_ID
+            )
+            .await
+            .unwrap_err(),
+        "ordinary_evidence_source_mismatch"
+    );
+    source.vault_id = b.context.id().to_string();
+    assert_eq!(
+        adapter
+            .ordinary_retrieve_with_profile(
+                &task,
+                &[source],
+                &budget(),
+                mcp_vault_eval::M6_A80_INDEX_PROFILE_ID
+            )
+            .await
+            .unwrap_err(),
+        "ordinary_evidence_source_mismatch"
+    );
+}
+
+#[tokio::test]
+async fn ordinary_budget_keeps_whole_section_and_historical_preamble_or_reports_gap() {
+    let temp = tempfile::tempdir().unwrap();
+    let baseline = fixture(temp.path(), "baseline").await;
+    let b = fixture(temp.path(), "arm-b").await;
+    let c = fixture(temp.path(), "arm-c").await;
+    let section = format!(
+        "## Rules\n\nThe rollback policy {} Recovery requires exact source evidence, never a filename match.\n\n### Exception\n\nEmergency approval remains necessary.\n\n",
+        "retains historical records. ".repeat(20)
+    );
+    let preamble = "# Archive\n\nStatus: superseded design, not current policy.\n\n";
+    let body = format!(
+        "{preamble}{section}## Log\n\n{}",
+        "Unrelated maintenance history. ".repeat(2000)
+    );
+    let path = VaultPath::parse("notes/archive.md").unwrap();
+    let file = baseline
+        .core
+        .create_bytes(
+            &baseline.context,
+            &path,
+            body.as_bytes(),
+            Actor::system(),
+            SourcePlane::System,
+            None,
+        )
+        .await
+        .unwrap()
+        .file;
+    IndexService::new(baseline.state.clone())
+        .rebuild_vault(&baseline.core, &baseline.context)
+        .await
+        .unwrap();
+    let mut source = source("S-archive", path.as_str(), &body);
+    source.vault_id = baseline.context.id().to_string();
+    source.file_id = file.id.to_string();
+    source.file_revision = file.current_revision.value();
+    let adapter = SemanticMemoryServiceAppBoundary::new_isolated(
+        baseline.state.clone(),
+        baseline.context.clone(),
+        baseline.state_db_path.clone(),
+        baseline.history_root.clone(),
+        runtime(&b),
+        runtime(&c),
+    )
+    .unwrap();
+    let mut task = task();
+    task.query = "What is the rollback policy?".into();
+    let mut budget = budget();
+    budget.max_bytes = 4000;
+    budget.max_tokens = 1000;
+    let result = adapter
+        .ordinary_retrieve_with_profile(
+            &task,
+            &[source.clone()],
+            &budget,
+            mcp_vault_eval::M6_A80_INDEX_PROFILE_ID,
+        )
+        .await
+        .unwrap();
+    let evidence = &result["sources"][0]["evidence"];
+    assert_eq!(evidence["kind"], "complete_section");
+    assert_eq!(evidence["spans"][0]["text"], preamble);
+    assert_eq!(evidence["spans"][1]["text"], section);
+    let bytes = serde_json::to_vec(&result).unwrap().len();
+    assert!(bytes <= budget.max_bytes as usize);
+    assert_eq!(result["token_count"], bytes.div_ceil(4));
+    budget.max_bytes = 1200;
+    budget.max_tokens = 300;
+    let gap = adapter
+        .ordinary_retrieve_with_profile(
+            &task,
+            &[source],
+            &budget,
+            mcp_vault_eval::M6_A80_INDEX_PROFILE_ID,
+        )
+        .await
+        .unwrap();
+    assert!(gap["sources"].as_array().unwrap().is_empty());
+    assert!(
+        gap["degradation_reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("ordinary_complete_evidence_budget_exhausted"))
+    );
+    assert!(serde_json::to_vec(&gap).unwrap().len() <= 1200);
 }
 
 #[test]

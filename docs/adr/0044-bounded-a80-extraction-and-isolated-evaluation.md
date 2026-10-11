@@ -14,6 +14,8 @@ M6 A80 observation 请求每片最多包含 80 个确定性逻辑 source blocks�
 
 可选语义 advisory 不能控制来源身份或证据。advisory 缺失或不属于白名单时，保留 statement 与已验证证据，并确定性记为 `unknown`/`unspecified`，只累计安全计数。source time evidence 仍须通过原有当前 block、角色、时间范围、span 和 hash fences。
 
+2026-10-11兼容补充：A80仅把精确历史提示 `stated` 识别为 `source_asserted`，其语义仅为“来源这样陈述”，不授予当前有效、采纳或验证状态，不推定时间范围。prompt v16显式列出规范值，要求每条相关历史陈述保留其限定；其他非法提示继续回退，legacy完整提案入口不接受该别名。保存的响应可离线检验此确定性映射，但不能据此声称历史限定或新提示的模型质量通过。
+
 每个 batch 在 State 中绑定 Vault、source revision、catalog/input/prompt/schema/provider fingerprints。调用前先原子 reserve attempt；崩溃留下的 `dispatching` 变为 `uncertain` 并按已消耗预算计数，绝不默认重放。明确的结构/核心响应错误可在 source fence 复核后消耗该 source-arm 唯一 regen token；token 与第二次 batch reservation 在 State 同一事务中提交，跨全部 batches 共享并跨重启保留。仅严格验证通过的 batch 能持久为 validated proposal；同一 claim 中所有片验证且最终 source fence 通过后，才经既有 source-set 原子发布路径提交。重启可复用匹配的 validated batches；source、provider、template、预算或manifest漂移 fail closed。
 
 一次成功发布生成一条 Observation 和一张本地确定性 MemoryCard。Card/answer pack 的证据摘录从 EvidenceRef/span/hash 回读规范原文，不能用模型回述代替。Relation 是可选增强；relation item 的失败不应用状态但不阻断卡片或答案。单题 answer/pack/retrieval 错误记录到权限受限的 safe `item-failures.jsonl` 并保留评分分母，继续其它独立臂和任务；来源、权限、Provider identity、预算或全局配置 fence 漂移仍终止运行。任何 item failure 都使最终质量状态保持 `not_evaluated`，不得报告通过。

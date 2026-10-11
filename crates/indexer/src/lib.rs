@@ -991,11 +991,21 @@ fn quote_fts_query_with(query: &str, separator: &str) -> Result<String, IndexErr
         .join(separator))
 }
 
+/// Versioned navigation evidence used by lexical relevance admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NoteLexicalEvidenceProfile {
+    /// Historical admission using only the snippet, title and tags.
+    LegacySnippet,
+    /// Include the indexed filename as navigation evidence, never as a fact.
+    FilenameAware,
+}
+
 /// Rebuildable lexical and optional semantic note-retrieval service.
 #[derive(Clone)]
 pub struct IndexService {
     state: mcp_vault_state::StateStore,
     providers: Option<ProviderService>,
+    lexical_evidence_profile: NoteLexicalEvidenceProfile,
 }
 
 impl IndexService {
@@ -1004,6 +1014,7 @@ impl IndexService {
         Self {
             state,
             providers: None,
+            lexical_evidence_profile: NoteLexicalEvidenceProfile::FilenameAware,
         }
     }
 
@@ -1015,7 +1026,28 @@ impl IndexService {
         Self {
             state,
             providers: Some(providers),
+            lexical_evidence_profile: NoteLexicalEvidenceProfile::FilenameAware,
         }
+    }
+
+    /// Select a frozen admission policy for reproducible historical evaluations.
+    pub fn with_lexical_evidence_profile(mut self, profile: NoteLexicalEvidenceProfile) -> Self {
+        self.lexical_evidence_profile = profile;
+        self
+    }
+
+    fn note_lexical_labels(&self, note: &NoteSearchRecord) -> Vec<String> {
+        let mut labels = note.title.iter().cloned().collect::<Vec<_>>();
+        if self.lexical_evidence_profile == NoteLexicalEvidenceProfile::FilenameAware
+            && let Some(filename) = std::path::Path::new(note.path.as_str())
+                .file_stem()
+                .and_then(|name| name.to_str())
+        {
+            // FTS indexes paths too. Discard parent directories and the file
+            // extension so a broad folder name cannot admit unrelated notes.
+            labels.push(filename.to_owned());
+        }
+        labels
     }
 
     /// Return the underlying Vault-scoped projection repository.
@@ -1218,7 +1250,7 @@ impl IndexService {
                         query,
                         &note.snippet,
                         &note.tags,
-                        &note.title.iter().cloned().collect::<Vec<_>>(),
+                        &self.note_lexical_labels(&note),
                     )
                     .admitted
                 {
@@ -2680,6 +2712,125 @@ mod tests {
             VaultId::new(),
             VaultPath::parse("知识/设计.md").unwrap(),
         )
+    }
+
+    #[tokio::test]
+    async fn filename_admission_preserves_thresholds_parent_exclusion_and_vault_scope() {
+        let root = tempdir().unwrap();
+        let state = StateStore::connect_and_migrate("sqlite::memory:")
+            .await
+            .unwrap();
+        let core = VaultCore::new(
+            state.clone(),
+            root.path().join("history"),
+            VaultPathPolicy::default(),
+            StorageOptions::default(),
+            Default::default(),
+        );
+        let mut contexts = Vec::new();
+        for name in ["primary", "other"] {
+            let context = VaultContext::new(
+                VaultId::new(),
+                VaultSlug::new(name).unwrap(),
+                root.path().join(name),
+                Revision::ZERO,
+            )
+            .unwrap();
+            state
+                .vaults()
+                .insert(&context, name, VaultStatus::Active)
+                .await
+                .unwrap();
+            for path in [
+                "notes/deployment-rollback-policy.md",
+                "deployment-rollback-policy/neutral.md",
+            ] {
+                core.create_bytes(
+                    &context,
+                    &VaultPath::parse(path).unwrap(),
+                    "# 决策\n\n发布前必须审阅恢复条件。\n".as_bytes(),
+                    Actor::system(),
+                    SourcePlane::System,
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+            IndexService::new(state.clone())
+                .rebuild_vault(&core, &context)
+                .await
+                .unwrap();
+            contexts.push(context);
+        }
+        let query = "What is the deployment rollback policy?";
+        let current = IndexService::new(state.clone());
+        let hits = current
+            .retrieve_notes_for_recall(&contexts[0], query, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            hits.hits.len(),
+            1,
+            "parent directory is not admission evidence"
+        );
+        assert_eq!(
+            hits.hits[0].note.path.as_str(),
+            "notes/deployment-rollback-policy.md"
+        );
+        assert!(
+            state
+                .files()
+                .get_by_id(&contexts[0], hits.hits[0].note.file_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            state
+                .files()
+                .get_by_id(&contexts[1], hits.hits[0].note.file_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let legacy = current
+            .clone()
+            .with_lexical_evidence_profile(super::NoteLexicalEvidenceProfile::LegacySnippet);
+        assert!(
+            legacy
+                .retrieve_notes_for_recall(&contexts[0], query, None, 10)
+                .await
+                .unwrap()
+                .hits
+                .is_empty()
+        );
+        assert!(
+            current
+                .retrieve_notes_for_recall(
+                    &contexts[0],
+                    "What is the astronomy deadline?",
+                    None,
+                    10
+                )
+                .await
+                .unwrap()
+                .hits
+                .is_empty()
+        );
+        assert!(
+            current
+                .retrieve_notes_for_recall(
+                    &contexts[0],
+                    "What is the deployment astronomy deadline?",
+                    None,
+                    10
+                )
+                .await
+                .unwrap()
+                .hits
+                .is_empty(),
+            "one filename term cannot pass a multi-term question threshold"
+        );
     }
 
     async fn semantic_embeddings(Json(request): Json<Value>) -> (StatusCode, Json<Value>) {

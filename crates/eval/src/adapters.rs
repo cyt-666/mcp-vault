@@ -18,9 +18,11 @@ use async_trait::async_trait;
 use mcp_vault_core::VaultCore;
 use mcp_vault_domain::{
     EvidenceRefId, ExtractionSetId, FileId, ModelId, Permission, PermissionSet, SemanticSourceId,
-    SourceRevisionId, VaultContext, VaultPath,
+    SourceRevisionId, VaultContext, VaultPath, VaultPathPolicy,
 };
-use mcp_vault_indexer::{IndexService, NoteRetrievalMode, NoteRetrievalScope};
+use mcp_vault_indexer::{
+    IndexService, MAX_NOTE_BYTES, NoteLexicalEvidenceProfile, NoteRetrievalMode, NoteRetrievalScope,
+};
 use mcp_vault_memory::{
     MemoryPackRequest, MemoryPackSourceScope, SemanticAccess, SemanticMemoryService,
     SemanticObservationBatch, SemanticObservationPhase, SemanticPreparedGeneration,
@@ -236,6 +238,8 @@ impl ProviderServiceAppBoundary {
             );
         let a80_non_stream_json_object = self.runtime_snapshot.provider_type == "xiaomi_mimo"
             && ((request.prompt_id == M6_A80_PROMPT_ID && request.schema_id == M6_A80_SCHEMA_ID)
+                || (request.prompt_id == "semantic-cards-tracked-adr-m6-v15"
+                    && request.schema_id == "semantic-cards-m6-json-v11")
                 || (request.prompt_id == "semantic-cards-tracked-adr-m6-v14"
                     && request.schema_id == "semantic-cards-m6-json-v10"))
             && matches!(
@@ -397,6 +401,7 @@ type PreparedA80Batches = BTreeMap<RelationCandidateKey, Vec<SemanticObservation
 pub struct SemanticMemoryServiceAppBoundary {
     state: StateStore,
     context: VaultContext,
+    baseline_core: VaultCore,
     arms: BTreeMap<crate::ComparisonArm, ArmSemanticRuntime>,
     source_bindings: Arc<Mutex<BTreeMap<(crate::ComparisonArm, String), ArmSourceBinding>>>,
     prepared_generations:
@@ -486,6 +491,13 @@ impl SemanticMemoryServiceAppBoundary {
         Ok(Self {
             state: state.clone(),
             context,
+            baseline_core: VaultCore::new(
+                state.clone(),
+                baseline_history_root,
+                VaultPathPolicy::default(),
+                mcp_vault_storage_fs::StorageOptions::default(),
+                Default::default(),
+            ),
             arms,
             source_bindings: Arc::new(Mutex::new(BTreeMap::new())),
             prepared_generations: Arc::new(Mutex::new(BTreeMap::new())),
@@ -507,6 +519,68 @@ impl SemanticMemoryServiceAppBoundary {
         self.arms
             .get(&arm)
             .ok_or_else(|| "semantic_arm_isolation_unavailable".to_owned())
+    }
+
+    async fn ordinary_evidence(
+        &self,
+        source: &EvalSource,
+        query: &str,
+    ) -> Result<Vec<Value>, String> {
+        if source.vault_id != self.context.id().to_string() {
+            return Err("ordinary_evidence_source_mismatch".to_owned());
+        }
+        let path = VaultPath::parse(&source.path).map_err(|_| "source_path_invalid".to_owned())?;
+        let matches = |file: &mcp_vault_state::FileRecord| {
+            file.id.to_string() == source.file_id
+                && file.path.as_str() == source.path
+                && file.current_revision.value() == source.file_revision
+                && file.content_hash.as_deref() == Some(source.content_hash.as_str())
+        };
+        // Check the indexed-note IO bound before Core verifies canonical bytes.
+        let file = self
+            .state
+            .files()
+            .get_active(&self.context, &path)
+            .await
+            .map_err(|_| "ordinary_evidence_source_unavailable".to_owned())?
+            .ok_or_else(|| "ordinary_evidence_source_unavailable".to_owned())?;
+        if !matches(&file) {
+            return Err("ordinary_evidence_source_mismatch".to_owned());
+        }
+        if file.size > MAX_NOTE_BYTES as u64 {
+            return Err("ordinary_evidence_too_large".to_owned());
+        }
+        let read = self
+            .baseline_core
+            .read(&self.context, &path)
+            .await
+            .map_err(|_| "ordinary_evidence_source_unavailable".to_owned())?;
+        if !matches(&read.file) {
+            return Err("ordinary_evidence_source_mismatch".to_owned());
+        }
+        let mut bytes = Vec::new();
+        read.reader
+            .take(MAX_NOTE_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| "ordinary_evidence_read_failed".to_owned())?;
+        if bytes.is_empty() || bytes.len() > MAX_NOTE_BYTES {
+            return Err("ordinary_evidence_size_invalid".to_owned());
+        }
+        if format!("{:x}", Sha256::digest(&bytes)) != source.content_hash {
+            return Err("ordinary_evidence_source_mismatch".to_owned());
+        }
+        let current = self
+            .baseline_core
+            .stat(&self.context, &path)
+            .await
+            .map_err(|_| "ordinary_evidence_source_unavailable".to_owned())?;
+        if !matches(&current.file) {
+            return Err("ordinary_evidence_source_mismatch".to_owned());
+        }
+        let text =
+            std::str::from_utf8(&bytes).map_err(|_| "ordinary_evidence_utf8_invalid".to_owned())?;
+        crate::material::ordinary_evidence_options(source, text, query)
     }
 
     async fn terminalize_extraction(
@@ -1205,6 +1279,26 @@ async fn add_m6_evidence_excerpts(
     Ok(())
 }
 
+fn ordinary_input_fits(result: &mut Value, budget: &crate::Budget) -> Result<bool, String> {
+    let entries = result["sources"].as_array().map_or(0, Vec::len);
+    result["entry_count"] = json!(entries);
+    result["coverage"]["returned_hit_count"] = json!(entries);
+    // Count the final serialized envelope, including the count's own digits.
+    // Starting at zero makes the fixed point monotone and deterministic.
+    result["token_count"] = json!(0);
+    loop {
+        let bytes = serde_json::to_vec(result)
+            .map_err(|_| "ordinary_retrieval_serialization".to_owned())?;
+        let tokens = u32::try_from(bytes.len().div_ceil(4)).unwrap_or(u32::MAX);
+        if result["token_count"] == tokens {
+            return Ok(bytes.len() <= budget.max_bytes as usize
+                && tokens <= budget.max_tokens
+                && entries <= budget.max_entries as usize);
+        }
+        result["token_count"] = json!(tokens);
+    }
+}
+
 #[async_trait]
 impl SemanticMemoryAppBoundary for SemanticMemoryServiceAppBoundary {
     async fn ordinary_retrieve(
@@ -1224,10 +1318,22 @@ impl SemanticMemoryAppBoundary for SemanticMemoryServiceAppBoundary {
         budget: &crate::Budget,
         index_profile_id: &str,
     ) -> Result<Value, String> {
-        if !["index-frozen-v1", M6_A80_INDEX_PROFILE_ID].contains(&index_profile_id) {
+        if ![
+            "index-frozen-v1",
+            "index-lexical-recall-v2",
+            M6_A80_INDEX_PROFILE_ID,
+        ]
+        .contains(&index_profile_id)
+        {
             return Err("ordinary_index_profile_unavailable".to_owned());
         }
-        let index = IndexService::new(self.state.clone());
+        let full_evidence = index_profile_id == M6_A80_INDEX_PROFILE_ID;
+        let index =
+            IndexService::new(self.state.clone()).with_lexical_evidence_profile(if full_evidence {
+                NoteLexicalEvidenceProfile::FilenameAware
+            } else {
+                NoteLexicalEvidenceProfile::LegacySnippet
+            });
         let mut selected = Vec::new();
         let mut expected_source_ids = std::collections::BTreeSet::new();
         let mut current_indexed_source_ids = std::collections::BTreeSet::new();
@@ -1261,7 +1367,7 @@ impl SemanticMemoryAppBoundary for SemanticMemoryServiceAppBoundary {
                 source_path: Some(source.path.clone()),
                 ..NoteRetrievalScope::default()
             };
-            let retrieval = if index_profile_id == M6_A80_INDEX_PROFILE_ID {
+            let retrieval = if index_profile_id != "index-frozen-v1" {
                 // The existing recall policy uses relaxed lexical candidates
                 // plus query relevance admission. None disables semantic hits;
                 // this IndexService has no Provider and cannot generate.
@@ -1396,24 +1502,48 @@ impl SemanticMemoryAppBoundary for SemanticMemoryServiceAppBoundary {
             "degradation_reasons": degradation_reasons,
             "quality_events": quality_events,
         });
-        loop {
-            let bytes = serde_json::to_vec(&result)
-                .map_err(|_| "ordinary_retrieval_serialization".to_owned())?;
-            let tokens = u32::try_from(bytes.len().div_ceil(4)).unwrap_or(u32::MAX);
-            if bytes.len() <= budget.max_bytes as usize && tokens <= budget.max_tokens {
-                if let Some(object) = result.as_object_mut() {
-                    let entry_count = object
-                        .get("sources")
-                        .and_then(Value::as_array)
-                        .map_or(0, Vec::len);
-                    object.insert("entry_count".to_owned(), json!(entry_count));
-                    if let Some(coverage) =
-                        object.get_mut("coverage").and_then(Value::as_object_mut)
-                    {
-                        coverage.insert("returned_hit_count".to_owned(), json!(entry_count));
+        if full_evidence {
+            result["retrieval_strategy"] = json!("ordinary_note_complete_evidence_v3");
+            let entries = result["sources"]
+                .as_array_mut()
+                .expect("constructed array")
+                .drain(..)
+                .collect::<Vec<_>>();
+            for mut entry in entries {
+                let source = sources
+                    .iter()
+                    .find(|source| entry["source_id"] == source.logical_id)
+                    .ok_or_else(|| "ordinary_evidence_source_mismatch".to_owned())?;
+                let options = self.ordinary_evidence(source, &task.query).await?;
+                let mut admitted = false;
+                for evidence in options {
+                    entry["evidence"] = evidence;
+                    result["sources"]
+                        .as_array_mut()
+                        .expect("constructed array")
+                        .push(entry.clone());
+                    if ordinary_input_fits(&mut result, budget)? {
+                        admitted = true;
+                        break;
                     }
-                    object.insert("token_count".to_owned(), json!(tokens));
+                    result["sources"]
+                        .as_array_mut()
+                        .expect("constructed array")
+                        .pop();
                 }
+                if !admitted {
+                    let reasons = result["degradation_reasons"]
+                        .as_array_mut()
+                        .expect("constructed array");
+                    let reason = json!("ordinary_complete_evidence_budget_exhausted");
+                    if !reasons.contains(&reason) {
+                        reasons.push(reason);
+                    }
+                }
+            }
+        }
+        loop {
+            if ordinary_input_fits(&mut result, budget)? {
                 return Ok(result);
             }
             let Some(sources) = result.get_mut("sources").and_then(Value::as_array_mut) else {

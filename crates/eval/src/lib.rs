@@ -6893,6 +6893,71 @@ mod tests {
             extraction_commit_sequence: 1,
         }
     }
+
+    #[test]
+    fn ordinary_complete_evidence_projection_rejects_tampering_and_retains_exact_input() {
+        use sha2::{Digest, Sha256};
+        let text = "# Policy\n\nHistorical rule: preserve the exception; 不得推定当前有效。\n";
+        let mut source = source();
+        source.file_id = mcp_vault_domain::FileId::new().to_string();
+        source.vault_id = mcp_vault_domain::VaultId::new().to_string();
+        source.content_hash = format!("{:x}", Sha256::digest(text.as_bytes()));
+        let evidence = material::ordinary_evidence_options(&source, text, "historical rule")
+            .unwrap()
+            .remove(0);
+        let input = serde_json::json!({
+            "retrieval_strategy":"ordinary_note_complete_evidence_v3", "task_id":"T01", "query":"historical rule",
+            "index_profile_id":M6_A80_INDEX_PROFILE_ID,
+            "sources":[{"source_id":source.logical_id,"file_id":source.file_id,"path":source.path,
+                "file_revision":source.file_revision,"title":"Policy","snippet":"Historical rule",
+                "matched_section":["Policy"],"score":1.0,"evidence":evidence}],
+            "coverage":{"expected_source_ids":[source.logical_id],"current_indexed_source_ids":[source.logical_id],
+                "expected_source_count":1,"current_indexed_source_count":1,"coverage_ratio":1.0,"complete":true,
+                "candidate_count":1,"eligible_count":1,"available_result_count":1,"returned_hit_count":1,"stale_hit_count":0},
+            "degradation_reasons":[]
+        });
+        let projected = material::project_ordinary_input(&input, &[source.clone()]).unwrap();
+        assert_eq!(
+            projected["sources"][0]["evidence"]["spans"][0]["text"],
+            text
+        );
+        let record = material::ordinary_input_record(&projected).unwrap();
+        assert_eq!(record["input"], projected);
+        assert_eq!(record["input_hash"], canonical_hash(&projected).unwrap());
+        for (pointer, value) in [
+            (
+                "/sources/0/evidence/source_content_hash",
+                serde_json::json!("bad"),
+            ),
+            (
+                "/sources/0/evidence/spans/0/content_hash",
+                serde_json::json!("bad"),
+            ),
+            (
+                "/sources/0/evidence/spans/0/start_byte",
+                serde_json::json!(1),
+            ),
+            (
+                "/sources/0/evidence/spans/0/text",
+                serde_json::json!("changed"),
+            ),
+            (
+                "/sources/0/evidence/document_bytes",
+                serde_json::json!(9999),
+            ),
+            ("/sources/0/path", serde_json::json!("other.md")),
+        ] {
+            let mut invalid = input.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                material::project_ordinary_input(&invalid, &[source.clone()]).is_err(),
+                "{pointer}"
+            );
+        }
+        let mut invalid = input;
+        invalid["sources"][0]["evidence"]["authorization"] = serde_json::json!("unexpected");
+        assert!(material::project_ordinary_input(&invalid, &[source]).is_err());
+    }
     fn manifest() -> EvaluationManifest {
         EvaluationManifest {
             schema_version: MANIFEST_SCHEMA.into(),
